@@ -11,7 +11,7 @@ description: Recipe for the L4 GPU Dataflow custom container — Beam SDK base +
 
 Dataflow runs the **same image ENTRYPOINT** in two different ways and *appends* args — it does **not** override the entrypoint. So the ENTRYPOINT is a dispatch script (`docker/entrypoint.sh`) that picks the binary from the appended args:
 
-- **Flex Template launch** → no FnAPI flags → execs `/opt/google/dataflow/python_template_launcher`. The launcher reads `FLEX_TEMPLATE_PYTHON_PY_FILE` (set to `sdfb_beam.cli.run_pipeline`) and submits the job.
+- **Flex Template launch** → no FnAPI flags → execs `/opt/google/dataflow/python_template_launcher`. The launcher reads `FLEX_TEMPLATE_PYTHON_PY_FILE`, the dispatcher `docker/flex_entry.py`: it calls `sdfb_beam.cli.run_pipeline.main` unless the launch passes `sdfb_job=evaluation`, which runs the evaluator the image also carries (ADR 0041's amendment). The Dockerfile takes the evaluator's source through a stage that tolerates its absence; never `COPY packages/sdfb-evaluation/…` directly, the DSG copy has no such directory.
 - **Dataflow workers** → Dataflow appends the Beam FnAPI boot flags (`--id`, `--logging_endpoint`, `--control_endpoint`, `--artifact_endpoint`, `--provision_endpoint`) → the script execs `/opt/apache/beam/boot`. (Letting the launcher binary receive these is what crash-looped `sdk-0-0` with `flag provided but not defined: -logging_endpoint`.)
 
 Both binaries are copied into the final image via multi-stage `COPY --from`. See [ADR 0009](../../docs/adr/0009-single-flex-template-image.md) for the rationale.

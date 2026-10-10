@@ -13,9 +13,12 @@
 #  limitations under the License.
 """Flex Template entrypoint for the synthesis pipeline.
 
-Set via `FLEX_TEMPLATE_PYTHON_PY_FILE` in `docker/Dockerfile`. The Python
-launcher invokes this with argparse args populated from the Flex Template
-parameters declared in `docker/flex_template_metadata.json`.
+The image's `FLEX_TEMPLATE_PYTHON_PY_FILE` (`docker/Dockerfile`) is the small
+dispatcher `docker/flex_entry.py`: unless a launch selects the image's other
+job (the evaluation of a landed run), it calls `main` here with the launch's
+arguments, populated from the Flex Template parameters declared in
+`docker/flex_template_metadata.json`. Running this file directly does the
+same thing.
 
 Runtime modes:
   - Production (Dataflow + L4 + Gemma 4 via vLLM):

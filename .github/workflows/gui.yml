@@ -1,0 +1,199 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+name: GUI
+
+# Synthetic Platform (gui/, ADR 0042): typecheck, lint, unit tests, build,
+# bundle budgets, contract drift against the Python side, repo-figure drift,
+# the tab-ownership gate on feat/gui-<tab> branches, then Playwright + axe on
+# Playwright's bundled Chromium.
+#
+# The workflow triggers on the union of what its two jobs read; the `changes`
+# job then runs each job only when its own paths changed, so a Python-only PR
+# runs the exporter check, not the whole GUI job:
+#
+#   exports  the Python exporters (scripts/gui/) in `--check` mode:
+#            knobs.json, relationships.json, dlq_rules.json and the golden
+#            fixtures (incl. the evaluator's scorer) must match the code in
+#            values, ids, anchor tokens and paths; workflow-paths.test.ts
+#            keeps EXPORTS_PATHS covering every file the exporters read or
+#            cite (docs/designs, docs/articles, docs/adr included). Line
+#            numbers may move (the default Python gate does not run this
+#            check, so an unrelated Python PR that shifts a line never fails;
+#            this job catches a value or anchor drift whenever the code the
+#            GUI imports changes).
+#   gui      gui/ itself, the contract sources, the figures assets:check
+#            copies, and the repo files the GUI's tests quote verbatim
+#            (DESIGN.md, READMEs, ADRs, articles, and the few Python lines the
+#            CONFIG tab cites by path:line). gui/apps/web/src/test/
+#            workflow-paths.test.ts keeps GUI_PATHS in step with those tests.
+
+on:
+  push:
+    branches: [master]
+    paths: &all_paths
+      - "gui/**"
+      - "packages/sdfb-evaluation/**"
+      - "config/bq_schema/**"
+      - "scripts/gui/**"
+      # What the exporters import or parse (value + anchor drift).
+      - "packages/sdfb-core/src/**"
+      - "packages/sdfb-beam/src/**"
+      - "packages/sdfb-tests/tests/unit/scripts/test_gui_exporters.py"
+      - "composer/**"
+      - "docker/flex_template_metadata.json"
+      - "config/thresholds.yml"
+      - "config/relationships/**"
+      - "scripts/doc/make_throughput_figures.py"
+      - "scripts/doc/make_ws5_figures.py"
+      # What the GUI's tests quote or copy.
+      - "README.md"
+      - "docs/DESIGN.md"
+      - "docs/adr/**"
+      - "docs/articles/**"
+      - "docs/designs/**"
+      - "docs/assets/**"
+      - ".claude/skills/validation-mode-a.md"
+      - ".github/workflows/gui.yml"
+  pull_request:
+    paths: *all_paths
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    # Which of the jobs below this change needs (extended regexes over the changed paths).
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      gui: ${{ steps.filter.outputs.gui }}
+      exports: ${{ steps.filter.outputs.exports }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Match the changed paths against each job's filter
+        id: filter
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          GUI_PATHS: '^(gui/|packages/sdfb-evaluation/(README\.md$|pyproject\.toml$|src/sdfb_evaluation/(schemas|catalogue)/)|config/bq_schema/|README\.md$|docs/(DESIGN\.md$|adr/|articles/|designs/|assets/)|\.claude/skills/validation-mode-a\.md$|packages/sdfb-beam/src/sdfb_beam/(pipeline\.py|dofns/validate_record\.py)$|packages/sdfb-core/src/sdfb_core/(engines/b1_rag/engine\.py|validation/summary\.py)$|\.github/workflows/gui\.yml$)'
+          EXPORTS_PATHS: '^(scripts/gui/|packages/sdfb-(core|beam|evaluation)/src/|packages/sdfb-tests/tests/unit/scripts/test_gui_exporters\.py$|gui/packages/contracts/generated/|composer/|docker/flex_template_metadata\.json$|config/(thresholds\.yml$|relationships/)|scripts/doc/make_(throughput|ws5)_figures\.py$|docs/(designs|articles|adr)/[^/]+\.md$|\.github/workflows/gui\.yml$)'
+        run: |
+          # No usable base (a new branch, a force-push): run every job.
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "gui=true" >> "$GITHUB_OUTPUT"
+            echo "exports=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          changed="$(git diff --name-only "$BASE" "$GITHUB_SHA")"
+          printf '%s\n' "$changed"
+          for job in gui exports; do
+            if [ "$job" = gui ]; then filter="$GUI_PATHS"; else filter="$EXPORTS_PATHS"; fi
+            if printf '%s\n' "$changed" | grep -Eq "$filter"; then
+              echo "$job=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "$job=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+  exports:
+    # Python truth → gui/packages/contracts/generated (value + anchor drift).
+    needs: changes
+    if: needs.changes.outputs.exports == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: latest
+          enable-cache: true
+          cache-dependency-glob: |
+            **/uv.lock
+            **/pyproject.toml
+          python-version: "3.11"
+
+      - name: Sync workspace
+        run: uv sync --group dev
+
+      - name: Knobs, relationship model and DLQ rules match the code
+        run: uv run python scripts/gui/export_knobs.py --check
+
+      - name: Golden fixtures match the Python embedder, serializer, retrieval and scorer
+        run: uv run python scripts/gui/export_golden_fixtures.py --check
+
+      - name: Exporter unit tests
+        run: uv run pytest -q packages/sdfb-tests/tests/unit/scripts/test_gui_exporters.py
+
+  gui:
+    needs: changes
+    if: needs.changes.outputs.gui == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: gui
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The ownership gate diffs the branch against its base.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: gui/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Tab ownership (feat/gui-<tab> branches only)
+        env:
+          BRANCH: ${{ github.head_ref || github.ref_name }}
+          BASE: ${{ github.base_ref || 'master' }}
+        run: node scripts/check-owned-paths.mjs "$BRANCH" --base "origin/$BASE"
+
+      - name: Check (typecheck, lint, test, build, size, contracts)
+        run: npm run check
+
+      - name: Repo figures match their sources
+        run: npm run assets:check
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: End-to-end (Playwright + axe)
+        env:
+          # Preview the build `npm run check` just made instead of building again.
+          GUI_E2E_SKIP_BUILD: "1"
+        run: npm run e2e
+
+      - name: Upload the Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-report
+          path: |
+            gui/playwright-report/
+            gui/test-results/
+          retention-days: 14

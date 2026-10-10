@@ -1,0 +1,497 @@
+{
+  "generated_by": "scripts/gui/export_knobs.py",
+  "note": "The committed sample relationship models, parsed by sdfb_core.contracts.relationships. Real models are gitignored and never exported.",
+  "models": [
+    {
+      "model": "example_retail",
+      "description": "accounts -> orders -> order lines, plus an unrelated ledger",
+      "source": "config/relationships/example_retail.yaml",
+      "sha12": "3f4df8793c4f",
+      "generation_order": [
+        "A_TABLE",
+        "B_TABLE",
+        "C_TABLE",
+        "D_TABLE",
+        "E_TABLE"
+      ],
+      "tables": [
+        {
+          "name": "A_TABLE",
+          "pk": [
+            "A_COL_001",
+            "A_COL_002"
+          ],
+          "identity": [
+            "A_COL_009"
+          ],
+          "enabled": true,
+          "note": "account master",
+          "fk": []
+        },
+        {
+          "name": "B_TABLE",
+          "pk": [
+            "B_COL_001"
+          ],
+          "identity": [],
+          "enabled": true,
+          "note": "",
+          "fk": [
+            {
+              "cols": [
+                "B_COL_006",
+                "B_COL_007"
+              ],
+              "ref": "A_TABLE",
+              "ref_cols": [
+                "A_COL_001",
+                "A_COL_002"
+              ],
+              "enforced": true,
+              "drives": false,
+              "external": false,
+              "role": "driving",
+              "drawn_cols": [
+                "B_COL_006",
+                "B_COL_007"
+              ],
+              "note": ""
+            }
+          ]
+        },
+        {
+          "name": "C_TABLE",
+          "pk": [
+            "C_COL_001"
+          ],
+          "identity": [],
+          "enabled": true,
+          "note": "",
+          "fk": [
+            {
+              "cols": [
+                "C_COL_004"
+              ],
+              "ref": "B_TABLE",
+              "ref_cols": [
+                "B_COL_001"
+              ],
+              "enforced": true,
+              "drives": false,
+              "external": false,
+              "role": "driving",
+              "drawn_cols": [
+                "C_COL_004"
+              ],
+              "note": ""
+            },
+            {
+              "cols": [
+                "JOIN_KEY"
+              ],
+              "ref": "A_TABLE",
+              "ref_cols": [
+                "JOIN_KEY"
+              ],
+              "enforced": false,
+              "drives": false,
+              "external": false,
+              "role": "documented",
+              "drawn_cols": [
+                "JOIN_KEY"
+              ],
+              "note": "reporting-only link, key not materialised"
+            }
+          ]
+        },
+        {
+          "name": "D_TABLE",
+          "pk": [
+            "D_COL_001"
+          ],
+          "identity": [],
+          "enabled": false,
+          "note": "",
+          "fk": [
+            {
+              "cols": [
+                "D_COL_002"
+              ],
+              "ref": "C_TABLE",
+              "ref_cols": [
+                "C_COL_001"
+              ],
+              "enforced": true,
+              "drives": false,
+              "external": false,
+              "role": "disabled",
+              "drawn_cols": [
+                "D_COL_002"
+              ],
+              "note": ""
+            }
+          ]
+        },
+        {
+          "name": "E_TABLE",
+          "pk": [
+            "E_COL_001"
+          ],
+          "identity": [],
+          "enabled": true,
+          "note": "",
+          "fk": [
+            {
+              "cols": [
+                "E_COL_002"
+              ],
+              "ref": "warehouse_ds.EXT_TABLE",
+              "ref_cols": [
+                "EXT_ID"
+              ],
+              "enforced": true,
+              "drives": false,
+              "external": true,
+              "role": "external",
+              "drawn_cols": [
+                "E_COL_002"
+              ],
+              "note": ""
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "example_star_diamond",
+      "description": "a star-schema fact and a true diamond — the two ADR 0037 shapes",
+      "source": "config/relationships/example_star_diamond.yaml",
+      "sha12": "699326e27ea6",
+      "generation_order": [
+        "dim_a",
+        "dim_b",
+        "fact",
+        "top",
+        "left",
+        "right",
+        "bottom"
+      ],
+      "tables": [
+        {
+          "name": "dim_a",
+          "pk": [
+            "A_KEY"
+          ],
+          "identity": [],
+          "enabled": true,
+          "note": "dimension — a root, generated first",
+          "fk": []
+        },
+        {
+          "name": "dim_b",
+          "pk": [
+            "B_KEY"
+          ],
+          "identity": [],
+          "enabled": true,
+          "note": "dimension — a second root, unrelated to dim_a",
+          "fk": []
+        },
+        {
+          "name": "fact",
+          "pk": [
+            "A_KEY",
+            "B_KEY",
+            "LINE_NO"
+          ],
+          "identity": [],
+          "enabled": true,
+          "note": "",
+          "fk": [
+            {
+              "cols": [
+                "A_KEY"
+              ],
+              "ref": "dim_a",
+              "ref_cols": [
+                "A_KEY"
+              ],
+              "enforced": true,
+              "drives": false,
+              "external": false,
+              "role": "driving",
+              "drawn_cols": [
+                "A_KEY"
+              ],
+              "note": "the parent whose keys drive generation"
+            },
+            {
+              "cols": [
+                "B_KEY"
+              ],
+              "ref": "dim_b",
+              "ref_cols": [
+                "B_KEY"
+              ],
+              "enforced": true,
+              "drives": false,
+              "external": false,
+              "role": "independent",
+              "drawn_cols": [
+                "B_KEY"
+              ],
+              "note": "a star-schema dimension — drawn from the sampled key pool"
+            }
+          ]
+        },
+        {
+          "name": "top",
+          "pk": [
+            "T"
+          ],
+          "identity": [],
+          "enabled": true,
+          "note": "the shared ancestor of both branches",
+          "fk": []
+        },
+        {
+          "name": "left",
+          "pk": [
+            "T",
+            "L"
+          ],
+          "identity": [],
+          "enabled": true,
+          "note": "",
+          "fk": [
+            {
+              "cols": [
+                "T"
+              ],
+              "ref": "top",
+              "ref_cols": [
+                "T"
+              ],
+              "enforced": true,
+              "drives": false,
+              "external": false,
+              "role": "driving",
+              "drawn_cols": [
+                "T"
+              ],
+              "note": ""
+            }
+          ]
+        },
+        {
+          "name": "right",
+          "pk": [
+            "T",
+            "R"
+          ],
+          "identity": [],
+          "enabled": true,
+          "note": "",
+          "fk": [
+            {
+              "cols": [
+                "T"
+              ],
+              "ref": "top",
+              "ref_cols": [
+                "T"
+              ],
+              "enforced": true,
+              "drives": false,
+              "external": false,
+              "role": "driving",
+              "drawn_cols": [
+                "T"
+              ],
+              "note": ""
+            }
+          ]
+        },
+        {
+          "name": "bottom",
+          "pk": [
+            "T",
+            "L",
+            "R"
+          ],
+          "identity": [],
+          "enabled": true,
+          "note": "",
+          "fk": [
+            {
+              "cols": [
+                "T",
+                "L"
+              ],
+              "ref": "left",
+              "ref_cols": [
+                "T",
+                "L"
+              ],
+              "enforced": true,
+              "drives": true,
+              "external": false,
+              "role": "driving",
+              "drawn_cols": [
+                "T",
+                "L"
+              ],
+              "note": ""
+            },
+            {
+              "cols": [
+                "T",
+                "R"
+              ],
+              "ref": "right",
+              "ref_cols": [
+                "T",
+                "R"
+              ],
+              "enforced": true,
+              "drives": false,
+              "external": false,
+              "role": "conditional",
+              "drawn_cols": [
+                "T",
+                "R"
+              ],
+              "note": "the diamond's other branch — conditional on the shared T"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "model": "gcp_public_thelook",
+      "description": "users -> orders -> order_items, product_id from the landed products catalog",
+      "source": "config/relationships/gcp_public_fk_example.yaml",
+      "sha12": "eeb64408371e",
+      "generation_order": [
+        "users",
+        "orders",
+        "order_items"
+      ],
+      "tables": [
+        {
+          "name": "users",
+          "pk": [
+            "id"
+          ],
+          "identity": [
+            "id"
+          ],
+          "enabled": true,
+          "note": "root, generated with num_rows rows",
+          "fk": []
+        },
+        {
+          "name": "orders",
+          "pk": [
+            "order_id"
+          ],
+          "identity": [
+            "order_id"
+          ],
+          "enabled": true,
+          "note": "",
+          "fk": [
+            {
+              "cols": [
+                "user_id"
+              ],
+              "ref": "users",
+              "ref_cols": [
+                "id"
+              ],
+              "enforced": true,
+              "drives": false,
+              "external": false,
+              "role": "driving",
+              "drawn_cols": [
+                "user_id"
+              ],
+              "note": ""
+            }
+          ]
+        },
+        {
+          "name": "order_items",
+          "pk": [
+            "id"
+          ],
+          "identity": [
+            "id"
+          ],
+          "enabled": true,
+          "note": "",
+          "fk": [
+            {
+              "cols": [
+                "order_id",
+                "user_id"
+              ],
+              "ref": "orders",
+              "ref_cols": [
+                "order_id",
+                "user_id"
+              ],
+              "enforced": true,
+              "drives": true,
+              "external": false,
+              "role": "driving",
+              "drawn_cols": [
+                "order_id",
+                "user_id"
+              ],
+              "note": ""
+            },
+            {
+              "cols": [
+                "user_id"
+              ],
+              "ref": "users",
+              "ref_cols": [
+                "id"
+              ],
+              "enforced": true,
+              "drives": false,
+              "external": false,
+              "role": "implied",
+              "drawn_cols": [
+                "user_id"
+              ],
+              "note": ""
+            },
+            {
+              "cols": [
+                "product_id"
+              ],
+              "ref": "synthetic_data.products",
+              "ref_cols": [
+                "id"
+              ],
+              "enforced": true,
+              "drives": false,
+              "external": true,
+              "role": "external",
+              "drawn_cols": [
+                "product_id"
+              ],
+              "note": ""
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "exported_from": {
+    "commit": "ce9528eba70ebaf83ed1e4b863b8349271de59da",
+    "dirty": []
+  }
+}

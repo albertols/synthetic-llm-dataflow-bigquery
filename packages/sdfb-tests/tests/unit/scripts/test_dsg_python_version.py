@@ -35,6 +35,12 @@ _spec.loader.exec_module(sync)
 _PINNED_SUFFIXES = (".py", ".sh", ".yaml", ".yml", ".toml", ".tf")
 _PINNED_NAMES = ("Dockerfile", ".python-version")
 
+# The evaluator is a standalone uv project with its own lock and its own
+# Python pin (decision D1), shipped as its own unit. This test covers the
+# generator's files; the evaluator's pin is checked against its Dockerfile
+# and lock inside the package (tests/unit/test_launch_surfaces.py).
+_STANDALONE_EVALUATOR = "packages/sdfb-evaluation/"
+
 
 def _tree(**overrides):
   files = {
@@ -107,7 +113,8 @@ def test_this_repository_pins_one_python_version():
   files = {
       rel: (_ROOT / rel).read_text(encoding="utf-8")
       for rel in tracked
-      if rel and rel != this_file and (_ROOT / rel).is_file() and
+      if rel and rel != this_file and
+      not rel.startswith(_STANDALONE_EVALUATOR) and (_ROOT / rel).is_file() and
       (rel.endswith(_PINNED_SUFFIXES) or Path(rel).name in _PINNED_NAMES)
   }
   # The reference is the one the guide ships: there is no second copy.

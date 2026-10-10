@@ -1,0 +1,2992 @@
+{
+  "generated_by": "scripts/gui/export_knobs.py",
+  "note": "Generated; do not edit. Re-run the exporter (see its docstring).",
+  "channels": [
+    {
+      "id": "sampling",
+      "label": "SAMPLING",
+      "description": "How much of the source the generator reads, and what the profiler keeps from it."
+    },
+    {
+      "id": "generation",
+      "label": "GENERATION",
+      "description": "Engine choice and the dials of the bulk sampler."
+    },
+    {
+      "id": "free_text",
+      "label": "FREE TEXT",
+      "description": "The bounded LLM pool ladder for free-text columns."
+    },
+    {
+      "id": "rag",
+      "label": "RAG",
+      "description": "Row documents, value chunks, embedders and retrieval."
+    },
+    {
+      "id": "guardrails",
+      "label": "GUARDRAILS",
+      "description": "Mode A gates: uniqueness, the DLQ and the BLOCKER ratio."
+    },
+    {
+      "id": "relational",
+      "label": "RELATIONAL",
+      "description": "Foreign-key generation across a relationship model."
+    },
+    {
+      "id": "serving",
+      "label": "SERVING",
+      "description": "vLLM on the worker and the Dataflow fleet."
+    },
+    {
+      "id": "evaluation",
+      "label": "EVALUATION",
+      "description": "The standalone evaluator (sdfb-evaluation) and its budgets."
+    }
+  ],
+  "knobs": [
+    {
+      "id": "reference_rows_limit",
+      "channel": "sampling",
+      "group": "Reference sample",
+      "label": "Reference rows (n)",
+      "value": 10000,
+      "unit": "rows",
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--reference_rows_limit",
+      "flex_param": "reference_rows_limit",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:284",
+      "source_token": "\"--reference_rows_limit\"",
+      "related_adrs": [
+        "0005",
+        "0022"
+      ],
+      "docs": [
+        "docs/designs/2026-07-24-reference-sample-scaling.md"
+      ]
+    },
+    {
+      "id": "source_stats",
+      "channel": "sampling",
+      "group": "Reference sample",
+      "label": "Source-stats tier",
+      "value": "sample",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--source_stats",
+      "composer_param": "source_stats",
+      "flex_param": "source_stats",
+      "choices": [
+        "off",
+        "sample",
+        "exact"
+      ],
+      "help": "Compute per-column source_table_stats from the reference sample (driver-side, zero DAG cost). exact adds ONE aggregate scan of the live table (HLL distinct, deciles, top-k; ADR 0022) and feeds exact distinct into free-text pool sizing. off disables entirely.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:522",
+      "source_token": "\"--source_stats\"",
+      "related_adrs": [
+        "0022"
+      ],
+      "docs": [
+        "docs/designs/2026-08-05-source-table-stats.md"
+      ]
+    },
+    {
+      "id": "profiler_version",
+      "channel": "sampling",
+      "group": "Profiler (source_table_stats)",
+      "label": "Profiler version",
+      "value": "2",
+      "unit": null,
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Part of the stats-table append-skip key: the reference digest hashes ROWS, not this module, so a profiler upgrade must bump this or already-profiled tables keep stale stats forever (ADR 0022).",
+      "source": "packages/sdfb-core/src/sdfb_core/stats/source_stats.py:61",
+      "source_token": "PROFILER_VERSION",
+      "related_adrs": [
+        "0022"
+      ],
+      "docs": []
+    },
+    {
+      "id": "top_values_max_distinct",
+      "channel": "sampling",
+      "group": "Profiler (source_table_stats)",
+      "label": "Literal top values up to (distinct)",
+      "value": 50,
+      "unit": "values",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Literal source values land in stats ONLY for enum-routed columns (the T4 exemplar-leak lesson): above this distinct count, a column gets shapes / entropy / lengths — never values. Mirrors the engines' _FREE_TEXT_MAX_CATEGORIES so \"enum-routed\" means the same thing everywhere.",
+      "source": "packages/sdfb-core/src/sdfb_core/stats/source_stats.py:67",
+      "source_token": "_TOP_VALUES_MAX_DISTINCT",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "top_values_top_k",
+      "channel": "sampling",
+      "group": "Profiler (source_table_stats)",
+      "label": "Top values kept",
+      "value": 8,
+      "unit": "values",
+      "settable_via": [
+        "constant"
+      ],
+      "source": "packages/sdfb-core/src/sdfb_core/stats/source_stats.py:68",
+      "source_token": "_TOP_VALUES_TOP_K",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "shape_mix_top_k",
+      "channel": "sampling",
+      "group": "Profiler (source_table_stats)",
+      "label": "Shape masks kept",
+      "value": 8,
+      "unit": "masks",
+      "settable_via": [
+        "constant"
+      ],
+      "source": "packages/sdfb-core/src/sdfb_core/stats/source_stats.py:55",
+      "source_token": "_SHAPE_MIX_TOP_K",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "length_percentiles",
+      "channel": "sampling",
+      "group": "Profiler (source_table_stats)",
+      "label": "Length percentiles",
+      "value": [
+        0.05,
+        0.5,
+        0.95
+      ],
+      "unit": "quantile",
+      "settable_via": [
+        "constant"
+      ],
+      "source": "packages/sdfb-core/src/sdfb_core/stats/source_stats.py:56",
+      "source_token": "_LEN_PCTS",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "null_pattern_max_cols",
+      "channel": "sampling",
+      "group": "Profiler (source_table_stats)",
+      "label": "Null-pattern column cap",
+      "value": 64,
+      "unit": "columns",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Row-level null co-occurrence: per-row is-null bitstrings, top-K patterns. Skipped above the column cap — the bitstring alphabet grows with width and the pass is O(rows x cols).",
+      "source": "packages/sdfb-core/src/sdfb_core/stats/source_stats.py:73",
+      "source_token": "_NULL_PATTERN_MAX_COLS",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "null_pattern_top_k",
+      "channel": "sampling",
+      "group": "Profiler (source_table_stats)",
+      "label": "Null patterns kept",
+      "value": 8,
+      "unit": "patterns",
+      "settable_via": [
+        "constant"
+      ],
+      "source": "packages/sdfb-core/src/sdfb_core/stats/source_stats.py:74",
+      "source_token": "_NULL_PATTERN_TOP_K",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "engine",
+      "channel": "generation",
+      "group": "Engine",
+      "label": "Engine",
+      "value": "b1_rag",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--engine",
+      "composer_param": "engine",
+      "composer_default": "{{ENGINE}}",
+      "flex_param": "engine",
+      "help": "Engine name registered in ENGINE_REGISTRY",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:369",
+      "source_token": "\"--engine\"",
+      "related_adrs": [
+        "0006"
+      ],
+      "docs": []
+    },
+    {
+      "id": "num_rows",
+      "channel": "generation",
+      "group": "Engine",
+      "label": "Rows to generate (M)",
+      "value": null,
+      "unit": "rows",
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--num_rows",
+      "composer_param": "num_rows",
+      "composer_default": "1000",
+      "flex_param": "num_rows",
+      "required": true,
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:317",
+      "source_token": "\"--num_rows\"",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "similarity",
+      "channel": "generation",
+      "group": "Sampler",
+      "label": "Similarity",
+      "value": 0.5,
+      "unit": "0-1",
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--similarity",
+      "composer_param": "similarity",
+      "flex_param": "similarity",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:348",
+      "source_token": "\"--similarity\"",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "seed",
+      "channel": "generation",
+      "group": "Sampler",
+      "label": "Seed",
+      "value": "",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--seed",
+      "composer_param": "seed",
+      "flex_param": "seed",
+      "help": "Explicit base RNG seed (int). Empty = derive per (run_id, batch_id) — never replays across runs because run_id is salted per trigger.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:350",
+      "source_token": "\"--seed\"",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "batch_size",
+      "channel": "generation",
+      "group": "Sampler",
+      "label": "Rows per element",
+      "value": 16,
+      "unit": "rows",
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--batch_size",
+      "composer_param": "batch_size",
+      "flex_param": "batch_size",
+      "help": "Rows per element. Left at the default, this scales with --num_rows toward ~1,000 elements (never below the default). Pass an explicit value to pin it.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:342",
+      "source_token": "\"--batch_size\"",
+      "related_adrs": [],
+      "docs": [
+        "docs/designs/2026-07-26-ws5-generation-throughput.md"
+      ]
+    },
+    {
+      "id": "generation_max_retries",
+      "channel": "generation",
+      "group": "Sampler",
+      "label": "Retries per batch",
+      "value": 2,
+      "unit": "retries",
+      "settable_via": [
+        "constant"
+      ],
+      "source": "packages/sdfb-core/src/sdfb_core/engines/base.py:177",
+      "source_token": "max_retries",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "temperature_ladder",
+      "channel": "generation",
+      "group": "Sampler",
+      "label": "Free-text temperature ladder",
+      "value": [
+        0.7,
+        1.0,
+        1.3
+      ],
+      "unit": "temperature",
+      "settable_via": [
+        "derived"
+      ],
+      "comment": "Sampling temperatures for free-text pool retries, ascending from ``start`` up to 1.3. An LLM pool call whose NOVEL yield is empty (every value a verbatim copy of a reference value — the 2026-07-16 corp run, where Qwen3-4B echoed the seed exemplars on all 32 choices) is retried at each successive temperature before the engine gives up. Higher temperature diversifies sampling away from the exemplar echoes; 1.3 is the ceiling B.2 already uses for maximum divergence (`similarity_to_temperature`).",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/base.py:72",
+      "source_token": "def escalating_temperatures",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "sampling_ladder",
+      "channel": "free_text",
+      "group": "Pool ladder",
+      "label": "Sampling levels per retry",
+      "value": [
+        [
+          0.7,
+          null,
+          null
+        ],
+        [
+          1.0,
+          1.0,
+          0
+        ],
+        [
+          1.3,
+          1.0,
+          0
+        ]
+      ],
+      "unit": null,
+      "settable_via": [
+        "derived"
+      ],
+      "comment": "Sampling configurations for free-text pool retries. Temperature alone is NOT enough: a served model can pin sampling truncation via its shipped ``generation_config.json`` (Qwen3-4B: ``top_k=20, top_p=0.8`` — vLLM logs an override warning). When the model is confident in echoing an exemplar, that nucleus collapses to the echo token and temperature has nothing left to diversify — the 2026-07-16 corp run produced 96/96 verbatim copies at 0.7, 1.0 AND 1.3. So the first attempt keeps the vendor-tuned defaults, and every retry escalates temperature (via `escalating_temperatures`) with the truncation fully unclamped: ``top_p=1.0`` and ``top_k=0`` (vLLM: consider all tokens). A ``start`` already at the temperature ceiling still gets one unclamped retry — that is the retry that can actually change the outcome.",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/base.py:102",
+      "source_token": "def escalating_sampling",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "temporal_max_age_years_b1",
+      "channel": "generation",
+      "group": "Temporal floor",
+      "label": "Temporal floor, b1 (now minus years)",
+      "value": 10,
+      "unit": "years",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Interim temporal-age policy (2026-07-23): the jitter floor is clamped to now - 10y; fully-historical columns keep their observed range. Subject to per-column DDL-JSON functional descriptions later (audit fields, FK referential integrity, M2+) — see b2_library/fidelity.py for the full rationale.",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/profile.py:116",
+      "source_token": "_MAX_TEMPORAL_AGE_YEARS",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "temporal_max_age_years_b2",
+      "channel": "generation",
+      "group": "Temporal floor",
+      "label": "Temporal floor, b2 (now minus years)",
+      "value": 10,
+      "unit": "years",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Interim temporal-age policy (2026-07-23): generated dates/datetimes/ timestamps must not be older than this. The jitter floor becomes max(observed_min, now - 10y); columns whose ENTIRE observed range is older keep it unchanged (fabricated recent dates would be worse than old truth). EXPLICITLY interim: per-column behavior will later come from the DDL-JSON description (audit fields that must keep fixed/consistent values, FK referential integrity across linked tables, M2+) and must override this blanket constant — keep the policy a single constant + clamp, not a config surface, until that metadata exists.",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/b2_library/fidelity.py:105",
+      "source_token": "_MAX_TEMPORAL_AGE_YEARS",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "free_text_pool_max",
+      "channel": "free_text",
+      "group": "Pool ladder",
+      "label": "Pool cap",
+      "value": 512,
+      "unit": "values",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "The bounded-pool ceiling shared by the engines' free-text ladders and the launcher's PK-capacity preflight (ADR 0028 P4): a constrained column with no samplable pattern can never exceed this many distinct values, so a PK routed there caps at it — the 2026-08-21 run DLQ'd 999 488 of 1M rows exactly this way.",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/generation_plan.py:45",
+      "source_token": "FREE_TEXT_POOL_MAX",
+      "related_adrs": [
+        "0018",
+        "0028"
+      ],
+      "docs": []
+    },
+    {
+      "id": "pool_values_per_call",
+      "channel": "free_text",
+      "group": "Pool ladder",
+      "label": "Values per LLM call",
+      "value": 32,
+      "unit": "values",
+      "settable_via": [
+        "constant"
+      ],
+      "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py:156",
+      "source_token": "_POOL_VALUES_PER_CALL",
+      "related_adrs": [
+        "0013"
+      ],
+      "docs": []
+    },
+    {
+      "id": "pool_parallel_choices",
+      "channel": "free_text",
+      "group": "Pool ladder",
+      "label": "Parallel choices (n)",
+      "value": 4,
+      "unit": "choices",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Server-side parallel sampling (2026-07-25 perf fix): each pool HTTP round trip requests this many INDEPENDENT array-completions (`n=`) and de-dupes across them, multiplying per-call novel yield ~4x. Safe because pool requests are UNSEEDED — the 2026-07-16 collapse was n=32 single-value choices under a pinned seed, a different shape entirely. The prompt stays byte-identical across attempts (stable prefix ⇒ vLLM APC / LMCache-ready).",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py:167",
+      "source_token": "_POOL_PARALLEL_CHOICES",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "pool_stagnation_window",
+      "channel": "free_text",
+      "group": "Pool ladder",
+      "label": "Stagnation window",
+      "value": 3,
+      "unit": "attempts",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Stagnation exit (2026-07-23 E2E): 2 of 3 pool columns rode the full 2*ceil(target/32)=32-call budget (~30 min of T4 setup) while marginal novel yield had collapsed to cross-call duplicates and prompt echoes. Once every escalation level has run, _POOL_STAGNATION_WINDOW consecutive attempts each adding fewer than _POOL_STAGNATION_MIN_NOVEL novel values end the ladder — more retries at the ceiling level cannot outrun the yield decay.",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py:175",
+      "source_token": "_POOL_STAGNATION_WINDOW",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "pool_stagnation_min_novel",
+      "channel": "free_text",
+      "group": "Pool ladder",
+      "label": "Stagnation: min novel per attempt",
+      "value": 4,
+      "unit": "values",
+      "settable_via": [
+        "constant"
+      ],
+      "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py:176",
+      "source_token": "_POOL_STAGNATION_MIN_NOVEL",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "pool_format_collapse_rounds",
+      "channel": "free_text",
+      "group": "Pool ladder",
+      "label": "Format-collapse exit",
+      "value": 2,
+      "unit": "rounds",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Format-collapse exit (ADR 0033, 2026-08-25/26 R6 A_COL_037): 385/393 and 386/393 parsed values were format-rejected — 28-char values into a fixed 31-char bucket, the model echoing its clause's own off-format example — over three ~150 s T4 rounds before the stagnation window closed. A full-yield round with ZERO in-format values is a structural mismatch temperature cannot fix; two in a row end the ladder.",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py:183",
+      "source_token": "_POOL_FORMAT_COLLAPSE_ROUNDS",
+      "related_adrs": [
+        "0033"
+      ],
+      "docs": []
+    },
+    {
+      "id": "pool_build_max_workers",
+      "channel": "free_text",
+      "group": "Pool ladder",
+      "label": "Pool ladders in parallel",
+      "value": 4,
+      "unit": "threads",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Ladders for different columns are independent — run them on a bounded thread pool. vLLM continuous-batches concurrent requests on the server side; the client (openai/httpx) is thread-safe; embedder work is NOT (HF \"Already borrowed\") and therefore finishes before any thread spawns.",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py:188",
+      "source_token": "_POOL_BUILD_MAX_WORKERS",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "source_domain_cap",
+      "channel": "free_text",
+      "group": "Source-domain rejection",
+      "label": "Source-domain rejection cap",
+      "value": 1000000,
+      "unit": "distinct values",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Above this many distinct values the filter set stops being a cheap worker-side frozenset; the store reports \"unavailable\" and the engine degrades loudly to sample-only rejection. 1M strings ~= tens of MB on an n1-highmem-8 — far below worker RAM, far above every observed E2E column (max seen: 146k distinct, B_TABLE COL_038).",
+      "source": "packages/sdfb-beam/src/sdfb_beam/io/source_values.py:58",
+      "source_token": "_DEFAULT_CAP",
+      "related_adrs": [
+        "0023"
+      ],
+      "docs": []
+    },
+    {
+      "id": "free_text_unique_ratio",
+      "channel": "free_text",
+      "group": "Free-text routing (b1)",
+      "label": "Unique ratio for free text",
+      "value": 0.9,
+      "unit": "ratio",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "A string column with more unique non-null values than this *fraction* of its non-null count, AND a mean rendered length above the threshold, is treated as FREE_TEXT rather than CATEGORICAL. Tuned so low-cardinality enums (country, tier) stay categorical while names / descriptions / free-form notes go to the LLM pool.",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/profile.py:80",
+      "source_token": "_FREE_TEXT_UNIQUE_RATIO",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "free_text_min_mean_len",
+      "channel": "free_text",
+      "group": "Free-text routing (b1)",
+      "label": "Mean length for free text",
+      "value": 20,
+      "unit": "chars",
+      "settable_via": [
+        "constant"
+      ],
+      "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/profile.py:81",
+      "source_token": "_FREE_TEXT_MIN_MEAN_LEN",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "free_text_max_categories",
+      "channel": "free_text",
+      "group": "Free-text routing (b1)",
+      "label": "Categorical up to (distinct)",
+      "value": 50,
+      "unit": "values",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Above this absolute distinct count a string column is high-cardinality and treated as free text even if short (e.g. emails, ids-as-strings).",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/profile.py:84",
+      "source_token": "_FREE_TEXT_MAX_CATEGORIES",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "freetext_expansion",
+      "channel": "free_text",
+      "group": "Expansion and prompts",
+      "label": "Free-text expansion",
+      "value": "identifiers",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--freetext_expansion",
+      "composer_param": "freetext_expansion",
+      "flex_param": "freetext_expansion",
+      "choices": [
+        "off",
+        "identifiers",
+        "all"
+      ],
+      "help": "Shape-preserving expander for free-text columns (2026-08-05 spec C3). off = pool draws only (distinct capped at pool size). identifiers (default) = code-like columns expand from their observed shape mix. all = also mutate digit runs inside texty pool draws. Never adds an LLM call. Mode-by-mode panels, guarantees and trade-offs: docs/designs/2026-08-05-freetext-expansion-modes.md",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:494",
+      "source_token": "\"--freetext_expansion\"",
+      "related_adrs": [],
+      "docs": [
+        "docs/designs/2026-08-05-freetext-expansion-modes.md"
+      ]
+    },
+    {
+      "id": "pool_seed_strategy",
+      "channel": "free_text",
+      "group": "Expansion and prompts",
+      "label": "Pool seed strategy",
+      "value": "centroid",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--pool_seed_strategy",
+      "composer_param": "pool_seed_strategy",
+      "flex_param": "pool_seed_strategy",
+      "choices": [
+        "centroid",
+        "kcenter",
+        "kcenter_rotate"
+      ],
+      "help": "How the 8 free-text prompt seeds are chosen. centroid = control (densest region, today). kcenter = seeds span the column's modes. kcenter_rotate = re-seeded per ladder attempt (forfeits vLLM prefix caching by design).",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:474",
+      "source_token": "\"--pool_seed_strategy\"",
+      "related_adrs": [],
+      "docs": [
+        "docs/designs/2026-07-25-rag-retrieval-geometry-roadmap.md"
+      ]
+    },
+    {
+      "id": "prompt_constraints",
+      "channel": "free_text",
+      "group": "Expansion and prompts",
+      "label": "Prompt constraints",
+      "value": "on",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--prompt_constraints",
+      "composer_param": "prompt_constraints",
+      "flex_param": "prompt_constraints",
+      "choices": [
+        "on",
+        "off"
+      ],
+      "help": "Attach per-column llm_prompt_constraint (parsed from column-description JSON) to pool prompts (spec C5). Prefix-cache-safe constant suffix.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:506",
+      "source_token": "\"--prompt_constraints\"",
+      "related_adrs": [
+        "0024"
+      ],
+      "docs": [
+        "docs/designs/2026-08-10-prompt-constraints.md"
+      ]
+    },
+    {
+      "id": "prompt_debug",
+      "channel": "free_text",
+      "group": "Expansion and prompts",
+      "label": "Prompt debug logging",
+      "value": "off",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--prompt_debug",
+      "composer_param": "prompt_debug",
+      "flex_param": "prompt_debug",
+      "choices": [
+        "off",
+        "redacted",
+        "full"
+      ],
+      "help": "Log each built pool prompt as a freetext_pool_prompt milestone (ADR 0024). 'redacted' elides seed exemplars; 'full' logs verbatim prompts at WARNING — reference values reach Dataflow logs, debug runs only.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:513",
+      "source_token": "\"--prompt_debug\"",
+      "related_adrs": [
+        "0024"
+      ],
+      "docs": []
+    },
+    {
+      "id": "pool_pattern_guidance",
+      "channel": "free_text",
+      "group": "Expansion and prompts",
+      "label": "Decode-time pattern guidance",
+      "value": "",
+      "unit": null,
+      "settable_via": [
+        "cli"
+      ],
+      "cli_flag": "--pool_pattern_guidance",
+      "help": "true/false (bare flag = true). Constrain identifier-ish free-text pool completions at decode time with a charset/length regex (vLLM structured-output items.pattern). Opt-in until T4 throughput is confirmed; the post-hoc format gate protects pools either way.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:483",
+      "source_token": "\"--pool_pattern_guidance\"",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "build_pool_layer",
+      "channel": "free_text",
+      "group": "Persistence",
+      "label": "Build the pool layer",
+      "value": "",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--build_pool_layer",
+      "composer_param": "build_pool_layer",
+      "composer_default": "true",
+      "flex_param": "build_pool_layer",
+      "help": "true/false (bare flag = true). Build free-text pools in their own branch and persist them to --freetext_pools_table (skipped if this reference_digest + model_uri is already present). Without it pools are inferred inside every worker process's setup().",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:399",
+      "source_token": "\"--build_pool_layer\"",
+      "related_adrs": [
+        "0020"
+      ],
+      "docs": []
+    },
+    {
+      "id": "max_row_doc_rows",
+      "channel": "rag",
+      "group": "Population",
+      "label": "Row documents embedded",
+      "value": 1024,
+      "unit": "rows",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Population scope (2026-07-25 06:18 E2E postmortem). The only consumer of row_doc vectors is B1RagEngine._vectors_from_store, which reads EXACTLY the first MAX_ROW_DOC_ROWS fingerprint-ordered reference rows (all-or-nothing); embedding more is unreadable by design. The engine's _MAX_EMBED_ROWS aliases this constant — one source of truth for the write/read contract.",
+      "source": "packages/sdfb-core/src/sdfb_core/rag/chunking.py:52",
+      "source_token": "MAX_ROW_DOC_ROWS",
+      "related_adrs": [
+        "0019"
+      ],
+      "docs": []
+    },
+    {
+      "id": "max_free_text_values_per_column",
+      "channel": "rag",
+      "group": "Population",
+      "label": "Value chunks per free-text column",
+      "value": 1024,
+      "unit": "values",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "free_text_col chunks dedupe to distinct (column, value); a pathological near-unique column stays bounded here (consumers pick top-k=8 exemplars).",
+      "source": "packages/sdfb-core/src/sdfb_core/rag/chunking.py:55",
+      "source_token": "MAX_FREE_TEXT_VALUES_PER_COLUMN",
+      "related_adrs": [
+        "0019"
+      ],
+      "docs": []
+    },
+    {
+      "id": "rag_top_k",
+      "channel": "rag",
+      "group": "Retrieval",
+      "label": "Exemplars per prompt (top-k)",
+      "value": 8,
+      "unit": "values",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Top-k exemplars retrieved to condition the LLM's free-text inference.",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py:149",
+      "source_token": "_DEFAULT_TOP_K",
+      "related_adrs": [],
+      "docs": [
+        "docs/designs/2026-07-07-rag-layer-design.md"
+      ]
+    },
+    {
+      "id": "hashing_embedder_dim",
+      "channel": "rag",
+      "group": "Embedders",
+      "label": "HashingEmbedder dimension",
+      "value": 384,
+      "unit": "dims",
+      "settable_via": [
+        "constant"
+      ],
+      "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:132",
+      "source_token": "dim: int = 384",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "bge_embedder_dim",
+      "channel": "rag",
+      "group": "Embedders",
+      "label": "bge-small-en-v1.5 dimension",
+      "value": 384,
+      "unit": "dims",
+      "settable_via": [
+        "constant"
+      ],
+      "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:215",
+      "source_token": "dim: int = 384",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "bge_max_length",
+      "channel": "rag",
+      "group": "Embedders",
+      "label": "bge max tokens",
+      "value": 512,
+      "unit": "tokens",
+      "settable_via": [
+        "constant"
+      ],
+      "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:216",
+      "source_token": "max_length: int = 512",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "embedder_min_free_vram",
+      "channel": "rag",
+      "group": "Embedders",
+      "label": "Free VRAM before the embedder takes CUDA",
+      "value": 536870912,
+      "unit": "bytes",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "bge-small-en-v1.5 is ~130 MB of fp32 weights; activations and CUDA context push the real footprint higher. Require this much FREE VRAM before \"auto\" picks CUDA. The 2026-07-26 E2E asked for 2 MiB with 2.81 MiB free and OOMed: cuda.is_available() answers \"does a GPU exist\", never \"is there room\", and on a DoFn.setup() RETRY the module-level vLLM server reuse (ADR 0014) means the card is already spoken for.",
+      "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:62",
+      "source_token": "_MIN_FREE_VRAM_BYTES",
+      "related_adrs": [
+        "0014",
+        "0019"
+      ],
+      "docs": []
+    },
+    {
+      "id": "default_embedder_identity",
+      "channel": "rag",
+      "group": "Embedders",
+      "label": "Embedder when --embedder_uri is empty",
+      "value": [
+        "hashing-384",
+        "v1"
+      ],
+      "unit": null,
+      "settable_via": [
+        "constant"
+      ],
+      "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:347",
+      "source_token": "_DEFAULT_EMBEDDER_IDENTITY",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "embedder_uri",
+      "channel": "rag",
+      "group": "Embedders",
+      "label": "Embedder weights URI",
+      "value": "",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--embedder_uri",
+      "flex_param": "embedder_uri",
+      "help": "gs://<bucket>/synthetic/models/embedders/<model>/<version>/ for the B.1 RAG embedder (optional; empty → HashingEmbedder)",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:377",
+      "source_token": "\"--embedder_uri\"",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "build_rag_layer",
+      "channel": "rag",
+      "group": "Population",
+      "label": "Build the RAG layer",
+      "value": "",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--build_rag_layer",
+      "composer_param": "build_rag_layer",
+      "composer_default": "true",
+      "flex_param": "build_rag_layer",
+      "help": "true/false (bare flag = true). Populate synthetic_rag.rag_chunks from this run's reference sample (skipped if the reference_digest is already present for this embedder id+version). String-valued so the Flex Template/DAG chain can pass --build_rag_layer=true.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:382",
+      "source_token": "\"--build_rag_layer\"",
+      "related_adrs": [
+        "0017",
+        "0019"
+      ],
+      "docs": []
+    },
+    {
+      "id": "env",
+      "channel": "guardrails",
+      "group": "Gate",
+      "label": "Threshold tier",
+      "value": "dev",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--env",
+      "flex_param": "env",
+      "help": "Environment tier selecting thresholds (dev|uat|prd)",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:586",
+      "source_token": "\"--env\"",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "uniqueness_mode",
+      "channel": "guardrails",
+      "group": "Uniqueness",
+      "label": "Uniqueness mode",
+      "value": "exact",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--uniqueness_mode",
+      "composer_param": "uniqueness_mode",
+      "flex_param": "uniqueness_mode",
+      "choices": [
+        "exact",
+        "exact_chained",
+        "streaming"
+      ],
+      "help": "exact = divert every duplicate to the DLQ behind ONE full-row shuffle barrier (default; PK/identity resolved from key-only groups, ADR 0034). exact_chained = the pre-ADR-0034 three-barrier chain (row digest -> PK -> identity), kept for A/B runs. streaming = land rows as they are generated and MEASURE the duplicate rate instead of removing it, so no GroupByKey barrier sits between generation and BigQuery. In streaming mode duplicate rows LAND — the run is still marked FAILED_BLOCKER, so re-run with --write_disposition=overwrite.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:416",
+      "source_token": "\"--uniqueness_mode\"",
+      "related_adrs": [
+        "0034"
+      ],
+      "docs": [
+        "docs/designs/2026-09-07-generation-throughput-where-time-goes.md"
+      ]
+    },
+    {
+      "id": "driven_uniqueness_mode",
+      "channel": "guardrails",
+      "group": "Uniqueness",
+      "label": "Uniqueness mode, driven children",
+      "value": "streaming",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--driven_uniqueness_mode",
+      "flex_param": "driven_uniqueness_mode",
+      "choices": [
+        "exact",
+        "exact_chained",
+        "streaming"
+      ],
+      "help": "Uniqueness mode for a DRIVEN child without identity columns (ADR 0036): its PK is unique by construction, so `streaming` measures duplicates without the landing-path barrier.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:450",
+      "source_token": "\"--driven_uniqueness_mode\"",
+      "related_adrs": [
+        "0036"
+      ],
+      "docs": []
+    },
+    {
+      "id": "write_disposition",
+      "channel": "guardrails",
+      "group": "Landing",
+      "label": "Write disposition",
+      "value": "append",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--write_disposition",
+      "composer_param": "write_disposition",
+      "composer_default": "{{WRITE_DISPOSITION}}",
+      "flex_param": "write_disposition",
+      "choices": [
+        "append",
+        "overwrite"
+      ],
+      "help": "Landing-table write mode. append = WRITE_APPEND (default, today's behavior); overwrite = WRITE_TRUNCATE (FILE_LOADS-compatible). DLQ, validation_runs and rag_chunks always append.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:295",
+      "source_token": "\"--write_disposition\"",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "blocker_failure_ratio_dev",
+      "channel": "guardrails",
+      "group": "Gate",
+      "label": "BLOCKER ratio (dev)",
+      "value": 0.2,
+      "unit": "ratio",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Fraction of records failing any BLOCKER rule before the Dataflow job is failed (config/thresholds.yml).",
+      "source": "config/thresholds.yml:33",
+      "source_token": "dev:",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "blocker_failure_ratio_uat",
+      "channel": "guardrails",
+      "group": "Gate",
+      "label": "BLOCKER ratio (uat)",
+      "value": 0.05,
+      "unit": "ratio",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Fraction of records failing any BLOCKER rule before the Dataflow job is failed (config/thresholds.yml).",
+      "source": "config/thresholds.yml:34",
+      "source_token": "uat:",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "blocker_failure_ratio_prd",
+      "channel": "guardrails",
+      "group": "Gate",
+      "label": "BLOCKER ratio (prd)",
+      "value": 0.01,
+      "unit": "ratio",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Fraction of records failing any BLOCKER rule before the Dataflow job is failed (config/thresholds.yml).",
+      "source": "config/thresholds.yml:35",
+      "source_token": "prd:",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "blocker_rules_declared",
+      "channel": "guardrails",
+      "group": "Gate",
+      "label": "BLOCKER rules (thresholds.yml)",
+      "value": [
+        "engine_failure",
+        "fk.orphan",
+        "identity.unique",
+        "null.required",
+        "pk.duplicate",
+        "row.duplicate",
+        "schema.types"
+      ],
+      "unit": null,
+      "settable_via": [
+        "constant"
+      ],
+      "source": "config/thresholds.yml:37",
+      "source_token": "rules:",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "blocker_rule_ids",
+      "channel": "guardrails",
+      "group": "Gate",
+      "label": "BLOCKER rules counted by the gate",
+      "value": [
+        "engine_failure",
+        "identity.unique",
+        "null.required",
+        "pk.duplicate",
+        "row.duplicate",
+        "schema.types"
+      ],
+      "unit": null,
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "rule_ids whose failures count toward the BLOCKER gate. Mirrors the BLOCKER-severity rows in config/thresholds.yml.",
+      "source": "packages/sdfb-core/src/sdfb_core/validation/summary.py:44",
+      "source_token": "BLOCKER_RULE_IDS",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "repeat_share_tolerance",
+      "channel": "guardrails",
+      "group": "Gate",
+      "label": "Key-repeat share tolerance",
+      "value": 0.05,
+      "unit": "share",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Absolute tolerance between the SOURCE key-repeat share and the one the landing table lands with (ADR 0038 §5).  The copy is faithful BY CONSTRUCTION — every parent key draws its child count from the same measured histogram — so the only spread is sampling: the per-key draw converges at O(1/sqrt(keys)) (well under half a point at the 52k keys of the 2026-09-12 launch), plus the derived row count's rounding and, on an orphan-heavy source, the fact that the child copies the MATCHED share's distribution rather than the whole source's. Five points is loose enough to survive all three and tight enough that a structural break is unmissable: a fan-out capped to one child lands ~0.00 and a doubled one ~0.75, both far outside.",
+      "source": "packages/sdfb-core/src/sdfb_core/contracts/model_adjustment.py:81",
+      "source_token": "REPEAT_SHARE_TOLERANCE",
+      "related_adrs": [
+        "0038"
+      ],
+      "docs": []
+    },
+    {
+      "id": "generate_fk_relationships",
+      "channel": "relational",
+      "group": "Model",
+      "label": "Generate FK relationships",
+      "value": "true",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--generate_fk_relationships",
+      "composer_param": "generate_fk_relationships",
+      "flex_param": "generate_fk_relationships",
+      "help": "true (default): declared relationships are honored — a launch expands to the table's whole FK component (parents first) and children sample landed parent keys; tables with no declared relationships behave exactly as false (zero friction). false: isolated generation — declared edges ignored LOUDLY, FK columns use marginals. ADR 0029.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:543",
+      "source_token": "\"--generate_fk_relationships\"",
+      "related_adrs": [
+        "0029"
+      ],
+      "docs": []
+    },
+    {
+      "id": "relationships_uri",
+      "channel": "relational",
+      "group": "Model",
+      "label": "Relationship models",
+      "value": "config/relationships",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--relationships_uri",
+      "composer_param": "relationships_uri",
+      "flex_param": "relationships_uri",
+      "help": "Where the relational models live (ADR 0032): a folder or a single YAML file, local or gs://. Default: the config/relationships folder packaged in the image. Point it at gs://... to change PK/FK without rebuilding — this is the ONLY source of relational truth; table descriptions are never read for it.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:571",
+      "source_token": "\"--relationships_uri\"",
+      "related_adrs": [
+        "0032"
+      ],
+      "docs": [
+        "docs/designs/2026-08-24-relationships-as-config.md"
+      ]
+    },
+    {
+      "id": "multi_table_mode",
+      "channel": "relational",
+      "group": "Model",
+      "label": "Multi-table mode",
+      "value": "single_job",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--multi_table_mode",
+      "composer_param": "multi_table_mode",
+      "flex_param": "multi_table_mode",
+      "choices": [
+        "single_job",
+        "sequential_jobs"
+      ],
+      "help": "How a multi-table plan executes (ADR 0030). single_job (default): every planned table in ONE Dataflow job — one worker fleet, one vLLM ignition, in-DAG FK key handoff. sequential_jobs: one job per table, parents first (fallback / debugging).",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:561",
+      "source_token": "\"--multi_table_mode\"",
+      "related_adrs": [
+        "0030"
+      ],
+      "docs": []
+    },
+    {
+      "id": "on_model_conflict",
+      "channel": "relational",
+      "group": "Model",
+      "label": "On a measured model conflict",
+      "value": "adjust",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--on_model_conflict",
+      "flex_param": "on_model_conflict",
+      "choices": [
+        "adjust",
+        "stop"
+      ],
+      "help": "What a MEASURED contradiction between the relationship model and the SOURCE does (ADR 0038). adjust (default) = drop the declared `pk:` the full-source fan-out proves is not a key, announce it in the MODEL ADJUSTED banner, emit the effective model as YAML, and carry on — the landing table then reproduces the source's key-repeat share, and that table's pk.duplicate stops counting toward the BLOCKER gate. stop = refuse the launch, exactly as before ADR 0038. Model SELF-contradictions (unknown columns, two `drives: true` edges, an ambiguous role) and the ADR 0035 capacity gate stop under BOTH settings.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:457",
+      "source_token": "\"--on_model_conflict\"",
+      "related_adrs": [
+        "0035",
+        "0038"
+      ],
+      "docs": []
+    },
+    {
+      "id": "fk_candidate_cap",
+      "channel": "relational",
+      "group": "Keys",
+      "label": "Candidates per shared key (Top-M)",
+      "value": 64,
+      "unit": "candidates",
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--fk_candidate_cap",
+      "flex_param": "fk_candidate_cap",
+      "help": "ADR 0037: Top-M candidates kept per SHARED value on a CONDITIONAL edge (an edge sharing columns with the driving edge — a diamond branch). A hot shared key never carries more than M parent candidates into a request; the engine wraps only when a key's fan-out outruns the list it was handed. Raising it widens the per-key choice and LOWERS keys_per_batch to keep a request under ~100k candidate values.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:438",
+      "source_token": "\"--fk_candidate_cap\"",
+      "related_adrs": [
+        "0037"
+      ],
+      "docs": [
+        "docs/designs/2026-09-11-multi-parent-children.md"
+      ]
+    },
+    {
+      "id": "fk_key_sample_floor",
+      "channel": "relational",
+      "group": "Keys",
+      "label": "Parent keys sampled (floor)",
+      "value": 100000,
+      "unit": "keys",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "The ADR 0030 side-input cap: a child samples at most this many parent key tuples unless its PK needs more. Mirrored by `io/fk_pools._DEFAULT_LIMIT`.",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/pk_capacity.py:56",
+      "source_token": "FK_KEY_SAMPLE_FLOOR",
+      "related_adrs": [
+        "0030",
+        "0035"
+      ],
+      "docs": []
+    },
+    {
+      "id": "fk_key_sample_ceiling",
+      "channel": "relational",
+      "group": "Keys",
+      "label": "Parent keys sampled (ceiling)",
+      "value": 1000000,
+      "unit": "keys",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Largest side input this sizing will ask for. 1M single-column string keys is ~40 MB pickled / ~130 MB live per SDK process; beyond it the scaling answer is the co-partitioned join (ADR 0031 escape hatch).",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/pk_capacity.py:60",
+      "source_token": "FK_KEY_SAMPLE_CEILING",
+      "related_adrs": [
+        "0031",
+        "0035"
+      ],
+      "docs": []
+    },
+    {
+      "id": "fk_key_sample_margin",
+      "channel": "relational",
+      "group": "Keys",
+      "label": "Capacity margin over num_rows",
+      "value": 10,
+      "unit": "x",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "Capacity / num_rows target: at 10x, expected duplicates are ~4.8%.",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/pk_capacity.py:62",
+      "source_token": "FK_KEY_SAMPLE_MARGIN",
+      "related_adrs": [
+        "0035"
+      ],
+      "docs": []
+    },
+    {
+      "id": "max_conditional_values_per_request",
+      "channel": "relational",
+      "group": "Keys",
+      "label": "Candidate values per request",
+      "value": 100000,
+      "unit": "values",
+      "settable_via": [
+        "constant"
+      ],
+      "comment": "ADR 0037 §7 — a fan-out request carries `keys_per_batch * M` candidate tuples per conditional edge; `keys_per_batch` is lowered so the whole request stays under this many values, whatever the cap is set to.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:201",
+      "source_token": "_MAX_CONDITIONAL_VALUES_PER_REQUEST",
+      "related_adrs": [
+        "0037"
+      ],
+      "docs": []
+    },
+    {
+      "id": "client_type",
+      "channel": "serving",
+      "group": "LLM",
+      "label": "Model client",
+      "value": "vllm",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--client_type",
+      "composer_param": "client_type",
+      "flex_param": "client_type",
+      "choices": [
+        "vllm",
+        "mlx",
+        "fake"
+      ],
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:594",
+      "source_token": "\"--client_type\"",
+      "related_adrs": [
+        "0014"
+      ],
+      "docs": []
+    },
+    {
+      "id": "vllm_dtype",
+      "channel": "serving",
+      "group": "LLM",
+      "label": "vLLM dtype",
+      "value": "auto",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--vllm_dtype",
+      "composer_param": "vllm_dtype",
+      "composer_default": "float16",
+      "flex_param": "vllm_dtype",
+      "choices": [
+        "auto",
+        "float16",
+        "bfloat16"
+      ],
+      "help": "vLLM --dtype override. auto = checkpoint dtype (bf16 for Gemma/Qwen). float16 is REQUIRED on T4 for fp16-safe bf16 checkpoints (Qwen); refused for gemma-family models (fp16 Gemma emits empty output)",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:596",
+      "source_token": "\"--vllm_dtype\"",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "vllm_max_model_len",
+      "channel": "serving",
+      "group": "LLM",
+      "label": "vLLM max model len",
+      "value": "8192",
+      "unit": "tokens",
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--vllm_max_model_len",
+      "composer_param": "vllm_max_model_len",
+      "flex_param": "vllm_max_model_len",
+      "help": "vLLM --max-model-len cap. Without it vLLM sizes the KV cache for the checkpoint's NATIVE context (Qwen3-2507: 262K → 36GiB KV, kills the T4 EngineCore at startup). 8192 fits every registry model/GPU pairing and dwarfs the synthesis prompts. Empty = no cap (native context).",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:604",
+      "source_token": "\"--vllm_max_model_len\"",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "autoscaling",
+      "channel": "serving",
+      "group": "Fleet",
+      "label": "Autoscaling",
+      "value": "auto",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--autoscaling",
+      "composer_param": "autoscaling",
+      "flex_param": "autoscaling",
+      "choices": [
+        "auto",
+        "throughput",
+        "fixed"
+      ],
+      "help": "auto (default) = a fleet sized by --initial_workers stays that size (autoscaling_algorithm=NONE), otherwise Dataflow's THROUGHPUT_BASED. fixed = same pin, and --initial_workers is required. throughput = always let Dataflow scale (the 2026-09-07/08 multi runs lost ~4 min per job to mid-job scale-downs between the parent and child stages, ADR 0034 D9).",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:319",
+      "source_token": "\"--autoscaling\"",
+      "related_adrs": [
+        "0034"
+      ],
+      "docs": []
+    },
+    {
+      "id": "initial_workers",
+      "channel": "serving",
+      "group": "Fleet",
+      "label": "Initial workers",
+      "value": "",
+      "unit": "workers",
+      "settable_via": [
+        "cli",
+        "composer",
+        "flex"
+      ],
+      "cli_flag": "--initial_workers",
+      "composer_param": "initial_workers",
+      "flex_param": "initial_workers",
+      "help": "Initial Dataflow worker count (ADR 0034). Empty = Dataflow's own default: the 2026-08-29 R6 pair started on 2 workers and autoscaled to 4 only ~4 min into the first generate stage, so C_TABLE ran 8 min at a quarter of its steady-state rate. A scale run starts at its max_num_workers. Pinned from the launcher like disk_size_gb; an explicit Beam --num_workers on the launch wins.",
+      "source": "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py:331",
+      "source_token": "\"--initial_workers\"",
+      "related_adrs": [
+        "0034"
+      ],
+      "docs": []
+    },
+    {
+      "id": "gpu",
+      "channel": "serving",
+      "group": "Fleet",
+      "label": "GPU profile",
+      "value": "{{GPU}}",
+      "unit": null,
+      "settable_via": [
+        "composer"
+      ],
+      "composer_param": "gpu",
+      "source": "composer/synthetic_beam_bigquery.py:309",
+      "source_token": "\"gpu\"",
+      "related_adrs": [],
+      "docs": []
+    },
+    {
+      "id": "sdk_containers",
+      "channel": "serving",
+      "group": "Fleet",
+      "label": "SDK containers per worker",
+      "value": "single",
+      "unit": null,
+      "settable_via": [
+        "composer"
+      ],
+      "composer_param": "sdk_containers",
+      "source": "composer/synthetic_beam_bigquery.py:371",
+      "source_token": "\"sdk_containers\"",
+      "related_adrs": [
+        "0034"
+      ],
+      "docs": []
+    },
+    {
+      "id": "eval_mode",
+      "channel": "evaluation",
+      "group": "Evaluator",
+      "label": "Evaluation mode",
+      "value": null,
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--mode",
+      "flex_param": "mode",
+      "choices": [
+        "exact",
+        "sampled"
+      ],
+      "help": "read every row, or a salted sample above --sample_rows (default: sampled on the DirectRunner, exact on Dataflow)",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:233",
+      "source_token": "\"--mode\"",
+      "related_adrs": [
+        "0041"
+      ],
+      "docs": [
+        "docs/designs/2026-07-07-evaluation-framework-design.md"
+      ]
+    },
+    {
+      "id": "eval_sample_rows",
+      "channel": "evaluation",
+      "group": "Evaluator",
+      "label": "Sample rows per side",
+      "value": 200000,
+      "unit": "rows",
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--sample_rows",
+      "flex_param": "sample_rows",
+      "help": "sampled mode: rows read per side of a table larger than this",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:140",
+      "source_token": "\"--sample_rows\"",
+      "related_adrs": [
+        "0041"
+      ],
+      "docs": [
+        "docs/designs/2026-07-07-evaluation-framework-design.md"
+      ]
+    },
+    {
+      "id": "eval_privacy_sample_rows",
+      "channel": "evaluation",
+      "group": "Evaluator",
+      "label": "Privacy sample rows",
+      "value": 50000,
+      "unit": "rows",
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--privacy_sample_rows",
+      "flex_param": "privacy_sample_rows",
+      "help": "rows of the nearest-neighbour privacy sample",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:142",
+      "source_token": "\"--privacy_sample_rows\"",
+      "related_adrs": [
+        "0041"
+      ],
+      "docs": [
+        "docs/designs/2026-07-07-evaluation-framework-design.md"
+      ]
+    },
+    {
+      "id": "eval_detection_sample_rows",
+      "channel": "evaluation",
+      "group": "Evaluator",
+      "label": "Detection sample rows",
+      "value": 50000,
+      "unit": "rows",
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--detection_sample_rows",
+      "flex_param": "detection_sample_rows",
+      "help": "rows per side in the detection (C2ST) sample",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:144",
+      "source_token": "\"--detection_sample_rows\"",
+      "related_adrs": [
+        "0041"
+      ],
+      "docs": [
+        "docs/designs/2026-07-07-evaluation-framework-design.md"
+      ]
+    },
+    {
+      "id": "eval_pair_max_columns",
+      "channel": "evaluation",
+      "group": "Evaluator",
+      "label": "Pair columns cap",
+      "value": 20,
+      "unit": "columns",
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--pair_max_columns",
+      "flex_param": "pair_max_columns",
+      "help": "columns whose pairs are compared, per table",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:146",
+      "source_token": "\"--pair_max_columns\"",
+      "related_adrs": [
+        "0041"
+      ],
+      "docs": [
+        "docs/designs/2026-07-07-evaluation-framework-design.md"
+      ]
+    },
+    {
+      "id": "eval_row_flags_top_k",
+      "channel": "evaluation",
+      "group": "Evaluator",
+      "label": "Flagged rows per check",
+      "value": 100,
+      "unit": "rows",
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--row_flags_top_k",
+      "flex_param": "row_flags_top_k",
+      "help": "row flags kept per check and table",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:147",
+      "source_token": "\"--row_flags_top_k\"",
+      "related_adrs": [
+        "0041"
+      ],
+      "docs": [
+        "docs/designs/2026-07-07-evaluation-framework-design.md"
+      ]
+    },
+    {
+      "id": "eval_row_flags_source_keys",
+      "channel": "evaluation",
+      "group": "Evaluator",
+      "label": "Flagged source keys",
+      "value": "hashed",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--row_flags_source_keys",
+      "flex_param": "row_flags_source_keys",
+      "choices": [
+        "hashed"
+      ],
+      "help": "row flags carry the matched source key as a keyed hash only (raw keys are never written)",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:251",
+      "source_token": "\"--row_flags_source_keys\"",
+      "related_adrs": [
+        "0041"
+      ],
+      "docs": [
+        "docs/designs/2026-07-07-evaluation-framework-design.md"
+      ]
+    },
+    {
+      "id": "eval_max_bytes_billed",
+      "channel": "evaluation",
+      "group": "Evaluator",
+      "label": "BigQuery bytes cap",
+      "value": 1099511627776,
+      "unit": "bytes",
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--max_bytes_billed",
+      "flex_param": "max_bytes_billed",
+      "help": "BigQuery bytes the evaluation may process (default 1 TiB)",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:257",
+      "source_token": "\"--max_bytes_billed\"",
+      "related_adrs": [
+        "0041"
+      ],
+      "docs": [
+        "docs/designs/2026-07-07-evaluation-framework-design.md"
+      ]
+    },
+    {
+      "id": "eval_max_shuffle_gb",
+      "channel": "evaluation",
+      "group": "Evaluator",
+      "label": "Shuffle budget",
+      "value": 500.0,
+      "unit": "GB",
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--max_shuffle_gb",
+      "flex_param": "max_shuffle_gb",
+      "help": "shuffle the value census may use before it is value-sampled",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:262",
+      "source_token": "\"--max_shuffle_gb\"",
+      "related_adrs": [
+        "0041"
+      ],
+      "docs": [
+        "docs/designs/2026-07-07-evaluation-framework-design.md"
+      ]
+    },
+    {
+      "id": "eval_scope",
+      "channel": "evaluation",
+      "group": "Evaluator",
+      "label": "Evaluation scope",
+      "value": "auto",
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--scope",
+      "flex_param": "scope",
+      "choices": [
+        "auto",
+        "table",
+        "as_of",
+        "appends",
+        "as_of_diff",
+        "manual"
+      ],
+      "help": "how the job's landing rows are isolated (default auto)",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:238",
+      "source_token": "\"--scope\"",
+      "related_adrs": [
+        "0041"
+      ],
+      "docs": [
+        "docs/designs/2026-07-07-evaluation-framework-design.md"
+      ]
+    },
+    {
+      "id": "eval_allow_contaminated",
+      "channel": "evaluation",
+      "group": "Evaluator",
+      "label": "Allow contaminated scopes",
+      "value": false,
+      "unit": null,
+      "settable_via": [
+        "cli",
+        "flex"
+      ],
+      "cli_flag": "--allow_contaminated",
+      "flex_param": "allow_contaminated",
+      "help": "evaluate a scope another writer touched; it stays `contaminated`",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:242",
+      "source_token": "\"--allow_contaminated\"",
+      "related_adrs": [
+        "0041"
+      ],
+      "docs": [
+        "docs/designs/2026-07-07-evaluation-framework-design.md"
+      ]
+    }
+  ],
+  "annotations": [
+    {
+      "id": "similarity-semantics",
+      "title": "similarity means different things in b1 and b2",
+      "knobs": [
+        "similarity"
+      ],
+      "docs_say": "GenerationConfig and the b1 engine docstring: B.1 maps similarity to retrieval-neighbourhood tightness and sampling variance.",
+      "code_does": "b1 uses it only to blend temporal draws (anchored vs uniform); numeric and categorical draws and every free-text pool ignore it. b2 maps it to a categorical sampling temperature 2(1 - s) and an LLM temperature 1.3 - 1.2 s.",
+      "evidence": [
+        {
+          "source": "packages/sdfb-core/src/sdfb_core/engines/base.py:170",
+          "role": "docs",
+          "excerpt": "B.1 maps it to a retrieval-vs-perturbation balance"
+        },
+        {
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py:37",
+          "role": "docs",
+          "excerpt": "`similarity` (GenerationConfig) = retrieval-neighborhood tightness +"
+        },
+        {
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/_fidelity.py:226",
+          "role": "code",
+          "excerpt": "blended = similarity * (anchored + jitter) + (1.0 - similarity) * uniform"
+        },
+        {
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/_fidelity.py:241",
+          "role": "code",
+          "excerpt": "in-range and novel-by-interpolation; `similarity` is unused here."
+        },
+        {
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py:909",
+          "role": "code",
+          "excerpt": "del similarity  # Unused: pool, routed and expansion draws ignore it."
+        },
+        {
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b2_library/engine.py:406",
+          "role": "code",
+          "excerpt": "return round(2.0 * (1.0 - s), 4)"
+        },
+        {
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b2_library/freetext.py:89",
+          "role": "code",
+          "excerpt": "return round(1.3 - 1.2 * s, 4)"
+        }
+      ],
+      "related_adrs": [
+        "0013",
+        "0025"
+      ]
+    },
+    {
+      "id": "inverse-cdf-resolution",
+      "title": "Inverse-CDF resolution differs by engine",
+      "knobs": [
+        "engine",
+        "reference_rows_limit"
+      ],
+      "docs_say": "Both engines are described as inverse-CDF sampling of the source marginal (ADR 0022, ADR 0025).",
+      "code_does": "b1 interpolates across the whole sorted reference sample (one knot per observed value); b2 interpolates across 11 decile points (p0..p100), so b2 cannot reproduce any shape inside a decile.",
+      "evidence": [
+        {
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/_fidelity.py:253",
+          "role": "code",
+          "excerpt": "grid = np.linspace(0.0, 1.0, obs.size)"
+        },
+        {
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b2_library/fidelity.py:209",
+          "role": "code",
+          "excerpt": "return tuple(ordered[round(i * last / 10)] for i in range(11))"
+        },
+        {
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b2_library/backends.py:164",
+          "role": "code",
+          "excerpt": "draws = np.interp(rng.random(n), grid, np.asarray(p.quantiles))"
+        }
+      ],
+      "related_adrs": [
+        "0022",
+        "0025"
+      ]
+    },
+    {
+      "id": "bge-pooling",
+      "title": "bge-small is mean-pooled, not CLS-pooled",
+      "knobs": [
+        "bge_embedder_dim",
+        "bge_max_length"
+      ],
+      "docs_say": "The bge-small-en-v1.5 model card pools on the [CLS] token; the class docstring calls mean pooling \"the bge recipe\".",
+      "code_does": "BgeEmbedder mean-pools the last hidden state over the attention mask, then L2-normalizes. Whether [CLS] picks better exemplars here is unmeasured.",
+      "evidence": [
+        {
+          "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:176",
+          "role": "docs",
+          "excerpt": "Mean-pooled, L2-normalized CLS-free"
+        },
+        {
+          "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:336",
+          "role": "code",
+          "excerpt": "# bge uses mean pooling over the last hidden state."
+        },
+        {
+          "source": "docs/articles/04-b1-rag-deep-dive.md:376",
+          "role": "docs",
+          "excerpt": "bge was trained for `[CLS]` pooling"
+        }
+      ],
+      "links": [
+        {
+          "label": "bge-small-en-v1.5 model card",
+          "url": "https://huggingface.co/BAAI/bge-small-en-v1.5"
+        }
+      ],
+      "related_adrs": [
+        "0017"
+      ]
+    },
+    {
+      "id": "fk-orphan-not-blocker",
+      "title": "fk.orphan is BLOCKER in thresholds.yml but not counted",
+      "knobs": [
+        "blocker_rule_ids",
+        "blocker_rules_declared"
+      ],
+      "docs_say": "config/thresholds.yml declares fk.orphan with severity BLOCKER (ADR 0031).",
+      "code_does": "BLOCKER_RULE_IDS, the set the run gate counts, omits fk.orphan: orphan rows divert to the DLQ but never move observed_blocker_ratio.",
+      "evidence": [
+        {
+          "source": "config/thresholds.yml:53",
+          "role": "docs",
+          "excerpt": "fk.orphan:"
+        },
+        {
+          "source": "config/thresholds.yml:55",
+          "role": "docs",
+          "excerpt": "severity: BLOCKER"
+        },
+        {
+          "source": "packages/sdfb-core/src/sdfb_core/validation/summary.py:44",
+          "role": "code",
+          "excerpt": "BLOCKER_RULE_IDS = frozenset({"
+        }
+      ],
+      "related_adrs": [
+        "0031"
+      ]
+    }
+  ],
+  "measured_sources": [
+    {
+      "script": "scripts/doc/make_throughput_figures.py",
+      "provenance": "uv run --no-sync python3 scripts/doc/make_throughput_figures.py"
+    },
+    {
+      "script": "scripts/doc/make_ws5_figures.py",
+      "provenance": "uv run --no-sync python3 scripts/doc/make_ws5_figures.py"
+    }
+  ],
+  "measured": [
+    {
+      "id": "make_throughput_figures.WALL_MIN_COLD",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "WALL_MIN_COLD",
+      "value": 93.8,
+      "block": "MEASURED (cold job 2026-08-29_07_33_36-13355700596190055276)",
+      "comment": "--- MEASURED (cold job 2026-08-29_07_33_36-13355700596190055276) ------------ minutes since job create 14:33:36.9Z; JOB_STATE_DONE 16:07:26 (5,629.7 s). Phase edges come from job_phases.phase_markers (launcher_start, autoscale, workers_ready, cleanup) and worker milestones (pool_branch_emitted, batch_done first/last, fk_key_pool_capped, TriggerLoadJobs).",
+      "source": "scripts/doc/make_throughput_figures.py:59"
+    },
+    {
+      "id": "make_throughput_figures.PHASES_COLD",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "PHASES_COLD",
+      "value": [
+        [
+          "flex-template launcher",
+          0.0,
+          10.3,
+          "beam"
+        ],
+        [
+          "worker boot (image + driver)",
+          10.3,
+          15.9,
+          "beam"
+        ],
+        [
+          "C_TABLE pool branch (critical path)",
+          15.9,
+          23.8,
+          "gpu"
+        ],
+        [
+          "A_TABLE pool branch (parallel)",
+          15.9,
+          38.5,
+          "gpu"
+        ],
+        [
+          "C_TABLE generate 10M",
+          23.9,
+          47.3,
+          "cpu"
+        ],
+        [
+          "C_TABLE dedup + load",
+          47.3,
+          61.2,
+          "shuffle"
+        ],
+        [
+          "A_TABLE generate 10M",
+          61.3,
+          80.5,
+          "cpu"
+        ],
+        [
+          "A_TABLE dedup + load",
+          80.5,
+          92.6,
+          "shuffle"
+        ],
+        [
+          "cleanup",
+          92.6,
+          93.8,
+          "beam"
+        ]
+      ],
+      "block": "MEASURED (cold job 2026-08-29_07_33_36-13355700596190055276)",
+      "comment": "(label, start, end, class)",
+      "source": "scripts/doc/make_throughput_figures.py:60"
+    },
+    {
+      "id": "make_throughput_figures.GPU_BUSY_COLD",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "GPU_BUSY_COLD",
+      "value": [
+        [
+          16.0,
+          17.5
+        ],
+        [
+          18.6,
+          28.4
+        ]
+      ],
+      "block": "MEASURED (cold job 2026-08-29_07_33_36-13355700596190055276)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:71"
+    },
+    {
+      "id": "make_throughput_figures.GPU_BILLED_MIN_COLD",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "GPU_BILLED_MIN_COLD",
+      "value": 273.6666667,
+      "block": "MEASURED (cold job 2026-08-29_07_33_36-13355700596190055276)",
+      "comment": "TotalGpuTime 16,420 GPU-s",
+      "source": "scripts/doc/make_throughput_figures.py:73"
+    },
+    {
+      "id": "make_throughput_figures.AUTOSCALE_BOOT_COLD",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "AUTOSCALE_BOOT_COLD",
+      "value": 27.6,
+      "block": "MEASURED (cold job 2026-08-29_07_33_36-13355700596190055276)",
+      "comment": "3 harness boots 15:01:10-18 (2 → 4 workers)",
+      "source": "scripts/doc/make_throughput_figures.py:74"
+    },
+    {
+      "id": "make_throughput_figures.IDENTIFIER_FETCH_COLD",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "IDENTIFIER_FETCH_COLD",
+      "value": [
+        28.4,
+        33.9
+      ],
+      "block": "MEASURED (cold job 2026-08-29_07_33_36-13355700596190055276)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:75"
+    },
+    {
+      "id": "make_throughput_figures.WALL_MIN_WARM",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "WALL_MIN_WARM",
+      "value": 86.1,
+      "block": "MEASURED (warm job 2026-08-29_09_49_17-12681434869969021419)",
+      "comment": "--- MEASURED (warm job 2026-08-29_09_49_17-12681434869969021419) ------------ minutes since job create 16:49:17Z; JOB_STATE_DONE 18:15:23 (5,165.5 s).",
+      "source": "scripts/doc/make_throughput_figures.py:80"
+    },
+    {
+      "id": "make_throughput_figures.PHASES_WARM",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "PHASES_WARM",
+      "value": [
+        [
+          "launcher + worker boot",
+          0.0,
+          14.3,
+          "beam"
+        ],
+        [
+          "C_TABLE generate 10M",
+          14.3,
+          38.6,
+          "cpu"
+        ],
+        [
+          "C_TABLE dedup + load",
+          38.6,
+          52.8,
+          "shuffle"
+        ],
+        [
+          "A_TABLE generate 10M",
+          52.9,
+          72.7,
+          "cpu"
+        ],
+        [
+          "A_TABLE dedup + load",
+          72.7,
+          84.6,
+          "shuffle"
+        ],
+        [
+          "cleanup",
+          84.6,
+          86.1,
+          "beam"
+        ]
+      ],
+      "block": "MEASURED (warm job 2026-08-29_09_49_17-12681434869969021419)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:81"
+    },
+    {
+      "id": "make_throughput_figures.GPU_BILLED_MIN_WARM",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "GPU_BILLED_MIN_WARM",
+      "value": 271.8333333,
+      "block": "MEASURED (warm job 2026-08-29_09_49_17-12681434869969021419)",
+      "comment": "TotalGpuTime 16,310 GPU-s, zero vLLM spawns",
+      "source": "scripts/doc/make_throughput_figures.py:89"
+    },
+    {
+      "id": "make_throughput_figures.AUTOSCALE_BOOT_WARM",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "AUTOSCALE_BOOT_WARM",
+      "value": 19.0,
+      "block": "MEASURED (warm job 2026-08-29_09_49_17-12681434869969021419)",
+      "comment": "3 harness boots 17:08:15-18",
+      "source": "scripts/doc/make_throughput_figures.py:90"
+    },
+    {
+      "id": "make_throughput_figures.PRIOR_10M_WALL_MIN",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "PRIOR_10M_WALL_MIN",
+      "value": 92.9,
+      "block": "MEASURED (warm job 2026-08-29_09_49_17-12681434869969021419)",
+      "comment": "2026-08-26_05_01_16 R6 10M (docs/releases/v0.1.0)",
+      "source": "scripts/doc/make_throughput_figures.py:91"
+    },
+    {
+      "id": "make_throughput_figures.RAMP_C_COLD",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "RAMP_C_COLD",
+      "value": [
+        1667,
+        2250,
+        2833,
+        2833,
+        11500,
+        10583,
+        10417,
+        10917,
+        9583,
+        10500,
+        7917,
+        2333
+      ],
+      "block": "MEASURED (batch_done / batch_progress_compacted, 2-min buckets)",
+      "comment": "--- MEASURED (batch_done / batch_progress_compacted, 2-min buckets) -------- rows/s per 2-min bucket since each stage's first batch_done; 1,000 batches of 10k rows per table. `--dax_workflow_worker_num_threads_per_worker=8`.",
+      "source": "scripts/doc/make_throughput_figures.py:96"
+    },
+    {
+      "id": "make_throughput_figures.RAMP_C_WARM",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "RAMP_C_WARM",
+      "value": [
+        1500,
+        2417,
+        2833,
+        2000,
+        12167,
+        7833,
+        10500,
+        11417,
+        8750,
+        12333,
+        7417,
+        4167
+      ],
+      "block": "MEASURED (batch_done / batch_progress_compacted, 2-min buckets)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:98"
+    },
+    {
+      "id": "make_throughput_figures.RAMP_A_COLD",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "RAMP_A_COLD",
+      "value": [
+        1083,
+        12333,
+        13667,
+        10167,
+        12000,
+        16667,
+        7500,
+        8333,
+        1583
+      ],
+      "block": "MEASURED (batch_done / batch_progress_compacted, 2-min buckets)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:100"
+    },
+    {
+      "id": "make_throughput_figures.RAMP_A_WARM",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "RAMP_A_WARM",
+      "value": [
+        12667,
+        12750,
+        9750,
+        12000,
+        11583,
+        12083,
+        10250,
+        2250
+      ],
+      "block": "MEASURED (batch_done / batch_progress_compacted, 2-min buckets)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:101"
+    },
+    {
+      "id": "make_throughput_figures.SDK_REGISTER_C_COLD",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "SDK_REGISTER_C_COLD",
+      "value": [
+        6.1,
+        8.5,
+        9.0
+      ],
+      "block": "MEASURED (batch_done / batch_progress_compacted, 2-min buckets)",
+      "comment": "minutes after the stage's first batch_done at which the two autoscaled workers' SDK harnesses registered (\"Set shuffle service client total memory limit\"): cold 15:03:58 / 15:06:20 / 15:06:53 vs 14:57:53; warm 17:11:02 / 17:15:09 / 17:16:11 vs 17:04:40.",
+      "source": "scripts/doc/make_throughput_figures.py:106"
+    },
+    {
+      "id": "make_throughput_figures.SDK_REGISTER_C_WARM",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "SDK_REGISTER_C_WARM",
+      "value": [
+        6.4,
+        10.5,
+        11.5
+      ],
+      "block": "MEASURED (batch_done / batch_progress_compacted, 2-min buckets)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:107"
+    },
+    {
+      "id": "make_throughput_figures.AVG_CONCURRENCY",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "AVG_CONCURRENCY",
+      "value": {
+        "C cold": 19.0,
+        "A cold": 28.6,
+        "C warm": 20.4,
+        "A warm": 32.8
+      },
+      "block": "MEASURED (batch_done / batch_progress_compacted, 2-min buckets)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:108"
+    },
+    {
+      "id": "make_throughput_figures.BATCH_SECONDS_STEADY",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "BATCH_SECONDS_STEADY",
+      "value": [
+        26,
+        29
+      ],
+      "block": "MEASURED (batch_done / batch_progress_compacted, 2-min buckets)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:114"
+    },
+    {
+      "id": "make_throughput_figures.BATCH_SECONDS_FIRST",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "BATCH_SECONDS_FIRST",
+      "value": 4.0,
+      "block": "MEASURED (batch_done / batch_progress_compacted, 2-min buckets)",
+      "comment": "first batch_done on an uncontended worker",
+      "source": "scripts/doc/make_throughput_figures.py:116"
+    },
+    {
+      "id": "make_throughput_figures.ROWS_PER_S",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "ROWS_PER_S",
+      "value": {
+        "C cold": 7241,
+        "A cold": 10163,
+        "C warm": 7179,
+        "A warm": 11223
+      },
+      "block": "MEASURED (batch_done / batch_progress_compacted, 2-min buckets)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:117"
+    },
+    {
+      "id": "make_throughput_figures.WORKERS",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "WORKERS",
+      "value": 4,
+      "block": "MEASURED (batch_done / batch_progress_compacted, 2-min buckets)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:123"
+    },
+    {
+      "id": "make_throughput_figures.VCPUS_PER_WORKER",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "VCPUS_PER_WORKER",
+      "value": 8,
+      "block": "MEASURED (batch_done / batch_progress_compacted, 2-min buckets)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:123"
+    },
+    {
+      "id": "make_throughput_figures.THREADS_PER_WORKER",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "THREADS_PER_WORKER",
+      "value": 8,
+      "block": "MEASURED (batch_done / batch_progress_compacted, 2-min buckets)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:123"
+    },
+    {
+      "id": "make_throughput_figures.SETUP_C_COLD",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "SETUP_C_COLD",
+      "value": [
+        18.2,
+        59.9,
+        60.6,
+        61.9,
+        62.1,
+        62.5,
+        64.9,
+        65.5,
+        66.2,
+        68.2,
+        70.4,
+        71.1,
+        72.0,
+        72.0,
+        72.0,
+        74.7,
+        75.1,
+        75.3,
+        75.8,
+        76.0,
+        76.1,
+        76.6,
+        77.2,
+        77.7,
+        89.9,
+        93.4,
+        99.2,
+        110.2,
+        127.2,
+        167.7,
+        176.4,
+        444.4
+      ],
+      "block": "MEASURED (per-instance setup seconds, 32 GenerateRecordsDoFn/table)",
+      "comment": "--- MEASURED (per-instance setup seconds, 32 GenerateRecordsDoFn/table) ---",
+      "source": "scripts/doc/make_throughput_figures.py:126"
+    },
+    {
+      "id": "make_throughput_figures.SETUP_C_WARM",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "SETUP_C_WARM",
+      "value": [
+        50.6,
+        61.5,
+        61.6,
+        61.7,
+        64.3,
+        64.7,
+        67.0,
+        67.2,
+        75.6,
+        75.7,
+        75.8,
+        76.0,
+        76.2,
+        76.2,
+        76.6,
+        76.7,
+        76.8,
+        77.1,
+        77.5,
+        77.5,
+        77.6,
+        77.7,
+        78.3,
+        78.8,
+        80.8,
+        82.1,
+        92.6,
+        101.6,
+        130.6,
+        190.8,
+        203.3,
+        213.3
+      ],
+      "block": "MEASURED (per-instance setup seconds, 32 GenerateRecordsDoFn/table)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:130"
+    },
+    {
+      "id": "make_throughput_figures.POOLS_A_COLD",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "POOLS_A_COLD",
+      "value": [
+        37.9,
+        40.6,
+        40.7,
+        41.2,
+        41.4,
+        42.8,
+        43.0,
+        43.7,
+        44.1,
+        44.6,
+        46.3,
+        46.4,
+        46.4,
+        47.1,
+        47.4,
+        48.7,
+        49.0,
+        49.4,
+        49.6,
+        51.4,
+        51.7,
+        52.1,
+        55.2,
+        56.6,
+        57.4,
+        59.1,
+        86.2,
+        91.0,
+        101.4,
+        102.0,
+        169.1,
+        180.9
+      ],
+      "block": "MEASURED (per-instance setup seconds, 32 GenerateRecordsDoFn/table)",
+      "comment": "A_TABLE builds its engine in the first bundle (fk_side): b1_pools_built per instance (32) — the pool-branch instance (671 s cold) excluded.",
+      "source": "scripts/doc/make_throughput_figures.py:136"
+    },
+    {
+      "id": "make_throughput_figures.POOLS_A_WARM",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "POOLS_A_WARM",
+      "value": [
+        37.6,
+        38.4,
+        39.4,
+        40.7,
+        40.9,
+        41.4,
+        42.2,
+        42.7,
+        43.4,
+        44.2,
+        44.6,
+        45.1,
+        45.5,
+        47.4,
+        47.6,
+        47.6,
+        48.2,
+        48.3,
+        48.9,
+        49.2,
+        49.6,
+        50.0,
+        50.5,
+        52.2,
+        52.6,
+        53.2,
+        53.3,
+        53.7,
+        57.4,
+        58.2,
+        59.0,
+        60.2
+      ],
+      "block": "MEASURED (per-instance setup seconds, 32 GenerateRecordsDoFn/table)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:140"
+    },
+    {
+      "id": "make_throughput_figures.ACCEPT_RUNS",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "ACCEPT_RUNS",
+      "value": [
+        "R6 cold\n08-29",
+        "R7 single\n09-07",
+        "R7 multi\n09-07",
+        "R7 multi warm\n09-07 (pools rebuilt)",
+        "R7 multi cold\n09-08 (CPU embeds)"
+      ],
+      "block": "MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613)",
+      "comment": "--- MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613) ------- Worker logs only (no report annexes): phase edges from milestones, wall time from job create (job-id timestamp, PDT → UTC) to the console autoscaling chart's \"worker pool stopped\" (±0.5 min). initial_workers was left EMPTY on both — the fleet started on 1 worker. single: 2026-09-07_05_04_25-2281175974286848139 (sdk_containers=single) multi:  2026-09-07_07_33_01-10181729754686044047 (sdk_containers=multi) 2026-09-07_15_53_03-5022269583842232852: \"warm\" multi re-trigger whose pools the taint preflight rebuilt (the 09-07 pair had built them without source filters) — RAG warm, vLLM spawned once, 183 s ignition, no unfittable wait. 2026-09-08_01_28_40-16766915117990408687: cold multi, population embeds on CPU (D8 rev. 1) — 15-min stage, 177 s model pull, 598 s ignition; the autoscaler dipped to 1 worker between the parent and child stages. Both: `initial_workers` empty; both images carry the D4 fix (`identifier_source_filter size=944582`, no `_error`).",
+      "source": "scripts/doc/make_throughput_figures.py:160"
+    },
+    {
+      "id": "make_throughput_figures.ACCEPT_WALL_MIN",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "ACCEPT_WALL_MIN",
+      "value": [
+        93.8,
+        76.5,
+        50.5,
+        52.5,
+        56.9
+      ],
+      "block": "MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:163"
+    },
+    {
+      "id": "make_throughput_figures.ACCEPT_PHASES_MIN",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "ACCEPT_PHASES_MIN",
+      "value": {
+        "startup (launcher + boot)": [
+          15.9,
+          13.0,
+          12.4,
+          11.6,
+          15.5
+        ],
+        "cold pool branch": [
+          7.9,
+          10.1,
+          12.9,
+          9.7,
+          14.2
+        ],
+        "generation C + A": [
+          42.7,
+          36.4,
+          17.1,
+          21.1,
+          17.0
+        ],
+        "dedup + load C + A": [
+          26.2,
+          14.3,
+          6.4,
+          7.5,
+          8.2
+        ]
+      },
+      "block": "MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613)",
+      "comment": "per run: startup, cold pool branch (critical path), generation (both tables), dedup + load (both tables)",
+      "source": "scripts/doc/make_throughput_figures.py:166"
+    },
+    {
+      "id": "make_throughput_figures.ACCEPT_GEN_ROWS_PER_S",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "ACCEPT_GEN_ROWS_PER_S",
+      "value": {
+        "C_TABLE": [
+          7241,
+          7758,
+          16026,
+          13680,
+          null
+        ],
+        "A_TABLE": [
+          10163,
+          11173,
+          25063,
+          18727,
+          null
+        ]
+      },
+      "block": "MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613)",
+      "comment": "C_TABLE / A_TABLE stage averages",
+      "source": "scripts/doc/make_throughput_figures.py:172"
+    },
+    {
+      "id": "make_throughput_figures.ACCEPT_BATCH_SECONDS",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "ACCEPT_BATCH_SECONDS",
+      "value": [
+        27.5,
+        27.5,
+        6.1,
+        6.6,
+        null
+      ],
+      "block": "MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:176"
+    },
+    {
+      "id": "make_throughput_figures.ACCEPT_WORKERS_AT_4_MIN",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "ACCEPT_WORKERS_AT_4_MIN",
+      "value": [
+        "2 → 4 @ +27 min",
+        "1 → 4 @ +26 min",
+        "1 → 2 @ +29, 4 @ +37 min",
+        "1 → 4 @ +32, dip to 2 @ +37",
+        "1 → 4 @ +20, dip to 1 @ +40"
+      ],
+      "block": "MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:178"
+    },
+    {
+      "id": "make_throughput_figures.VLLM_READY_S",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "VLLM_READY_S",
+      "value": {
+        "single": 190.4,
+        "multi": 344.0,
+        "multi warm": 183.0,
+        "multi cold cpu": 598.7
+      },
+      "block": "MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:185"
+    },
+    {
+      "id": "make_throughput_figures.MODEL_PULL_S",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "MODEL_PULL_S",
+      "value": {
+        "multi warm": 52.5,
+        "multi cold cpu": 177.6
+      },
+      "block": "MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:191"
+    },
+    {
+      "id": "make_throughput_figures.POPULATION_STAGE_MIN",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "POPULATION_STAGE_MIN",
+      "value": {
+        "multi": 2.9,
+        "multi cold cpu": 15.4
+      },
+      "block": "MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:192"
+    },
+    {
+      "id": "make_throughput_figures.MULTI_PEAK_ROWS_PER_S",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "MULTI_PEAK_ROWS_PER_S",
+      "value": 31417,
+      "block": "MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613)",
+      "comment": "C_TABLE bucket 8-10 min, 4 workers up",
+      "source": "scripts/doc/make_throughput_figures.py:196"
+    },
+    {
+      "id": "make_throughput_figures.MULTI_VLLM_READY_S",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "MULTI_VLLM_READY_S",
+      "value": 344.0,
+      "block": "MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613)",
+      "comment": "8 vs 1 unfittable waits",
+      "source": "scripts/doc/make_throughput_figures.py:197"
+    },
+    {
+      "id": "make_throughput_figures.SINGLE_VLLM_READY_S",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "SINGLE_VLLM_READY_S",
+      "value": 190.4,
+      "block": "MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613)",
+      "comment": "8 vs 1 unfittable waits",
+      "source": "scripts/doc/make_throughput_figures.py:197"
+    },
+    {
+      "id": "make_throughput_figures.FETCH_FAILURES",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "FETCH_FAILURES",
+      "value": [
+        107,
+        459
+      ],
+      "block": "MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:198"
+    },
+    {
+      "id": "make_throughput_figures.ENGINE_BUILDS_PER_TABLE_SINGLE",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "ENGINE_BUILDS_PER_TABLE_SINGLE",
+      "value": 4,
+      "block": "MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613)",
+      "comment": "engine_shared holders=2..8 on each worker (32 → 4)",
+      "source": "scripts/doc/make_throughput_figures.py:201"
+    },
+    {
+      "id": "make_throughput_figures.SETUP_P50_SINGLE_S",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "SETUP_P50_SINGLE_S",
+      "value": 25.9,
+      "block": "MEASURED (2026-09-07 acceptance pair, image oss-pk-ready-00fc613)",
+      "comment": "dofn_setup_done C_TABLE (was 74.9)",
+      "source": "scripts/doc/make_throughput_figures.py:202"
+    },
+    {
+      "id": "make_throughput_figures.SHUFFLE_GB_COLD",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "SHUFFLE_GB_COLD",
+      "value": 123.26,
+      "block": "MEASURED (shuffle)",
+      "comment": "TotalShuffleDataProcessed, both tables, all barriers",
+      "source": "scripts/doc/make_throughput_figures.py:205"
+    },
+    {
+      "id": "make_throughput_figures.ROWS_PER_TABLE",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "ROWS_PER_TABLE",
+      "value": 10000000,
+      "block": "MEASURED (shuffle)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:206"
+    },
+    {
+      "id": "make_throughput_figures.TABLES",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "TABLES",
+      "value": 2,
+      "block": "MEASURED (shuffle)",
+      "comment": "",
+      "source": "scripts/doc/make_throughput_figures.py:206"
+    },
+    {
+      "id": "make_throughput_figures.CHAINED_ROW_PASSES",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "CHAINED_ROW_PASSES",
+      "value": 6,
+      "block": "MEASURED (shuffle)",
+      "comment": "3 barriers x (write + read)",
+      "source": "scripts/doc/make_throughput_figures.py:207"
+    },
+    {
+      "id": "make_throughput_figures.INTERPRETERS_MEASURED",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "INTERPRETERS_MEASURED",
+      "value": 1,
+      "block": "MEASURED (named)",
+      "comment": "GIL ceiling: interpreters per worker → fleet rows/s, linear until the shuffle write / BigQuery load bind (unknown; hatched beyond the measured point).",
+      "source": "scripts/doc/make_throughput_figures.py:214"
+    },
+    {
+      "id": "make_throughput_figures.FLEET_ROWS_PER_S_MEASURED",
+      "script": "scripts/doc/make_throughput_figures.py",
+      "name": "FLEET_ROWS_PER_S_MEASURED",
+      "value": 10500,
+      "block": "MEASURED (named)",
+      "comment": "C_TABLE steady state (buckets 8-20 min)",
+      "source": "scripts/doc/make_throughput_figures.py:215"
+    },
+    {
+      "id": "make_ws5_figures.POOL_BUILD_LLM",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "POOL_BUILD_LLM",
+      "value": 68805.0,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "freetext_pool_built, n=108 (LLM service time)",
+      "source": "scripts/doc/make_ws5_figures.py:56"
+    },
+    {
+      "id": "make_ws5_figures.POOL_BUILD_WALL",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "POOL_BUILD_WALL",
+      "value": 26946.0,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "b1_pools_built,      n=43  (per-setup wall)",
+      "source": "scripts/doc/make_ws5_figures.py:57"
+    },
+    {
+      "id": "make_ws5_figures.SETUP_TOTAL",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "SETUP_TOTAL",
+      "value": 28982.0,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "dofn_setup_done,     n=43",
+      "source": "scripts/doc/make_ws5_figures.py:58"
+    },
+    {
+      "id": "make_ws5_figures.VLLM_SPAWN",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "VLLM_SPAWN",
+      "value": 1403.0,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "vllm_ready,          n=6",
+      "source": "scripts/doc/make_ws5_figures.py:59"
+    },
+    {
+      "id": "make_ws5_figures.MODEL_PULL",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "MODEL_PULL",
+      "value": 326.0,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "model_pull_done,     n=6",
+      "source": "scripts/doc/make_ws5_figures.py:60"
+    },
+    {
+      "id": "make_ws5_figures.CHUNK_REUSE",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "CHUNK_REUSE",
+      "value": 333.0,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "b1_chunks_reused,    n=43",
+      "source": "scripts/doc/make_ws5_figures.py:61"
+    },
+    {
+      "id": "make_ws5_figures.INDEX_BUILD",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "INDEX_BUILD",
+      "value": 2.0,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "b1_index_built,      n=43",
+      "source": "scripts/doc/make_ws5_figures.py:62"
+    },
+    {
+      "id": "make_ws5_figures.JOB_WALL",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "JOB_WALL",
+      "value": 4050.0,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "14:04:52 -> 15:12:22",
+      "source": "scripts/doc/make_ws5_figures.py:63"
+    },
+    {
+      "id": "make_ws5_figures.POOLS_REBUILT",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "POOLS_REBUILT",
+      "value": 108,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "",
+      "source": "scripts/doc/make_ws5_figures.py:65"
+    },
+    {
+      "id": "make_ws5_figures.POOLS_CACHED",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "POOLS_CACHED",
+      "value": 21,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "",
+      "source": "scripts/doc/make_ws5_figures.py:65"
+    },
+    {
+      "id": "make_ws5_figures.PER_COLUMN",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "PER_COLUMN",
+      "value": {
+        "COL_047": 26107.0,
+        "COL_052": 24478.0,
+        "COL_053": 18220.0
+      },
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "freetext_pool_built totals",
+      "source": "scripts/doc/make_ws5_figures.py:66"
+    },
+    {
+      "id": "make_ws5_figures.WAVES",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "WAVES",
+      "value": [
+        [
+          3.2,
+          1
+        ],
+        [
+          10.5,
+          8
+        ],
+        [
+          17.0,
+          24
+        ],
+        [
+          37.0,
+          8
+        ],
+        [
+          55.1,
+          3
+        ]
+      ],
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "",
+      "source": "scripts/doc/make_ws5_figures.py:71"
+    },
+    {
+      "id": "make_ws5_figures.LAST_POOL_MIN",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "LAST_POOL_MIN",
+      "value": 64.2,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "",
+      "source": "scripts/doc/make_ws5_figures.py:72"
+    },
+    {
+      "id": "make_ws5_figures.N_ROWS",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "N_ROWS",
+      "value": 1000000,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "Generate-stage re-materialization (SECTION 4), from the 67-column source: 42 INT64 + 3 TIMESTAMP + 1 DATE + 21 STRING, ~10k observed values each. _numeric_numpy     rebuilds a listcomp+predicate per call  (~150 ns/item) _temporal_numpy    memoizes the LIST but re-runs np.asarray (~20 ns/item) _categorical_numpy rebuilds probs, but `categories` is CAPPED at 50 in profile.py (_FREE_TEXT_MAX_CATEGORIES), so it is bounded and deliberately left alone.",
+      "source": "scripts/doc/make_ws5_figures.py:81"
+    },
+    {
+      "id": "make_ws5_figures.N_OBSERVED",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "N_OBSERVED",
+      "value": 10000,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "",
+      "source": "scripts/doc/make_ws5_figures.py:82"
+    },
+    {
+      "id": "make_ws5_figures.N_NUMERIC_COLS",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "N_NUMERIC_COLS",
+      "value": 42,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "",
+      "source": "scripts/doc/make_ws5_figures.py:83"
+    },
+    {
+      "id": "make_ws5_figures.NS_PER_ITEM",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "NS_PER_ITEM",
+      "value": 1.5e-07,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "",
+      "source": "scripts/doc/make_ws5_figures.py:83"
+    },
+    {
+      "id": "make_ws5_figures.N_TEMPORAL_COLS",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "N_TEMPORAL_COLS",
+      "value": 4,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "",
+      "source": "scripts/doc/make_ws5_figures.py:84"
+    },
+    {
+      "id": "make_ws5_figures.NS_PER_ASARRAY",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "NS_PER_ASARRAY",
+      "value": 2e-08,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "",
+      "source": "scripts/doc/make_ws5_figures.py:84"
+    },
+    {
+      "id": "make_ws5_figures.N_CAT_COLS",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "N_CAT_COLS",
+      "value": 20,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "",
+      "source": "scripts/doc/make_ws5_figures.py:85"
+    },
+    {
+      "id": "make_ws5_figures.N_CATEGORIES",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "N_CATEGORIES",
+      "value": 50,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "",
+      "source": "scripts/doc/make_ws5_figures.py:85"
+    },
+    {
+      "id": "make_ws5_figures.N_SETUPS",
+      "script": "scripts/doc/make_ws5_figures.py",
+      "name": "N_SETUPS",
+      "value": 43,
+      "block": "MEASURED (1M-row run 2026-07-26_06_54_25, worker_logs.jsonl)",
+      "comment": "",
+      "source": "scripts/doc/make_ws5_figures.py:86"
+    }
+  ],
+  "exported_from": {
+    "commit": "ce9528eba70ebaf83ed1e4b863b8349271de59da",
+    "dirty": []
+  }
+}

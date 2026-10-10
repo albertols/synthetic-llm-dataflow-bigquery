@@ -1,6 +1,6 @@
 # ADR 0001 — No managed GCP services in the serving path
 
-- **Status**: accepted (2026-05-18) — **amended by [ADR 0014](0014-vllm-model-client-owns-server.md)** (2026-05-21): the serving path is still entirely inside Beam DoFns, through a `ModelClient` that owns the vLLM server, not `RunInference` with a custom `ModelHandler` as the Decision below first put it.
+- **Status**: accepted (2026-05-18) — **amended by [ADR 0014](0014-vllm-model-client-owns-server.md)** (2026-05-21): the serving path is still entirely inside Beam DoFns, through a `ModelClient` that owns the vLLM server, not `RunInference` with a custom `ModelHandler` as the Decision below first put it. **Amended by [ADR 0042](0042-self-hosted-platform-gui.md)** (2026-09-27): visualization of project tables by a self-hosted app is allowed per ADR 0042; Looker, Looker Studio and other managed dashboard services stay forbidden.
 - **Decider**: project owner
 
 ## Context
@@ -17,7 +17,7 @@ The LLM serving path runs **entirely inside Apache Beam DoFns** via `apache_beam
 
 - **Enables**: portability across GCP projects that lack managed AI / DQ services. Full ownership of the model serving stack — we control quantization, batch sizing, structured-output enforcement.
 - **Costs**: we must build and maintain the GPU container ([ADR 0015](0015-worker-image-via-artifact-registry.md)), pull weights ourselves (see `docs/MODEL_LAYOUT.md`), and design our own validation reporting schema (`synthetic_data_quality.*` tables).
-- **Forbids**: future design proposals that route LLM calls through Vertex, push DQ checks to Dataplex, or visualize in Looker Studio. If those become genuinely required, this ADR must be superseded explicitly.
+- **Forbids**: future design proposals that route LLM calls through Vertex, push DQ checks to Dataplex, or visualize in Looker Studio. If those become genuinely required, this ADR must be superseded explicitly. *(Narrowed by [ADR 0042](0042-self-hosted-platform-gui.md), 2026-09-27: visualization of project tables by a self-hosted app is allowed; visualizing in Looker Studio or any other managed dashboard service is still forbidden.)*
 
 ## Related
 

@@ -30,9 +30,23 @@ moved since `synced_at_commit`; re-verify before re-publishing) · `Stub`
 | 5 | b2_library deep dive | Wrapping `sdgx` (CTGAN + empirical fallback), fit-once-per-worker, LLM freetext patching, parity seams with b1 (source-value store, inverse-CDF) | ADR 0013/0022/0025, B.2 engine code | `marginal-wave3-*` figures | Stub |
 | 6 | Relational generation by construction | The flagship: relationships as config, launch scenarios, single-job parents-first propagation, joint FK tuples + IPF, orphan BLOCKER, pool-ladder integrity — 0/10M orphans measured | ADR 0028–0033, designs 2026-08-22/23/24/29, `config/relationships/README.md` | `fk-orphan-rate.png`, `fk-feasible-set.png`, `fk-marginal-fit.png`, `relationships-*.png`, `r6-scale-*.png` | Stub |
 | 7 | Integration testing with GH agents | The report-generation prompts as agents; metrics contracts (`gcp`/`offline`/`stats_diff`/`crosscheck`), `_full_report.md`, bundle redaction (`real/` vs `oss/`), evidence promotion to releases | `.github/prompts/*`, `RUN_PLAYBOOK.md` §5/§8, `E2E_TEST_MATRIX.md`, release tooling | `wave4-verified.png` + report screenshots (to make) | Stub |
-| 8 | Stats, stress & scale | The fidelity math (entropy, deciles, inverse CDF, DKW, HLL++, null patterns), 1M/10M performance anatomy, pool persistence economics (19.1 GPU-hours), warm vs cold | ADR 0022, design 2026-08-05 source-table-stats, release reports | `stats-*.png`, `sampling-error-dkw.png`, `ws5-cost-anatomy.png`, `r6-scale-where-time-went.png` | Stub |
+| 8 | Stats, stress & scale | The fidelity math (entropy, deciles, inverse CDF, DKW, HLL++, null patterns), 1M/10M performance anatomy, pool persistence economics (19.1 GPU-hours), warm vs cold; groundwork in the GUI's CONFIG tab ([below](#part-8-groundwork--the-config-tab)) | ADR 0022/0042, design 2026-08-05 source-table-stats, release reports, `gui/` CONFIG tab | `stats-*.png`, `sampling-error-dkw.png`, `ws5-cost-anatomy.png`, `r6-scale-where-time-went.png`; CONFIG tab screenshots (`gui/docs/assets/config-*.png`) | Stub |
 | 9 | CI/CD & infra | Flex templates, single-image strategy, Artifact Registry runtime pulls (and why a third-party registry cannot serve workers), uv workspace builds, dtype map (bf16/fp16 × T4/L4), G-machine matrix, driver pins, release Action | ADR 0008/0009/0015/0016, `public_cloud/deploy/gcp/`, `docker/Dockerfile` | new CI/CD drawio | Stub |
-| 10 | Evaluation framework | Tier-1/2/3 metrics, DCR/NNDR, SDMetrics scoring, DirectRunner harness — **deferred until `ws3-eval-framework` merges** | design 2026-07-07 evaluation framework, branch code | `eval-ks-vs-wasserstein.png`, `eval-dcr-nndr.png` | Stub (deferred) |
+| 10 | Evaluation framework | The standalone evaluator (ADR 0041): baselines and noise floors instead of p-values, matched n, memorization lifts against a holdout, DCR/NNDR, the registry and the four tables, the DirectRunner/Prism side-input finding. **Unblocked** — the design and the code are built; write it from the design document (and from the first GCP run's numbers once it exists, so no measurement is invented). Cross-reference article 8 (the source-side fidelity math: entropy, deciles, DKW) for the statistics the evaluator mirrors | [design 2026-07-07 evaluation framework](../designs/2026-07-07-evaluation-framework-design.md), [ADR 0041](../adr/0041-evaluation-standalone-package.md), `packages/sdfb-evaluation/` | `eval-ks-vs-wasserstein.png`, `eval-dcr-nndr.png`, `eval-noise-floor.png`, `eval-baseline.png`, `eval-memorization-lift.png` | Stub (unblocked) |
+
+### Part 8 groundwork — the CONFIG tab
+
+The [Synthetic Platform](../../gui/README.md) GUI's CONFIG tab already does,
+interactively, what Part 8 will explain in prose. The **Pipeline amp** shows
+every knob with its value imported from the code and a link to its line. The
+**scenario calculator** turns source rows, target rows and the reference
+sample size into the DKW band, rows per pool value and a wall-time estimate
+scaled from a measured run, next to the entropy, decile and inverse-CDF maths.
+The **source-stats explorer** shows what the profiler measured per column and
+compares the sample and exact tiers. Its figures and "Docs differ" notes are
+the draft's starting material; screenshots and their provenance are in
+[`gui/docs/assets/`](../../gui/docs/assets/README.md). Medium cannot embed
+the live app, so the article carries PNG figures like the rest of the series.
 
 ## Workflow
 

@@ -1,5 +1,6 @@
 # Doc-drift patterns — strings that MUST NOT appear in any tracked file
-# outside `docs/adr/` (where they are allowed for historical context).
+# outside `docs/adr/` and `docs/releases/` (where they are allowed for
+# historical context: decisions and release reports are records).
 #
 # Add an entry whenever you delete or rename a file, symbol, or image tag
 # that the rest of the repo might still reference. CI enforces this on
@@ -53,3 +54,17 @@ scripts/freetext_crosscheck.py
 # workers" caused the sdk-0-0 CrashLoopBackOff — it must not reappear in live
 # files (the ADR 0009 correction note, in docs/adr/, is excluded from the scan).
 irrelevant for workers
+
+# 2026-10-05 — the in-job evaluation proposal (one `validation_data_history`
+# table) was superseded by the standalone evaluator's `evaluation_data_history`
+# (ADR 0041 and release reports may name the old table; docs/adr/ and
+# docs/releases/ are excluded from the scan).
+validation_data_history
+
+# 2026-10-06 — one image, one template (ADR 0041's amendment). The standalone
+# evaluation DAG launches from the generation template and reads the marker
+# the import workflow already substitutes ({{PROJECT_VERSION}}); the marker
+# that named an evaluator template of its own is gone. Nothing substitutes it,
+# so a file that still carries it would launch a template named after the
+# literal marker.
+{{EVALUATOR_VERSION}}

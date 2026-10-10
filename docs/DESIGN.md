@@ -54,6 +54,9 @@ flowchart LR
   is built in CI, never on a laptop ([ADR 0008](adr/0008-ci-driven-builds.md)), and pulled from Artifact
   Registry ([ADR 0015](adr/0015-worker-image-via-artifact-registry.md)). Launcher and workers therefore share one Python version,
   pinned once in `.python-version`.
+- **One image and one template serve two jobs** ([ADR 0041](adr/0041-evaluation-standalone-package.md), amendment of 2026-10-06). The
+  template's entry is a dispatcher, `docker/flex_entry.py`: without the parameter `sdfb_job` a launch is a generation launch, as
+  before; `sdfb_job=evaluation` runs the evaluator (§11) when the image was built from a tree that has it.
 - All sinks use BigQuery `FILE_LOADS`: the job is batch-shaped.
 
 Code: [`sdfb_beam/pipeline.py::build_pipeline`](../packages/sdfb-beam/src/sdfb_beam/pipeline.py).
@@ -503,6 +506,8 @@ record; the section is where this document summarizes it.
 | 0038 | [§4 Relational generation](#4-relational-generation) | [Measured conflicts adjust the model](adr/0038-measured-conflicts-adjust-the-model.md) |
 | 0039 | [§4 Relational generation](#4-relational-generation) | [Row projection before the graph (proposed)](adr/0039-row-projection-before-the-graph.md) |
 | 0040 | [§9 ADR reference map](#9-adr-reference-map) | [Publishing this design to the Dataflow Solution Guides](adr/0040-dsg-donation-golden-source-sync.md) |
+| 0041 | [§11 Evaluation (sdfb-evaluation)](#11-evaluation-sdfb-evaluation) | [Evaluation is a standalone package and a separate job](adr/0041-evaluation-standalone-package.md) |
+| 0042 | [§12 Platform GUI](#12-platform-gui) | [A self-hosted GUI; managed dashboards stay out](adr/0042-self-hosted-platform-gui.md) |
 <!-- adr-map:end -->
 
 ## 10. Figure provenance
@@ -523,3 +528,167 @@ measured number of its own. Regenerate with
 | `designs/assets/throughput-where-time-went.png` | `scripts/doc/make_throughput_figures.py` | evidence (`MEASURED` block) |
 | `designs/assets/relationships-scenarios.png` | `scripts/doc/make_relationships_figures.py` | concept |
 | `designs/assets/relationships-flags.png` | `scripts/doc/make_relationships_figures.py` | concept, one panel per mode |
+| `designs/assets/eval-levels.png`, `designs/assets/eval-noise-floor.png` | `scripts/doc/make_eval_figures.py` | concept |
+
+## 11. Evaluation (sdfb-evaluation)
+
+**Claim: evaluation is a separate CPU job, after generation, that scores each
+unit of the synthetic data against the full source and says whether the
+distance is more than sampling noise; it never gates or fails the generation
+run.** *Status: built and reviewed on a laptop with invented data; nothing has
+run on Google Cloud yet.*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  GEN["🔀 generation job<br/>unchanged"]:::beam --> LAND[("🗄️ landing tables")]:::store
+  SRC[("🗄️ source tables")]:::store --> EVAL
+  LAND --> EVAL["🔀 evaluation job<br/>CPU only"]:::beam
+  EVAL --> REG[("🗄️ evaluation_data_history<br/>RUNNING, then one final row")]:::store
+  EVAL --> MET[("🗄️ metrics, profiles,<br/>row flags")]:::store
+  REG --> CLI["⚙️ sdfb-eval report<br/>and compare"]:::cpu
+  MET --> CLI
+  MET --> SQL["⚪ plain SQL<br/>and a separate GUI"]:::data
+```
+
+![Seven levels, each a unit of the data](designs/assets/eval-levels.png)
+
+*Concept figure, no data.* A metric id is `<level>.<name>`, from a single cell
+up to the whole launch, in one of four families: fidelity, privacy, integrity,
+diversity.
+
+![The same KS value is noise at 1,000 rows and an effect at a million](designs/assets/eval-noise-floor.png)
+
+*Concept figure, a seeded simulation, not a measurement of a run.* A metric
+fails only when its value crosses its threshold and exceeds its own noise
+floor; lifts and the holdout share gate on a confidence bound; no p-value is
+reported ([ADR 0041](adr/0041-evaluation-standalone-package.md) D5).
+
+| Decision | In one line |
+| :-- | :-- |
+| D1 | A standalone nested uv project, excluded from the root workspace |
+| D2 | Parity with the generator by two-sided golden files, never by import |
+| D3 | The reference sets R, E, H and H_E are prefixes of the generator's own row-fingerprint order |
+| D4 | Fidelity against the full source, pinned by time travel; every row stores `baseline_value = metric(R, source)` |
+| D5 | Status by effect size against a noise floor, at matched n |
+| D6 | Literal values only for at most 50 distinct source values seen at least 10 times; otherwise keyed hashes |
+| D7 | The registry is append-only events; the final row is written after the metric loads |
+
+**On Dataflow it has no image or template of its own.** The generator's image
+carries the evaluator's source, which runs on the generator's environment, and
+the generator's template launches it. Neither package imports the other; the
+dispatcher is the only file that names both.
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  T[("📄 one template<br/>one image")]:::store --> E{"⚙️ flex_entry.py<br/>reads sdfb_job"}:::cpu
+  E -- "absent" --> G["🔀 generation job<br/>GPU workers"]:::beam
+  E -- "evaluation" --> V["🔀 evaluation job<br/>CPU workers"]:::beam
+  G -. "launched table and job id,<br/>when the DAG is opted in" .-> V
+```
+
+*Not built, not launched.* The Composer DAG of the generator, where a
+deployment has one, chains the two when its `run_evaluation` parameter is true
+(the evaluation is given the launched table and the relationship model, and the
+job only as the launch's identity: it reads the Dataflow job for its window, one query on the generator's
+`validation_runs` for the digest that verifies the reference sample, and no job log);
+the standalone DAG evaluates an already-landed run on its own by the same seed path; both launches take a launcher machine type (the launch has 12 minutes in all, the image pull included);
+it and the evaluator package stay in the source repository.
+
+Four tables in `synthetic_data_quality` (`evaluation_data_history`,
+`evaluation_metrics`, `evaluation_profiles`, `evaluation_row_flags`) and two
+views (`evaluation_latest`, `evaluation_latest_per_job`). One file,
+`catalogue/metrics.yaml`, defines every metric; the scorer, the report and the
+design document's tables all read it. The package never imports `sdfb_core`
+or `sdfb_beam`. A local run executes on Beam's in-process runner
+(`--runner DirectRunner`), never on Prism.
+
+Full design, every figure and the primary sources:
+[`designs/2026-07-07-evaluation-framework-design.md`](designs/2026-07-07-evaluation-framework-design.md).
+How to run it: [`packages/sdfb-evaluation/README.md`](../packages/sdfb-evaluation/README.md)
+and [`RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md) "Evaluate a run".
+
+Code: [`packages/sdfb-evaluation/src/sdfb_evaluation/`](../packages/sdfb-evaluation/src/sdfb_evaluation/) (`catalogue/`, `context/`, `beam/`, `scoring/`, `cli/`, `schemas/`).
+
+## 12. Platform GUI
+
+**Claim: a self-hosted app reads this project's BigQuery tables through named,
+read-only, bytes-capped queries; it writes nothing, and the pipeline does not
+depend on it.**
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+
+  JOB["🔀 Dataflow job<br/>generate + validate"]:::beam
+  BQ[("🗄️ project tables<br/>quality, evaluation,<br/>source stats")]:::store
+  WEB["⚙️ browser app<br/>holds no credentials"]:::cpu
+  BFF["⚙️ local BFF<br/>named queries only"]:::cpu
+  CAP["🛡️ dry run<br/>+ bytes cap"]:::cpu
+  MOCK[("📄 seeded mock<br/>fixtures")]:::store
+
+  JOB -->|"FILE_LOADS"| BQ
+  WEB -->|"query name<br/>+ parameters"| BFF
+  BFF -->|"DATA_SOURCE=bigquery"| CAP
+  CAP -->|"read-only SELECT"| BQ
+  BFF -->|"DATA_SOURCE=mock"| MOCK
+```
+
+*Nothing points back from the GUI to the job: the pipeline writes its tables
+as before, and the GUI only reads them.*
+
+- **The browser never sends SQL.** It names a query and passes its
+  parameters. The backend-for-frontend (BFF) holds the SQL, binds the
+  parameters, dry-runs the query and caps the bytes billed (10 GiB by default).
+  The UI shows the estimate. Fetched rows are cached in memory and never
+  written anywhere.
+- **Two data sources, one contract.** `DATA_SOURCE=bigquery` reads the
+  tables. `DATA_SOURCE=mock` serves seeded fixtures that parse against the
+  same types, so the app runs with no GCP access. The types are generated from
+  the Python-side schemas and the metric catalogue, and CI fails when they
+  drift.
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+
+  subgraph local["💻 default: local"]
+    DEV["⚙️ BFF on<br/>127.0.0.1"]:::cpu
+  end
+  subgraph cloud["☁️ optional: Cloud Run"]
+    IAP["🛡️ IAP<br/>who may open it"]:::cpu
+    SVC["⚙️ same container<br/>read-only account"]:::cpu
+    IAP --> SVC
+  end
+  BQ[("🗄️ project tables")]:::store
+
+  DEV -->|"your ADC<br/>named SELECTs"| BQ
+  SVC -->|"Data Viewer<br/>+ Job User"| BQ
+```
+
+*One panel per deployment mode. Locally, the BFF listens on `127.0.0.1` and
+queries with the Application Default Credentials of whoever runs it; those may
+carry more than read access, so read-only rests on the BFF running named
+`SELECT`s only. On Cloud Run, Identity-Aware Proxy decides who may open the
+app, and the container queries as a service account that holds only BigQuery
+Data Viewer and Job User, so IAM enforces read-only as well.*
+
+The GUI stays in the source repository. The pipeline does not depend on it,
+and it is not part of the Dataflow Solution Guides copy
+([ADR 0040](adr/0040-dsg-donation-golden-source-sync.md)). Managed dashboard
+services (Looker, Looker Studio, Dataplex) stay out
+([ADR 0001](adr/0001-no-managed-gcp-services.md)); the rule that allows this
+GUI and keeps them out is [ADR 0042](adr/0042-self-hosted-platform-gui.md).
+Code: [`gui/apps/web/src/router.tsx`](../gui/apps/web/src/router.tsx).

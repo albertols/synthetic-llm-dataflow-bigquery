@@ -509,6 +509,69 @@ source-derived values, and the sensitive-content gate
 (`scripts/dsg/precheck.py`) rejects any `**/evidence/**` path. Releases
 publish the aggregate report only.
 
+### 5a. Evaluate a run
+
+After a generation job lands, the statistical evaluator scores its tables against the source ([ADR 0041](adr/0041-evaluation-standalone-package.md), [`packages/sdfb-evaluation/README.md`](../packages/sdfb-evaluation/README.md)). **Not yet run on Google Cloud**; commands are as built and tested on invented data. Prerequisites (tables, IAM, image): [`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md) "Evaluator".
+
+**Do it soon: time travel is the deadline.** The evaluator recovers the job's rows and pins the source as it was when the job started, both through BigQuery time travel. Once the generation job's write window is older than the landing table's time-travel window (less a one-hour margin), that table's scope is `expired` and it is not evaluated (design §3.2). Separately, within the source's own window the source is pinned as of the job's create time; outside it, or when the create time is unknown, the source is read as it is now and the plan says so (design §3.3). Evaluate the same day, and before anything else writes to the landing tables.
+
+```bash
+cd packages/sdfb-evaluation
+# 1. plan: nothing runs, no registry row; prints scope, panel, bytes, predicted shuffle
+uv run sdfb-eval plan --dry_run --project <PROJECT> --region <REGION> --job_id <JOB_ID>
+# 2. run (local, in-process Beam; --runner DirectRunner is the default spelling)
+uv run sdfb-eval run --project <PROJECT> --region <REGION> --job_id <JOB_ID>
+# 3. read it
+uv run sdfb-eval report --project <PROJECT> --evaluation_id <ID>
+```
+
+Exit codes of `run`: 0 finished and no gate tripped; 1 the optional `--fail_on` gate tripped; 2 a usage error, nothing started; 3 the evaluation failed. Evaluation never fails the generation run.
+
+**From Composer or the template, with nothing extra deployed.** One image and one template serve both jobs ([ADR 0041, amendment](adr/0041-evaluation-standalone-package.md#amendment-2026-10-06-one-image-one-template)); the template parameter `sdfb_job=evaluation` selects the evaluator. None of the three paths has been run yet.
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  A["⚪ generation DAG<br/>run_evaluation = true"]:::data --> W["⚙️ waits for its job"]:::cpu --> J["🔀 evaluation job<br/>CPU workers"]:::beam
+  B["⚪ standalone DAG<br/>job id or a list"]:::data --> J
+  C["⚪ gcloud<br/>sdfb_job=evaluation"]:::data --> J
+```
+
+| Path | Do this | Use it when |
+| :-- | :-- | :-- |
+| The generation DAG | trigger it with `run_evaluation` true and `source_dataset` set to the dataset of the source tables (optionally `evaluation_mode`, `evaluation_machine_type`, `evaluation_max_workers`, `evaluation_output_dataset`) | you want the run evaluated as soon as it lands: the launched table's enabled component in the relationship model, or that table alone. The task `trigger_evaluation` submits the job and does not wait: read the result from the registry. It reads no job log. Of the three roles that read a job it needs only `roles/dataflow.viewer`, for the generation window (without it the run still works, with a warning and no window) |
+| The standalone DAG `sdfb_evaluation_framework` (optional import) | trigger it with the defaults the import filled (`seed_table`, `landing_dataset`, `source_dataset`, `validation_runs_table`) and, when known, `generation_job_id` (its identity: the Dataflow job's window, no log); `seed_table` alone when the job id is unknown; `generation_job_id` alone with `seed_table` emptied for the full lookup (needs the roles that read a job's log); `run_id` or `tables` as before (a typed one beats the default seed); `generation_job_ids` for several jobs (one run and one Dataflow job per id, one after another; the seed is not handed to them, each is the full lookup of its own job) | the run already landed and you want it evaluated on its own (to re-run it, or the generation DAG ran without `run_evaluation`), or you want the launch to wait for the job and close the registry row if the job dies. It evaluates by the same seed path as the chain, reads no job log, and takes `launcher_machine_type` for the launcher VM |
+| The template, by hand | `gcloud dataflow flex-template run … --template-file-gcs-location gs://<templates>/synthetic/sdfb-<VERSION>-template.json --parameters sdfb_job=evaluation,generation_job_id=<JOB_ID>,disk_size_gb=200 --worker-machine-type e2-standard-8` | no Composer at hand |
+
+The launch has 12 minutes in all, the image pull included ("By default, the Flex Template launch process has a timeout of 12 mins", Google's troubleshooting page, "Polling timeout errors"); the pull of the multi-GB image took almost eight on a cold launcher, and planning runs on the launcher before the job exists. Both evaluation launches therefore take a launcher machine type (`evaluation_launcher_machine_type` in the generation DAG, `launcher_machine_type` in the standalone one, default `e2-standard-8`; REST field `environment.launcherMachineType`); a larger one pulls faster, but whether it is enough is known only from a launch (the planning lines in the console log show where the time goes). The public REST description has no field for the limit itself, so it cannot be set from a DAG. With `run_evaluation` true the generation DAG's run stays running until the generation job ends, and the DAG has `max_active_runs=1`: launches of that DAG then run one generation at a time, and every later trigger queues behind the waiting run. `max_active_runs` is the knob; raising it lets several generation jobs run at once (GPU quota). A chained evaluation does not look the launch up: it is given the generation job's id as the launch's identity (the evaluator reads the Dataflow job resource for its window, never its log or BigQuery job labels, plus one query on the generator's `validation_runs` table for this launch's rows), the launched table (`seed_table`, the last part of `table_fqn`), the generation's landing dataset and `source_dataset`, and evaluates what the launch generated: the table's enabled component in the model at `relationships_uri`, parents first, or the table alone when no model names it, the folder holds no model file (it says so in the plan's warnings), or `generate_fk_relationships` is false. It reads each landing table whole (`scope=manual`): with the DAG's `write_disposition` overwrite that is exactly this launch's rows, with append it includes the rows of earlier launches (the row count then differs from what this launch wrote, so the run reads `PARTIAL`; the metrics are still computed). It passes the generation's `reference_rows_limit` and `validation_runs_table` (the nearest-neighbour metrics also need the source table to hold at least twice `reference_rows_limit` rows, since the sample and its holdout must be the same size): the evaluator rebuilds the generator's reference sample and verifies it against the digest on this launch's `validation_runs` row, which is what lets the nearest-neighbour metrics (`row.dcr_train_holdout_share`, `row.dcr_p5_ratio`, `row.nndr_p5_ratio`, `row.density`, `row.coverage`) and the panel-based match rates and lifts (`row.memorization_lift` and `row.exposure_lift` among them) be evaluated. Without the table, or when the job's window cannot be read, those metrics are `not_evaluated` with the reason on the row; every other metric is unaffected. A table it cannot read is skipped by planning with a warning while the others are evaluated; only a target with no readable table fails. A landing table named differently from its source is not found: the evaluation looks for the source's name in the landing dataset. Its registry row carries the generation job's id and window, so a chained run is listed in `evaluation_latest_per_job`; that read needs `roles/dataflow.viewer` (without it: a warning and no window). The window also pins the source as of the job's create time, within the source's time-travel window, like any evaluation by job id. What stays lost: the launch's log, so a model the launch adjusted (ADR 0038) is not seen and the table list is the seed's, not the launch's own record. The service account needs read on the `validation_runs` table. For an evaluation by `--job_id` the evaluator follows the launch's relationships, three outcomes for the URI the job's record names: a model on record (`relationships_loaded` in the generation launcher log) and no readable files raises; no model on record (log read) and only sample models there evaluates without relationships and says so in the plan's warnings; the log unread does the same and the warning says it is unknown whether a model was loaded. An explicit `--relationships_uri` that resolves to nothing always raises. If you expect a model, check that log line first.
+
+**How the job reads, and what the launch log says about it.** The launch prints one timed line per step (`evaluation <id>: <step> <seconds>s`): the target check, the launch lookup, the relationship models, the planner's own lines, the `RUNNING` row, the prepare statements, the read path, then the four steps of the submission (`free text pools`, `pipeline options`, `graph`, `pipeline run`) and their sum, `submission`; while the pipeline is handed over, Beam's own `Starting GCS upload` / `Completed GCS upload … in N seconds` lines are relayed after `pipeline run:`. The `read path` step asks BigQuery for one read session per project of the tables the job will read. Where a project refuses, the job pages that project's tables instead of using the Storage Read API and the launch says so in one `WARNING` (§7's milestone dictionary has its row); nothing has to be set. Paging is slower and bounded by a per-project quota, so for large tables trigger the launch with `mode` = `sampled`.
+
+Before the first one: the four tables exist (`sdfb-eval schemas --apply`) and the service account the launch uses has the evaluator's roles ([`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md) "Evaluator"; preflight step 13; of the three roles that read a job a chained launch needs only `roles/dataflow.viewer`, for the generation window). A chained evaluation that dies after launch leaves its `RUNNING` row open; a standalone-DAG run for the same job gives one whose row is closed either way.
+
+How to read a row (each metric row is one unit, not a pass/fail verdict on the data):
+
+| Field | Read it as |
+| :-- | :-- |
+| `value` against `baseline_value` | The baseline is `metric(R, source)`: what a perfect copier of the reference sample would score. A generator is fine when it is near the baseline, not near zero |
+| noise floor / interval | A `WARN` or `FAIL` that sampling noise explains is reported `PASS`; compare a delta between runs only beyond both rows' noise (`sdfb-eval compare` marks `≈` inside it) |
+| lifts (`row.memorization_lift`, `row.exposure_lift`, value lifts) | Synthetic matches to the reference sample over matches to the equally sized holdout; 1 is chance. Status reads the confidence **lower bound** of the lift |
+| `row.dcr_train_holdout_share` | 0.5 is chance; a copy fraction f moves it by f/2. It cannot see one heavy copied cluster; the exact-copy metrics own that |
+| status of the run | `SUCCEEDED`, `PARTIAL` (a table or block not evaluated) and so on describe the evaluation, not the data |
+
+Latest result per generation job, for a script:
+
+```sql
+SELECT evaluation_id, status
+FROM `<PROJECT>.synthetic_data_quality.evaluation_latest_per_job`
+WHERE generation_job_id = '<JOB_ID>'
+```
+
+The privacy metrics are risk indicators, not guarantees. The same step inside the end-to-end validation report is Step 3.6 of [the prompt](../.github/prompts/end_to_end_validation_report_generation.prompt.md).
+
 ---
 
 ## 6. Stores, flags, and experiment hygiene
@@ -609,6 +672,7 @@ Store / pool lifecycle:
 | `freetext_pools_warm columns=` | every pool came from the persisted store / process cache — the designed warm path (ADR 0020/0033), not idle hardware |
 | `engine_shared holders=N` | this generate DoFn reused the process's engine (ADR 0034 D2): N holders share one build — 4 builds per table on the R7 single run instead of 32 |
 | `source_values_arrow_fallback error=` / `source_values_storage_api_disabled` | the Storage Read API attempt failed (`PermissionDenied` = grant `roles/bigquery.readSessionUser`); REST paging serves the process. A following `*_source_filter_error` means the fetch itself failed — the ADR 0023 filters are INACTIVE, treat the run's pools as tainted |
+| `the BigQuery Storage Read API refused a read session on project …` (WARNING, an **evaluation** launch's console and its registry row's `warnings`) | the evaluator's probe was refused (a 403) by the project(s) named: their read tables are paged through `tabledata.list` instead of `DIRECT_READ`, the rest keep the fast read. The line lists each paged table side with its rows and the table's logical bytes; dividing them by the quota it quotes (3.7 GB of row data per minute, 7.5 GB in the US and EU multi-regions, for the project that contains the table) gives an estimate of the read time, not a bound: the bytes count every column where only the plan's are paged (an overestimate, most of all for a read-only parent, read by its key columns), and the quota is shared with every other reader of that project. Where the refusing project is yours, `roles/bigquery.readSessionUser` on it for the account the job runs as restores the fast read; otherwise, or when the tables are too large to page, launch with `mode=sampled`. In the job's worker log `paged read of <table>: …` lines give the row count, the ranges and the pages, and two WARNINGs name a table whose metadata says nothing (`carries no row count`: the count is `tabledata.list`'s own; `carries no modification time`: a rewrite with as many rows would not be noticed). `TableChangedError` means the table's metadata and its rows disagreed, or something wrote to it while it was paged: evaluate again once nothing does (§5a, [`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md) "Evaluator") |
 | `vllm_spawn_lock_acquired` / `vllm_spawn_lock_wait` / `vllm_server_kept_alive` | `sdk_containers=multi` (ADR 0034 D6): exactly one process per worker acquires the spawn window; waiters bind to its server via the reuse probe; the server outlives the client that spawned it |
 | `sdk_container_topology topology=` | launcher: `single` (one SDK process per worker) or `multi` (one per vCPU) — decides the cross-process vLLM mode and the CPU population embed |
 | `llm_route_unused` (WARNING) | this setup has NO LLM-derived pool at all (every column expandable / typed / binary) — GPU workers idle; plan a CPU-only rerun (ADR 0027/0033) |

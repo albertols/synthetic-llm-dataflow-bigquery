@@ -191,7 +191,7 @@ When you need information on a concern, go here — don't restate it elsewhere.
 packages/sdfb-core/               pure-Python contracts + ABC + codegen (laptop-installable)
 packages/sdfb-beam/               Beam pipeline + DoFns + DDL extractor + handlers + CLI
 packages/sdfb-tests/              unit + integration tests
-docker/                           Dockerfile + .dockerignore + flex_template_metadata.json
+docker/                           Dockerfile + .dockerignore + flex_entry.py (the template's entry) + flex_template_metadata.json
 scripts/                          extract_ddl, hello_synthetic_mlx, e2e/, release/, doc/
 config/                           thresholds.yml + models.yml
 composer/                         synthetic_beam_bigquery.py (Airflow DAG template)

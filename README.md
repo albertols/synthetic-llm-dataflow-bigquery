@@ -35,6 +35,7 @@ Generate fictitious-but-realistic synthetic rows for any BigQuery table — driv
 - [Getting started](#getting-started)
 - [CI/CD](#cicd)
 - [Integration testing & validation reports](#integration-testing--validation-reports)
+- [Platform GUI](#platform-gui)
 - [Documentation map](#documentation-map)
 - [Glossary](#glossary)
 - [License](#license)
@@ -45,7 +46,7 @@ Teams need realistic tabular data for development, testing, and analytics protot
 
 This pipeline reads a table's DDL and a bounded reference sample (≤10k rows, deterministic `FARM_FINGERPRINT` ordering), runs open-weight LLMs entirely inside your own cloud project, and writes validated synthetic rows back to BigQuery — with **memorization measured and gated on every run**. The fully self-hosted design (no data egress, open-weight models only, auditable per-run quality records) aligns directly with EU AI Act and data-sensitivity expectations.
 
-**Status.** Both generation engines, relational PK/FK generation, stats-driven fidelity and the validation, dead-letter and audit chain are in place, and they have run on Dataflow GPU workers: single tables at 1M and 10M rows, and a five-table relational model in one job. What changed in each release is in the [changelog](CHANGELOG.md), the [releases page](https://github.com/albertols/synthetic-llm-dataflow-bigquery/releases) and the [measured release history](docs/releases/README.md). The evaluation framework (Tier-1/2/3 metrics) still lives on the `ws3-eval-framework` branch.
+**Status.** Both generation engines, relational PK/FK generation, stats-driven fidelity and the validation, dead-letter and audit chain are in place, and they have run on Dataflow GPU workers: single tables at 1M and 10M rows, and a five-table relational model in one job. What changed in each release is in the [changelog](CHANGELOG.md), the [releases page](https://github.com/albertols/synthetic-llm-dataflow-bigquery/releases) and the [measured release history](docs/releases/README.md). A separate, standalone evaluator, [`packages/sdfb-evaluation`](packages/sdfb-evaluation/README.md) ([ADR 0041](docs/adr/0041-evaluation-standalone-package.md)), scores landed tables against their source after the fact; it is built and reviewed on a laptop and has not yet run on Google Cloud.
 
 ## Architecture at a glance
 
@@ -208,7 +209,17 @@ Skew is tracked with **normalised entropy** and **`top1_share`** (a balanced enu
 
 **Memorization gate.** Any identical real/synthetic row match, or a per-column `copy_ratio` at/above the privacy threshold on a high-cardinality column, fails the run — in every environment (pass criteria: [`docs/RUN_PLAYBOOK.md`](docs/RUN_PLAYBOOK.md)).
 
-**Evaluation framework** (branch `ws3-eval-framework`, merge pending): Tier 1 statistical metrics (KS/Wasserstein, total variation, PSI/JSD, correlation & mutual-information drift, DCR/NNDR privacy distances), Tier 2 SDMetrics quality/diagnostic reports → a single 0–1 `fidelity_overall_score`, Tier 3 opt-in SynthEval/Evidently.
+**Evaluation (a separate job, after generation).** [`packages/sdfb-evaluation`](packages/sdfb-evaluation/README.md) is a standalone package (its own lock, Python 3.11, not a workspace member) that reads the landing tables and the full source and writes four tables to `synthetic_data_quality`: fidelity, privacy, integrity and diversity metrics, each with its own noise floor and a baseline. It never gates or fails the generation run: a status describes the evaluation run, and `--fail_on` is an optional exit-code gate for a calling script. Design: [`docs/DESIGN.md` §11](docs/DESIGN.md#11-evaluation-sdfb-evaluation) and [ADR 0041](docs/adr/0041-evaluation-standalone-package.md). On Dataflow it needs no image or template of its own: the generation image carries it and the generation template runs it when a launch passes `sdfb_job=evaluation`. **Not yet run on Google Cloud**: so far it has run on invented data only, with fake BigQuery clients.
+
+```bash
+cd packages/sdfb-evaluation && uv sync --frozen
+uv run sdfb-eval schemas --project <PROJECT> --apply        # once: four tables, two views
+uv run sdfb-eval plan --dry_run --project <PROJECT> --region <REGION> --job_id <GENERATION_JOB_ID>
+uv run sdfb-eval run  --project <PROJECT> --region <REGION> --job_id <GENERATION_JOB_ID>
+uv run sdfb-eval report --project <PROJECT> --evaluation_id <ID>
+```
+
+Recipes: [`docs/RUN_PLAYBOOK.md`](docs/RUN_PLAYBOOK.md) "Evaluate a run"; prerequisites: [`docs/DEPLOYMENT_PREREQUISITES.md`](docs/DEPLOYMENT_PREREQUISITES.md).
 
 ## CPU/GPU split & vLLM serving
 
@@ -262,6 +273,14 @@ Real-run evidence flows through a fixed contract:
 - **Promote** bundles a release cites to `docs/releases/<version>/evidence/<JOB_ID>/` — the layout the release Action reads. Evidence bundles stay out of the public repo (the sensitive-content gate in `scripts/dsg/precheck.py` forbids that path); published releases carry the aggregate report only.
 - **Interpret** with the report generators in [`.github/prompts/`](.github/prompts/): the end-to-end validation report, the free-text crosscheck report, and the prompt-constraint recommender.
 
+## Platform GUI
+
+> Design rationale: [`docs/DESIGN.md` §12](docs/DESIGN.md#12-platform-gui); decision: [ADR 0042](docs/adr/0042-self-hosted-platform-gui.md).
+
+**Synthetic Platform** (`gui/`) is a local web app that reads and explains this project's data: evaluations and their scorecards, validation runs and the DLQ, source statistics, the RAG embedding space, and every generation knob with its value from the code. It runs on a seeded mock with no GCP access (`npm ci && npm run build && npm start` in `gui/`, then open `http://127.0.0.1:8787`), or against your BigQuery tables through named, read-only, bytes-capped queries on a backend bound to `127.0.0.1`. It writes nothing, the pipeline does not depend on it, and it is not part of the Dataflow Solution Guides copy.
+
+Quickstart for live mode, environment variables, the four tabs and screenshots: [`gui/README.md`](gui/README.md).
+
 ## Documentation map
 
 | Layer | Where | What |
@@ -272,6 +291,7 @@ Real-run evidence flows through a fixed contract:
 | Guides | [`docs/`](docs/) | run playbook, deployment prerequisites, DDL contract guide, model layout, E2E matrix |
 | Releases | [`docs/releases/`](docs/releases/README.md) | per-version deterministic reports (aggregate metrics and charts) |
 | Articles | [`docs/articles/`](docs/articles/README.md) | the Medium series — VCS-tracked, kept in sync with the implementation |
+| GUI | [`gui/`](gui/README.md) | the Synthetic Platform app: quickstart, architecture, data contracts, screenshots |
 
 ## Glossary
 
@@ -283,10 +303,10 @@ Synthetic-data concepts **as implemented here** — every term is backed by code
 - **Source / reference table** — the real BigQuery table being imitated; only its DDL and a bounded sample (≤10k rows) are ever read.
 - **Reference sample** — the deterministic sample drawn from the source table; every distribution below is measured from it.
 - **Reference digest** — SHA-256 fingerprint of the sample; keys every cached artifact and audit row, proving which data a run derived from.
-- **Fidelity** — how closely synthetic data matches real-data statistics; the eval tier scores it 0–1 per run (SDMetrics `fidelity_overall_score`, branch-WIP).
-- **Copy rate (`copy_ratio`)** — fraction of synthetic values in a column that also appear verbatim in the source; gated on high-cardinality columns — crossing the privacy threshold **fails the run**.
-- **Memorization** — synthetic rows identical to real rows; any identical match **fails the run** in every environment.
-- **DCR / NNDR** — distance-to-closest-record and nearest-neighbor distance ratio; low values mean synthetic rows sit suspiciously close to real ones (eval tier, branch-WIP).
+- **Fidelity** — how closely synthetic data matches the source's statistics. The evaluator measures it per column, pair and table against the full source (not just the reference sample) and grades each row `PASS`/`WARN`/`FAIL` only when the distance exceeds its noise floor; a post-hoc status of the evaluation run, never a gate on generation (an optional `--fail_on` turns it into an exit code).
+- **Copy rate (`copy_ratio`)** — fraction of synthetic values in a column that also appear verbatim in the source; gated in-run on high-cardinality columns — crossing the privacy threshold **fails the run**. The evaluator reports a post-hoc counterpart (`field.substantive_copy_rate`) with its baseline and noise floor.
+- **Memorization** — synthetic rows identical to real rows; any identical match **fails the run** in every environment. Post-hoc, the evaluator also reports a *memorization lift* (see below).
+- **DCR / NNDR** — distance-to-closest-record and nearest-neighbor distance ratio; low values mean synthetic rows sit suspiciously close to real ones. Computed by the evaluator on a sample, with the holdout share as the gated reading; a risk indicator, not a guarantee.
 - **Freetext column** — high-cardinality text that statistical samplers can't produce; the only place the LLM generates values, always under schema-constrained decoding.
 - **Categories / categorical column** — a column with a small closed set of values; reproduced from its measured frequency table, never extended with invented values.
 - **Category proportions** — the share of each category measured in the reference sample (e.g. 40% "WEB", 35% "STORE", 25% "PHONE") and reproduced within sampling noise.
@@ -302,7 +322,12 @@ Synthetic-data concepts **as implemented here** — every term is backed by code
 - **DLQ (dead-letter queue)** — the partitioned BigQuery table receiving every rejected row with full error context; nothing is silently dropped.
 - **Blocker gate** — the run-level check that fails the Dataflow job when blocking-severity defects exceed the environment budget (dev 20% / uat 5% / prd 1%).
 - **Generation plan** — the per-run structured log of which strategy every column got; makes each run's synthesis auditable.
-- **PSI (population stability index)** — drift of a column's distribution vs the previous run (eval tier, branch-WIP).
+- **PSI (population stability index)** — drift of a column's distribution over the source's decile bins. The evaluator reports it per column (`column.psi`) as a post-hoc status; `sdfb-eval compare` gives it between two runs only where both carry the same histogram edges.
+- **Baseline** — `baseline_value = metric(R, source)`: the score a perfect copier of the reference sample would get. A generator is judged against it, not against zero.
+- **Noise floor** — the sampling noise a metric value carries at its sample size. A metric fails only when it crosses its threshold *and* exceeds this floor; no p-values are reported.
+- **Memorization lift** — how much more often synthetic rows match the reference sample R than the equally sized holdout H (`row.memorization_lift`). Chance matches fall on both, so only copying lifts the ratio; status reads the lift's confidence lower bound.
+- **Exposure set** — the first 1,024 reference rows in the generator's own order, the ones whose row documents can reach a prompt; `row.exposure_lift` is the same lift measured on them.
+- **Matched n** — computing a size-dependent metric (entropy, distinct count, coverage, DCR, density, detection AUC) on equal sample sizes for both sides, so a faithful generator scores at each metric's target (1 for the ratio metrics, 0.5 for a detection AUC).
 - **Determinism / seeding** — all sampling flows from `blake2b(run_id, batch_id)`-derived seeds: same inputs → same synthetic output, distinct batches → distinct draws.
 
 ### Relational concepts
@@ -368,7 +393,7 @@ Apache-2.0.
 | ~7,257 CPU-s bulk generation for 1M rows; batched Pandera bounds | [`docs/designs/2026-07-27-ws6-pipeline-shape.md`](docs/designs/2026-07-27-ws6-pipeline-shape.md) |
 | Embedder bytes (133,466,304 B fp32), 512 MiB VRAM gate, CPU demotion | `packages/sdfb-core/src/sdfb_core/rag/embedding.py`, [ADR 0019](docs/adr/0019-rag-population-scoped-to-consumers.md) |
 | Retrieval geometry (centroid top-k=8, k-center) + figures | [`docs/designs/2026-07-25-rag-retrieval-geometry-roadmap.md`](docs/designs/2026-07-25-rag-retrieval-geometry-roadmap.md) |
-| Eval metrics + memorization-gate identifiers | branch `ws3-eval-framework`: `sdfb_core/evaluation/`, `config/thresholds.yml` (merge pending) |
+| Evaluator: metrics, catalogue, four tables (laptop-tested; not run on GCP) | [`packages/sdfb-evaluation/`](packages/sdfb-evaluation/README.md), [ADR 0041](docs/adr/0041-evaluation-standalone-package.md), [`docs/designs/2026-07-07-evaluation-framework-design.md`](docs/designs/2026-07-07-evaluation-framework-design.md); gate thresholds: `config/thresholds.yml` |
 | Machine matrix, SDK-container and worker caps | [`docs/RUN_PLAYBOOK.md`](docs/RUN_PLAYBOOK.md), `composer/synthetic_beam_bigquery.py`, `public_cloud/deploy/gcp/tiers.yaml` |
 | Engine-owned vLLM server (not Beam RunInference) | [ADR 0014](docs/adr/0014-vllm-model-client-owns-server.md) |
 | Beam Summit 2025 acceptance | session *"Building Banking Synthetic Data for a Lakehouse with Gemma"* — [beamsummit.org](https://beamsummit.org) (accepted 2025-05-10) |

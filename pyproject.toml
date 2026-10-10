@@ -47,6 +47,7 @@ constraint-dependencies = ["betterproto==2.0.0b6"]
 
 [tool.uv.workspace]
 members = ["packages/sdfb-core", "packages/sdfb-beam", "packages/sdfb-tests"]
+exclude = ["packages/sdfb-evaluation"]   # standalone project, own lock (ADR 0041)
 
 [tool.uv.sources]
 sdfb-core = { workspace = true }
@@ -98,7 +99,7 @@ ignore = ["E501", "PLR0913", "PLC0415"]
 based_on_style = "yapf"
 
 [tool.yapfignore]
-ignore_patterns = [".venv/**", "packages/sdfb-tests/fixtures/**"]
+ignore_patterns = [".venv/**", "packages/sdfb-tests/fixtures/**", "packages/*/.venv/**"]
 
 [tool.mypy]
 python_version = "3.11"
