@@ -143,8 +143,10 @@ def test_run_passes_the_prepared_plan_to_options_and_pipeline(
 def test_the_driver_logs_the_steps_around_planning(bq, resolved, monkeypatch,
                                                    caplog, capsys):
   """The launch lookup before planning and the RUNNING row, the prepare
-  statements and the submission after it say how long they took, in the
-  planner's line shape; the planner's own lines sit between them."""
+  statements, the read path and the submission after it say how long
+  they took, in the planner's line shape; the planner's own lines sit
+  between them. The submission's line follows the four steps it is the
+  sum of (`test_read_path.py`)."""
   del resolved
   monkeypatch.setattr(driver, "build_evaluation_pipeline",
                       tiny_pipeline(fast=True))
@@ -159,7 +161,8 @@ def test_the_driver_logs_the_steps_around_planning(bq, resolved, monkeypatch,
   ]
   assert steps == [
       "target check", "launch lookup", "relationship models", "RUNNING row",
-      "prepare statements", "submission"
+      "prepare statements", "read path", "free text pools", "pipeline options",
+      "graph", "pipeline run", "submission"
   ]
   planning = [i for i, line in enumerate(lines) if line.startswith("planning ")]
   running = lines.index(next(x for x in lines if "RUNNING row" in x))

@@ -89,6 +89,7 @@ class _FakeClient:
             }]
         },
         "numRows": "18250",
+        "numBytes": "3650000",
         "location": "EU",
         "timePartitioning": {
             "type": "DAY",
@@ -174,6 +175,7 @@ def test_table_summary():
       "mode": "REQUIRED"
   }]
   assert info["numRows"] == 18250
+  assert info["numBytes"] == 3_650_000  # the table's logical bytes
   assert info["location"] == "EU"
   assert info["timePartitioning"] == {"type": "DAY", "field": "created_at"}
   assert info["lastModified"] == "2026-09-13T13:49:30.500000Z"

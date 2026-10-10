@@ -1483,6 +1483,157 @@ Writes use `WriteToBigQuery` with file loads, append, and no table
 creation; the driver's own registry events are client load jobs. Streaming
 inserts are never used.
 
+**Reading the rows: two paths, one rule.**
+
+**Claim:** a read table is paged if and only if its project refused a read
+session; every other read table keeps the fast read.
+
+The source and synthetic sides are read by `ReadFromBigQuery` with
+`DIRECT_READ`, the [BigQuery Storage Read API][bq-storage-read]. Opening a
+read session needs `bigquery.readsessions.create` **on the project of the
+table being read**: Beam 2.74 asks with that project as the session's
+parent (`_CustomBigQueryStorageSource.split`, read in the installed
+package). A project may refuse it. A deployment may not grant
+`roles/bigquery.readSessionUser`, and a public project is expected to
+refuse: the caller holds no role there (an inference from the parent
+project Beam uses, not something observed). A read-only parent's source
+twin and an unpinned source are read from the source's own project, which
+may be one. A worker that is refused fails the
+job four attempts later: the first job launched in a deployment without
+the role, on 2026-10-09, failed on every read that way. That launch is the
+only observation in this subsection. The paged read below is tested on a
+laptop against the real BigQuery client over a fake connection and has not
+read from BigQuery yet.
+
+```mermaid
+flowchart TB
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  PREP["⚙️ prepare statements<br/>read tables exist"]:::cpu --> PROBE{"🛡️ one read session<br/>per project"}:::cpu
+  PROBE -- "anything else" --> FAILED[("🗄️ FAILED row")]:::store
+
+  subgraph fast["✅ project accepted: DIRECT_READ"]
+    direction TB
+    DR["🔀 ReadFromBigQuery<br/>Storage Read API, Arrow"]:::beam --> FIX["🔀 type fix<br/>JSON text"]:::beam
+  end
+
+  subgraph paged["🚫 project refused: paged read"]
+    direction TB
+    CUT["🔀 Ranges<br/>rows counted now"]:::beam --> SHUF["🔀 Reshuffle"]:::beam --> PAGE["🔀 Page<br/>tabledata.list"]:::beam --> SAME["🛡️ table unchanged<br/>else the job fails"]:::beam
+  end
+
+  PROBE -- "accepted" --> DR
+  PROBE -- "refused: 403" --> WARN["⚪ one WARNING<br/>plan warnings"]:::data --> CUT
+  FIX --> ROWS["🧺 rows<br/>client types"]:::beam
+  SAME --> ROWS
+```
+
+The driver decides before the graph is built (`cli/driver.py::_Run.read_path`).
+Once the prepare statements have created the read tables, it asks for one
+read session per project of the planned read tables
+(`beam/io.py::probe_direct_read`: the call a worker makes, one stream, no row
+read). A 403 is a refusal; any other error raises and the driver writes
+the `FAILED` row, so a transient error never changes how an evaluation
+reads. The probe is bounded at 45 seconds a project, the retries of an
+unavailable service included, because it runs inside the launcher's twelve
+minutes. `beam/io.py::RoutedBigQuerySources.paged` is the one rule. A run
+that reads nothing from BigQuery (a fixture) is not probed. A table with
+one side paged and the other read by `DIRECT_READ` differs between its
+sides only on the types `DIRECT_READ` already could not normalise (a JSON
+sub-field inside a RECORD, INTERVAL, RANGE), which the generator does not
+write.
+
+| | `DIRECT_READ` | Paged read |
+| --- | --- | --- |
+| Chosen for a read table when | its project accepted the read session | its project refused it |
+| Needs | `bigquery.readsessions.create` on the read table's project | `bigquery.tables.get` (the table's metadata) and `bigquery.tables.getData` (its rows) on the read table; `roles/bigquery.dataViewer` has both, and planning uses both on the source and landing tables |
+| Transport | Storage Read API streams, Arrow | REST [`tabledata.list`][bq-paging] through the BigQuery client's `list_rows`, the plan's columns only |
+| Parallelism | the API's streams | row ranges of about 64 MB of the table's logical bytes, cut when the job reads from the table's own row count, reshuffled over the workers |
+| Cell types | Arrow's; top-level JSON text is parsed (`normalize_direct_read`) | the client's own, the types of the panel, with no conversion in between |
+| Bound | the API's throughput | [3.7 GB of row data per minute, 7.5 GB in the US and EU multi-regions][bq-quotas], charged to the project that contains the table and shared with every other reader of that project and with `jobs.getQueryResults`; 1,000 requests per second; at most 100,000 rows in a response |
+
+**The quota belongs to the table's project.** For the job's own tables
+that is the job's project, where a large paged evaluation competes with
+everyone else who pages rows or fetches query results. For a source read
+from another project it is that project's quota: for a public source, one
+shared with every reader of the public project.
+
+**One request per page.** The API cuts a response at about 10 MB, so a
+request for the rest of a range comes back short. The next request starts
+at the row after the last one returned (`startIndex`), never at a page
+token: every request is a first-page request, and nothing rests on how a
+client mixes the two.
+
+**A table that changes while it is read fails the job.** A range holds the
+rows it claims only on a table that does not change, so the paged read
+checks instead of trusting:
+
+| Check | When | Catches |
+| --- | --- | --- |
+| the metadata's `numRows` is the `totalRows` of one `tabledata.list` request for one row | when the ranges are cut | a table whose metadata and rows disagree (a streaming buffer); metadata that counts no row over a table that holds rows |
+| the response carries a `totalRows`, and it is the row count of the cut | every response | rows added or removed; a response that cannot be checked |
+| the range returned exactly its row count | every range | a response that ends early |
+| `tables.get` again: the row count and the modification time of the cut | after every range, inside the bundle that emitted its rows, so a range that fails commits none of them | a table rewritten with as many rows |
+| the rows the ranges emitted add up to the cut (each range counts what it yields), and the metadata is still the cut's | after the last range | a range that never ran; a row lost on the way out |
+
+The row count of the cut is `tabledata.list`'s own: row positions address
+that count, and it is there to be asked whatever the metadata says. So a
+table is read as empty only when the list counts no row, never because
+its metadata does. Metadata that says nothing is not taken for an answer
+either:
+
+| `tables.get` carries | Then |
+| --- | --- |
+| a `numRows` equal to the list's count | the ranges are cut from it |
+| a `numRows` that differs | the job fails, naming both counts |
+| no `numRows` | the list's count is used, and one `WARNING` names the table |
+| no `lastModifiedTime` | the read goes on without the check for a rewrite with as many rows, and one `WARNING` says so |
+
+What these checks cannot see is a table whose rows changed order while
+its row count and modification time did not. Nothing BigQuery publishes
+says that a row index addresses the same row on two calls to an unchanged
+table; the paged read assumes it. Which read tables are exposed:
+
+| Read table | Kind | Can it change during the read? |
+| --- | --- | --- |
+| source, pinned | a snapshot in the temporary dataset | no |
+| source or landing sample (`--mode sampled`) | a table the prepare statements wrote | only by its 24-hour expiry |
+| landing, scope `as_of` | a snapshot | no |
+| landing, scope `appends` or `as_of_diff` | a table the prepare statements wrote | only by its expiry |
+| landing, scope `table` or `manual` | the landing table itself | yes |
+| source, unpinned; a read-only parent, both sides | the table itself | yes |
+
+**Throttling.** A page BigQuery throttles waits and is asked for again,
+with exponential back-off up to 60 seconds between attempts, for 15
+minutes in all (`beam/io.py::page_retry_waits`). The error's reason
+decides: `rateLimitExceeded`, `quotaExceeded` or a backend error waits;
+`accessDenied` and every other reason fail at once, and so does a 403
+without a reason. Google's [troubleshooting page][bq-quota-errors] names
+the error (`exceeded quota for tabledata.list bytes per second per
+project`) and prescribes "retries with exponential backoff". Its section
+on that error does not name the reason the error carries; the page's
+general example of a quota error is a 403 with `quotaExceeded`, which the
+BigQuery client's own retry does not wait for. So both reasons wait. The 15
+minutes are a bound on purpose: a per-minute limit comes back within it,
+a daily or custom quota does not, and the range then fails naming the
+reason instead of holding the job for hours.
+
+**The cost is speed.** Above the quota Google's own advice is the Storage
+Read API. A table too large to page is evaluated with `--mode sampled`
+(§3.4), which reads at most `sample_rows` per side. An export to Cloud
+Storage was considered and not built; [ADR 0041's note of
+2026-10-10](../adr/0041-evaluation-standalone-package.md) records why.
+
+The launch says what it does in one `WARNING`: per refusing project, why
+it refused and the table sides it pages, each with its rows and the
+table's logical bytes (an upper bound on what is paged: only the plan's
+columns are read), then the quota and the role whose holder gets the
+fast read. The same text joins the plan's warnings, so the registry's
+`FINAL` (or `FAILED`) row carries it.
+
 **Failures stay per table.** Nothing is dropped silently: every skip
 becomes a written row with a reason.
 
@@ -2516,6 +2667,11 @@ list, and two BigQuery reference pages in `schemas/__init__.py`.
 | [BigQuery: approximate aggregate functions][bq-approx] | planning statistics, §4.3 | Fetched; "a statistical estimate" is on the page |
 | [BigQuery: hash functions][bq-hash] | `FARM_FINGERPRINT`, §3.4 | Fetched; the function is on the page |
 | [Dataflow: Flex Templates][flex-templates] | the launcher, §8.2 | Fetched; title matches |
+| [BigQuery: Storage Read API][bq-storage-read] | the fast read and its permission, §5.2 | Fetched 2026-10-10; `bigquery.readsessions.create` "on the project" and `roles/bigquery.readSessionUser` are on the page, and so is "Sessions expire automatically" |
+| [BigQuery: read with pagination][bq-paging] | `tabledata.list`, the size of a response, §5.2 | Fetched 2026-10-10; "more than 10 MB of data or more than `maxResults` rows" is on the page. The page says nothing about the order of rows across requests |
+| [BigQuery: quotas and limits][bq-quotas] | the `tabledata.list` limits, §5.2 | Read on 2026-10-10 with `curl -sL` and a text search (the fetch tool used for the other pages returns this one's navigation only). On the page: "Maximum tabledata.list bytes per minute: 7.5 GB in multi-regions; 3.7 GB in all other regions", "This quota applies to the project that contains the table being read", "Other APIs including jobs.getQueryResults and fetching results from jobs.query and jobs.insert can also consume this quota", 1,000 `tabledata.list` requests per second and 100,000 rows per response. No rows-per-second limit is on the page |
+| [BigQuery: troubleshoot quota errors][bq-quota-errors] | the throttling error and its remedy, §5.2 | Read on 2026-10-10 with `curl -sL`. The section "Maximum tabledata.list bytes per second per project quota errors" gives the message and "retries with exponential backoff" and names no reason; the overview's example of a quota error is a 403 whose reason is `quotaExceeded` |
+| [BigQuery: export table data][bq-export] | the read path not built, ADR 0041 | Fetched 2026-10-10; `bigquery.tables.export`, the Cloud Storage permissions and DATETIME as a string in Avro are on the page. The page does not say whether a table snapshot can be exported |
 | [apache/beam#36563][beam-36563] | Prism and side inputs, §5.4 | Fetched; the issue title matches and the issue is closed |
 | [SDMetrics documentation][sdmetrics] | the origin of several metric names, §4.3 | Fetched; title matches |
 
@@ -2580,5 +2736,10 @@ list, and two BigQuery reference pages in `schemas/__init__.py`.
 [bq-approx]: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/approximate_aggregate_functions
 [bq-hash]: https://docs.cloud.google.com/bigquery/docs/reference/standard-sql/hash_functions
 [flex-templates]: https://docs.cloud.google.com/dataflow/docs/guides/templates/using-flex-templates
+[bq-storage-read]: https://docs.cloud.google.com/bigquery/docs/reference/storage
+[bq-paging]: https://docs.cloud.google.com/bigquery/docs/paging-results
+[bq-quotas]: https://docs.cloud.google.com/bigquery/quotas
+[bq-quota-errors]: https://docs.cloud.google.com/bigquery/docs/troubleshoot-quotas
+[bq-export]: https://docs.cloud.google.com/bigquery/docs/exporting-data
 [beam-36563]: https://github.com/apache/beam/issues/36563
 [sdmetrics]: https://docs.sdv.dev/sdmetrics

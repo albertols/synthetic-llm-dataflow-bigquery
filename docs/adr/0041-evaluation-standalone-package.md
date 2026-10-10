@@ -467,6 +467,82 @@ description of the launch has no such field (gcloud has
 image would pull faster but is a second image, and that stays the owner's
 decision.
 
+**Note (2026-10-10): where a project refuses a read session, the evaluator
+pages.** The fourth real launch (the standalone DAG, the seed path, five
+tables) reached Dataflow and failed on every read. The pipeline read its
+source and synthetic rows with `ReadFromBigQuery` and `DIRECT_READ`, the
+[BigQuery Storage Read API](https://docs.cloud.google.com/bigquery/docs/reference/storage),
+which needs `bigquery.readsessions.create` on the project of the table being
+read (Beam 2.74 opens the session with that project as its parent). The
+owner's worker account does not hold it; the generator met the same refusal
+on 2026-09-07 and pages around it
+([ADR 0034](0034-generation-throughput-single-barrier-shared-engines.md) D4).
+The evaluator had no other read path.
+
+*Decision.* Once the prepare statements have built the read tables and
+before the graph is built, the driver asks the API for one read session per
+project of the planned read tables (the call a worker makes; no row is
+read). **A read table is paged if and only if its project refused** (a
+403): it is read through the BigQuery client's `list_rows`, REST
+[`tabledata.list`](https://docs.cloud.google.com/bigquery/docs/paging-results),
+by row ranges, which needs `bigquery.tables.get` and
+`bigquery.tables.getData` on the read table (both in
+`roles/bigquery.dataViewer`, and both already used by planning on the source
+and landing tables) and no read session. Every
+other read table keeps `DIRECT_READ`. Any other answer of the probe fails
+the launch: a transient error never changes how an evaluation reads. No
+parameter chooses the path, because the permission is a fact of the project
+and the launcher of a Flex Template runs as the account its workers run as.
+The rule is per project because the permission is: a public project is
+expected to refuse (the caller holds no role there; an inference from the
+parent project Beam uses, not an observation), so a read-only parent's
+source twin read from one would be paged while the job's own tables keep
+the fast read. The mechanism, its diagram, the
+checks that fail a job whose table changes while it is paged and the wait
+on a throttled page are the design document's
+[§5.2](../designs/2026-07-07-evaluation-framework-design.md#52-the-graph).
+
+*Rejected: `ReadFromBigQuery(method=EXPORT)`,* an extract job to Cloud
+Storage read back as Avro files. It scales, and it was not built, for three
+reasons.
+
+1. **Its permissions have never run in that deployment.** An export needs
+   [`bigquery.tables.export`, an extract job, and objects created in the
+   bucket](https://docs.cloud.google.com/bigquery/docs/exporting-data), and
+   here it would export a table snapshot (the source pin), which that page
+   does not say is possible. Every launch so far has stopped on something
+   the deployment refuses, and each costs a build, a deploy and a day.
+   Paging needs the two permissions that the planning of that same launch
+   had just used on its source and landing tables.
+2. **Types.** In an Avro export a DATETIME is a string, and the evaluator
+   repairs that at top level only. The client's cells are the panel's types
+   by construction: the same code decodes both.
+3. **No copy.** An export leaves a full copy of every read table, source
+   tables included, in the temporary bucket while the job runs, and after it
+   when the job dies before its cleanup step. The design's §4.9 lists no
+   such place for source data.
+
+*Consequences.* `roles/bigquery.readSessionUser` is optional for the
+evaluator; granting it later moves the same image to the fast read without
+a rebuild. The price of paging is speed: BigQuery limits `tabledata.list`
+to [3.7 GB of row data per minute, 7.5 GB in the US and EU
+multi-regions](https://docs.cloud.google.com/bigquery/quotas), a quota of
+the project that contains the table, shared with every other reader of
+that project (for a public source, with everyone who reads it), and
+recommends the Storage Read API above that. `--mode sampled` is the lever
+for tables too large to page; an
+export path stays a later decision of the owner's, should exact mode be
+needed at that scale and the bucket copy be accepted. A paged read of a
+table that is still being written fails the job rather than read it wrong,
+which matters for the tables read live: the landing table of a `table` or
+`manual` scope, an unpinned source, a read-only parent. A table is read as
+empty only when `tabledata.list` itself counts no row, never on its
+metadata's word. Not verified until
+a launch: that `tabledata.list` answers for a table snapshot in that
+project, and how the paged read behaves at the owner's volumes. The same
+launch spent almost five of its twelve minutes in the driver's submission
+step without saying where, so the driver now times the steps inside it.
+
 ## Sources
 
 [Lin, Lucas & Shmueli 2013](https://doi.org/10.1287/isre.2013.0480) (p-values at scale) ·
@@ -477,5 +553,9 @@ decision.
 [table snapshots](https://docs.cloud.google.com/bigquery/docs/table-snapshots-intro),
 [`INFORMATION_SCHEMA.JOBS`](https://docs.cloud.google.com/bigquery/docs/information-schema-jobs) ·
 [Dataflow Flex Templates](https://docs.cloud.google.com/dataflow/docs/guides/templates/using-flex-templates) ·
+[BigQuery Storage Read API](https://docs.cloud.google.com/bigquery/docs/reference/storage),
+[reading with pagination](https://docs.cloud.google.com/bigquery/docs/paging-results),
+[quotas and limits](https://docs.cloud.google.com/bigquery/quotas),
+[exporting table data](https://docs.cloud.google.com/bigquery/docs/exporting-data) (the note of 2026-10-10) ·
 [uv workspaces](https://docs.astral.sh/uv/concepts/projects/workspaces/) ·
 [apache/beam#36563](https://github.com/apache/beam/issues/36563). The full list, each fetched and checked, is the design document's §14.

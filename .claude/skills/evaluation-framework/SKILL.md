@@ -103,6 +103,12 @@ that must match the generator is mirrored and pinned by the two-sided golden fil
   a given plan.
 - A temporal column's mean keeps 9 significant digits of an epoch value (about ten seconds).
 - Beam arguments are passed through; the experiment `enable_data_sampling` is refused.
+- The job reads by `DIRECT_READ` (the Storage Read API) where the read table's project grants
+  `bigquery.readsessions.create`, and by pages (`tabledata.list`) where it refuses: the launch probes once per
+  project and says what it pages in one `WARNING` (`the BigQuery Storage Read API refused a read session on
+  project …`), also in the registry row's `warnings`. Paging is slower (a quota of the project that contains the
+  table) and fails the job if a table changes meanwhile; for large tables use `--mode sampled`. A public project
+  is expected to refuse (not observed).
 - On the shared image an evaluation launch must pass `sdfb_job=evaluation` (else it is a generation launch) and
   `disk_size_gb=200` (the image is multi-GB; the evaluator pins no boot disk). Both DAGs do.
 - A chained evaluation (`trigger=chained`, from the generation DAG) names its tables with `--seed_table` (its enabled component in the model, else the table alone) and the job id only as the launch's identity (`--generation_job_id` next to the seed: only the Dataflow job is read, needs `roles/dataflow.viewer`, never the log): its row carries the job id and window and is listed in `evaluation_latest_per_job`; with `--validation_runs_table` and the window it also reads this launch's `validation_runs` rows (one query), whose digest verifies the reference sample so the reference-based privacy metrics (nearest-neighbour ones, panel-based rates and lifts) are evaluated, otherwise they are `not_evaluated` with the reason; a model the launch adjusted is not seen. It is not waited for: if its job dies after

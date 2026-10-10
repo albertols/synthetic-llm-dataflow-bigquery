@@ -325,6 +325,42 @@ flowchart LR
   E -- "evaluation" --> V["🔀 evaluation job<br/>CPU workers"]:::beam
 ```
 
+**How the job reads its rows.** The source and synthetic rows are read
+through the BigQuery Storage Read API (`DIRECT_READ`), which needs
+`bigquery.readsessions.create` (`roles/bigquery.readSessionUser`) on the
+project of each table read. The role is optional: the launch asks once per
+project, and a table whose project refuses is paged through `tabledata.list`
+with `bigquery.tables.get` and `bigquery.tables.getData` (both in
+`roles/bigquery.dataViewer`) and no read session. The first launch in a deployment
+without the role, on 2026-10-09, failed on every read; the paged read was
+built for it and has not read from BigQuery yet.
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  P{"🛡️ read session<br/>per project"}:::cpu
+  P -- "accepted" --> D["🔀 DIRECT_READ<br/>Storage Read API"]:::beam
+  P -- "refused: 403" --> W["⚪ one WARNING"]:::data --> L["🔀 paged read<br/>tabledata.list"]:::beam
+  P -- "anything else" --> F["⚪ the launch fails"]:::data
+```
+
+| | `DIRECT_READ` | Paged read |
+|---|---|---|
+| A read table gets it when | its project accepted | its project refused |
+| Speed | the API's streams | bounded by a quota of the project that contains the table: 3.7 GB of row data per minute, 7.5 GB in the US and EU multi-regions, shared with every other reader of that project |
+| A table written to while it is read | read as the session saw it | the job fails (`TableChangedError`): evaluate once nothing writes to it |
+| An empty table | read as empty | read as empty only when `tabledata.list` counts no row; metadata that disagrees with it fails the job |
+| Too large for it | — | `--mode sampled` reads a sample of each table |
+
+The launch says which tables it pages in one `WARNING` (it starts `the
+BigQuery Storage Read API refused a read session on project`), with their
+rows and bytes; the registry row keeps it in `warnings`. Nothing has to be
+set, and granting the role later moves the same image to the fast read.
+Design: [§5.2](../../docs/designs/2026-07-07-evaluation-framework-design.md#52-the-graph).
+
 | What | Where | Note |
 |---|---|---|
 | The image | `docker/Dockerfile` (repository root) | carries `packages/sdfb-evaluation/src`; the evaluator runs on the generator's environment, not on this package's lock |

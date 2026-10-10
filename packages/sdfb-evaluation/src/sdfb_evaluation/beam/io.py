@@ -18,6 +18,15 @@
                                            method=DIRECT_READ, selected_fields=
                                            plan columns, use_native_datetime=
                                            True) → normalize_direct_read
+                          PagedBigQuerySources
+                                           the BigQuery client's `list_rows`
+                                           (REST tabledata.list) by row
+                                           ranges, plan columns only; no
+                                           normalisation ("The paged read")
+                          RoutedBigQuerySources
+                                           DIRECT_READ, except the read
+                                           tables of the projects that
+                                           refused a read session: paged
                           InMemorySources  beam.Create(rows_by[(table, side)])
       reference, holdout  both             beam.Create(table.panel.r_rows /
                                            h_rows), projected to the plan
@@ -52,17 +61,17 @@ and what the generator read its reference sample with
 `_CustomBigQueryStorageSource` reads Avro through fastavro by default and
 Arrow (`read_arrow`, each cell `.as_py()`) with `use_native_datetime=True`:
 
-    BigQuery type    client (panel)       Arrow DIRECT_READ     Avro DIRECT_READ
-    ───────────────  ───────────────────  ────────────────────  ────────────────
-    TIMESTAMP        aware UTC datetime   aware UTC datetime    aware UTC datetime
-    DATETIME         naive datetime       naive datetime        text  ◄ fixed here
-    DATE, TIME       date, time           date, time            date, time
-    NUMERIC          Decimal              Decimal, scale 9      Decimal, scale 9
-    BIGNUMERIC       Decimal              Decimal, scale 38     Decimal, scale 38
-    BYTES            bytes                bytes                 bytes
-    JSON             parsed value         JSON text ◄ fixed     JSON text ◄ fixed
-    GEOGRAPHY        WKT text             WKT text              WKT text
-    RECORD, ARRAY    dict, list           dict, list            dict, list
+    BigQuery type    client (panel)       Arrow DIRECT_READ     Avro DIRECT_READ    paged read
+    ───────────────  ───────────────────  ────────────────────  ──────────────────  ──────────
+    TIMESTAMP        aware UTC datetime   aware UTC datetime    aware UTC datetime  = client
+    DATETIME         naive datetime       naive datetime        text  ◄ fixed here  = client
+    DATE, TIME       date, time           date, time            date, time          = client
+    NUMERIC          Decimal              Decimal, scale 9      Decimal, scale 9    = client
+    BIGNUMERIC       Decimal              Decimal, scale 38     Decimal, scale 38   = client
+    BYTES            bytes                bytes                 bytes               = client
+    JSON             parsed value         JSON text ◄ fixed     JSON text ◄ fixed   = client
+    GEOGRAPHY        WKT text             WKT text              WKT text            = client
+    RECORD, ARRAY    dict, list           dict, list            dict, list          = client
 
 Decimal scale needs no fix (`canonical_value` strips trailing zeros). Arrow
 is chosen because it types DATETIME natively at every depth, RECORD
@@ -71,7 +80,83 @@ should an Avro read ever feed it, DATETIME text) by the plan's `bq_type`.
 Known limits, all on types the generator does not write or nests: a JSON
 sub-field inside a RECORD stays text, and INTERVAL (client `relativedelta`,
 Arrow `MonthDayNano`) and RANGE are not normalised — rows holding them hash
-differently on the panel and DIRECT_READ sides.
+differently on the panel and DIRECT_READ sides. The paged read has none of
+these limits: its cells are decoded by the code that decodes the panel's.
+A table with one side paged and the other read by DIRECT_READ therefore
+differs between its sides only on those same limits.
+
+The paged read. DIRECT_READ needs `bigquery.readsessions.create` on the
+project of every table it reads, and a project may refuse it (a
+deployment that does not grant the role; a public project, where the
+caller is expected to hold no role — expected, not observed). The driver
+asks once per such project before the graph is built
+(`probe_direct_read`, the call a worker makes when it splits the read),
+and one rule follows (`RoutedBigQuerySources.paged`): A READ TABLE IS
+PAGED IF AND ONLY IF ITS PROJECT REFUSED. Every other read table keeps
+DIRECT_READ. The paged read needs `bigquery.tables.get` (the table's
+metadata) and `bigquery.tables.getData` (its rows) on the read table,
+and no read session:
+
+    Create([read table])
+      │ Ranges   NOW (the read table is built by the prepare statements,
+      │          after planning): tables.get → numRows, numBytes,
+      │          lastModifiedTime, and ONE tabledata.list request for
+      │          one row → totalRows, the count the row positions
+      │          address → row ranges (start, count) holding about
+      │          RANGE_BYTES each
+      ▼
+    Reshuffle    the ranges spread over the workers
+      ▼
+    Page         per range: tabledata.list(startIndex = position,
+      │          maxResults = rows left, selectedFields = plan columns),
+      │          ONE response per request — the API cuts a response at
+      │          its byte limit, so the next request starts at
+      │          position + rows returned, never at a page token
+      ▼
+    rows ──► the same PCollection[dict] DIRECT_READ gives, in the
+             client's types (the table above)
+
+A range is only the rows it claims on a table that does not change, so
+the read fails the job (`TableChangedError`, naming the table and both
+readings) instead of reading a changing table wrong:
+
+    the cut            the metadata's `numRows` is `tabledata.list`'s
+                       `totalRows`. A table is empty only when the list
+                       says so: metadata counting no row is still asked
+    every response     it carries a `totalRows` (one that does not
+                       fails: it cannot be checked), and that is the row
+                       count of the cut
+    every range        returns exactly its row count; then tables.get
+                       again: the row count and the modification time of
+                       the cut. The check runs inside the bundle that
+                       emitted the range's rows, so a range that fails
+                       it commits none of them
+    after the last     the rows the ranges emitted (each range counts
+      range            what it yields) add up to the cut, and the
+                       table's metadata is still the cut's
+
+Metadata that says nothing never passes for an answer: without a
+`numRows` the count is the list's own and one WARNING names the table;
+without a `lastModifiedTime` the check for a rewrite with as many rows
+is off for that table, and one WARNING says so.
+
+What the checks cannot see: a table whose rows changed ORDER while its
+row count and modification time did not. The source pin and the sample
+tables are immutable; the landing table of a `table` / `manual` scope
+and an unpinned source are live tables.
+
+Throttling. `tabledata.list` has a byte quota per project (3.7 GB of row
+data per minute, 7.5 GB in the US and EU multi-regions), charged to the
+project that CONTAINS THE TABLE and shared with every other reader of
+that project and with `jobs.getQueryResults`. A page
+BigQuery throttles waits and is asked for again (`page_retry_waits`: by
+the error's REASON — `rateLimitExceeded`, `quotaExceeded`, a backend
+error — or a transient transport error; never on a 403 alone, so a
+missing permission fails at once), with exponential back-off up to
+PAGE_RETRY_MAXIMUM_SECONDS between attempts, for PAGE_RETRY_SECONDS in
+all: long enough to ride out a per-minute limit the job's own readers
+keep hitting, short enough that a quota waiting does not bring back (a
+daily or custom one) fails the range, naming the reason, in minutes.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 """
@@ -81,11 +166,13 @@ from __future__ import annotations
 import abc
 import glob
 import json
+import logging
 import os
 import re
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, NamedTuple, Protocol
 
 import apache_beam as beam
 from apache_beam.io.gcp.bigquery import (
@@ -95,6 +182,7 @@ from apache_beam.io.gcp.bigquery import (
 )
 
 from sdfb_evaluation.canonical import json_safe
+from sdfb_evaluation.context.bq import normalize_fqn
 from sdfb_evaluation.schemas import TABLES, load_schema
 from sdfb_evaluation.types import Side
 
@@ -102,17 +190,30 @@ if TYPE_CHECKING:
   from sdfb_evaluation.context.plan import ColumnPlan, TablePlan
 
 __all__ = [
+    "DEFAULT_RANGE_ROWS",
     "LOAD_ORDER",
+    "MAX_RANGE_ROWS",
+    "MIN_RANGE_ROWS",
+    "PAGE_RETRY_SECONDS",
+    "PROBE_SECONDS",
+    "RANGE_BYTES",
     "BigQuerySinks",
     "BigQuerySources",
     "ClientLoadSinks",
     "InMemorySources",
     "JsonLoader",
     "LocalJsonSinks",
+    "PagedBigQuerySources",
+    "RoutedBigQuerySources",
     "Sinks",
     "Sources",
+    "TableChangedError",
     "json_line",
     "normalize_direct_read",
+    "page_retry_waits",
+    "probe_direct_read",
+    "read_table_of",
+    "row_ranges",
 ]
 
 # The metric tables first, the registry last: its FINAL row must never be
@@ -133,6 +234,39 @@ _BEAM_TEMP = "beam-temp-"
 _BEAM_TEMP_ID = re.compile(r"[0-9a-f]{32}")
 _GLOB_CHARS = re.compile(r"[*?\[\]]")
 _SHOWN_FILES = 3
+_LOGGER = logging.getLogger(__name__)
+
+# The paged read (module docstring). A range holds about RANGE_BYTES of
+# the table's logical bytes: a few tabledata.list responses (the API cuts
+# one at 10 MB), so a bundle that is retried re-reads little and the
+# ranges of a large table spread over every worker.
+RANGE_BYTES = 64 << 20
+MIN_RANGE_ROWS = 1_000
+MAX_RANGE_ROWS = 1_000_000
+DEFAULT_RANGE_ROWS = 50_000  # a table whose metadata gives no size
+# The probe of the Storage Read API, retries included (`probe_direct_read`).
+PROBE_SECONDS = 45.0
+# One page request: how long it may take, and how it waits when BigQuery
+# throttles it (module docstring, Throttling).
+PAGE_TIMEOUT_SECONDS = 300.0
+PAGE_RETRY_SECONDS = 900.0
+PAGE_RETRY_INITIAL_SECONDS = 1.0
+PAGE_RETRY_MAXIMUM_SECONDS = 60.0
+_PAGE_RETRY_MULTIPLIER = 2.0
+_WAIT_REASONS = frozenset({
+    "rateLimitExceeded",
+    "quotaExceeded",
+    "backendError",
+    "internalError",
+    "badGateway",
+})
+# `project` → a `google.cloud.bigquery.Client`, called on a worker.
+ClientFactory = Callable[[str], Any]
+_RANGES = "ranges"
+_CUT = "cut"
+_ROWS = "rows"
+_READ = "read"
+_ERROR_CHARS = 300
 
 
 # --------------------------------------------------------------------------
@@ -236,6 +370,28 @@ class Sources(abc.ABC):
     """The source or synthetic side's rows."""
 
 
+def read_table_of(table: TablePlan, side: Side | str) -> str:
+  """The BigQuery table the pipeline reads for one source/synthetic side
+  of `table` (`project.dataset.table`).
+
+  Raises:
+    ValueError: a panel side, or a side with nothing to read.
+  """
+  side = Side(side)
+  if side in _PANEL_SIDES:
+    raise ValueError(f"the {side} side comes from the plan's panel, not "
+                     "from BigQuery")
+  if side is Side.SOURCE:
+    read_table = table.source_read_table
+  else:
+    read_table = table.synthetic_read_table or table.scope.read_table
+  if not read_table:
+    why = table.skip_reason or "see the plan warnings"
+    raise ValueError(f"{table.landing_table}: nothing to read for the "
+                     f"{side} side (no read table was planned: {why})")
+  return read_table
+
+
 class BigQuerySources(Sources):
   """DIRECT_READ (BigQuery Storage Read API, Arrow) of each side's read
   table, restricted to the plan's columns, then `normalize_direct_read`."""
@@ -246,20 +402,8 @@ class BigQuerySources(Sources):
     Raises:
       ValueError: a panel side, or a side with nothing to read.
     """
-    side = Side(side)
-    if side in _PANEL_SIDES:
-      raise ValueError(f"the {side} side comes from the plan's panel, not "
-                       "from BigQuery")
-    if side is Side.SOURCE:
-      read_table = table.source_read_table
-    else:
-      read_table = table.synthetic_read_table or table.scope.read_table
-    if not read_table:
-      why = table.skip_reason or "see the plan warnings"
-      raise ValueError(f"{table.landing_table}: nothing to read for the "
-                       f"{side} side (no read table was planned: {why})")
     return ReadFromBigQuery(
-        table=read_table,
+        table=read_table_of(table, side),
         method=ReadFromBigQuery.Method.DIRECT_READ,
         selected_fields=[c.name for c in table.columns],
         use_native_datetime=True)
@@ -271,6 +415,505 @@ class BigQuerySources(Sources):
     if fixes:
       rows = rows | f"{label}/Types" >> beam.Map(_apply_fixes, fixes)
     return rows
+
+
+def probe_direct_read(read_table: str, columns: Sequence[str]) -> None:
+  """Ask the BigQuery Storage Read API for ONE read session on
+  `read_table`, as a DIRECT_READ worker does when it splits the read
+  (Beam 2.74, `_CustomBigQueryStorageSource.split`): the same call
+  (`BigQueryReadClient.create_read_session`), the same parent — the READ
+  TABLE's own project, which is where `bigquery.readsessions.create` is
+  checked — Arrow, the plan's columns, and one stream instead of many. No
+  row is read; a session nobody reads expires by itself.
+
+  The answer is the workers' answer when the caller runs as the account
+  they run as: a Flex Template launcher and its job's workers share one
+  service account, and a local runner reads as the caller. A Dataflow job
+  submitted from an operator's own machine runs as another account than
+  the one that probed.
+
+  The call is bounded: `PROBE_SECONDS` in all, the retries of an
+  unavailable service included, so an endpoint that does not answer costs
+  a launcher a known part of its twelve minutes and then fails the
+  launch.
+
+  Returns when the API accepts the session.
+
+  Raises:
+    ValueError: `read_table` is not a `project.dataset.table`.
+    Exception: whatever the API raised (`google.api_core.exceptions`): a
+      `Forbidden` (`PermissionDenied`) is a refusal; anything else may
+      pass on a retry.
+  """
+  from google.api_core import exceptions  # pylint: disable=import-outside-toplevel  # with the client below
+  from google.api_core import retry as retries  # pylint: disable=import-outside-toplevel  # same
+  from google.cloud import bigquery_storage_v1 as bq_storage  # pylint: disable=import-outside-toplevel  # credentials and gRPC only when a real read is probed
+
+  project, dataset, name = normalize_fqn(read_table).split(".")
+  session = bq_storage.types.ReadSession(
+      table=f"projects/{project}/datasets/{dataset}/tables/{name}",
+      data_format=bq_storage.types.DataFormat.ARROW,
+      read_options=bq_storage.types.ReadSession.TableReadOptions(
+          selected_fields=list(columns)))
+  bq_storage.BigQueryReadClient().create_read_session(
+      parent=f"projects/{project}",
+      read_session=session,
+      max_stream_count=1,
+      retry=retries.Retry(
+          predicate=retries.if_exception_type(exceptions.ServiceUnavailable,
+                                              exceptions.DeadlineExceeded),
+          initial=1.0,
+          maximum=8.0,
+          multiplier=2.0,
+          timeout=PROBE_SECONDS),
+      timeout=PROBE_SECONDS)
+
+
+# --------------------------------------------------------------------------
+# the paged read
+# --------------------------------------------------------------------------
+class TableChangedError(RuntimeError):
+  """A table read by row ranges is not the table its ranges were cut
+  from (module docstring, The paged read)."""
+
+
+class _TableState(NamedTuple):
+  """What `tables.get` says of a read table: its rows, its logical bytes
+  and `lastModifiedTime` (ms). Each is None when the resource does not
+  carry it — an absent row count is never read as zero."""
+  rows: int | None
+  size: int | None
+  modified: int | None
+
+  def seen(self) -> str:
+    """This reading in words, for an error message."""
+    rows = "no row count" if self.rows is None else f"{self.rows} rows"
+    return f"{rows}, last modified {self.modified}"
+
+
+def row_ranges(num_rows: int, num_bytes: int | None) -> list[tuple[int, int]]:
+  """`(start, count)` row ranges that cover rows `0 … num_rows - 1` once
+  each, in order: about `RANGE_BYTES` of the table's logical bytes a
+  range, between `MIN_RANGE_ROWS` and `MAX_RANGE_ROWS` rows, or
+  `DEFAULT_RANGE_ROWS` when the size is unknown. `[]` for an empty
+  table."""
+  if num_rows <= 0:
+    return []
+  if num_bytes:
+    size = RANGE_BYTES * num_rows // num_bytes
+    size = min(MAX_RANGE_ROWS, max(MIN_RANGE_ROWS, size))
+  else:
+    size = DEFAULT_RANGE_ROWS
+  return [(start, min(size, num_rows - start))
+          for start in range(0, num_rows, size)]
+
+
+def _reason(exc: BaseException) -> str | None:
+  """The `reason` of the first error an API exception carries, if any."""
+  try:
+    reason = exc.errors[0]["reason"]  # type: ignore[attr-defined]
+  except (AttributeError, IndexError, KeyError, TypeError):
+    return None
+  return str(reason) if reason else None
+
+
+def _transient(exc: BaseException) -> bool:
+  """An error with no reason that a retry may remove: the transport and
+  server failures the BigQuery client's own default retry waits for."""
+  import requests.exceptions  # pylint: disable=import-outside-toplevel  # the client's transport, loaded with it
+  from google.api_core import exceptions  # pylint: disable=import-outside-toplevel  # same
+  from google.auth import exceptions as auth_exceptions  # pylint: disable=import-outside-toplevel  # same
+
+  if isinstance(exc, requests.exceptions.SSLError):
+    return False  # a configuration or security problem: it does not pass
+  return isinstance(
+      exc, (ConnectionError, exceptions.TooManyRequests,
+            exceptions.InternalServerError, exceptions.BadGateway,
+            exceptions.ServiceUnavailable, exceptions.GatewayTimeout,
+            requests.exceptions.ChunkedEncodingError,
+            requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+            auth_exceptions.TransportError))
+
+
+def page_retry_waits(exc: BaseException) -> bool:
+  """Whether a failed page request waits and is sent again (module
+  docstring, Throttling). The error's REASON decides when it has one: a
+  rate limit, a quota or a backend error waits; `accessDenied`,
+  `notFound`, `invalid` and every other reason fail at once. An error
+  without a reason waits only when it is a transport or server failure —
+  never because its status is 403."""
+  reason = _reason(exc)
+  if reason is not None:
+    return reason in _WAIT_REASONS
+  return _transient(exc)
+
+
+def _bigquery_client(project: str) -> Any:
+  from google.cloud import bigquery  # pylint: disable=import-outside-toplevel  # credentials are resolved on the worker that reads
+
+  return bigquery.Client(project=project)
+
+
+def _table_state(client: Any, read_table: str) -> tuple[_TableState, Any]:
+  """(`_TableState`, the `Table`) of `read_table`, from `tables.get`."""
+  table = client.get_table(read_table)
+  resource = table.to_api_repr()
+  size, modified = resource.get("numBytes"), resource.get("lastModifiedTime")
+  rows = resource.get("numRows")
+  state = _TableState(
+      rows=int(rows) if rows is not None else None,
+      size=int(size) if size is not None else None,
+      modified=int(modified) if modified is not None else None)
+  return state, table
+
+
+def _first_line(exc: BaseException) -> str:
+  lines = str(exc).strip().splitlines()
+  return (lines[0] if lines else type(exc).__name__)[:_ERROR_CHARS]
+
+
+class _PagedFn(beam.DoFn):
+  """A DoFn that talks to one read table through a BigQuery client made
+  in `setup()` (on the worker; never pickled into the graph)."""
+
+  def __init__(self, read_table: str, project: str, make_client: ClientFactory):
+    super().__init__()
+    self._read_table = read_table
+    self._project = project
+    self._make_client = make_client
+    self._client: Any = None
+    self._waits = beam.metrics.Metrics.counter("sdfb_evaluation.paged_read",
+                                               "waits")
+
+  def setup(self) -> None:
+    self._client = self._make_client(self._project)
+
+  def teardown(self) -> None:
+    if self._client is not None:
+      self._client.close()
+    self._client = None
+
+  def _changed(self, cut: tuple[int, int | None],
+               now: str) -> TableChangedError:
+    """The error of a table that is not the table of the cut; `now` is
+    the second reading, in words."""
+    return TableChangedError(
+        f"{self._read_table} changed while it was read by row ranges: "
+        f"{cut[0]} rows, last modified {cut[1]} (ms since the epoch) when "
+        f"its ranges were cut; {now}. A paged read is only correct on a "
+        "table that does not change (one being written to, or with rows in "
+        "a streaming buffer, is not), so the job fails rather than evaluate "
+        "rows read twice or not at all; evaluate it again once nothing "
+        "writes to the table")
+
+  @staticmethod
+  def _moved(now: _TableState, cut: Sequence[Any]) -> bool:
+    """Whether the table's metadata is no longer the cut's `(rows,
+    modified)`: another modification time, or another row count where
+    the metadata carries one (the cut's count is `tabledata.list`'s
+    own, which every response is checked against)."""
+    return now.modified != cut[1] or (now.rows is not None and
+                                      now.rows != cut[0])
+
+  def _waited(self, exc: BaseException) -> None:
+    self._waits.inc()
+    _LOGGER.info("paged read of %s: a request waits (%s: %s)", self._read_table,
+                 _reason(exc) or type(exc).__name__, _first_line(exc))
+
+  def _list(self, reference: Any, fields: Sequence[Any], start: int | None,
+            limit: int, doing: str) -> tuple[Any, int]:
+    """ONE `tabledata.list` request for up to `limit` rows of `fields`
+    from row `start` (None: no row position is sent): (the response's
+    rows as a page, its `totalRows`). `doing` says what the request is
+    for, in an error message.
+
+    Raises:
+      RuntimeError: the request was still throttled after
+        `PAGE_RETRY_SECONDS` (the message names the reason), or the
+        response carries no `totalRows`, so it cannot be checked against
+        the table's row count.
+      Exception: any error that does not wait (`page_retry_waits`).
+    """
+    from google.api_core import exceptions  # pylint: disable=import-outside-toplevel  # with the client, on a worker
+    from google.api_core import retry as retries  # pylint: disable=import-outside-toplevel  # same
+
+    retry = retries.Retry(
+        predicate=page_retry_waits,
+        initial=PAGE_RETRY_INITIAL_SECONDS,
+        maximum=PAGE_RETRY_MAXIMUM_SECONDS,
+        multiplier=_PAGE_RETRY_MULTIPLIER,
+        timeout=PAGE_RETRY_SECONDS,
+        on_error=self._waited)
+    rows = self._client.list_rows(
+        reference,
+        selected_fields=fields,
+        start_index=start,
+        max_results=limit,
+        retry=retry,
+        timeout=PAGE_TIMEOUT_SECONDS)
+    try:
+      page = next(rows.pages, None)
+    except exceptions.RetryError as exc:
+      cause = exc.cause or exc
+      raise RuntimeError(
+          f"{self._read_table}: tabledata.list still answered "
+          f"{_reason(cause) or type(cause).__name__} after "
+          f"{PAGE_RETRY_SECONDS:.0f} s of waiting ({_first_line(cause)}) "
+          f"while {doing}. A quota that waiting does not bring back has to "
+          "be raised, or the table read with --mode sampled or through the "
+          "Storage Read API (roles/bigquery.readSessionUser)") from exc
+    total = rows.total_rows
+    if total is None:
+      raise RuntimeError(
+          f"{self._read_table}: tabledata.list answered without totalRows "
+          f"while {doing}, so the response cannot be checked against the "
+          "table's row count; the job fails rather than evaluate rows it "
+          "could not check")
+    return page, int(total)
+
+
+class _CutRangesFn(_PagedFn):
+  """The read table → its row ranges `(start, count, rows, modified)`,
+  cut at read time, and — tagged `cut` — the `(rows, modified)` every
+  range is checked against.
+
+  The row count is `tabledata.list`'s own (`totalRows` of one request
+  for one row of one column): row positions address that count, and it
+  is there to be asked even when the table's metadata says nothing. The
+  metadata's `numRows` is compared with it where the metadata carries
+  one, and is never what makes a table empty:
+
+      numRows   totalRows   then
+      ───────   ─────────   ──────────────────────────────────────────
+      equal     n           n rows in ranges (none, and no row, for 0)
+      differs   n           TableChangedError naming both readings
+      absent    n           n rows in ranges, and one WARNING
+
+  An absent `lastModifiedTime` switches off the one check that sees a
+  rewrite with as many rows: one WARNING says so, and the read goes on.
+  """
+
+  def process(self, element: Any) -> Iterator[Any]:
+    del element  # the table is this DoFn's own
+    state, table = _table_state(self._client, self._read_table)
+    first = list(table.schema[:1])
+    if not first:
+      raise ValueError(f"{self._read_table} has no column, so it has no "
+                       "row to page")
+    page, total = self._list(table.reference, first, None, 1,
+                             "counting its rows")
+    if state.rows is None:
+      _LOGGER.warning(
+          "paged read of %s: the table's metadata carries no row count; "
+          "the count is tabledata.list's own (%d rows)", self._read_table,
+          total)
+    elif state.rows != total:
+      raise TableChangedError(
+          f"{self._read_table}: tables.get counts {state.rows} rows and "
+          f"tabledata.list counts {total} rows (a table being written to, "
+          "or with rows in a streaming buffer, is counted differently by "
+          "the two). A paged read is only correct on a table that does not "
+          "change, so the job fails rather than evaluate rows read twice "
+          "or not at all; evaluate it again once nothing writes to the "
+          "table")
+    if total == 0 and page is not None and page.num_items:
+      raise TableChangedError(
+          f"{self._read_table}: tabledata.list counts no row and returned "
+          "a row; the job fails rather than evaluate a table it cannot "
+          "count")
+    if state.modified is None:
+      _LOGGER.warning(
+          "paged read of %s: the table's metadata carries no modification "
+          "time, so a table rewritten with as many rows while it is read "
+          "would not be noticed; its row count is still checked on every "
+          "page", self._read_table)
+    yield beam.pvalue.TaggedOutput(_CUT, (total, state.modified))
+    ranges = row_ranges(total, state.size)
+    _LOGGER.info(
+        "paged read of %s: %d rows, %s logical bytes, last modified %s (ms), "
+        "%d row ranges", self._read_table, total, state.size, state.modified,
+        len(ranges))
+    for start, count in ranges:
+      yield (start, count, total, state.modified)
+
+
+class _ReadRangeFn(_PagedFn):
+  """One row range → its rows, page by page (module docstring, The
+  paged read), and — tagged `read` — the number of rows it emitted."""
+
+  def __init__(self, read_table: str, columns: Sequence[str], project: str,
+               make_client: ClientFactory):
+    super().__init__(read_table, project, make_client)
+    self._columns = tuple(columns)
+    self._fields: list[Any] | None = None
+    self._reference: Any = None
+    self._pages = beam.metrics.Metrics.counter("sdfb_evaluation.paged_read",
+                                               "pages")
+
+  def setup(self) -> None:
+    super().setup()
+    self._fields = None
+    self._reference = None
+
+  def _selected(self) -> list[Any]:
+    """The plan's columns as the table's own schema fields, in the
+    TABLE's order: the client decodes a row's cells by position.
+
+    Raises:
+      ValueError: the table lacks a column the plan reads.
+    """
+    if self._fields is None:
+      table = self._client.get_table(self._read_table)
+      names = {field.name for field in table.schema}
+      missing = [name for name in self._columns if name not in names]
+      if missing:
+        raise ValueError(f"{self._read_table} has no column {missing}, which "
+                         "the plan reads")
+      wanted = set(self._columns)
+      self._fields = [f for f in table.schema if f.name in wanted]
+      self._reference = table.reference
+    return self._fields
+
+  def _page(self, position: int, left: int, span: str) -> tuple[Any, int]:
+    """(the response's rows as a page, its `totalRows`) of ONE request
+    for up to `left` rows from row `position` (`_PagedFn._list`)."""
+    fields = self._selected()  # also sets the table's reference
+    found = self._list(self._reference, fields, position, left,
+                       f"reading {span} at row {position}")
+    self._pages.inc()
+    return found
+
+  def process(self, element: tuple[int, int, int, int | None]) -> Iterator[Any]:
+    start, count, cut_rows, cut_modified = element
+    cut = (cut_rows, cut_modified)
+    end = start + count
+    span = f"rows [{start}, {end})"
+    self._selected()
+    began = time.monotonic()
+    position, pages, emitted = start, 0, 0
+    while position < end:
+      page, total = self._page(position, end - position, span)
+      got = page.num_items if page is not None else 0
+      if total != cut_rows:
+        raise self._changed(
+            cut, f"{total} rows counted by tabledata.list on the page at row "
+            f"{position} of {span}")
+      if got == 0 or got > end - position:
+        returned = "no row" if got == 0 else f"{got} rows"
+        raise TableChangedError(
+            f"{self._read_table}: tabledata.list returned {returned} at row "
+            f"{position} of {span}, where {end - position} were left of the "
+            f"{cut_rows} rows its ranges were cut from; the job fails rather "
+            "than evaluate rows read twice or not at all")
+      for row in page:
+        emitted += 1
+        yield dict(row.items())
+      position += got
+      pages += 1
+    now, _ = _table_state(self._client, self._read_table)
+    if self._moved(now, cut):
+      raise self._changed(cut, f"{now.seen()} after {span}")
+    _LOGGER.info("paged read of %s: %s in %d pages, %.1f s", self._read_table,
+                 span, pages,
+                 time.monotonic() - began)
+    yield beam.pvalue.TaggedOutput(_READ, emitted)
+
+
+class _UnchangedFn(_PagedFn):
+  """After the last range: the table is still the table of the cut, and
+  the rows the ranges emitted are the rows of the cut."""
+
+  def process(self, rows_read: int, cut: tuple[int, int | None]) -> None:
+    now, _ = _table_state(self._client, self._read_table)
+    if self._moved(now, cut):
+      raise self._changed(cut, f"{now.seen()} after its last range")
+    if rows_read != cut[0]:
+      raise TableChangedError(
+          f"{self._read_table}: its row ranges returned {rows_read} rows "
+          f"where the table had {cut[0]} rows when they were cut; the job "
+          "fails rather than evaluate rows read twice or not at all")
+    _LOGGER.info("paged read of %s: complete, %d rows, unchanged",
+                 self._read_table, rows_read)
+
+
+class PagedBigQuerySources(Sources):
+  """Each side's read table through the BigQuery client's `list_rows`
+  (REST `tabledata.list`), by row ranges, restricted to the plan's
+  columns (module docstring, The paged read). It needs
+  `bigquery.tables.get` and `bigquery.tables.getData` on the read tables
+  and no read session; the rows have the client's own Python types, the
+  panel's, so nothing normalises them.
+
+  Args:
+    project: the project the workers' BigQuery client is made for (the
+      job's).
+    make_client: `project` → a `google.cloud.bigquery.Client` (tests
+      give one over a fake connection); called on the worker.
+  """
+
+  def __init__(self,
+               project: str,
+               *,
+               make_client: ClientFactory = _bigquery_client):
+    self.project = project
+    self._make_client = make_client
+
+  def _read(self, p: beam.Pipeline, table: TablePlan, side: Side,
+            label: str) -> beam.PCollection:
+    read_table = normalize_fqn(read_table_of(table, side))
+    columns = [c.name for c in table.columns]
+    about = (read_table, self.project, self._make_client)
+    cut = (
+        p
+        | f"{label}/Table" >> beam.Create([read_table])
+        | f"{label}/Ranges" >> beam.ParDo(_CutRangesFn(*about)).with_outputs(
+            _CUT, main=_RANGES))
+    read = (
+        cut[_RANGES]
+        | f"{label}/Reshuffle" >> beam.Reshuffle()
+        | f"{label}/Page" >> beam.ParDo(
+            _ReadRangeFn(read_table, columns, self.project,
+                         self._make_client)).with_outputs(_READ, main=_ROWS))
+    _ = (
+        read[_READ]
+        | f"{label}/Count" >> beam.CombineGlobally(sum)
+        | f"{label}/Unchanged" >> beam.ParDo(
+            _UnchangedFn(*about), beam.pvalue.AsSingleton(cut[_CUT])))
+    rows: beam.PCollection = read[_ROWS]
+    return rows
+
+
+class RoutedBigQuerySources(Sources):
+  """DIRECT_READ for every read table, except those of the projects
+  that refused a read session, which are paged (module docstring, The
+  paged read). `paged` is the one rule; nothing else chooses a path.
+
+  Args:
+    refused: the projects whose probe was refused.
+    project: the project the paged read's client is made for (the job's).
+    make_client: see `PagedBigQuerySources`.
+  """
+
+  def __init__(self,
+               refused: Collection[str],
+               project: str,
+               *,
+               make_client: ClientFactory = _bigquery_client):
+    self.refused = frozenset(refused)
+    self._direct = BigQuerySources()
+    self._paged = PagedBigQuerySources(project, make_client=make_client)
+
+  def paged(self, read_table: str) -> bool:
+    """Whether `read_table` (`project.dataset.table`) is read by pages:
+    if and only if its project refused a read session."""
+    return normalize_fqn(read_table).split(".", 1)[0] in self.refused
+
+  def _read(self, p: beam.Pipeline, table: TablePlan, side: Side,
+            label: str) -> beam.PCollection:
+    del label  # the chosen sources label the read the same way
+    chosen = (
+        self._paged if self.paged(read_table_of(table, side)) else self._direct)
+    return chosen.read(p, table, side)
 
 
 class InMemorySources(Sources):

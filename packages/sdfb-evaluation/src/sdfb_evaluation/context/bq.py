@@ -266,10 +266,10 @@ class Bq:
     """What planning and scoping need to know about one table.
 
     Returns:
-      `schema` (BigQuery JSON field list), `numRows` (int), `location`,
-      `timePartitioning` (dict or None), `lastModified` and `created`
-      (RFC 3339 UTC) and `timeTravelHours` (the dataset's window; 168
-      when unset).
+      `schema` (BigQuery JSON field list), `numRows` and `numBytes`
+      (int; the table's logical bytes), `location`, `timePartitioning`
+      (dict or None), `lastModified` and `created` (RFC 3339 UTC) and
+      `timeTravelHours` (the dataset's window; 168 when unset).
     """
     name = normalize_fqn(fqn)
     resource = _translated(lambda: self._client.get_table(name),
@@ -278,12 +278,14 @@ class Bq:
         lambda: self._client.get_dataset(name.rsplit(".", 1)[0]),
         f"dataset of {name}")
     hours = getattr(dataset, "max_time_travel_hours", None)
-    rows = resource.get("numRows")
+    rows, size = resource.get("numRows"), resource.get("numBytes")
     return {
         "schema":
             list((resource.get("schema") or {}).get("fields") or []),
         "numRows":
             int(rows) if rows is not None else None,
+        "numBytes":
+            int(size) if size is not None else None,
         "location":
             resource.get("location"),
         "timePartitioning":

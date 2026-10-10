@@ -25,6 +25,8 @@ pipeline (D7), and who writes the one terminal row.
           ▼             or — `--sink local_json` — a shard in the
     prepare_evaluation  evaluation's own directory
           ▼
+    read path           DIRECT_READ, or the paged read when BigQuery
+          ▼             refuses a read session ("The read path")
     pipeline(options from the PREPARED plan) ─► submit ─► wait
           │  bq         the pipeline writes its rows and the FINAL row
           │  bq_client  local NDJSON, then one load job per table, the
@@ -139,6 +141,45 @@ table, from the launch's `freetext_pools_table`. A read BigQuery REFUSES
 (`context.bq.is_refusal`) degrades with a warning; a transient error
 fails the run, as in `prepare_evaluation` (Ruling R89, M8).
 
+The read path. The pipeline reads the source and synthetic rows by
+DIRECT_READ (the BigQuery Storage Read API), which needs
+`bigquery.readsessions.create` on the project of every table it reads.
+A deployment may not grant it, and a worker that is refused fails the
+job four attempts later. So, once the prepare statements have built the
+read tables and before the graph is built, the driver asks the API for
+one read session per project of the planned read tables
+(`beam.io.probe_direct_read`: the call a worker makes, with no row
+read):
+
+    accepted by a project       its read tables keep DIRECT_READ
+    refused (a 403) by a        its read tables, and only they, are read
+      project                   through the BigQuery client's
+                                `tabledata.list`
+                                (`beam.io.RoutedBigQuerySources`: a read
+                                table is paged if and only if its
+                                project refused), and one WARNING says
+                                so: per refusing project, why, the table
+                                sides it pages with their rows and
+                                bytes, the quota that bounds them and
+                                the role that restores the fast read;
+                                the same text joins the plan's warnings,
+                                so the registry's FINAL (or FAILED) row
+                                has it
+    anything else               raised: the driver's FAILED row. A
+                                transient error never silently changes
+                                how the evaluation reads
+
+A run that reads nothing from BigQuery (a fixture, sources a test put
+in) is not probed. The probe's answer is the workers' answer when the
+driver runs as the account they run as: a Flex Template launcher does,
+and so does a local runner.
+
+The launch is timed step by step (`_timed`): the submission's own line
+is the sum of the four before it (the free-text pools read, the pipeline
+options, the graph, `pipeline.run()`), and while the pipeline is handed
+to its runner Beam's own lines about its uploads to Cloud Storage are
+relayed, because `run()` cannot be timed from outside beyond its total.
+
 `--sink bq_client` without `--output_local` writes under a temporary
 directory: removed when the run ends without an error, kept (its path
 printed once on stderr) when it failed after writing something.
@@ -189,8 +230,10 @@ from sdfb_evaluation.beam.io import (
     BigQuerySources,
     ClientLoadSinks,
     LocalJsonSinks,
+    RoutedBigQuerySources,
     Sinks,
     Sources,
+    probe_direct_read,
 )
 from sdfb_evaluation.beam.label_key import label_key_mode
 from sdfb_evaluation.beam.pipeline import (
@@ -213,6 +256,7 @@ from sdfb_evaluation.context.launch import LaunchContext, resolve_launch
 from sdfb_evaluation.context.plan import (
     EvaluationPlan,
     Knobs,
+    TablePlan,
     build_plan,
     evaluation_key,
 )
@@ -230,6 +274,7 @@ from sdfb_evaluation.report.store import (
     read_bq,
 )
 from sdfb_evaluation.schemas import load_schema
+from sdfb_evaluation.types import Side
 from sdfb_evaluation.version import EVALUATOR_VERSION
 
 __all__ = [
@@ -243,6 +288,7 @@ __all__ = [
     "pipeline_options",
     "plan",
     "planning_failed_row",
+    "read_sides",
     "run",
     "runner_defaults",
     "submit_pipeline",
@@ -260,14 +306,67 @@ _LOGGER = logging.getLogger(__name__)
 @contextlib.contextmanager
 def _timed(evaluation_id: str, step: str) -> Iterator[None]:
   """Log one finished step of the launch around planning (the lookup
-  before it, the registry row, the prepare statements and the submission
-  after it) and its seconds, in the planner's line shape."""
+  before it, the registry row, the prepare statements, the read path and
+  the submission's steps after it) and its seconds, in the planner's
+  line shape. The `submission` line is the sum of the four before it."""
   began = time.monotonic()
   try:
     yield
   finally:
     _LOGGER.info("evaluation %s: %s %.2fs", evaluation_id, step,
                  time.monotonic() - began)
+
+
+# Beam's Dataflow client, and the lines it logs while `pipeline.run()`
+# stages the job: the only view from outside of where that call's time
+# goes (module docstring). Nothing else it logs is relayed — its "Create
+# job" line prints the whole job.
+_BEAM_SUBMIT_LOGGER = "apache_beam.runners.dataflow.internal.apiclient"
+_BEAM_SUBMIT_LINES = ("Starting GCS upload to ", "Completed GCS upload to ",
+                      "A template was just created at location ")
+
+
+class _RelayUploads(logging.Filter):
+  """On Beam's Dataflow client logger while a pipeline is handed over:
+  relays `_BEAM_SUBMIT_LINES` as this module's own INFO lines and lets
+  through only what the logger let through before (`threshold`, its
+  effective level then), so no other handler sees a line it did not see
+  before."""
+
+  def __init__(self, evaluation_id: str, threshold: int):
+    super().__init__()
+    self._evaluation_id = evaluation_id
+    self._threshold = threshold
+
+  def filter(self, record: logging.LogRecord) -> bool:
+    try:
+      message = record.getMessage()
+    except Exception:  # pylint: disable=broad-exception-caught  # a line Beam formatted badly must not stop the launch
+      message = ""
+    if record.levelno == logging.INFO and message.startswith(
+        _BEAM_SUBMIT_LINES):
+      _LOGGER.info("evaluation %s: pipeline run: %s", self._evaluation_id,
+                   message)
+    return record.levelno >= self._threshold
+
+
+@contextlib.contextmanager
+def _relayed_uploads(evaluation_id: str) -> Iterator[None]:
+  """While the pipeline is handed to its runner, relay Beam's upload
+  lines. Beam's logger is opened to INFO for that time, with a filter
+  that keeps every other line where it was; both are undone on the way
+  out, whatever happened."""
+  beam_logger = logging.getLogger(_BEAM_SUBMIT_LOGGER)
+  level = beam_logger.level
+  relay = _RelayUploads(evaluation_id, beam_logger.getEffectiveLevel())
+  beam_logger.addFilter(relay)
+  if not beam_logger.isEnabledFor(logging.INFO):
+    beam_logger.setLevel(logging.INFO)
+  try:
+    yield
+  finally:
+    beam_logger.setLevel(level)
+    beam_logger.removeFilter(relay)
 
 
 _DATAFLOW = "dataflow"
@@ -282,6 +381,10 @@ _COUNT_KEYS = ("total", "pass", "warn", "fail", "info", "not_evaluated")
 _SCORE_KEYS = ("overall", "fidelity", "privacy", "integrity", "diversity")
 _BQ_ERRORS = (BqApiError, PermissionError, LookupError)
 _NO_FINAL = "the job finished without a FINAL row"
+_HTTP_FORBIDDEN = 403
+_READ_SESSION_ROLE = "roles/bigquery.readSessionUser"
+_ERROR_CHARS = 300
+_SIZE_UNITS = (("GB", 10**9), ("MB", 10**6), ("kB", 10**3))
 _NO_SNAPSHOTS = (
     "--no_planning_snapshots: planning creates no table, so this as_of_diff "
     "scope has no start snapshot to read; plan or run without the flag to "
@@ -356,12 +459,16 @@ class Env:
   how a pipeline is made from its options (on Dataflow, Beam validates
   them against Cloud Storage right there) and how a built one is handed
   to its runner (the result: `wait_until_finish()`, `state` and, for a
-  submitted job, `job_id()`)."""
+  submitted job, `job_id()`). `probe_read(read table, columns)` asks the
+  Storage Read API for one read session and raises what it raised
+  (module docstring, The read path); it is called only when
+  `make_sources` gives the DIRECT_READ sources."""
   make_bq: Callable[[str], Any] = _default_bq
   session_factory: Callable[[str], Any] | None = None
   now: Callable[[], datetime] = _utc_now
   token: Callable[[], str] = _token
   make_sources: Callable[[], Sources] = BigQuerySources
+  probe_read: Callable[[str, Sequence[str]], None] = probe_direct_read
   make_pipeline: Callable[[PipelineOptions], beam.Pipeline] = _pipeline
   submit: Callable[[beam.Pipeline], Any] = submit_pipeline
 
@@ -987,6 +1094,132 @@ def pipeline_options(args: argparse.Namespace, beam_args: Sequence[str],
 
 
 # --------------------------------------------------------------------------
+# the read path
+# --------------------------------------------------------------------------
+def read_sides(planned: EvaluationPlan) -> list[tuple[TablePlan, Side, str]]:
+  """(table, side, read table) of every source or synthetic side the
+  pipeline reads from BigQuery: both sides of an evaluated table, and
+  the sides of a read-only parent that still have a read table. A read
+  table that is no table name is left to the pipeline's own set-up,
+  which names it."""
+  sides: list[tuple[TablePlan, Side, str]] = []
+  for table in planned.tables:
+    if not table.columns or not (table.evaluated or table.role == "external"):
+      continue
+    reads = ((Side.SOURCE, table.source_read_table),
+             (Side.SYNTHETIC, table.synthetic_read_table or
+              table.scope.read_table))
+    for side, read in reads:
+      if not read:
+        continue
+      try:
+        sides.append((table, side, normalize_fqn(read)))
+      except ValueError:
+        continue
+  return sides
+
+
+def _refused(exc: BaseException) -> bool:
+  """Whether the Storage Read API REFUSED the probe — a 403: the
+  missing permission, the API disabled in the project, a perimeter. Any
+  other error may pass on a retry and is not a refusal (module
+  docstring, The read path)."""
+  return isinstance(exc, PermissionError) or getattr(exc, "code",
+                                                     None) == _HTTP_FORBIDDEN
+
+
+def _first_line(exc: BaseException) -> str:
+  lines = str(exc).strip().splitlines()
+  return (lines[0] if lines else type(exc).__name__)[:_ERROR_CHARS]
+
+
+def _size(count: int) -> str:
+  for unit, scale in _SIZE_UNITS:
+    if count >= scale:
+      return f"{count / scale:.2f} {unit}"
+  return f"{count} B"
+
+
+def _side_size(bq: Any, table: TablePlan, side: Side,
+               read: str) -> tuple[int, int | None]:
+  """(rows, logical bytes or None) of one read table, from the table
+  itself (the prepare statements built it after planning); the rows the
+  plan counted, and no size, when BigQuery refuses the lookup.
+
+  Raises:
+    BqApiError: the lookup failed for a reason a retry may remove.
+  """
+  planned = table.rows_read[0 if side is Side.SOURCE else 1]
+  try:
+    info = bq.table(read)
+  except _BQ_ERRORS as exc:
+    if not is_refusal(exc):
+      raise
+    return round(planned), None
+  rows, size = info.get("numRows"), info.get("numBytes")
+  return (int(rows) if rows is not None else round(planned),
+          int(size) if size is not None else None)
+
+
+def _paged_sides(sides: Sequence[tuple[TablePlan, Side, str]], bq: Any) -> str:
+  """The table sides one refusing project pages, each with its rows and
+  the table's logical bytes, and their total. The bytes are an upper
+  bound on what is paged: a table's size counts every column, and only
+  the plan's columns are read (a read-only parent's key columns)."""
+  entries, rows_all, bytes_all, sized = [], 0, 0, 0
+  for table, side, read in sides:
+    rows, size = _side_size(bq, table, side, read)
+    rows_all += rows
+    if size is not None:
+      bytes_all += size
+      sized += 1
+    measured = _size(size) if size is not None else "size not read"
+    entries.append(f"{table.name} {side.value}: {rows:,} rows, {measured}")
+  noun = "table side" if len(sides) == 1 else "table sides"
+  total = f"{len(sides)} {noun}, {rows_all:,} rows"
+  if sized == len(sides):
+    total += f", at most {_size(bytes_all)} in all"
+  elif sized:
+    total += (f" in all, at most {_size(bytes_all)} in the {sized} whose "
+              "size was read")
+  else:
+    total += " in all"
+  return "; ".join([*entries, total])
+
+
+def _paged_note(refusals: Mapping[str, BaseException],
+                paged: Sequence[tuple[TablePlan, Side, str]], bq: Any) -> str:
+  """The one line a launch says when it pages (module docstring, The
+  read path), on the console and in the plan's warnings: per refusing
+  project, why it refused and the table sides read from it. `paged` are
+  the sides whose read table is in a refusing project; a side that keeps
+  DIRECT_READ is not named. It says what brings the fast read back
+  without telling the reader to grant a role: a refusing project may be
+  one nobody in the deployment administers (a public one)."""
+  noun = "project" if len(refusals) == 1 else "projects"
+  where = noun + " " + ", ".join(sorted(refusals))
+  parts = []
+  for project, exc in sorted(refusals.items()):
+    sides = [s for s in paged if s[2].split(".", 1)[0] == project]
+    parts.append(f"Project {project} ({type(exc).__name__}: "
+                 f"{_first_line(exc)}) pages {_paged_sides(sides, bq)}.")
+  paging = " ".join(parts)
+  return (
+      f"the BigQuery Storage Read API refused a read session on {where}: "
+      "the table sides read from there are paged through tabledata.list by "
+      "the BigQuery client instead, which is slower, and every other side "
+      "keeps the fast read. BigQuery limits tabledata.list to 3.7 GB of row "
+      "data per minute (7.5 GB in the US and EU multi-regions) for the "
+      "project that contains the table, shared with every other reader of "
+      "that project. The sizes below are the tables' logical bytes, so at "
+      "most that is paged: only the plan's columns are read. "
+      f"{paging} The fast read comes back for a project once the account "
+      f"the job runs as holds {_READ_SESSION_ROLE} on it, a grant only that "
+      "project's administrators can make; for tables too large to page, "
+      "--mode sampled reads a sample of each")
+
+
+# --------------------------------------------------------------------------
 # run
 # --------------------------------------------------------------------------
 class _Registry:
@@ -1144,30 +1377,77 @@ class _Run:
     return (f"sdfb-eval report --project {self.project} --evaluation_id "
             f"{evaluation_id} --output_dataset {dataset}")
 
-  def submit(self, planned: EvaluationPlan, beam_args: Sequence[str]) -> Any:
-    """Build the pipeline of the prepared plan and hand it to its
-    runner; returns the runner's result."""
+  def read_path(self,
+                planned: EvaluationPlan) -> tuple[Sources, EvaluationPlan]:
+    """The sources the pipeline of the PREPARED plan reads through, and
+    the plan — with the paged read's warning when a project refused a
+    read session (module docstring, The read path).
+
+    Raises:
+      Exception: a probe failed without being refused (`_refused`), or
+        a read table's size could not be read for a reason a retry may
+        remove; the driver then writes the FAILED row.
+    """
+    sources = self.env.make_sources()
+    if not isinstance(sources, BigQuerySources):
+      return sources, planned
+    sides = read_sides(planned)
+    refusals: dict[str, BaseException] = {}
+    probed: set[str] = set()
+    for table, _, read in sides:
+      project = read.split(".", 1)[0]
+      if project in probed:
+        continue
+      probed.add(project)
+      try:
+        self.env.probe_read(read, [c.name for c in table.columns])
+      except Exception as exc:  # pylint: disable=broad-exception-caught  # the API's own error types; whatever is not a refusal is re-raised
+        if not _refused(exc):
+          raise
+        refusals[project] = exc
+    if not refusals:
+      return sources, planned
+    routed = RoutedBigQuerySources(refusals, self.project)
+    note = _paged_note(refusals, [s for s in sides if routed.paged(s[2])],
+                       self.bq)
+    _LOGGER.warning("%s", note)
+    return routed, dataclasses.replace(
+        planned, warnings=(*planned.warnings, note))
+
+  def submit(self,
+             planned: EvaluationPlan,
+             beam_args: Sequence[str],
+             sources: Sources | None = None) -> Any:
+    """Build the pipeline of the prepared plan over `sources` (None: a
+    fixture's own) and hand it to its runner; returns the runner's
+    result. Each step is timed (module docstring)."""
     args, fixture = self.args, self.fixture
+    evaluation_id = self.attempt.evaluation_id
     pools: dict[str, dict[str, FreeTextPool]] | None = None
     notes: list[str] = []
-    if fixture is None:
-      pools, notes = _free_text_pools(planned, self.bq)
+    with _timed(evaluation_id, "free text pools"):
+      if fixture is None:
+        pools, notes = _free_text_pools(planned, self.bq)
     if notes:
       planned = dataclasses.replace(
           planned, warnings=(*planned.warnings, *notes))
-    options = pipeline_options(args, beam_args, planned,
-                               self.attempt.evaluation_id)
-    pipeline = self.env.make_pipeline(options)
-    build_evaluation_pipeline(
-        pipeline,
-        planned,
-        sources=(self.env.make_sources()
-                 if fixture is None else fixture.sources()),
-        sinks=self.sinks,
-        stats_query=self.bq.query if fixture is None else None,
-        pools=pools,
-        thresholds=getattr(args, "thresholds", None) or None)
-    return self.env.submit(pipeline)
+    with _timed(evaluation_id, "pipeline options"):
+      options = pipeline_options(args, beam_args, planned, evaluation_id)
+      pipeline = self.env.make_pipeline(options)
+    if sources is None:
+      sources = (
+          self.env.make_sources() if fixture is None else fixture.sources())
+    with _timed(evaluation_id, "graph"):
+      build_evaluation_pipeline(
+          pipeline,
+          planned,
+          sources=sources,
+          sinks=self.sinks,
+          stats_query=self.bq.query if fixture is None else None,
+          pools=pools,
+          thresholds=getattr(args, "thresholds", None) or None)
+    with _timed(evaluation_id, "pipeline run"), _relayed_uploads(evaluation_id):
+      return self.env.submit(pipeline)
 
   def _close(self, planned: EvaluationPlan, exc: BaseException) -> None:
     """The driver owns the outcome: append its FAILED row."""
@@ -1424,11 +1704,14 @@ def _drive(this: _Run, beam_args: Sequence[str], wait: bool,
   try:
     with _timed(planned.evaluation_id, "RUNNING row"):
       registry.append(running_row(planned), "driver-running")
+    sources: Sources | None = None
     if this.fixture is None:
       with _timed(planned.evaluation_id, "prepare statements"):
         planned = prepare_evaluation(planned, this.bq)
+      with _timed(planned.evaluation_id, "read path"):
+        sources, planned = this.read_path(planned)
     with _timed(planned.evaluation_id, "submission"):
-      result = this.submit(planned, beam_args)
+      result = this.submit(planned, beam_args, sources)
   except BaseException as exc:  # no job is running: the driver's to close
     registry.record_failure(_failed, planned, exc, this.env.now())
     raise
