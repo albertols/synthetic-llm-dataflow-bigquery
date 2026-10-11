@@ -416,8 +416,8 @@ default_dag_params = {
             "single = one SDK process per worker "
             "(no_use_multiple_sdk_containers, RUN_PLAYBOOK §3): the "
             "generate stages run on ONE Python interpreter per worker "
-            "(~1 of 8 vCPUs busy on the 2026-08-29 R6 pair). multi = "
-            "Dataflow's default, one SDK process per vCPU; the "
+            "(~1 of 8 vCPUs busy on the 2026-08-29 R6 pair). multi "
+            "(default) = Dataflow's default, one SDK process per vCPU; the "
             "vLLM client's cross-process spawn mutex keeps one "
             "server per worker. Ignored for client_type=fake.",
         ),

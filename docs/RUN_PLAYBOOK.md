@@ -257,8 +257,9 @@ child is the one number certainly wrong.
   now carry `initial_workers=4` + `autoscaling=fixed`; an explicit Beam
   `--autoscaling_algorithm` always wins.
 - **SDK-container topology — `sdk_containers=single|multi` (ADR 0034).**
-  `single` (default) is the pin described in the next bullet. `multi`
-  lifts it: Runner v2 starts one SDK process per vCPU, so the generate
+  `single` is the pin described in the next bullet. `multi` (the
+  Composer DAG's default since 2026-10-11; the personal-GCP tiers keep
+  `single`) lifts it: Runner v2 starts one SDK process per vCPU, so the generate
   stages — pure-Python DoFns that shared ONE interpreter per worker on
   the R6 pair (8 harness threads, ~1 of 8 vCPUs busy, ~10.5k rows/s
   fleet-wide) — get eight interpreters per worker. The vLLM client makes

@@ -617,7 +617,7 @@ flowchart LR
 | `output_dataset` | `synthetic_data_quality` | template `output_dataset`; the registry the callback writes |
 | `trigger` | `composer` (`chained`) | template `trigger` |
 | `wait_for_generation` | false | the `wait_gate` short-circuit |
-| `machine_type`, `max_workers` | `e2-standard-8`, 4 | the launch environment (the workers), not the template |
+| `machine_type`, `max_workers` | `e2-standard-8`, 8 (at least 4) | the launch environment (the workers), not the template |
 | `launcher_machine_type` | `e2-standard-8` | the launch environment (`launcherMachineType`, the launcher VM), not the template |
 
 The target is one of the four shapes above: a seed (with or without the job

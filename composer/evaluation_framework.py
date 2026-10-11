@@ -712,7 +712,7 @@ default_dag_params = {
             type="integer",
             minimum=4,
             description="Dataflow maxWorkers: the most workers the "
-            "evaluation job may use. Default 4.",
+            "evaluation job may use. Default 8, at least 4.",
         ),
 }
 

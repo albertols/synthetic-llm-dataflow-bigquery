@@ -30,6 +30,8 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 - `packages/sdfb-evaluation/deploy/build_flex_template.sh` builds only an evaluator-only template from an existing image (`IMAGE=…`); it builds no image. The package's CPU `Dockerfile` stays for the package as a unit of its own.
 - Preflight step 13j looks for the deployment's one template (`sdfb-<version>-template.json` or `sdfb-latest-template.json`), an evaluator-only template, or any `sdfb-*-template.json`, and names what it found.
 - The generation launcher's log lines carry the logger name `sdfb_beam.cli.run_pipeline` where they carried `__main__`: the launch now enters through the dispatcher.
+- The generation DAG's `sdk_containers` default is `multi` (it was `single`): one SDK process per vCPU, the topology [ADR 0034](docs/adr/0034-generation-throughput-single-barrier-shared-engines.md) measured at three times the fleet rate. Pass `single` to pin one process per worker. The personal-GCP tiers keep `single`. The GUI's config page follows the DAG: its presets estimate from the R7 multi run, and the switch to multi is recommended only from `single`.
+- The standalone evaluation DAG's `max_workers` default is 8 (it was 4), and at least 4.
 - CLAUDE.md constraint 3 and ADR 0001 are narrowed to managed dashboard services (Looker, Looker Studio / Data Studio, Dataplex): a self-hosted GUI may read the project's tables, read-only ([ADR 0042](docs/adr/0042-self-hosted-platform-gui.md)). `gui/**` and `scripts/gui/**` stay out of the Dataflow Solution Guides copy.
 
 ### ⚡ Performance
