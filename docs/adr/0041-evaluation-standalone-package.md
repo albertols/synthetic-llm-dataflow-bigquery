@@ -319,14 +319,17 @@ flowchart LR
     S2["🔀 start_sdfb<br/>launch, no wait"]:::beam --> G2{"🛡️ gate"}:::cpu
     G2 --> W["⚙️ wait_for_generation<br/>reschedule sensor"]:::cpu
     W --> T["🔀 trigger_evaluation<br/>same template<br/>sdfb_job=evaluation"]:::beam
+    T --> L["⚙️ wait_for_evaluation_launch<br/>until the job runs"]:::cpu
   end
 ```
 
 *The two modes of the generation DAG's `run_evaluation` parameter
-(`composer/synthetic_beam_bigquery.py`).*
+(`composer/synthetic_beam_bigquery.py`). The last task was added on
+2026-10-11: see the note of that date below.*
 
 **A4. The chain is inside the generation DAG.** `start_sdfb >>
-run_evaluation_gate >> wait_for_generation >> trigger_evaluation`. The wait is
+run_evaluation_gate >> wait_for_generation >> trigger_evaluation` (and, since
+2026-10-11, `>> wait_for_evaluation_launch`). The wait is
 a sensor in [reschedule mode](https://airflow.apache.org/docs/apache-airflow/stable/core-concepts/sensors.html),
 which holds no worker slot between two reads of the job's state and needs no
 triggerer; it is stated as not deferrable because the environment may have
@@ -363,6 +366,55 @@ build script now builds only a template from an existing image.
 - A chained evaluation that dies after it was launched leaves its `RUNNING`
   row open. Nothing in the generation DAG closes it; a run of the standalone
   DAG for the same job is the path that does.
+
+  **Note (2026-10-11): the chain waits for the evaluation's launch, and that
+  wait closes the row of a launcher that dies.** Two chained launches were
+  ended by the launcher's time limit after it had written `RUNNING`, and the
+  rows stayed open. The launch task cannot see that: with
+  `wait_until_finished=False` the provider returns as soon as the job is in
+  an awaiting state, queued included
+  ([`_check_dataflow_job_state`](https://github.com/apache/airflow/blob/providers-google/10.0.0/airflow/providers/google/cloud/hooks/dataflow.py#L393-L421)),
+  minutes before the launcher writes the row. So the chain gains a fifth
+  task, `wait_for_evaluation_launch`: a second
+  [`DataflowJobStatusSensor`](https://airflow.apache.org/docs/apache-airflow-providers-google/stable/operators/cloud/dataflow.html#howto-operator-dataflowjobstatussensor)
+  on the evaluation job, with the first sensor's arguments, expecting
+  `JOB_STATE_RUNNING` or `JOB_STATE_DONE`. The sensor's `poke` raises for a
+  terminal state it was not told to expect
+  ([source](https://github.com/apache/airflow/blob/providers-google/10.0.0/airflow/providers/google/cloud/sensors/dataflow.py#L103-L111);
+  the same in `main`), so a job that ended failed fails the task, and its
+  failure callback appends the `FAILED` row with the standalone DAG's
+  statement, copied. Not at once: the task is retried first and the callback
+  runs after its last retry. No task sets `retries` and the DAG sets no
+  `default_args`, so the environment decides, and Cloud Composer's default
+  is "two retries for a failed task", "twice with 5 minute intervals"
+  ([known issues](https://docs.cloud.google.com/composer/docs/composer-2/known-issues)):
+  the row is closed about ten minutes after the sensor first sees the dead
+  job. That is kept, so that a transient error in one read does not end the
+  watch. Rejected: the callback on the launch task (it never runs for this
+  case), `retries=0` on the sensor (an immediate close, but one failed read
+  would end the watch), and waiting for `JOB_STATE_DONE` (it would also
+  close a job that dies on the workers, but the DAG has one run slot and the
+  next generation would queue behind the whole evaluation). Still not closed
+  by the chain: a job that dies after a read saw it running; the GUI shows
+  such a row as Stale after 24 hours and the run playbook has the manual
+  close. Costs: the run holds its slot until the evaluation's launch is over
+  (at most the launcher's twelve minutes and one read, plus the retries when
+  the launcher died), and a dead evaluation launch fails the DAG run. Two
+  conditions of the environment: below `providers-google` 4.0.0 the launch
+  ignored `wait_until_finished` and waited for the job's end, which inverts
+  this design (the launch task fails on a dead launcher and the sensor never
+  runs); and neither sensor is deferrable only while `[operators]
+  default_deferrable` is not set. While the launcher runs, the job is not yet
+  running: "Queued: either a FlexRS job is queued or a Flex Template job is
+  being launched" ([Dataflow jobs list](https://docs.cloud.google.com/dataflow/docs/guides/jobs-list)).
+  That page lists the console's statuses, and no page names the
+  [job state](https://docs.cloud.google.com/dataflow/docs/reference/rest/v1b3/projects.jobs#Job.JobState)
+  a launch that timed out ends in (the
+  [troubleshooting page](https://docs.cloud.google.com/dataflow/docs/guides/troubleshoot-templates)
+  says "the job fails"); the run playbook has the one-line check. All of
+  this was read, in the provider's source at two versions and on those
+  pages. None of it was run: not the DAG, not the installed provider, not
+  the environment's retries.
 - The copy that ships to the Dataflow Solution Guides has a `Dockerfile` and a
   template metadata that mention an evaluator it does not ship.
 
@@ -370,7 +422,8 @@ build script now builds only a template from an existing image.
 with and without the evaluator's directory; the import check in both contexts;
 the dispatcher under the template launcher; a template with every parameter
 optional; the sensor's behaviour when the generation job fails or is
-cancelled (the provider's source was not available to read); `maxWorkers`
+cancelled (the provider's source was not available to read; read since,
+see the note of 2026-10-11 above); `maxWorkers`
 rendered as a string; the boot disk reaching the evaluation job's workers; the
 standalone DAG re-triggering itself.
 

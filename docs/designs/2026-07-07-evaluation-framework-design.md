@@ -2397,6 +2397,8 @@ flowchart LR
   G -- "true" --> W["⚙️ wait_for_generation<br/>job reached DONE"]:::cpu
   W --> T["🔀 trigger_evaluation<br/>same template<br/>sdfb_job=evaluation"]:::beam
   T --> L["⚙️ launcher: RUNNING row<br/>then submit"]:::cpu --> JOB["🔀 evaluation job<br/>CPU workers"]:::beam --> FIN[("🗄️ FINAL row")]:::store
+  T --> WL["⚙️ wait_for_evaluation_launch<br/>until the job runs"]:::cpu
+  WL -. "launcher died:<br/>failure callback" .-> FAILED[("🗄️ FINAL FAILED")]:::store
   W -. "job failed<br/>or cancelled" .-> F["⚠️ task fails<br/>nothing evaluated"]:::data
 ```
 
@@ -2429,9 +2431,13 @@ flowchart LR
 - **With `run_evaluation` false** the gate skips every task after the
   launch. The launch itself is unchanged: a test pins the operator's whole
   call to its shape before the chain existed.
-- **A chained evaluation that dies after launch leaves its `RUNNING` row
-  open.** Nothing in this DAG closes it. The standalone DAG below is the
-  path that waits for its job and closes the row.
+- **A chained evaluation whose launcher dies has its `RUNNING` row closed;
+  one whose job dies after it started does not.** A fifth task,
+  `wait_for_evaluation_launch`, waits until the evaluation job runs; a job
+  that ended failed fails it once the task's retries are used up, and its
+  failure callback then appends the `FAILED` row (ADR 0041, note of
+  2026-10-11). It does not wait for the job's end: the standalone DAG below
+  is the path that waits for its job and closes the row.
 
 **The standalone DAG** (`composer/evaluation_framework.py`, DAG id
 `sdfb_evaluation_framework`) is optional: it evaluates a run that has
@@ -2497,8 +2503,8 @@ flowchart LR
   so a failed job leaves its row open and the callback logs a warning.
 
 Unverified until a real environment: the reschedule-mode sensor and what
-it does when the generation job fails or is cancelled (the provider's
-source was not available to read), the launch task's wait
+it does when the generation job fails or is cancelled (since read in the
+provider's source, ADR 0041's note of 2026-10-11; not run), the launch task's wait
 (`wait_until_finished`) of the standalone DAG, the DML, the callback's
 operator call, the job id in XCom and the
 hook's job read that the callback's state check relies on, a worker count

@@ -52,26 +52,48 @@ selects a CPU smoke (no L4) — see below.
 
 Opt-in evaluation (`run_evaluation`, default False), chained in THIS DAG::
 
-    start_sdfb ─► run_evaluation_gate ─► wait_for_generation ─► trigger_evaluation
-    (launch,      (skips the rest         (reschedule-mode        (launch, SAME
-     no wait)      unless opted in)        sensor on the job)      template)
+    start_sdfb ─► run_evaluation_gate ─► wait_for_generation ─►
+    (launch,      (skips the rest         (reschedule-mode
+     no wait)      unless opted in)        sensor on the job)
+
+        ─► trigger_evaluation ─► wait_for_evaluation_launch
+           (launch, SAME         (reschedule-mode sensor on the
+            template, no wait)    evaluation job, until it runs)
 
 With `run_evaluation` False the gate skips everything after the generation
 launch: the DAG runs `start_sdfb` and nothing else, as before. With it True
 the sensor waits for the generation job to reach JOB_STATE_DONE (a job that
-fails or is cancelled fails the sensor, at once or at its one-day timeout)
-and `trigger_evaluation` launches the evaluation as a second, CPU-only
+fails or is cancelled fails the sensor, after the task's retries) and
+`trigger_evaluation` launches the evaluation as a second, CPU-only
 Dataflow job from the same Flex Template, with the template parameter
 `sdfb_job=evaluation` (one image, one template, one DAG import; ADR 0041's
-amendment of 2026-10-06). No other DAG is triggered, and no marker or Airflow
-Variable is added for it. The sensor is not deferrable, so no triggerer is
-needed.
+amendment of 2026-10-06). `wait_for_evaluation_launch` then waits until that
+job runs, which is when its launch is over ("who writes the terminal row",
+below). No other DAG is triggered, and no marker or Airflow Variable is added
+for any of it. Neither sensor is deferrable, so no triggerer is needed:
+`deferrable` is not passed, and the provider's default is off unless the
+environment sets `[operators] default_deferrable`.
 
 Run slot: with `run_evaluation` true a run of this DAG stays running until the
-generation job ends (the sensor waits for it, hours), and the DAG has
-`max_active_runs=1`, so every later trigger queues behind it: launches run one
-generation at a time. `max_active_runs` is the knob; raising it lets several
-generation jobs run at once (mind the GPU quota). It is unchanged here.
+generation job ends (the first sensor waits for it, hours) and then until the
+evaluation's launch is over (the second sensor). The second wait follows from
+the code, it was not measured: at most the launcher's twelve minutes and one
+60-second poke, whether the job then runs or the launcher has died; on the
+failure path, plus the task's retries (below); and one hour, the sensor's
+timeout, for a job that stays queued. The DAG has `max_active_runs=1`, so
+every later trigger queues behind it: launches run one generation at a time.
+`max_active_runs` is the knob; raising it lets several generation jobs run at
+once (mind the GPU quota). It is unchanged here.
+
+Retries: no task here passes `retries` and the DAG passes no `default_args`,
+so the environment decides. Cloud Composer's default is two retries, five
+minutes apart, for any task that fails. A sensor that raises on a dead job is
+therefore "up for retry" first, and its failure callback runs after the
+task's last retry: under that default about ten minutes after the sensor
+first saw the dead job, with the registry row still RUNNING meanwhile. That
+is kept on purpose (a transient error in one poke must not end the watch). A
+sensor that ends on its timeout is not retried. The same default launches a
+failed `trigger_evaluation` again.
 
 `trigger_evaluation` evaluates what the launch generated: the launched table
 (`seed_table`) and its enabled group of tables in the relationship model, or
@@ -112,12 +134,116 @@ this DAG leaves at their defaults. In short:
   own record. The service account also needs read on the generator's
   `validation_runs` table.
 
-`trigger_evaluation` submits the job and does not wait: the evaluation job
-writes its own FINAL registry row. A job that dies after it was launched
-leaves its RUNNING row open; `composer/evaluation_framework.py`, the
-standalone DAG, is the path that waits for the job and closes that row.
+`trigger_evaluation` submits the job and does not wait, and nothing in the
+chain waits for the evaluation to finish: the evaluation job writes its own
+FINAL registry row. The launcher writes the RUNNING row minutes into the
+launch (after the image pull and planning, before it submits the pipeline),
+so an evaluation that ends without a FINAL row keeps RUNNING as its last
+event. Who writes the terminal row::
 
-None of this has been parsed or run by Airflow.
+    what happens                          who closes the RUNNING row
+    ────────────────────────────────────  ──────────────────────────────────
+    the job finishes                      the job: its own FINAL row
+    the launch CALL fails                 normally nobody needs to: no
+      (`trigger_evaluation` fails)        launcher ran, so no RUNNING row
+                                          was written
+    the LAUNCHER dies (its time limit,    this DAG: the job ends FAILED,
+      say, ends it after RUNNING was      which fails
+      written), or the job ends some      `wait_for_evaluation_launch`
+      other way before a poke saw it      after its retries; its failure
+      running                             callback, `_close_running_row`,
+                                          appends FINAL FAILED
+    the job dies after a poke saw it      nobody in this DAG: the sensor
+      running                             has succeeded and nothing waits
+                                          for the job's end
+
+"Normally", because the launch task can also fail after its call was
+accepted (the status read that follows the launch raises, or the worker dies
+in those seconds): a launcher then runs and writes RUNNING while the sensor
+is upstream-failed, and no callback runs for it. And the last line is wider
+than it looks: a Dataflow job reports running when it starts, before any
+worker is up, so a job that dies while its workers start is one nobody
+closes here.
+
+Why a fifth task. `trigger_evaluation` cannot see a launcher die: with
+`wait_until_finished=False` the operator returns as soon as the job it
+launched is queued, seconds after the launch call and minutes before the
+launcher writes the RUNNING row. Whatever happens to the launcher later, that
+task has succeeded, so a failure callback on it would never run for a dead
+launcher. `wait_for_evaluation_launch` is a second status sensor, the same
+class and arguments as `wait_for_generation`, on the evaluation job (the id
+in `trigger_evaluation`'s XCom). Its `expected_statuses` are
+JOB_STATE_RUNNING and JOB_STATE_DONE: the launch is over when the job runs,
+or has already finished between two pokes. A job that reaches any other
+terminal state makes the sensor raise (the provider's sensor raises on a
+terminal state it was not told to expect); once the task's retries are used
+up it has failed, and its failure callback closes the row.
+
+It waits for the launch, not for the job's end. The alternative,
+`expected_statuses={"JOB_STATE_DONE"}` with a timeout as long as an
+evaluation, would also close the row of a job that dies on the workers, at
+the price of the DAG's one run slot (`max_active_runs=1`) for the whole
+evaluation: the next generation launch would queue behind it. It is not
+built.
+
+What the wait costs: the run slot is held longer (Run slot, above); a dead
+evaluation launch now marks the DAG run failed, where before the run was
+green while its evaluation was dead; and a job that dies on the workers after
+it started is still not closed by the chain.
+
+`_close_running_row` finds the row by this run's generation job id (the XCom
+of `start_sdfb`: what the launch passed as `generation_job_id`), the trigger
+`chained` and the run's start. It writes only when the launched Dataflow job
+is known and has ended without being done. With no job id in XCom the job's
+state was never read; a job that is running or done writes its own row; a
+job still queued when the sensor times out may yet run; a state that cannot
+be read is unknown: in each case nothing is written. So for the launch that
+died there are never two terminal rows, and never a FAILED row over a job
+that may be running or done. After the statement it logs how many rows it
+wrote, as a warning when none: the BigQuery job succeeds either way, and
+only the count tells a closed row from a statement that matched nothing (the
+standalone DAG's callback logs nothing there).
+
+Where that ends. The row is found by generation job, trigger and the run's
+start, not by its own id. Two evaluations of one generation job inside one
+RUNNING DAG run can therefore close each other's row: a launch task retried
+(the environment's retries make that the normal path for a launch task that
+failed after its call was accepted) or cleared while the run is still
+running, or a standalone evaluation of the same generation job started with
+`trigger=chained` during the chained launch. If the later launch dies while
+the earlier evaluation still runs, that one's row is closed as well, and its
+job's own FINAL row follows. Clearing the tail of a FINISHED run is not such
+a case: Airflow resets the run's start then, so the earlier evaluation's row
+is older than the start and is not matched. For the same reason the callback
+cannot close that older row either, when it is the one whose launcher then
+dies: the statement matches nothing and the log says so.
+
+The statement, its constants and its helpers are a COPY of the standalone
+DAG's (`composer/evaluation_framework.py`): Composer imports the two files
+separately, so each stays self-contained.
+
+A job that dies after it started keeps its RUNNING row until someone closes
+it by hand (`docs/RUN_PLAYBOOK.md`, "A RUNNING row that never closes"); the
+GUI shows it as Stale once the event is more than 24 hours old. The
+standalone DAG is the launch that waits for its job's end, and so closes the
+row of a job that dies on the workers.
+
+None of this has been parsed or run by Airflow. The close rests on two
+things, both read and neither run (ADR 0041, note of 2026-10-11, has the
+links). One: the status sensor raises when the job it watches ends in a
+state it was not told to expect (JOB_STATE_FAILED for a dead launcher). That
+is the provider's source; if an installed provider only poked on, the sensor
+would fail at its one-hour timeout and the callback, reading the job as
+failed, would close the row then. Two: while the launcher runs, the job is
+not yet running. Google's page of job statuses lists a Flex Template job that
+is being launched as Queued. That page names the console's statuses, and no
+page names the state a launch that timed out ends in: if it is not one of the
+four the callback closes, the sensor ends on its timeout and the callback
+writes nothing (the playbook has the one-line check). Also unverified: the
+environment's retries, that a sensor in reschedule mode gets its
+`on_failure_callback` called as written, and the callback's two hook calls
+(the standalone DAG's own). The evaluation job's id is not in question: it
+is the return value of a launch task that succeeded.
 
 """
 
@@ -244,6 +370,14 @@ evaluation_job_name = _evaluation_job_base[:38].rstrip("-")
 # rescheduled and holds no worker slot.
 GENERATION_POKE_SECONDS = 120
 GENERATION_TIMEOUT_SECONDS = 86400
+# The evaluation job's id, the same way: `trigger_evaluation` does not wait
+# either, so its XCom holds the id of the job it launched.
+evaluation_job_id = "{{ ti.xcom_pull(task_ids='trigger_evaluation')['id'] }}"
+# How the second sensor waits for the evaluation's LAUNCH to be over (the job
+# running): one status read a minute, for at most an hour. The launcher gives
+# up after about 12 minutes; the hour bounds a job that stays queued.
+EVALUATION_LAUNCH_POKE_SECONDS = 60
+EVALUATION_LAUNCH_TIMEOUT_SECONDS = 3600
 # Default of the `evaluation_output_dataset` param: the dataset of the
 # validation-runs table above (`project.dataset.table`), so a deployment whose
 # quality dataset has another name needs no extra setting.
@@ -258,6 +392,54 @@ evaluation_output_dataset_default = (
 # for its own workers in run_pipeline.py, the evaluator pins nothing, so this
 # launch says it (Beam's own --disk_size_gb, passed through the template).
 EVALUATION_WORKER_DISK_GB = "200"
+# What the chained launch records as the evaluation's trigger. The failure
+# callback finds the launch's RUNNING row by it, so both read this one name.
+EVALUATION_TRIGGER = "chained"
+
+# The registry table of the evaluator's output dataset. The dataset comes from
+# the `evaluation_output_dataset` DAG param, validated by `_DATASET_PATTERN`
+# before it is part of SQL text; every other value reaches BigQuery as a query
+# parameter. From here to `_ENDED_NOT_DONE`: a COPY of the standalone
+# evaluation DAG's constants (see the header: one file per import).
+_REGISTRY_TABLE = "evaluation_data_history"
+_DATASET_PATTERN = r"[A-Za-z0-9_-]+(\.[A-Za-z0-9_-]+)?"
+
+# Appends the FAILED close of a RUNNING row whose launch died: the launcher
+# mints the evaluation id and its RUNNING row has no job id, so the row is
+# found by launch target (the generation job id), trigger and DAG run start.
+# Copying the row keeps every schema-required field. An evaluation that
+# already has a FINAL event is skipped; no match inserts nothing.
+_CLOSE_RUNNING_SQL = """
+INSERT INTO `{registry}`
+SELECT * REPLACE (
+  'FINAL' AS event,
+  'FAILED' AS status,
+  @reason AS status_reason,
+  CURRENT_TIMESTAMP() AS recorded_at,
+  CURRENT_TIMESTAMP() AS finished_at,
+  COALESCE(NULLIF(@job_id, ''), running.evaluation_job_id) AS evaluation_job_id)
+FROM `{registry}` AS running
+WHERE running.event = 'RUNNING'
+  AND running.trigger = @trigger
+  AND (running.generation_job_id = @target OR running.base_run_id = @target)
+  AND running.recorded_at >= @run_start
+  AND NOT EXISTS (
+    SELECT 1 FROM `{registry}` AS closed
+    WHERE closed.evaluation_id = running.evaluation_id
+      AND closed.event = 'FINAL')
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY running.evaluation_id ORDER BY running.recorded_at DESC) = 1
+"""
+
+# Dataflow job states (the REST API's JobState) that are terminal and are
+# not JOB_STATE_DONE: a job in one of them writes no FINAL row of its own,
+# so the callback's FAILED row is the evaluation's one terminal row. In any
+# other state — queued, pending, running, cancelling, draining, done, or one
+# that could not be read — the job may still write (or has written) it.
+_ENDED_NOT_DONE = frozenset({
+    "JOB_STATE_FAILED", "JOB_STATE_CANCELLED", "JOB_STATE_UPDATED",
+    "JOB_STATE_DRAINED"
+})
 # -----------------------------------------------------------------------------
 # DAG params — runtime-overridable on every trigger.
 # Using Param objects so {{ params.X }} resolves to the VALUE, not the definition.
@@ -563,9 +745,11 @@ default_dag_params = {
             "table and, with generate_fk_relationships true, the rest of "
             "its group of tables in the relationship model; each landed "
             "table is read whole (with write_disposition append that "
-            "includes earlier launches' rows). While it waits the run holds "
-            "the DAG's only active-run slot (max_active_runs=1), so launches "
-            "of this DAG then run one generation at a time.",
+            "includes earlier launches' rows). While it waits (for the "
+            "generation job, then for the evaluation's launch to be over) "
+            "the run holds the DAG's only active-run slot "
+            "(max_active_runs=1), so launches of this DAG then run one "
+            "generation at a time. A dead evaluation launch fails the run.",
         ),
     "evaluation_mode":
         Param(
@@ -646,6 +830,169 @@ default_dag_params = {
 def _run_evaluation_enabled(params, **_):
   """Gate for the opt-in evaluation: False skips every task after it."""
   return bool(params["run_evaluation"])
+
+
+def _callback_closes_row(job_id, state):
+  """Whether the failure callback writes the FAILED row.
+
+  Only when a job id is known and the job ended in a terminal state other
+  than done. With no id the state was never read, so nothing is written: a
+  RUNNING row left open is the lesser harm than a FAILED row on a run that
+  went on to succeed. A job still running, a job that is done and a state
+  that could not be read (None) leave the row to the job.
+  """
+  return bool(job_id) and state in _ENDED_NOT_DONE
+
+
+def _launched_job_id(launched, job_config):
+  """The launched Dataflow job's id, or "" when neither XCom entry has it.
+
+  `launched` is the task's return value (`{"id": ...}`; Airflow pushes it
+  only when the task returned, which a failed task has not). `job_config` is
+  the entry the launch operator pushes under `dataflow_job_config` before
+  it can fail (`{"job_id": ...}`); that key and shape are unverified against
+  a real provider.
+  """
+  for entry, key in ((launched, "id"), (job_config, "job_id")):
+    value = entry.get(key) if isinstance(entry, dict) else None
+    if isinstance(value, str) and value:
+      return value
+  return ""
+
+
+def _job_state(job_id):
+  """The Dataflow job's current state, or None when it cannot be read."""
+  import logging
+
+  from airflow.providers.google.cloud.hooks.dataflow import DataflowHook
+
+  try:
+    job = DataflowHook().get_job(
+        job_id=job_id, project_id=project_id, location=region)
+  except Exception as exc:  # pylint: disable=broad-exception-caught  # any read failure means "unknown": the callback then writes nothing
+    logging.warning("evaluation job %s: its state could not be read (%s)",
+                    job_id, exc)
+    return None
+  return job.get("currentState") if isinstance(job, dict) else None
+
+
+def _close_running_row(context):
+  """on_failure_callback of `wait_for_evaluation_launch`: close the RUNNING
+  row of the evaluation this DAG run launched with FAILED.
+
+  It runs on the sensor's task instance, not on the launch's: the ids it
+  needs are pulled from the two launch tasks by name. Nothing is written
+  without a job id, nor while the launched job may still write its own FINAL
+  row (`_callback_closes_row`): never two terminal rows for one evaluation,
+  and never FAILED with the job's state unread. A sensor that fails on its
+  timeout while the job is still queued therefore writes nothing.
+  """
+  import logging
+  import re
+
+  from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
+
+  params = context["params"]
+  dataset = str(params["evaluation_output_dataset"])
+  if not re.fullmatch(_DATASET_PATTERN, dataset):
+    logging.error(
+        "evaluation registry not updated: bad evaluation_output_dataset %r",
+        dataset)
+    return
+  registry = (f"{dataset}.{_REGISTRY_TABLE}" if "." in dataset else
+              f"{project_id}.{dataset}.{_REGISTRY_TABLE}")
+  ti = context["ti"]
+  # The launch target: the generation job's id as the launch read it (the
+  # `id` of start_sdfb's return value; a callback has no Jinja to render).
+  target = _launched_job_id(ti.xcom_pull(task_ids="start_sdfb"), None)
+  if not target:
+    logging.warning(
+        "evaluation registry not updated: start_sdfb left no generation job "
+        "id in XCom to find the chained launch's RUNNING row by")
+    return
+  job_id = _launched_job_id(
+      ti.xcom_pull(task_ids="trigger_evaluation"),
+      ti.xcom_pull(task_ids="trigger_evaluation", key="dataflow_job_config"))
+  if not job_id:
+    logging.warning(
+        "evaluation registry not updated: no Dataflow job id in XCom for the "
+        "chained launch, so the job's state was not read. A RUNNING row is "
+        "left open rather than closed over a job that may have succeeded")
+    return
+  state = _job_state(job_id)
+  if not _callback_closes_row(job_id, state):
+    logging.warning(
+        "evaluation registry not updated: Dataflow job %s is in state %s, "
+        "not a terminal state other than JOB_STATE_DONE. The job is still "
+        "running, or it finished: it writes its own FINAL row", job_id, state)
+    return
+  exception = context.get("exception")
+  ended = f" (job state {state})" if state else ""
+  reason = (
+      f"Chained evaluation job ended while its launch was awaited{ended}: "
+      f"{str(exception)[:500] or type(exception).__name__}")
+
+  def string(name, value):
+    return {
+        "name": name,
+        "parameterType": {
+            "type": "STRING"
+        },
+        "parameterValue": {
+            "value": value
+        },
+    }
+
+  # The hook, not an operator executed inside a callable. UNVERIFIED against
+  # the installed provider: `insert_job(configuration=, project_id=)` and the
+  # job's `result()` are written from the operator's documented behaviour.
+  job = BigQueryHook().insert_job(
+      project_id=project_id,
+      configuration={
+          "query": {
+              "query":
+                  _CLOSE_RUNNING_SQL.format(registry=registry),
+              "useLegacySql":
+                  False,
+              "queryParameters": [
+                  string("reason", reason),
+                  string("job_id", job_id),
+                  string("trigger", EVALUATION_TRIGGER),
+                  string("target", target),
+                  {
+                      "name": "run_start",
+                      "parameterType": {
+                          "type": "TIMESTAMP"
+                      },
+                      "parameterValue": {
+                          "value": context["dag_run"].start_date.isoformat()
+                      },
+                  },
+              ],
+          }
+      },
+  )
+  job.result()
+  # The BigQuery job succeeds whether or not the statement matched a row, so
+  # say which. Read defensively: the attribute is the client library's.
+  written = getattr(job, "num_dml_affected_rows", None)
+  if not isinstance(written, int):
+    logging.info(
+        "evaluation registry: the close statement ran for Dataflow job %s "
+        "(generation job %s); how many rows it wrote is unknown", job_id,
+        target)
+  elif written:
+    logging.info(
+        "evaluation registry: closed %d RUNNING row(s) as FAILED for Dataflow "
+        "job %s (generation job %s)", written, job_id, target)
+  else:
+    logging.warning(
+        "evaluation registry not updated: the close statement matched no "
+        "open RUNNING row for generation job %s, trigger %s, recorded since "
+        "this DAG run's start. Either there was nothing to close (the "
+        "launcher wrote its own FINAL row, or died before it wrote RUNNING), "
+        "or the row is older than the run's start (the run was cleared), or "
+        "it had not yet been loaded", target, EVALUATION_TRIGGER)
 
 
 with models.DAG(
@@ -832,10 +1179,11 @@ with models.DAG(
   )
 
   # The landed tables are evaluated, so the generation job must be done. A
-  # job that failed or was cancelled is expected to fail this task at once
-  # (the provider's sensor raises on a terminal state it was not told to
-  # expect; not verified against the installed provider). If it did not, the
-  # task would fail at its timeout: either way nothing is evaluated. Not
+  # job that failed or was cancelled is expected to fail this task once its
+  # retries are used up (the provider's sensor raises on a terminal state it
+  # was not told to expect; read in its source, not run under the installed
+  # provider). If it did not, the task would fail at its timeout: either way
+  # nothing is evaluated. No `retries` here: the environment decides. Not
   # deferrable (the default; `deferrable` is not passed, as older providers
   # lack that argument), so the environment needs no triggerer.
   wait_for_generation = DataflowJobStatusSensor(
@@ -853,7 +1201,9 @@ with models.DAG(
   # generation above. `sdfb_job` selects the evaluator's entry in the image.
   # What to evaluate is named by the launched table and the relationship model
   # and read whole (scope manual). Submitted and not waited for, like the
-  # generation: the job writes its own FINAL row.
+  # generation: the job writes its own FINAL row. This task returns as soon
+  # as the job is queued, before the launcher has written the RUNNING row, so
+  # it cannot see the launcher die: the sensor after it does (see the header).
   #
   # Evaluator options this launch does NOT pass (each keeps its default).
   # The template accepts them; add one to `parameters` below to change it.
@@ -1045,9 +1395,10 @@ with models.DAG(
                   "validation_runs_table":
                       validation_runs_table,
                   # Recorded in the registry row: what started the
-                  # evaluation (cli | composer | chained | agent).
+                  # evaluation (cli | composer | chained | agent). The
+                  # failure callback looks for the row by this same name.
                   "trigger":
-                      "chained",
+                      EVALUATION_TRIGGER,
                   # The DAG param evaluation_mode. Empty: exact on Dataflow
                   # (every row of both sides); sampled: a salted sample of a
                   # side with more rows than sample_rows (200000).
@@ -1071,4 +1422,29 @@ with models.DAG(
       wait_until_finished=False,
   )
 
+  # The evaluation's LAUNCH is over when its job runs. Until then the
+  # launcher (planning, the RUNNING row, the submission) can still die, and
+  # the launch task above has long since succeeded. This sensor waits for the
+  # job to run (or to be done already, between two pokes). A job that ended
+  # any other way makes it raise (the provider's sensor raises on a terminal
+  # state it was not told to expect; read in its source, not run under the
+  # installed provider). The task is then retried as the environment says
+  # (no `retries` here, on purpose: see Retries in the header), and after its
+  # last retry the failure callback closes the RUNNING row. It does not wait
+  # for the job's end: the job writes its own FINAL row, and the DAG's one
+  # run slot is not held for the evaluation. The same class and arguments as
+  # `wait_for_generation`, plus the callback.
+  wait_for_evaluation_launch = DataflowJobStatusSensor(
+      task_id="wait_for_evaluation_launch",
+      job_id=evaluation_job_id,
+      expected_statuses={"JOB_STATE_RUNNING", "JOB_STATE_DONE"},
+      project_id=project_id,
+      location=region,
+      mode="reschedule",
+      poke_interval=EVALUATION_LAUNCH_POKE_SECONDS,
+      timeout=EVALUATION_LAUNCH_TIMEOUT_SECONDS,
+      on_failure_callback=_close_running_row,
+  )
+
   start_sdfb >> run_evaluation_gate >> wait_for_generation >> trigger_evaluation  # pylint: disable=pointless-statement  # Airflow chain
+  trigger_evaluation >> wait_for_evaluation_launch  # pylint: disable=pointless-statement  # Airflow dependency operator

@@ -120,7 +120,16 @@ that must match the generator is mirrored and pinned by the two-sided golden fil
 - On the shared image an evaluation launch must pass `sdfb_job=evaluation` (else it is a generation launch) and
   `disk_size_gb=200` (the image is multi-GB; the evaluator pins no boot disk). Both DAGs do.
 - A chained evaluation (`trigger=chained`, from the generation DAG) names its tables with `--seed_table` (its enabled component in the model, else the table alone) and the job id only as the launch's identity (`--generation_job_id` next to the seed: only the Dataflow job is read, needs `roles/dataflow.viewer`, never the log): its row carries the job id and window and is listed in `evaluation_latest_per_job`; with `--validation_runs_table` and the window it also reads this launch's `validation_runs` rows (one query), whose digest verifies the reference sample so the reference-based privacy metrics (nearest-neighbour ones, panel-based rates and lifts) are evaluated, otherwise they are `not_evaluated` with the reason; a model the launch adjusted is not seen. It is not waited for: if its job dies after
-  launch the `RUNNING` row stays open. Only the standalone DAG closes such a row.
+  launch the `RUNNING` row stays open, unless the job ended before the chain saw it running (next bullet).
+- A `RUNNING` row is the registry's last event, not proof that a job runs. A launcher that dies has its row closed
+  by the failure callback of the task that waits: the standalone DAG's launch task (it waits for the job's end),
+  and in the generation DAG the sensor after the launch, `wait_for_evaluation_launch` (it waits only until the job
+  runs; the launch task itself returns before the launcher has written `RUNNING`). The callback runs after the
+  task's last retry (Cloud Composer retries twice, five minutes apart, by default: the row is closed about ten
+  minutes after the job is seen dead) and writes only when the launched job ended without being done. A job that
+  dies after the chain saw it running is closed by nobody; a row nobody closed is closed by hand
+  (`docs/RUN_PLAYBOOK.md`, "A RUNNING row that never closes": the listing of open evaluations, the check and the
+  statement). The GUI shows a `RUNNING` event more than 24 hours old as Stale; the registry still says `RUNNING`.
 - A change of the evaluator's dependencies must stay inside what the root `uv.lock` holds and the image's extras
   install: `packages/sdfb-tests/tests/unit/docker/test_shared_image.py` fails otherwise.
 - Do not propose Vertex AI, Dataplex, Looker or an external LLM API for any of this.

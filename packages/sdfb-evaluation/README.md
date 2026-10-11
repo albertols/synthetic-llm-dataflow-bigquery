@@ -260,7 +260,15 @@ known.
 | the job finished, and the registry could not be read back | none: the FINAL row may well be there. The command says the registry could not be read |
 
 So a RUNNING row without a terminal row means the job is still running, or
-that it died after the command had stopped watching it.
+that it died after the command had stopped watching it. RUNNING is the last
+event the registry holds, not proof that a job runs: both Composer DAGs close
+the row of a launch that dies (below), the GUI shows a RUNNING event
+more than 24 hours old as Stale (the tables an evaluation prepares for its
+reads expire 24 hours after it creates them, so by then it has most likely
+ended), and a row nobody closed is closed by hand
+([`docs/RUN_PLAYBOOK.md`](../../docs/RUN_PLAYBOOK.md#a-running-row-that-never-closes),
+"A RUNNING row that never closes": who writes the terminal row on each path,
+the listing of open evaluations and the statement).
 
 #### Your own thresholds
 
@@ -489,6 +497,7 @@ flowchart LR
   G -- "false, the default" --> X["∅ the rest is skipped"]:::data
   G -- "true" --> W["⚙️ wait_for_generation<br/>job reached DONE"]:::cpu
   W --> T["🔀 trigger_evaluation<br/>same template<br/>sdfb_job=evaluation"]:::beam
+  T --> L["⚙️ wait_for_evaluation_launch<br/>until the job runs"]:::cpu
 ```
 
 | Param | Default | Goes to |
@@ -543,14 +552,48 @@ flowchart LR
   The relationship models are read from `relationships_uri`; the default
   folder is in the same image.
 - It submits the job and does not wait: the evaluation job writes its own
-  FINAL row. **A chained evaluation that dies after it was launched leaves
-  its RUNNING row open**; nothing in this DAG closes it. Run the standalone
-  DAG for that job to get an evaluation whose row is closed either way.
+  FINAL row. The launch task returns as soon as the job is queued, minutes
+  before the launcher writes the RUNNING row, so it cannot see a launcher
+  die. The task after it can.
+- `wait_for_evaluation_launch` is a second `DataflowJobStatusSensor`, with
+  the arguments `wait_for_generation` passes, on the evaluation job's id
+  (`trigger_evaluation`'s XCom). It waits until the launch is over: the job
+  is `JOB_STATE_RUNNING`, or already `JOB_STATE_DONE` between two pokes
+  (one a minute, for an hour at most). **A launcher that dies has its
+  RUNNING row closed by this task's failure callback** (`_close_running_row`,
+  a copy of the standalone DAG's below: the same statement and the same
+  guards, found by this run's generation job id and the trigger `chained`).
+  When the launcher's 12-minute limit ends it after the RUNNING row was
+  written, the job ends failed and the sensor raises. **The row is not
+  closed at once**: the task is retried first, and the callback runs after
+  its last retry. The DAG sets no retries, so the environment decides;
+  under Cloud Composer's default (two retries, five minutes apart) that is
+  about ten minutes after the sensor first sees the dead job, with the task
+  up for retry and the row still RUNNING meanwhile. The callback then writes
+  FAILED, because the job ended without being done, and logs how many rows
+  it wrote (a warning when none). A sensor that times out on a job still
+  queued writes nothing. **A job that dies after a read saw it running still
+  leaves its RUNNING row open**: the sensor has succeeded and nothing in
+  this DAG waits for the job's end (that would hold the DAG's one run slot
+  for the whole evaluation). A Dataflow job reports running before any
+  worker is up, so a job that dies while its workers start is one of those.
+  Close that row by hand
+  ([playbook](../../docs/RUN_PLAYBOOK.md#a-running-row-that-never-closes)),
+  or use the standalone DAG, whose launch waits for its job's end. A dead
+  evaluation launch now marks the DAG run failed. Read, not run (ADR 0041's
+  note of 2026-10-11 has the sources): the provider's sensor raises on a job
+  that ended in a state it was not told to expect, and a Flex Template job
+  being launched is listed as Queued, not running. Not known: the state a
+  launch that timed out ends in (the playbook has the check), and the
+  environment's retries.
 - **Run slot.** With `run_evaluation` true a run of this DAG stays running
-  until the generation job ends (hours), and the DAG has `max_active_runs=1`:
-  every later trigger queues behind it, so launches of this DAG run one
-  generation at a time. `max_active_runs` is the knob; raising it lets several
-  generation jobs run at once (GPU quota). It is not changed here.
+  until the generation job ends (hours) and then until the evaluation's
+  launch is over: at most the launcher's twelve minutes and one read of the
+  job, plus the task's retries when the launcher died. The DAG has
+  `max_active_runs=1`: every later trigger queues behind it, so launches of
+  this DAG run one generation at a time. `max_active_runs` is the knob;
+  raising it lets several generation jobs run at once (GPU quota). It is not
+  changed here.
 - **Relationship models.** The evaluator follows what the generation did,
   by where the URI came from and whether the launch's log was read.
   An explicit `--relationships_uri` that resolves to no model file always
@@ -721,8 +764,12 @@ for one evaluation only the latest is closed. A job left running by a failed
 task keeps its RUNNING row open until it writes FINAL; if it then dies, no
 callback runs again and the row stays open. So does a job that dies after
 launch while no job id reached XCom: a RUNNING row left open is the lesser
-harm than a FAILED row on a run that succeeds (a launch that failed itself
-has its FAILED row from the launcher, or never wrote RUNNING).
+harm than a FAILED row on a run that succeeds (a launch whose command raised
+has its FAILED row from the launcher, or never wrote RUNNING; a launcher that
+is killed, as by its 12-minute limit, writes nothing more, and its row then
+depends on this callback finding the job id). The generation DAG carries a
+copy of this callback and statement on its wait for the evaluation's launch
+(tests keep the two equal).
 
 Limits to know before the first launch:
 
@@ -736,14 +783,20 @@ Limits to know before the first launch:
   `wait_until_finished=True` does in the installed provider when the job
   fails, the DML on real BigQuery,
   `BigQueryHook().insert_job(configuration=, project_id=)` and the job's
-  `result()` in the failure callback (written from the operator's documented
-  behaviour; the provider was not available to read), a trigger's conf
+  `result()` in the failure callback (since read in the provider's source
+  at two versions: it returns the client library's job, already waited for;
+  not run), a trigger's conf
   reaching `context["params"]`, and the trigger rule when the sensor is
   skipped.
 - Unverified until Composer, for the generation DAG's chain: that the
   reschedule-mode sensor fails when the generation job ends in a state other
-  than done (the provider's source was not available to read), and that
-  `disk_size_gb` reaches the evaluation job's workers.
+  than done (since read in the provider's source; not run), and that
+  `disk_size_gb` reaches the evaluation job's workers. For the failure
+  callback on the chain's second sensor: what this list says of the
+  standalone callback's hook calls and DML, the environment's retries, and
+  the state a launch that timed out ends in (6.1). The job id is not among
+  the unknowns there: it is the return value of a launch task that
+  succeeded.
 - Unverified until Composer, for the fan-out: `airflow.api.common.trigger_dag.
   trigger_dag(dag_id=, run_id=, conf=, replace_microseconds=False)` called
   inside a task's callable (Airflow 2's function, which the trigger operator

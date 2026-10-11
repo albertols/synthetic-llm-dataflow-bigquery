@@ -21,7 +21,9 @@
                                           per run, for a job id, a run id or
                                           tables (Task 29)
 
-Both launch from the repository's ONE template, with `sdfb_job=evaluation`.
+Both launch from the repository's ONE template, with `sdfb_job=evaluation`,
+and each closes the RUNNING registry row of a launch that died, with its own
+copy of one statement (Ruling R160; the last section).
 
 Airflow is not a dependency here, so the DAG files are read with ``ast`` and
 never imported; a pure function of a DAG is executed on its own. The files
@@ -32,11 +34,16 @@ as a standalone unit they are absent and the whole module skips.
 from __future__ import annotations
 
 import ast
+import copy
+import difflib
+import itertools
 import json
+import logging
 import re
 import subprocess
 import sys
 import types
+from datetime import UTC, datetime
 from pathlib import Path
 
 import jinja2
@@ -987,18 +994,32 @@ def test_runs_are_sequential_and_the_header_says_which_knob_changes_that():
 # The generation DAG's opt-in evaluation, chained inside the DAG itself
 # --------------------------------------------------------------------------- #
 #
-#   start_sdfb >> run_evaluation_gate >> wait_for_generation >> trigger_evaluation
+#   start_sdfb >> run_evaluation_gate >> wait_for_generation
+#              >> trigger_evaluation >> wait_for_evaluation_launch
 #
 # One import of composer/synthetic_beam_bigquery.py is all the deployment
 # needs: the evaluation is launched by this DAG, from the SAME template as the
 # generation, with `sdfb_job=evaluation` (Ruling R118). The gate is off by
-# default, and then only `start_sdfb` runs, as before.
+# default, and then only `start_sdfb` runs, as before. The fifth task waits
+# for the evaluation's LAUNCH to be over, and its failure closes the RUNNING
+# registry row of a launch that died (Ruling R165; the last section).
 
 _JOB_ID_XCOM = "{{ ti.xcom_pull(task_ids='start_sdfb')['id'] }}"
+# The evaluation job's id, in the same form: neither launch waits, so each
+# task's return value holds the id of the job it launched.
+_EVALUATION_JOB_XCOM = "{{ ti.xcom_pull(task_ids='trigger_evaluation')['id'] }}"
 _CHAIN = [
     "start_sdfb", "run_evaluation_gate", "wait_for_generation",
-    "trigger_evaluation"
+    "trigger_evaluation", "wait_for_evaluation_launch"
 ]
+# One line of tasks, each behind the one before it: no branch, no join.
+_CHAIN_EDGES = set(itertools.pairwise(_CHAIN))
+# What both sensors pass: the provider sensor's long-standing arguments and
+# the base sensor's, and nothing a recent provider alone would know.
+_SENSOR_ARGUMENTS = {
+    "task_id", "job_id", "expected_statuses", "project_id", "location", "mode",
+    "poke_interval", "timeout"
+}
 # What workflow 3 substitutes at import. It refuses a file in which any other
 # {{UPPERCASE}} marker is left, so a new one would break the import.
 _GENERATION_MARKERS = {
@@ -1024,9 +1045,11 @@ def test_generation_dag_opt_in_param_defaults_off():
   assert ast.literal_eval(_kw(param, "type")) == "boolean"
 
 
-def test_generation_dag_chain_is_four_tasks_of_this_dag():
+def test_generation_dag_chain_is_five_tasks_of_this_dag():
   tree = _tree(GENERATION_DAG)
-  assert _chains(tree) == [_CHAIN]
+  assert _edges(tree) == _CHAIN_EDGES
+  # the four-task line is as it was; the fifth task hangs off its last
+  assert _chains(tree) == [_CHAIN[:-1], _CHAIN[-2:]]
   task_ids = {}
   for node in ast.walk(tree):
     if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)):
@@ -1040,6 +1063,7 @@ def test_generation_dag_chain_is_four_tasks_of_this_dag():
       "run_evaluation_gate": "'run_evaluation_gate'",
       "wait_for_generation": "'wait_for_generation'",
       "trigger_evaluation": "'trigger_evaluation'",
+      "wait_for_evaluation_launch": "'wait_for_evaluation_launch'",
   }
   (app_name,) = [
       n.value for n in tree.body if isinstance(n, ast.Assign) and
@@ -1050,8 +1074,8 @@ def test_generation_dag_chain_is_four_tasks_of_this_dag():
 
 def test_generation_dag_triggers_no_other_dag():
   """No second DAG import: nothing here imports a trigger operator or
-  names the standalone evaluation DAG's id (its file is named once, in
-  the header, as the path that closes a RUNNING row)."""
+  names the standalone evaluation DAG's id (its file is named in the
+  header only, as the path that waits for the job)."""
   tree = _tree(GENERATION_DAG)
   assert not _calls(tree, "TriggerDagRunOperator")
   evaluation = _tree(EVALUATION_DAG)
@@ -1075,15 +1099,17 @@ def test_generation_dag_gate_is_the_opt_in_short_circuit():
   assert enabled({"run_evaluation": True}) is True
   # the default: a skipped gate skips EVERYTHING downstream of it
   assert {k.arg for k in gate.keywords} == {"task_id", "python_callable"}
-  sensor = _one(tree, "DataflowJobStatusSensor")
   trigger = _launch(tree, "trigger_evaluation")
-  for downstream in (sensor, trigger):
+  sensors = _calls(tree, "DataflowJobStatusSensor")
+  assert len(sensors) == 2
+  for downstream in (*sensors, trigger):
     assert "trigger_rule" not in {k.arg for k in downstream.keywords}
 
 
 def test_generation_dag_waits_in_reschedule_mode_and_needs_no_triggerer():
   tree = _tree(GENERATION_DAG)
-  sensor = _one(tree, "DataflowJobStatusSensor")
+  sensor = _task(tree, "wait_for_generation")
+  assert _name(sensor.func) == "DataflowJobStatusSensor"
   assert ast.literal_eval(_kw(sensor,
                               "expected_statuses")) == {"JOB_STATE_DONE"}
   assert ast.literal_eval(_kw(sensor, "mode")) == "reschedule"
@@ -1101,11 +1127,14 @@ def test_generation_dag_waits_in_reschedule_mode_and_needs_no_triggerer():
 
 
 def test_the_new_tasks_pass_only_arguments_the_working_launch_or_airflow_has():
-  """No new task may use a constructor argument start_sdfb does not have.
+  """No new task may use a constructor argument start_sdfb does not have,
+  and the second sensor none the first does not have, but for
+  `on_failure_callback` on that second sensor.
 
-  The sensor's own (job_id, expected_statuses) are the provider sensor's
+  A sensor's own (job_id, expected_statuses) are the provider sensor's
   long-standing arguments; mode, poke_interval and timeout are the base
-  sensor's; task_id and python_callable are Airflow's.
+  sensor's; task_id, python_callable and on_failure_callback are Airflow's
+  (the standalone DAG's launch has passed the callback since Task 29).
   """
   tree = _tree(GENERATION_DAG)
 
@@ -1114,12 +1143,15 @@ def test_the_new_tasks_pass_only_arguments_the_working_launch_or_airflow_has():
 
   assert names(_one(tree,
                     "ShortCircuitOperator")) == {"task_id", "python_callable"}
-  assert names(_one(tree, "DataflowJobStatusSensor")) == {
-      "task_id", "job_id", "expected_statuses", "project_id", "location",
-      "mode", "poke_interval", "timeout"
-  }
+  assert names(_task(tree, "wait_for_generation")) == _SENSOR_ARGUMENTS
+  # the launch is again exactly the generation launch's call shape: when it
+  # fails no job has reached its driver, so there is no row to close
   assert names(_launch(tree, "trigger_evaluation")) == names(
       _launch(tree, "start_sdfb"))
+  assert names(_task(tree,
+                     "wait_for_evaluation_launch")) == _SENSOR_ARGUMENTS | {
+                         "on_failure_callback"
+                     }
 
 
 def test_trigger_evaluation_launches_from_the_generation_template():
@@ -1164,7 +1196,7 @@ def test_trigger_evaluation_parameters_select_the_evaluator_for_this_job():
   # the one the sensor waits on
   assert "job_id" not in values
   assert _value(tree, values["generation_job_id"]) == _JOB_ID_XCOM
-  sensor = _one(tree, "DataflowJobStatusSensor")
+  sensor = _task(tree, "wait_for_generation")
   assert _value(tree,
                 values["generation_job_id"]) == _value(tree,
                                                        _kw(sensor, "job_id"))
@@ -1617,3 +1649,784 @@ def test_both_evaluation_launches_name_the_launcher_machine():
   for launch in (_launch(generation, "trigger_evaluation"),
                  _one(standalone, "DataflowStartFlexTemplateOperator")):
     assert "timeout" not in ast.unparse(_entry(launch, "environment")).lower()
+
+
+# --------------------------------------------------------------------------- #
+# A launch that dies closes its RUNNING row, on both paths (R160, R165)
+# --------------------------------------------------------------------------- #
+#
+#                    ┌─ the job finishes ─────────► FINAL, written by the job
+#   RUNNING ─────────┤
+#   (the launcher)   ├─ standalone DAG: the launch task waits for the job; it
+#                    │  fails when the launch or the job dies
+#                    │  ─► _close_running_row ─► FINAL FAILED
+#                    │
+#                    └─ chained DAG: the launch task (trigger_evaluation)
+#                       returns seconds after the launch CALL, long before
+#                       the launcher writes RUNNING, so it never sees the
+#                       launcher die. A fifth task waits for the launch to be
+#                       over (wait_for_evaluation_launch: the job RUNNING or
+#                       DONE); a job that ended otherwise fails it
+#                       ─► its _close_running_row ─► FINAL FAILED
+#                       (it does not wait for the job's end: a job that dies
+#                       after it started is closed by nobody)
+#
+# Composer imports the two files separately, so the generation DAG carries a
+# COPY of the statement, its constants and the three helpers. The tests here
+# keep the copies equal and run both callbacks against the same fake hooks:
+# what holds for the standalone callback holds for the chained one.
+
+_EVALUATION_JOB = "2026-09-14_05_00_00-999"
+_RUN_START = datetime(2026, 9, 14, 4, 0, tzinfo=UTC)
+_REGISTRY = "demo-project.synthetic_data_quality.evaluation_data_history"
+_COPIED_CONSTANTS = ("_REGISTRY_TABLE", "_DATASET_PATTERN",
+                     "_CLOSE_RUNNING_SQL", "_ENDED_NOT_DONE")
+_COPIED_HELPERS = ("_callback_closes_row", "_launched_job_id", "_job_state")
+# Per path: the DAG file, the task that launches the evaluation (whose XCom
+# holds the evaluation job's id) and the param naming the registry's dataset.
+_PATHS = {
+    "standalone": (EVALUATION_DAG, "start_evaluation", "output_dataset"),
+    "chained":
+        (GENERATION_DAG, "trigger_evaluation", "evaluation_output_dataset"),
+}
+_BOTH_PATHS = pytest.mark.parametrize("path_id", sorted(_PATHS))
+# What the launch task left in XCom when the callback runs. Standalone: the
+# launch task itself failed, so no return value, only the entry the operator
+# pushes before it can fail. Chained: the launch task SUCCEEDED (the callback
+# runs on the wait after it), so its return value holds the job.
+_LAUNCH_XCOM = {
+    "standalone": {
+        "dataflow_job_config": {
+            "job_id": _EVALUATION_JOB
+        }
+    },
+    "chained": {
+        "return_value": {
+            "id": _EVALUATION_JOB
+        }
+    },
+}
+
+
+def _chained_trigger_name(tree: ast.Module) -> str:
+  """The module-level name the chained launch passes as `trigger`: typed
+  once, so the callback cannot look for another value than the launch wrote."""
+  node = _entry(
+      _entry(_launch(tree, "trigger_evaluation"), "parameters"), "trigger")
+  assert isinstance(node, ast.Name), "a name, not a second literal"
+  return node.id
+
+
+def _callback_scope(path_id: str) -> dict:
+  """The DAG's failure callback and what it calls, executed without Airflow;
+  the two Airflow Variables it reads are set as the import would."""
+  path = _PATHS[path_id][0]
+  tree = _tree(path)
+  names = [*_COPIED_CONSTANTS, *_COPIED_HELPERS, "_close_running_row"]
+  if path_id == "chained":
+    names.append(_chained_trigger_name(tree))
+  scope = _pure(tree, *names, path=path)
+  scope["project_id"], scope["region"] = "demo-project", "europe-west1"
+  return scope
+
+
+class _Xcoms:
+  """A task instance that answers `xcom_pull` from (task id, key) entries
+  and keeps the task ids it was asked for."""
+
+  def __init__(self, entries: dict):
+    self.entries = entries
+    self.pulled: list = []
+
+  def xcom_pull(self, task_ids=None, key="return_value"):
+    self.pulled.append(task_ids)
+    return self.entries.get((task_ids, key))
+
+
+def _context(path_id: str,
+             *,
+             dataset: str = "synthetic_data_quality",
+             target: object = _A,
+             launch: dict | None = None) -> dict:
+  """What Airflow hands the failure callback: a run whose launch targeted
+  the generation job `target` and left `launch` (key -> value) in XCom."""
+  _, task, dataset_param = _PATHS[path_id]
+  pushed = _LAUNCH_XCOM[path_id] if launch is None else launch
+  entries = {(task, key): value for key, value in pushed.items()}
+  params: dict = {dataset_param: dataset}
+  if path_id == "standalone":
+    params.update(generation_job_id=target, run_id="", trigger="composer")
+  else:
+    # the chain's target is the id its generation launch returned
+    entries[("start_sdfb", "return_value")] = {"id": target} if target else None
+  return {
+      "params": params,
+      "ti": _Xcoms(entries),
+      "dag_run": types.SimpleNamespace(start_date=_RUN_START),
+      "exception": RuntimeError("the job is in a terminal state"),
+  }
+
+
+_NO_COUNT = object()  # a query job that does not say how many rows it wrote
+
+
+def _stub_hooks(monkeypatch, state, affected: object = 1) -> tuple[list, list]:
+  """Fake Dataflow and BigQuery hooks under the provider's module names (a
+  callback imports them when it runs). `state` is what the job read answers;
+  an exception is raised instead. `affected` is the query job's
+  `num_dml_affected_rows` (`_NO_COUNT`: it has no such attribute). Returns
+  the reads and the inserts made."""
+  reads: list = []
+  inserts: list = []
+
+  class DataflowHook:
+
+    def get_job(self, **kwargs):
+      reads.append(kwargs)
+      if isinstance(state, Exception):
+        raise state
+      return {"currentState": state}
+
+  class QueryJob:
+    waited = False
+
+    def result(self):
+      self.waited = True
+
+    if affected is not _NO_COUNT:
+
+      @property
+      def num_dml_affected_rows(self):
+        assert self.waited, "the count was read before the statement finished"
+        return affected
+
+  class BigQueryHook:
+
+    def insert_job(self, **kwargs):
+      job = QueryJob()
+      inserts.append((kwargs, job))
+      return job
+
+  hooks = "airflow.providers.google.cloud.hooks"
+  dataflow = types.ModuleType(f"{hooks}.dataflow")
+  dataflow.DataflowHook = DataflowHook  # type: ignore[attr-defined]
+  bigquery = types.ModuleType(f"{hooks}.bigquery")
+  bigquery.BigQueryHook = BigQueryHook  # type: ignore[attr-defined]
+  parts = hooks.split(".")
+  for depth in range(1, len(parts) + 1):
+    package = ".".join(parts[:depth])
+    monkeypatch.setitem(sys.modules, package, types.ModuleType(package))
+  for module in (dataflow, bigquery):
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+  return reads, inserts
+
+
+def _only(inserts: list) -> tuple[dict, object]:
+  """The one statement a callback ran (its arguments and its job)."""
+  assert len(inserts) == 1, inserts
+  return inserts[0]
+
+
+def _bound(insert: dict) -> dict[str, tuple[str, str]]:
+  """The statement's query parameters: name -> (type, value)."""
+  return {
+      p["name"]: (p["parameterType"]["type"], p["parameterValue"]["value"])
+      for p in insert["configuration"]["query"]["queryParameters"]
+  }
+
+
+def test_the_chain_waits_for_the_evaluations_launch_not_for_its_end():
+  """`trigger_evaluation` returns as soon as its job is queued, minutes
+  before the launcher writes the RUNNING row: it cannot see a launcher die.
+  The task after it can: a status sensor on the evaluation job, satisfied
+  once the job runs (or has already finished between two pokes), made to
+  raise by a job that ended any other way (and failed, with its callback,
+  once the environment's retries are used up)."""
+  tree = _tree(GENERATION_DAG)
+  sensor = _task(tree, "wait_for_evaluation_launch")
+  assert _name(sensor.func) == "DataflowJobStatusSensor"
+  first = _task(tree, "wait_for_generation")
+  # the class and arguments the deployment already runs, plus the callback
+  assert {k.arg for k in sensor.keywords
+         } == {k.arg for k in first.keywords} | {"on_failure_callback"}
+  assert "deferrable" not in {k.arg for k in sensor.keywords}
+  assert ast.literal_eval(_kw(sensor, "mode")) == "reschedule"
+  for keyword in ("project_id", "location"):
+    assert ast.unparse(_kw(sensor, keyword)) == ast.unparse(_kw(first, keyword))
+  # the job it watches is the one trigger_evaluation launched, read the way
+  # the first sensor reads the generation job
+  assert _value(tree, _kw(sensor, "job_id")) == _EVALUATION_JOB_XCOM
+  assert _JOB_ID_XCOM.replace("start_sdfb",
+                              "trigger_evaluation") == _EVALUATION_JOB_XCOM
+  assert ast.literal_eval(
+      _kw(_launch(tree, "trigger_evaluation"), "do_xcom_push")) is True
+  # the LAUNCH is over when the job runs; never the job's end alone, which
+  # would hold the DAG's one run slot for the whole evaluation
+  assert ast.literal_eval(_kw(
+      sensor, "expected_statuses")) == {"JOB_STATE_RUNNING", "JOB_STATE_DONE"}
+  # its own two constants, not the generation wait's
+  poke, timeout = _kw(sensor, "poke_interval"), _kw(sensor, "timeout")
+  assert isinstance(poke, ast.Name) and isinstance(timeout, ast.Name)
+  assert {poke.id, timeout.id}.isdisjoint(
+      {_kw(first, "poke_interval").id,
+       _kw(first, "timeout").id})
+  assert _value(tree, poke) == 60
+  # past the launcher's 12 minutes with room for a job stuck queued, and
+  # far below the generation wait's day
+  assert _value(tree, timeout) == 3600
+  assert _value(tree, timeout) < _value(tree, _kw(first, "timeout"))
+
+
+def test_the_wait_for_the_launch_comes_last_behind_the_launch_it_watches():
+  tree = _tree(GENERATION_DAG)
+  edges = _edges(tree)
+  assert edges == _CHAIN_EDGES
+  assert {a for a, b in edges if b == "wait_for_evaluation_launch"
+         } == {"trigger_evaluation"}
+  assert not {b for a, b in edges if a == "wait_for_evaluation_launch"}
+  # behind the gate like the rest, by the DAG's own edges: with
+  # run_evaluation off the short circuit skips it
+  reached, frontier = set(), {"run_evaluation_gate"}
+  while frontier:
+    reached |= frontier
+    frontier = {b for a, b in edges if a in frontier} - reached
+  assert "wait_for_evaluation_launch" in reached
+  assert "start_sdfb" not in reached
+
+
+def test_the_callback_is_on_the_wait_and_not_on_the_launch():
+  tree = _tree(GENERATION_DAG)
+  callback = _kw(
+      _task(tree, "wait_for_evaluation_launch"), "on_failure_callback")
+  assert isinstance(callback, ast.Name)
+  assert callback.id == "_close_running_row"
+  # no other task has it: the launch (when it fails no job has reached its
+  # driver, so no RUNNING row exists), the generation launch, the first
+  # sensor (a generation that failed has no evaluation at all), the gate
+  for variable in _CHAIN[:-1]:
+    assert "on_failure_callback" not in {
+        k.arg for k in _task(tree, variable).keywords
+    }, variable
+  # and the launch still does not wait: the sensor does the waiting
+  assert ast.literal_eval(
+      _kw(_launch(tree, "trigger_evaluation"), "wait_until_finished")) is False
+  body = ast.unparse(_function(tree, callback.id))
+  # through the hook: an operator is never executed inside a callable
+  assert "BigQueryHook" in body and "BigQueryInsertJobOperator" not in body
+  assert ".execute(" not in body
+  # the Param-derived dataset is validated before it is part of SQL text
+  assert "fullmatch" in body
+
+
+def test_a_job_state_that_makes_the_wait_raise_is_one_the_callback_closes():
+  """The provider's sensor raises for a terminal state it was not told to
+  expect. Those states and the states the callback closes are the same four:
+  a sensor that fails on the job's state always closes the row, and a sensor
+  that fails for any other reason (its timeout) never does."""
+  tree = _tree(GENERATION_DAG)
+  expected = ast.literal_eval(
+      _kw(_task(tree, "wait_for_evaluation_launch"), "expected_statuses"))
+  ended = set(
+      _pure(tree, "_ENDED_NOT_DONE", path=GENERATION_DAG)["_ENDED_NOT_DONE"])
+  terminal = {
+      "JOB_STATE_DONE", "JOB_STATE_FAILED", "JOB_STATE_CANCELLED",
+      "JOB_STATE_UPDATED", "JOB_STATE_DRAINED"
+  }  # the Dataflow API's terminal JobStates
+  assert terminal - expected == ended == _NOT_DONE_TERMINAL
+  assert expected - terminal == {"JOB_STATE_RUNNING"}
+
+
+@pytest.mark.parametrize("state", [
+    "JOB_STATE_QUEUED", "JOB_STATE_PENDING", "JOB_STATE_RUNNING",
+    "JOB_STATE_DONE"
+])
+def test_a_wait_that_times_out_writes_nothing(monkeypatch, state):
+  """The sensor gave up on a job still queued (or the job started just as
+  it did): the job may yet write its own FINAL row, so nothing is closed."""
+  reads, inserts = _stub_hooks(monkeypatch, state)
+  context = {
+      **_context("chained"), "exception":
+          TimeoutError("Sensor has timed out; run duration of 3600 s")
+  }
+  _callback_scope("chained")["_close_running_row"](context)
+  assert [read["job_id"] for read in reads] == [_EVALUATION_JOB]
+  assert not inserts
+
+
+def test_the_chained_callback_reads_nothing_of_the_task_it_runs_on(monkeypatch):
+  """It runs on the sensor's task instance, not on the launch's. Every id it
+  needs is pulled by an explicit task id: the evaluation job's from
+  `trigger_evaluation`, the generation job's from `start_sdfb`."""
+  tree = _tree(GENERATION_DAG)
+  callback = _function(tree, "_close_running_row")
+  pulls = _calls(callback, "xcom_pull")
+  assert pulls
+  for pull in pulls:
+    assert ast.literal_eval(_kw(pull, "task_ids")) in ("start_sdfb",
+                                                       "trigger_evaluation")
+  # its statements, the docstring left out (which names the sensor)
+  body = ast.unparse(ast.Module(body=callback.body[1:], type_ignores=[]))
+  assert not re.search(r"\btask_id\b", body)  # `task_ids=` only
+  for own in ("wait_for_evaluation_launch", "context['task']"):
+    assert own not in body, own
+  _, inserts = _stub_hooks(monkeypatch, "JOB_STATE_FAILED")
+  context = _context("chained")
+  _callback_scope("chained")["_close_running_row"](context)
+  assert set(context["ti"].pulled) == {"start_sdfb", "trigger_evaluation"}
+  # the job id is the return value of a launch task that succeeded
+  insert, _ = _only(inserts)
+  assert _bound(insert)["job_id"] == ("STRING", _EVALUATION_JOB)
+
+
+def test_the_close_statement_is_the_same_text_in_both_dags():
+  """Two copies of one statement: this keeps them one statement."""
+  ours = _value(_tree(GENERATION_DAG), ast.Name("_CLOSE_RUNNING_SQL"))
+  theirs = _value(_tree(EVALUATION_DAG), ast.Name("_CLOSE_RUNNING_SQL"))
+  assert ours == theirs
+  assert ours.count("INSERT INTO") == 1
+  assert _failure_sql(_tree(GENERATION_DAG)) == _failure_sql(
+      _tree(EVALUATION_DAG))
+
+
+@pytest.mark.parametrize("name", _COPIED_CONSTANTS)
+def test_both_dags_type_the_same_constants(name):
+  assert ast.dump(_assigned(_tree(GENERATION_DAG), name)) == ast.dump(
+      _assigned(_tree(EVALUATION_DAG), name))
+
+
+def _code(function: ast.FunctionDef) -> str:
+  """A function's signature and statements, its docstring left out."""
+  body = function.body[1:] if ast.get_docstring(function) else function.body
+  return ast.dump(function.args) + ast.dump(
+      ast.Module(body=body, type_ignores=[]))
+
+
+@pytest.mark.parametrize("name", _COPIED_HELPERS)
+def test_the_copied_helpers_are_the_standalone_dags_code(name):
+  assert _code(_function(_tree(GENERATION_DAG), name)) == _code(
+      _function(_tree(EVALUATION_DAG), name))
+
+
+def test_the_copied_decisions_answer_as_the_standalone_ones():
+  names = ("_ENDED_NOT_DONE", "_callback_closes_row", "_launched_job_id")
+  ours = _pure(_tree(GENERATION_DAG), *names, path=GENERATION_DAG)
+  theirs = _pure(_tree(EVALUATION_DAG), *names)
+  states = (*sorted(_NOT_DONE_TERMINAL), *_MAY_STILL_WRITE, None, "",
+            "JOB_STATE_NEW")
+  for job_id in (_EVALUATION_JOB, "", None):
+    for state in states:
+      answer = ours["_callback_closes_row"](job_id, state)
+      assert answer is theirs["_callback_closes_row"](job_id, state)
+      assert answer is (bool(job_id) and state in _NOT_DONE_TERMINAL)
+  entries = (None, {}, {
+      "id": "A"
+  }, {
+      "id": ""
+  }, {
+      "id": 5
+  }, {
+      "job_id": "B"
+  }, {
+      "job_id": ""
+  }, {
+      "job_id": 6
+  }, {
+      "id": "A",
+      "job_id": "B"
+  }, "text", 7, ["A"])
+  for launched in entries:
+    for config in entries:
+      assert ours["_launched_job_id"](
+          launched, config) == theirs["_launched_job_id"](launched, config)
+
+
+@_BOTH_PATHS
+@pytest.mark.parametrize("state", sorted(_NOT_DONE_TERMINAL))
+def test_a_dead_job_gets_one_failed_row_found_by_its_launch(
+    monkeypatch, path_id, state):
+  reads, inserts = _stub_hooks(monkeypatch, state)
+  scope = _callback_scope(path_id)
+  scope["_close_running_row"](_context(path_id))
+  # the state of THIS launch's job was read, once, before anything was written
+  assert reads == [{
+      "job_id": _EVALUATION_JOB,
+      "project_id": "demo-project",
+      "location": "europe-west1"
+  }]
+  insert, job = _only(inserts)
+  assert job.waited  # a statement that fails, fails the callback loudly
+  assert insert["project_id"] == "demo-project"
+  query = insert["configuration"]["query"]
+  assert query["useLegacySql"] is False
+  assert query["query"] == scope["_CLOSE_RUNNING_SQL"].format(
+      registry=_REGISTRY)
+  bound = _bound(insert)
+  assert set(bound) == set(re.findall(r"@(\w+)", query["query"]))
+  assert bound["job_id"] == ("STRING", _EVALUATION_JOB)
+  assert bound["target"] == ("STRING", _A)
+  assert bound["run_start"] == ("TIMESTAMP", _RUN_START.isoformat())
+  kind, reason = bound["reason"]
+  assert kind == "STRING" and state in reason
+  assert "the job is in a terminal state" in reason
+
+
+@_BOTH_PATHS
+@pytest.mark.parametrize(
+    "state", [*_MAY_STILL_WRITE, None,
+              PermissionError("dataflow.jobs.get")],
+    ids=[*_MAY_STILL_WRITE, "no_state", "unreadable"])
+def test_nothing_is_written_while_the_job_may_write_its_own_row(
+    monkeypatch, path_id, state):
+  """Running, queued, cancelling, done, or a state that could not be read:
+  the job is still to write its FINAL row, or has. FAILED is never written
+  over a job that may be running or done."""
+  reads, inserts = _stub_hooks(monkeypatch, state)
+  _callback_scope(path_id)["_close_running_row"](_context(path_id))
+  assert len(reads) == 1 and not inserts
+
+
+@_BOTH_PATHS
+@pytest.mark.parametrize("launch", [
+    {},
+    {
+        "return_value": None,
+        "dataflow_job_config": None
+    },
+    {
+        "return_value": {
+            "id": ""
+        },
+        "dataflow_job_config": {
+            "job_id": ""
+        }
+    },
+    {
+        "dataflow_job_config": {
+            "project_id": "demo-project"
+        }
+    },
+    {
+        "return_value": "not a dict",
+        "dataflow_job_config": 7
+    },
+])
+def test_without_a_job_id_no_state_is_read_and_nothing_is_written(
+    monkeypatch, path_id, launch):
+  """A job whose state was not read is never closed, whatever it is."""
+  reads, inserts = _stub_hooks(monkeypatch, "JOB_STATE_FAILED")
+  _callback_scope(path_id)["_close_running_row"](
+      _context(path_id, launch=launch))
+  assert not reads and not inserts
+
+
+@_BOTH_PATHS
+def test_the_job_id_is_the_return_value_before_the_launch_config(
+    monkeypatch, path_id):
+  reads, inserts = _stub_hooks(monkeypatch, "JOB_STATE_CANCELLED")
+  launch = {
+      "return_value": {
+          "id": "2026-09-14_05_00_00-111"
+      },
+      "dataflow_job_config": {
+          "job_id": "2026-09-14_05_00_00-222"
+      }
+  }
+  _callback_scope(path_id)["_close_running_row"](
+      _context(path_id, launch=launch))
+  assert [read["job_id"] for read in reads] == ["2026-09-14_05_00_00-111"]
+  insert, _ = _only(inserts)
+  assert _bound(insert)["job_id"] == ("STRING", "2026-09-14_05_00_00-111")
+
+
+@_BOTH_PATHS
+@pytest.mark.parametrize("dataset", [
+    "", "a.b.c", "quality data", "project:quality",
+    "quality`; DROP TABLE x; --", "quality.evaluation_data_history` WHERE 1=1"
+])
+def test_a_bad_dataset_name_never_becomes_sql(monkeypatch, path_id, dataset):
+  reads, inserts = _stub_hooks(monkeypatch, "JOB_STATE_FAILED")
+  _callback_scope(path_id)["_close_running_row"](
+      _context(path_id, dataset=dataset))
+  assert not reads and not inserts
+
+
+@_BOTH_PATHS
+def test_a_qualified_dataset_names_its_own_project(monkeypatch, path_id):
+  _, inserts = _stub_hooks(monkeypatch, "JOB_STATE_FAILED")
+  scope = _callback_scope(path_id)
+  scope["_close_running_row"](
+      _context(path_id, dataset="other-project.quality"))
+  insert, _ = _only(inserts)
+  assert insert["configuration"]["query"]["query"] == scope[
+      "_CLOSE_RUNNING_SQL"].format(
+          registry="other-project.quality.evaluation_data_history")
+  # the query still runs in (and is billed to) the DAG's own project
+  assert insert["project_id"] == "demo-project"
+
+
+@_BOTH_PATHS
+@pytest.mark.parametrize("target", ["", None])
+def test_without_a_launch_target_there_is_no_row_to_find(
+    monkeypatch, path_id, target):
+  reads, inserts = _stub_hooks(monkeypatch, "JOB_STATE_FAILED")
+  _callback_scope(path_id)["_close_running_row"](
+      _context(path_id, target=target))
+  assert not reads and not inserts
+
+
+def test_the_standalone_callback_binds_the_runs_own_trigger(monkeypatch):
+  _, inserts = _stub_hooks(monkeypatch, "JOB_STATE_FAILED")
+  _callback_scope("standalone")["_close_running_row"](_context("standalone"))
+  insert, _ = _only(inserts)
+  assert _bound(insert)["trigger"] == ("STRING", "composer")
+
+
+def test_the_chained_callback_binds_the_trigger_its_launch_passes(monkeypatch):
+  """The row is found by `trigger`, so the callback must look for the value
+  the launch wrote. One module-level name serves both: no second literal."""
+  tree = _tree(GENERATION_DAG)
+  name = _chained_trigger_name(tree)
+  passed = _value(tree, ast.Name(name))
+  assert passed == "chained"
+  # what the standalone DAG's own `trigger` param admits for such a run
+  enum = _kw(_params(_tree(EVALUATION_DAG))["trigger"], "enum")
+  assert passed in ast.literal_eval(enum)
+  callback = _function(tree, "_close_running_row")
+  assert name in {n.id for n in ast.walk(callback) if isinstance(n, ast.Name)}
+  assert passed not in _strings(callback)
+  _, inserts = _stub_hooks(monkeypatch, "JOB_STATE_FAILED")
+  _callback_scope("chained")["_close_running_row"](_context("chained"))
+  insert, _ = _only(inserts)
+  assert _bound(insert)["trigger"] == ("STRING", passed)
+
+
+def test_the_chained_callback_finds_the_row_by_this_runs_generation_job(
+    monkeypatch):
+  """The launch target is the generation job id `start_sdfb` returned: the
+  expression the launch passes as `generation_job_id`, read from the task
+  instance because a callback has no Jinja."""
+  tree = _tree(GENERATION_DAG)
+  (task,) = re.findall(r"xcom_pull\(task_ids='(\w+)'\)\['id'\]", _JOB_ID_XCOM)
+  assert ast.unparse(_kw(_launch(tree, "start_sdfb"),
+                         "task_id")) == "f'start_{app_name}'"
+  assert task == f"start_{_value(tree, ast.Name('app_name'))}"
+  body = ast.unparse(_function(tree, "_close_running_row"))
+  assert f"xcom_pull(task_ids='{task}')" in body
+  # its own launch's job id: the return value, then the key pushed before
+  # the operator can fail
+  assert "xcom_pull(task_ids='trigger_evaluation')" in body
+  assert "xcom_pull(task_ids='trigger_evaluation', key='dataflow_job_config')" in body
+  assert "params['evaluation_output_dataset']" in body
+  # a generation job id found only in the launch config is not the launch's
+  # target: the launch read the return value's `id` and nothing else
+  reads, inserts = _stub_hooks(monkeypatch, "JOB_STATE_FAILED")
+  context = _context("chained", target=None)
+  context["ti"].entries[(task, "dataflow_job_config")] = {"job_id": _A}
+  _callback_scope("chained")["_close_running_row"](context)
+  assert not reads and not inserts
+  # ... and with it, the row of THIS run's generation job is the one closed
+  _, inserts = _stub_hooks(monkeypatch, "JOB_STATE_FAILED")
+  _callback_scope("chained")["_close_running_row"](
+      _context("chained", target=_B))
+  insert, _ = _only(inserts)
+  assert _bound(insert)["target"] == ("STRING", _B)
+
+
+def test_the_chained_reason_says_what_ended_and_when(monkeypatch):
+  """Not "the launch task failed": that task succeeded. What ended is the
+  job, while the chain was waiting for its launch to be over."""
+  _, inserts = _stub_hooks(monkeypatch, "JOB_STATE_FAILED")
+  _callback_scope("chained")["_close_running_row"](_context("chained"))
+  insert, _ = _only(inserts)
+  reason = _bound(insert)["reason"][1]
+  assert reason.startswith(
+      "Chained evaluation job ended while its launch was awaited")
+  assert "JOB_STATE_FAILED" in reason
+  assert "the job is in a terminal state" in reason
+  assert "task" not in reason.split(":")[0]
+  # an exception with no text still leaves a reason; a long one is cut
+  for exception, said in ((RuntimeError(), "RuntimeError"),
+                          (RuntimeError("x" * 900), "x" * 500)):
+    _, inserts = _stub_hooks(monkeypatch, "JOB_STATE_FAILED")
+    context = {**_context("chained"), "exception": exception}
+    _callback_scope("chained")["_close_running_row"](context)
+    insert, _ = _only(inserts)
+    reason = _bound(insert)["reason"][1]
+    assert said in reason and "x" * 501 not in reason
+
+
+def test_the_generation_dags_header_says_what_closes_a_running_row():
+  docstring = _flat(ast.get_docstring(_tree(GENERATION_DAG)) or "")
+  for said in ("_close_running_row", "does not wait",
+               "wait_for_evaluation_launch", "JOB_STATE_RUNNING",
+               "max_active_runs", "composer/evaluation_framework.py",
+               "None of this has been parsed or run by Airflow"):
+    assert said in docstring, said
+  # the chain's drawing names its five tasks, in order
+  at = [docstring.index(task) for task in _CHAIN]
+  assert at == sorted(at)
+
+
+# --------------------------------------------------------------------------- #
+# What the rest of the design rests on (R167)
+# --------------------------------------------------------------------------- #
+
+
+def test_the_generation_dag_runs_one_run_at_a_time():
+  """Every cost of the wait, and the reason it does not wait for the job's
+  end, is the DAG's one run slot."""
+  tree = _tree(GENERATION_DAG)
+  assert ast.literal_eval(_kw(_one(tree, "DAG"), "max_active_runs")) == 1
+  assert "`max_active_runs=1`" in (ast.get_docstring(tree) or "")
+
+
+def test_the_chain_leaves_retries_to_the_environment():
+  """Cloud Composer retries a failed task twice, five minutes apart, unless
+  told otherwise, and a sensor that raises on a dead job is retried like any
+  task: the failure callback runs after the last retry. That is kept (a
+  transient poke error must not end the watch), so no task sets its own
+  retries and the DAG sets no `default_args` that could set them, or a
+  callback, for every task."""
+  tree = _tree(GENERATION_DAG)
+  assert "default_args" not in {k.arg for k in _one(tree, "DAG").keywords}
+  for variable in _CHAIN:
+    passed = {k.arg for k in _task(tree, variable).keywords}
+    assert not passed & {
+        "retries", "retry_delay", "retry_exponential_backoff",
+        "max_retry_delay", "default_args"
+    }, variable
+  docstring = _flat(ast.get_docstring(tree) or "")
+  for said in ("after the task's last retry", "two retries", "default_args"):
+    assert said in docstring, said
+
+
+def test_the_close_statement_names_only_columns_the_registry_has():
+  """One text in both DAGs, so one check: every column the statement
+  replaces or filters on is a column of `evaluation_data_history`, with the
+  type the replacement has."""
+  sql = _value(_tree(GENERATION_DAG), ast.Name("_CLOSE_RUNNING_SQL"))
+  assert sql == _value(_tree(EVALUATION_DAG), ast.Name("_CLOSE_RUNNING_SQL"))
+  fields = {
+      field["name"]: field["type"]
+      for field in json.loads((PACKAGE / "src" / "sdfb_evaluation" / "schemas" /
+                               "evaluation_data_history.schema.json").read_text(
+                                   encoding="utf-8"))
+  }
+  (block,) = re.findall(r"SELECT \* REPLACE \((.*?)\)\nFROM", sql, flags=re.S)
+  replaced = re.findall(r"\bAS (\w+)", block)
+  assert replaced == [
+      "event", "status", "status_reason", "recorded_at", "finished_at",
+      "evaluation_job_id"
+  ]
+  filtered = set(re.findall(r"\b(?:running|closed)\.(\w+)", sql))
+  assert filtered == {
+      "event", "trigger", "generation_job_id", "base_run_id", "recorded_at",
+      "evaluation_id", "evaluation_job_id"
+  }
+  assert set(replaced) | filtered <= set(fields)
+  assert {
+      name: fields[name] for name in replaced
+  } == {
+      "event": "STRING",
+      "status": "STRING",
+      "status_reason": "STRING",
+      "recorded_at": "TIMESTAMP",
+      "finished_at": "TIMESTAMP",
+      "evaluation_job_id": "STRING",
+  }
+  # what the statement is matched on is text, and compared with text
+  for name in ("trigger", "generation_job_id", "base_run_id", "evaluation_id"):
+    assert fields[name] == "STRING", name
+
+
+@pytest.mark.parametrize(
+    "affected,level,said", [
+        (1, logging.INFO, "closed 1 RUNNING row"),
+        (2, logging.INFO, "closed 2 RUNNING row"),
+        (0, logging.WARNING, "matched no open RUNNING row"),
+        (None, logging.INFO, "unknown"),
+        (_NO_COUNT, logging.INFO, "unknown"),
+    ],
+    ids=["one", "two", "none", "null", "no_attribute"])
+def test_the_chained_callback_says_how_many_rows_it_closed(
+    monkeypatch, caplog, affected, level, said):
+  """A close that matches nothing is a BigQuery job that succeeded: only
+  the count tells "closed one row" from "matched none". It is read after the
+  statement finished; zero is a warning, an unknown count is not."""
+  _, inserts = _stub_hooks(monkeypatch, "JOB_STATE_FAILED", affected=affected)
+  with caplog.at_level(logging.INFO):
+    _callback_scope("chained")["_close_running_row"](_context("chained"))
+  _, job = _only(inserts)
+  assert job.waited
+  (record,) = [
+      r for r in caplog.records if "evaluation registry" in r.getMessage()
+  ]
+  message = record.getMessage()
+  assert record.levelno == level and said in message
+  # enough to find the row by hand: the launch target or the job
+  assert _A in message or _EVALUATION_JOB in message
+  if not affected and affected is not None and affected is not _NO_COUNT:
+    assert message.startswith("evaluation registry not updated")
+    assert _A in message and "chained" in message
+
+
+def _masked(function: ast.FunctionDef) -> list[str]:
+  """A function's statements, one per line, every string literal masked."""
+  body = function.body[1:] if ast.get_docstring(function) else function.body
+  module = ast.Module(body=copy.deepcopy(body), type_ignores=[])
+  for node in ast.walk(module):
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+      node.value = "…"
+  return ast.unparse(module).splitlines()
+
+
+def test_the_two_callbacks_differ_only_where_the_chain_differs():
+  """The list of differences, held. With every string literal masked (the
+  words differ by design: the dataset param, the task ids, the reason, the
+  log lines, each held by a test above), the two callbacks are the same
+  statements but for three things: where the launch target comes from, the
+  trigger that is bound, and the row count the chained one logs after its
+  insert. A fourth difference fails here until it is listed."""
+  tree = _tree(GENERATION_DAG)
+  trigger = _chained_trigger_name(tree)
+  theirs = _masked(_function(_tree(EVALUATION_DAG), "_close_running_row"))
+  ours = _masked(_function(tree, "_close_running_row"))
+  changed = [
+      line for line in difflib.unified_diff(theirs, ours, lineterm="", n=0)
+      if not line.startswith(("---", "+++", "@@"))
+  ]
+  removed = [line[1:].strip() for line in changed if line.startswith("-")]
+  added = [line[1:].strip() for line in changed if line.startswith("+")]
+  insert = "job = BigQueryHook().insert_job("
+  (their_insert,) = [line for line in removed if line.startswith(insert)]
+  (our_insert,) = [line for line in added if line.startswith(insert)]
+  # the trigger: a param of the run there, the launch's own constant here
+  assert our_insert.replace(f"string('…', {trigger})",
+                            "string('…', params['…'])") == their_insert
+  # the launch target: params there, the generation launch's XCom here
+  assert [line for line in removed if line != their_insert] == [
+      "target = params['…'] or params['…']",
+      "ti = context['…']",
+  ]
+  assert [line for line in added if line != our_insert] == [
+      "ti = context['…']",
+      "target = _launched_job_id(ti.xcom_pull(task_ids='…'), None)",
+      # the row count, logged by the chained callback alone
+      "written = getattr(job, '…', None)",
+      "if not isinstance(written, int):",
+      "logging.info('…', job_id, target)",
+      "elif written:",
+      "logging.info('…', written, job_id, target)",
+      "else:",
+      f"logging.warning('…', target, {trigger})",
+  ]
+
+
+def test_the_standalone_callback_is_left_as_it_was_after_its_insert():
+  """The count is the chained callback's alone (the standalone DAG is not
+  touched in this task): one more listed difference between the two."""
+  standalone = _function(_tree(EVALUATION_DAG), "_close_running_row")
+  assert "num_dml_affected_rows" not in ast.unparse(standalone)
+  assert ast.unparse(standalone.body[-1]) == "job.result()"
+  chained = _function(_tree(GENERATION_DAG), "_close_running_row")
+  assert "getattr(job, 'num_dml_affected_rows', None)" in ast.unparse(chained)
