@@ -25,6 +25,8 @@ export const concepts = defineConcepts([
       bad: "PARTIAL or FAILED: read status_reason first; some metrics are missing or not evaluated.",
       tip: "SUCCEEDED_WITH_WARNINGS is operational (sampled mode, scope notes), not a metric failure — the metric counts carry those.",
     },
+    pitfalls:
+      "RUNNING is the last event the registry holds, not proof that a job is running. A RUNNING event more than 24 hours old with no FINAL event is shown as Stale: the launch or the job most likely ended without recording a result. The row stays RUNNING until a FINAL row is appended.",
     links: [
       { label: "evaluation_data_history schema", url: `${SCHEMAS}/evaluation_data_history.schema.json`, kind: "code" },
       catalogueLink,

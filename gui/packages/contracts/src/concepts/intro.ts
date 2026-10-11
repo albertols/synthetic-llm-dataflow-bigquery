@@ -296,7 +296,8 @@ export const concepts = defineConcepts([
   {
     id: "intro:counter-evaluations",
     title: "Evaluations",
-    purpose: "Distinct evaluation ids in the registry (evaluation_data_history), running ones included.",
+    purpose:
+      "Distinct evaluation ids in the registry (evaluation_data_history), those with no FINAL event (running or stale) included.",
     links: [L.registrySql],
   },
   {

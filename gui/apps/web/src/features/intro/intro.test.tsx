@@ -113,11 +113,11 @@ function respond(body: unknown) {
   });
 }
 
-function stubBff() {
+function stubBff(facets: Facets = FACETS) {
   const fetch = vi.fn((input: RequestInfo | URL) => {
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     if (url.startsWith("/api/health")) return Promise.resolve(respond(HEALTH));
-    if (url.startsWith("/api/facets")) return Promise.resolve(respond(FACETS));
+    if (url.startsWith("/api/facets")) return Promise.resolve(respond(facets));
     if (url.startsWith("/api/evaluations"))
       return Promise.resolve(respond({ items: EVALUATIONS, total: 40, offset: 0, limit: 24 }));
     if (url.startsWith("/api/relationships")) return Promise.resolve(respond({ models: [] }));
@@ -186,7 +186,10 @@ beforeEach(() => {
   stubBff();
   setReducedMotion(false);
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 describe("INTRO pipeline hero", { timeout: 90_000 }, () => {
   it("renders the whole page, then deep-links a stage to its tab", async () => {
@@ -279,6 +282,28 @@ describe("INTRO live counters", { timeout: 90_000 }, () => {
     expect(within(tile("Latest overall score")).getByRole("link", { name: LATEST })).toBeInTheDocument();
     expect(await screen.findByText("Seeded mock data · no GCP access needed", {}, WAIT)).toBeInTheDocument();
   });
+
+  // A registry with no FINAL row at all: its latest evaluation is the newest RUNNING one.
+  it.each([
+    ["Running", 23, "RUNNING"],
+    ["Stale", 25, "STALE"],
+  ])(
+    "show a latest evaluation with no FINAL event as %s, by the age of its RUNNING event",
+    async (label, hours, status) => {
+      const started = "2026-09-27T18:45:00.189160Z";
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.parse(started) + hours * 3_600_000);
+      stubBff({
+        ...FACETS,
+        latest: { evaluation_id: "eval-0040", evaluated_at: started, status: "RUNNING", overall_score: null },
+      });
+      renderIntro("/", LiveCounters);
+      const tiles = await screen.findByTestId("live-counters", {}, WAIT);
+      const tile = within(tiles).getByRole("group", { name: "Latest overall score" });
+      expect(within(tile).getByRole("link", { name: "eval-0040" })).toBeInTheDocument();
+      expect(within(tile).getByText(label).closest("[data-status]")).toHaveAttribute("data-status", status);
+    },
+  );
 
   it("say so, with a retry, when the BFF does not answer", async () => {
     vi.stubGlobal("fetch", () => Promise.resolve(new Response("{}", { status: 503, statusText: "Unavailable" })));

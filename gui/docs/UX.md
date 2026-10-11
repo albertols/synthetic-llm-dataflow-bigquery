@@ -89,6 +89,52 @@ Follow the dataviz method: pick the form first, colour last.
 - `StatusPill` for metric statuses (`pass`, `warn`, `fail`, `info`,
   `not_evaluated`) and run statuses (`RUNNING` … `FAILED`). `not_evaluated`
   and `SKIPPED` are neutral, not green.
+- **An evaluation's status goes through `RunStatusPill`**, never a bare
+  `StatusPill`: the registry's `RUNNING` is the last event it holds, not
+  proof that a job runs.
+
+  ```mermaid
+  flowchart LR
+    classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+    classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+    classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+    E[("🗄️ last registry event")]:::store --> Q{"🛡️ which event"}:::cpu
+    Q -- "FINAL" --> S["⚪ the row's<br/>own status"]:::data
+    Q -- "RUNNING" --> A{"⚙️ recorded more<br/>than 24 h ago"}:::cpu
+    A -- "no" --> R["⚪ Running<br/>blue, spinner"]:::data
+    A -- "yes" --> T["⚪ Stale<br/>amber, slashed circle"]:::data
+  ```
+
+  _One rule, in `src/lib/runState.ts`: an evaluation whose last registry
+  event is `RUNNING`, recorded more than 24 hours ago, is stale._ Why 24
+  hours: every table an evaluation prepares for its reads expires 24 hours
+  after it was created
+  (`packages/sdfb-evaluation/src/sdfb_evaluation/context/scope.py`,
+  `_EXPIRY`), so by then it is not expected to be running: the launch or the
+  job most likely ended without recording a result. That is an inference
+  from the event's age, not a reading of the job, so the words keep that
+  register ("most likely", "is expected"); no text says flatly that the
+  evaluation is not running, that its tables have expired, or that nothing
+  more will be written. The pill is amber with a slashed circle: the tone of
+  "Succeeded with warnings" without its triangle. On purpose it shares the
+  icon with the run status Skipped (neutral) and the whole look with the
+  scope status "Expired". Stale is a display state, derived in the browser from the
+  row a view already has and the clock: the registry's status is still
+  `RUNNING`, so the status filter and the sort keep saying `RUNNING`, and
+  the pill's title says "Registry status RUNNING". On the run view the
+  reason sits in a callout directly under the header, on every section: what
+  the registry holds, since when, to check that no Dataflow job is still
+  running before closing the row, and where the manual close is written down
+  ([run playbook](../../docs/RUN_PLAYBOOK.md#a-running-row-that-never-closes);
+  `CLOSE_BY_HAND` in `runState.ts` holds the heading and its anchor, and a
+  test reads the playbook to keep them true). Unit tests fake the clock
+  (`vi.setSystemTime`) or pass `now`. The two end-to-end tests of the rule
+  fix the browser's clock (`page.clock.setFixedTime`), one on each side of
+  it, so those two do not depend on the real date. The suite's other tests
+  still render the mock's dated `RUNNING` evaluation under the real clock
+  (Stale); none asserts on it.
+
 - `LevelChip` for FIELD, COLUMN, PAIR, ROW, TABLE, RELATIONSHIP, MODEL.
 - The top nav always shows the data source: **MOCK** or **BIGQUERY
   <project>**. Views that show a BigQuery bytes estimate (from the BFF's

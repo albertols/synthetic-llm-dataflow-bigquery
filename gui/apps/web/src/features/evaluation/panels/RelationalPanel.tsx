@@ -51,13 +51,31 @@ function EdgeDetail({ edge }: { edge: GraphEdge }) {
   );
 }
 
-export function RelationalPanel({ graph, table }: { graph: Graph; table?: string }) {
+export function RelationalPanel({
+  graph,
+  table,
+  noMetrics,
+}: {
+  graph: Graph;
+  table?: string;
+  /**
+   * The evaluation has no metric row at all: say that, not a guess at the model. "yet" while it is
+   * running (its last event is RUNNING and not stale), "at-all" otherwise (it failed, or never finished).
+   */
+  noMetrics?: "yet" | "at-all";
+}) {
   const edges = graph.edges.filter((e) => e.rows.length && (!table || e.child === table || e.parent === table));
   if (!edges.length)
     return (
       <EmptyState
         title="No relationship metrics"
-        description="The launch generated one table, or its relationship model declares no foreign keys between generated tables."
+        description={
+          noMetrics === "yet"
+            ? "This evaluation has written no metric rows yet, so no relationship has been measured so far."
+            : noMetrics === "at-all"
+              ? "This evaluation wrote no metric rows at all, so no relationship was measured."
+              : "The launch generated one table, or its relationship model declares no foreign keys between generated tables."
+        }
       />
     );
   const orphanRow = (row: MetricRow | null) => (row ? row.value : null);

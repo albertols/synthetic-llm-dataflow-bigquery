@@ -1,7 +1,8 @@
 /**
- * The run header: the registry status and its reason, the scope of every
- * table (scope_ok / contaminated / expired / count mismatch / empty), the
- * reference check, sampled mode with its sample rates, versions and cost.
+ * The run header: the registry status and its reason (Stale for a RUNNING
+ * event that is too old to be running), the scope of every table (scope_ok /
+ * contaminated / expired / count mismatch / empty), the reference check,
+ * sampled mode with its sample rates, versions and cost.
  */
 import type { ReactNode } from "react";
 
@@ -9,10 +10,12 @@ import type { EvaluationRecord } from "@contracts/api";
 
 import { Callout } from "@/components/Callout";
 import { InfoHint } from "@/components/InfoHint";
+import { RunStatusPill } from "@/components/RunStatusPill";
 import { StatusPill } from "@/components/StatusPill";
 import { Badge } from "@/components/ui/badge";
 import { Table, TableBody, TableCell, TableContainer, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { formatBytes, formatCount, formatDateTime, formatDuration, formatPercent, MISSING } from "@/lib/format";
+import { isStale } from "@/lib/runState";
 
 import { catalogueVersion } from "../lib/catalogue";
 
@@ -39,6 +42,12 @@ function rate(value: number | null): string {
   return value === null ? MISSING : formatPercent(value, value < 0.01 ? 2 : 0);
 }
 
+/** When the run was evaluated; for an open one, since when it runs or since when the registry has heard nothing. */
+function whenLine(evaluation: EvaluationRecord, stale: boolean): string {
+  if (stale) return `RUNNING event recorded ${formatDateTime(evaluation.recorded_at)} · no FINAL event since`;
+  return `${evaluation.event === "RUNNING" ? "running since" : "evaluated"} ${formatDateTime(evaluation.evaluated_at)}`;
+}
+
 export function RunHeader({
   evaluation,
   contractWarnings,
@@ -46,6 +55,7 @@ export function RunHeader({
   evaluation: EvaluationRecord;
   contractWarnings: string[];
 }) {
+  const stale = isStale(evaluation);
   const seconds =
     evaluation.finished_at && evaluation.evaluated_at
       ? (Date.parse(evaluation.finished_at) - Date.parse(evaluation.evaluated_at)) / 1000
@@ -62,9 +72,9 @@ export function RunHeader({
         Run status and scope
       </h2>
       <div className="flex flex-wrap items-center gap-2">
-        <StatusPill status={evaluation.status} />
+        <RunStatusPill row={evaluation} />
         <span className="inline-flex items-center gap-0.5 text-xs text-text-3">
-          {evaluation.event === "RUNNING" ? "running since" : "evaluated"} {formatDateTime(evaluation.evaluated_at)}
+          {whenLine(evaluation, stale)}
           {seconds !== null && seconds >= 0 ? ` · took ${formatDuration(seconds)}` : ""}
           <InfoHint concept="eval:evaluation" />
         </span>

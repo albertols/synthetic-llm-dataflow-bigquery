@@ -199,7 +199,12 @@ tab that explores it.
 **EVALUATION** (`/evaluation`) — the list of evaluations, one run's scorecards
 and drill-downs (columns, pairs, privacy, detection, relational), and a compare
 view that flags runs measured with a different catalogue, evaluator or encoding
-plan instead of judging them.
+plan instead of judging them. An evaluation whose last registry event is
+`RUNNING` and more than 24 hours old reads **Stale**, not Running: the launch
+or the job most likely ended without recording a result, and the row stays
+`RUNNING` in the registry until it is closed
+([the rule](docs/UX.md#status-levels-data-source);
+[closing it](../docs/RUN_PLAYBOOK.md#a-running-row-that-never-closes)).
 
 ![EVALUATION compare: three runs side by side, with the notice that they are not directly comparable and why](docs/assets/evaluation-compare-1440.png)
 

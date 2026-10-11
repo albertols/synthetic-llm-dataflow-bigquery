@@ -26,8 +26,8 @@ import { ChartFrame } from "@/components/ChartFrame";
 import { EmptyState } from "@/components/EmptyState";
 import { InfoHint } from "@/components/InfoHint";
 import { PageHeader } from "@/components/PageHeader";
+import { RunStatusPill } from "@/components/RunStatusPill";
 import { StatTile } from "@/components/StatTile";
-import { StatusPill } from "@/components/StatusPill";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Combobox } from "@/components/ui/combobox";
@@ -37,6 +37,7 @@ import { toast } from "@/components/ui/toast";
 import { useEvaluations, useFacets } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { formatCompact, formatCount, formatDateTime, MISSING } from "@/lib/format";
+import { isStale, latestEvent } from "@/lib/runState";
 
 import { metricMeta } from "./lib/catalogue";
 import { slotMap } from "./lib/compare";
@@ -436,7 +437,7 @@ function EvaluationsTable({
                   {formatDateTime(e.evaluated_at)}
                 </TableCell>
                 <TableCell>
-                  <StatusPill status={e.status} size="sm" />
+                  <RunStatusPill row={e} size="sm" />
                 </TableCell>
                 <TableCell className="text-right">
                   <ScoreCell score={e.overall_score} label="overall" />
@@ -523,7 +524,7 @@ function EvaluationCards({
             >
               {e.evaluation_id}
             </Link>
-            <StatusPill status={e.status} size="sm" className="ml-auto" />
+            <RunStatusPill row={e} size="sm" className="ml-auto" />
           </div>
           <p className="text-xs text-text-2">
             {formatDateTime(e.evaluated_at)} · {e.engine ?? MISSING} · {shortModel(e.llm_model_uri)} ·{" "}
@@ -758,7 +759,9 @@ function ListPageContent() {
                 params={{ evaluationId: latest.evaluation_id }}
                 className="text-link hover:underline"
               >
-                {latest.evaluation_id} · {latest.status} · {formatDateTime(latest.evaluated_at)}
+                {/* The registry's own status, quoted; a RUNNING that is too old to be running says so. */}
+                {latest.evaluation_id} · {latest.status}
+                {isStale(latestEvent(latest)) ? " (stale)" : ""} · {formatDateTime(latest.evaluated_at)}
               </Link>
             ) : (
               "No evaluation yet"

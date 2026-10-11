@@ -35,8 +35,9 @@ name: GUI
 #            GUI imports changes).
 #   gui      gui/ itself, the contract sources, the figures assets:check
 #            copies, and the repo files the GUI's tests quote verbatim
-#            (DESIGN.md, READMEs, ADRs, articles, and the few Python lines the
-#            CONFIG tab cites by path:line). gui/apps/web/src/test/
+#            (DESIGN.md, READMEs, ADRs, articles, the run playbook's heading
+#            the EVALUATION tab links, and the few Python lines the CONFIG
+#            tab cites by path:line). gui/apps/web/src/test/
 #            workflow-paths.test.ts keeps GUI_PATHS in step with those tests.
 
 on:
@@ -60,6 +61,7 @@ on:
       # What the GUI's tests quote or copy.
       - "README.md"
       - "docs/DESIGN.md"
+      - "docs/RUN_PLAYBOOK.md"
       - "docs/adr/**"
       - "docs/articles/**"
       - "docs/designs/**"
@@ -93,7 +95,7 @@ jobs:
         id: filter
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-          GUI_PATHS: '^(gui/|packages/sdfb-evaluation/(README\.md$|pyproject\.toml$|src/sdfb_evaluation/(schemas|catalogue)/)|config/bq_schema/|README\.md$|docs/(DESIGN\.md$|adr/|articles/|designs/|assets/)|\.claude/skills/validation-mode-a\.md$|packages/sdfb-beam/src/sdfb_beam/(pipeline\.py|dofns/validate_record\.py)$|packages/sdfb-core/src/sdfb_core/(engines/b1_rag/engine\.py|validation/summary\.py)$|\.github/workflows/gui\.yml$)'
+          GUI_PATHS: '^(gui/|packages/sdfb-evaluation/(README\.md$|pyproject\.toml$|src/sdfb_evaluation/(schemas|catalogue)/)|config/bq_schema/|README\.md$|docs/(DESIGN\.md$|RUN_PLAYBOOK\.md$|adr/|articles/|designs/|assets/)|\.claude/skills/validation-mode-a\.md$|packages/sdfb-beam/src/sdfb_beam/(pipeline\.py|dofns/validate_record\.py)$|packages/sdfb-core/src/sdfb_core/(engines/b1_rag/engine\.py|validation/summary\.py)$|\.github/workflows/gui\.yml$)'
           EXPORTS_PATHS: '^(scripts/gui/|packages/sdfb-(core|beam|evaluation)/src/|packages/sdfb-tests/tests/unit/scripts/test_gui_exporters\.py$|gui/packages/contracts/generated/|composer/|docker/flex_template_metadata\.json$|config/(thresholds\.yml$|relationships/)|scripts/doc/make_(throughput|ws5)_figures\.py$|docs/(designs|articles|adr)/[^/]+\.md$|\.github/workflows/gui\.yml$)'
         run: |
           # No usable base (a new branch, a force-push): run every job.

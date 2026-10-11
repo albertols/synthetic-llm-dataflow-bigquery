@@ -433,7 +433,7 @@ export function countsDetail(): EvaluationDetail {
       column_name: "state",
       column_kind: "categorical",
       value: 0.05,
-      status: "stale" as MetricRow["status"],
+      status: "newer_than_this_gui" as MetricRow["status"],
     }),
     metric("column.wasserstein", {
       column_name: "age",

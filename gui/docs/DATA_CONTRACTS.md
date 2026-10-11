@@ -346,7 +346,9 @@ Fetched rows are cached in memory (LRU) and never persisted.
   need every row of a side), `eval-0014` FAILED, `eval-0017` PARTIAL (scope
   `count_mismatch`), `eval-0024` SKIPPED (empty appends scope), `eval-0027`
   PARTIAL (reference not verified: privacy `not_evaluated`), `eval-0032` the
-  200-column table, `eval-0040` still RUNNING (no FINAL event); scope notes
+  200-column table, `eval-0040` still RUNNING (no FINAL event; its RUNNING
+  event is dated 2026-09-27, so the views show it as Stale, not Running:
+  [`UX.md`](UX.md#status-levels-data-source)); scope notes
   `expired` (`eval-0007`, users) and `contaminated` (`eval-0030`,
   order_items) come with warnings (SUCCEEDED_WITH_WARNINGS). b2 runs keep
   joint structure (pair metrics pass more often) but interpolate through 11

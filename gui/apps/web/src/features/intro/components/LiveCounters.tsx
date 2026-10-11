@@ -10,13 +10,14 @@ import type { EvaluationSummary, Facets } from "@contracts/api";
 
 import { Callout } from "@/components/Callout";
 import { InfoHint } from "@/components/InfoHint";
+import { RunStatusPill } from "@/components/RunStatusPill";
 import { StatTile } from "@/components/StatTile";
-import { StatusPill } from "@/components/StatusPill";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { useEvaluations, useFacets } from "@/lib/api";
 import { useDataSource } from "@/lib/dataSource";
 import { formatBytes, formatCount, formatDate, formatFixed, isFiniteNumber } from "@/lib/format";
+import { latestEvent } from "@/lib/runState";
 
 import { IntroSection } from "./primitives";
 
@@ -155,7 +156,7 @@ function CounterTiles({ facets, items }: { facets: Facets; items: readonly Evalu
         footnote={
           latest ? (
             <span className="flex flex-wrap items-center gap-1.5">
-              <StatusPill status={latest.status} size="sm" />
+              <RunStatusPill row={latestEvent(latest)} size="sm" />
               <Link
                 to="/evaluation/$evaluationId"
                 params={{ evaluationId: latest.evaluation_id }}

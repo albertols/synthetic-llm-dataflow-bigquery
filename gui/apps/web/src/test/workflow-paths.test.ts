@@ -14,6 +14,7 @@ import { CITES, splitCitation } from "@/features/config/citations";
 import { DESIGN_PATH, DESIGN_SECTIONS } from "@/features/intro/content/designSections";
 import { PACKAGES } from "@/features/intro/content/packages";
 import { STAGES } from "@/features/intro/content/stages";
+import { CLOSE_BY_HAND } from "@/lib/runState";
 
 function repoRoot(): string {
   let dir = process.cwd();
@@ -51,7 +52,8 @@ function triggerGlobs(): RegExp[] {
 
 /** Repo-relative files the GUI's unit tests read outside gui/. */
 function filesTheTestsRead(): string[] {
-  const files = new Set<string>([DESIGN_PATH, "README.md"]);
+  // CLOSE_BY_HAND.doc: lib/runState.test.ts checks the stale callout's link against its heading there.
+  const files = new Set<string>([DESIGN_PATH, "README.md", CLOSE_BY_HAND.doc]);
   for (const cite of Object.values(CITES)) files.add(splitCitation(cite.source).path);
   for (const stage of STAGES) files.add(stage.quote.source);
   for (const section of DESIGN_SECTIONS)

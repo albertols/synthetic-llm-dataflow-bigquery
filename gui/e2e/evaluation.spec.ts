@@ -1,8 +1,9 @@
 /**
  * EVALUATION tab e2e (real BFF, mock data): filter the list → open a run →
  * open a column drawer → compare two runs, with axe at each step; the
- * 200-column evaluation; the degenerate registry states (RUNNING, SKIPPED,
- * FAILED, reference unverified, unknown id, a single id to compare).
+ * 200-column evaluation; a RUNNING event on both sides of the 24-hour stale
+ * rule, with the browser's clock fixed; the degenerate registry states
+ * (SKIPPED, FAILED, reference unverified, unknown id, a single id to compare).
  * Screenshots of the key views when GUI_SHOTS_DIR is set.
  */
 import { AxeBuilder } from "@axe-core/playwright";
@@ -155,13 +156,72 @@ test("the 200-column evaluation renders 50 rows at a time and stays responsive",
   expect(errors).toEqual([]);
 });
 
-test("degenerate registry states render labelled empty states, never a crash", async ({ page }) => {
+// The mock's last evaluation, eval-0040, has a RUNNING event recorded on 2026-09-27 at 18:45 UTC
+// and no FINAL event. Whether it reads Running or Stale depends only on the clock, so the two
+// tests below fix the browser's clock (Date only: timers keep running) instead of reading the
+// real date. The server is untouched: the rule is derived in the browser.
+const RUNNING_EVENT = Date.parse("2026-09-27T18:45:00Z");
+const HOUR = 3_600_000;
+
+test("a RUNNING event up to 24 hours old reads Running, in the list and on its page", async ({ page }) => {
   test.setTimeout(180_000);
   const errors = watchErrors(page);
+  await page.clock.setFixedTime(new Date(RUNNING_EVENT + 2 * HOUR));
+
+  await page.goto("/evaluation");
+  const row = page.locator('[data-evaluation="eval-0040"]').filter({ visible: true });
+  await expect(row.locator('[data-status="RUNNING"]')).toHaveText(/^Running/, { timeout: 45_000 });
+  await expect(row.locator('[data-status="STALE"]')).toHaveCount(0);
+  await noHorizontalScroll(page);
 
   await page.goto("/evaluation/eval-0040");
   await expect(page.getByText("Metrics are still being computed")).toBeVisible();
-  await expect(page.getByText("Still running")).toBeVisible();
+  const header = page.getByRole("region", { name: "Run status and scope" });
+  await expect(header.locator('[data-status="RUNNING"]')).toHaveText(/^Running/);
+  await expect(header).toContainText("running since 2026-09-27 18:45 UTC");
+  const note = page.getByRole("note").filter({ hasText: "Still running" });
+  await expect(note).toContainText("Numbers may change: the FINAL event has not been recorded yet");
+  await expect(page.locator('[data-status="STALE"]')).toHaveCount(0);
+  await expectNoSeriousViolations(page, "running run");
+  await noHorizontalScroll(page);
+  expect(errors).toEqual([]);
+});
+
+test("a RUNNING event more than 24 hours old reads Stale, with the reason on top of its page", async ({ page }) => {
+  test.setTimeout(180_000);
+  const errors = watchErrors(page);
+  await page.clock.setFixedTime(new Date(RUNNING_EVENT + 30 * HOUR));
+
+  await page.goto("/evaluation");
+  const row = page.locator('[data-evaluation="eval-0040"]').filter({ visible: true });
+  await expect(row.locator('[data-status="STALE"]')).toHaveText(/^Stale/, { timeout: 45_000 });
+  await expect(row.locator('[data-status="RUNNING"]')).toHaveCount(0);
+  await noHorizontalScroll(page);
+
+  await page.goto("/evaluation/eval-0040");
+  await expect(page.getByText("No metrics, and no result recorded for more than 24 hours")).toBeVisible();
+  const header = page.getByRole("region", { name: "Run status and scope" });
+  await expect(header.locator('[data-status="STALE"]')).toHaveText(/^Stale/);
+  await expect(header).toContainText("RUNNING event recorded 2026-09-27 18:45 UTC · no FINAL event since");
+  const callout = page.getByRole("note").filter({ hasText: "Stale: no result recorded for more than 24 hours" });
+  await expect(callout).toContainText("most likely ended without recording a result");
+  await expect(callout).toContainText("check that no Dataflow job is still running for it");
+  await expect(callout.getByRole("link", { name: /A RUNNING row that never closes/ })).toBeVisible();
+  // Under the header and above the sections, on every tab.
+  const top = async (locator: ReturnType<Page["locator"]>) => (await locator.boundingBox())!.y;
+  expect(await top(header)).toBeLessThan(await top(callout));
+  expect(await top(callout)).toBeLessThan(await top(page.getByRole("tablist", { name: "Evaluation sections" })));
+  // Exact: the callout itself says to check that no job "is still running" before closing the row.
+  await expect(page.getByText("Still running", { exact: true })).toHaveCount(0);
+  await expect(page.getByText("Metrics are still being computed")).toHaveCount(0);
+  await expectNoSeriousViolations(page, "stale run");
+  await noHorizontalScroll(page);
+  expect(errors).toEqual([]);
+});
+
+test("degenerate registry states render labelled empty states, never a crash", async ({ page }) => {
+  test.setTimeout(180_000);
+  const errors = watchErrors(page);
 
   await page.goto("/evaluation/eval-0024");
   await expect(page.getByText("No metrics were written")).toBeVisible();

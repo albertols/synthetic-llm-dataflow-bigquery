@@ -15,6 +15,7 @@ import type { EvaluationDetail } from "@contracts/api";
 import { Callout } from "@/components/Callout";
 import { EmptyState } from "@/components/EmptyState";
 import { PageHeader } from "@/components/PageHeader";
+import { SourceLink } from "@/components/SourceLink";
 import { StatTile } from "@/components/StatTile";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -22,6 +23,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ApiError, useEvaluation, useEvaluations, useRelationships } from "@/lib/api";
 import { formatCompact, formatCount, formatDateTime } from "@/lib/format";
+import { CLOSE_BY_HAND, isStale, STALE_AFTER_HOURS } from "@/lib/runState";
 
 import { NoiseLegend } from "./components/NoiseLegend";
 import { StatusCounts } from "./components/StatusCounts";
@@ -195,6 +197,11 @@ function RunPageContent() {
   const tab: RunTabId = search.tab ?? "overview";
   const drawerSummary = search.column ? derived.summaries.find((s) => s.key === search.column) : undefined;
   const hasMetrics = detail.metrics.length > 0;
+  // An old RUNNING event: the launch or the job most likely ended without a FINAL row (lib/runState.ts).
+  const stale = isStale(evaluation);
+  const running = evaluation.status === "RUNNING" && !stale;
+  // No metric row in the whole evaluation (not the table scope): "yet" only while its last event is a live RUNNING.
+  const noMetrics = hasMetrics ? undefined : evaluation.event === "RUNNING" && !stale ? "yet" : "at-all";
   const rowsSynthetic = evaluation.tables.reduce((acc, t) => acc + (t.rows_synthetic ?? 0), 0);
 
   return (
@@ -231,6 +238,19 @@ function RunPageContent() {
       />
 
       <RunHeader evaluation={evaluation} contractWarnings={query.data?.warnings ?? []} />
+
+      {/* Under the header, so the reason and the link are the first thing on every section and deep link. */}
+      {stale ? (
+        <Callout tone="warn" title={`Stale: no result recorded for more than ${STALE_AFTER_HOURS} hours`}>
+          The registry has had a RUNNING event since {formatDateTime(evaluation.recorded_at)} and no FINAL event. The
+          launch or the job most likely ended without recording a result (the tables an evaluation prepares expire{" "}
+          {STALE_AFTER_HOURS} hours after it creates them).
+          {hasMetrics ? " The metrics on this page are what was written so far: they may be incomplete." : ""} The row
+          stays as it is until someone closes it. Before closing it, check that no Dataflow job is still running for it:
+          see <SourceLink path={`${CLOSE_BY_HAND.doc}#${CLOSE_BY_HAND.anchor}`}>{CLOSE_BY_HAND.title}</SourceLink> in
+          the run playbook.
+        </Callout>
+      ) : null}
 
       <div className="flex flex-wrap items-center gap-3" role="group" aria-label="Scope">
         <label htmlFor="run-table-scope" className="text-sm text-text-2">
@@ -326,12 +346,20 @@ function RunPageContent() {
           ) : (
             <>
               <EmptyState
-                title={evaluation.status === "RUNNING" ? "Metrics are still being computed" : "No metrics were written"}
+                title={
+                  stale
+                    ? `No metrics, and no result recorded for more than ${STALE_AFTER_HOURS} hours`
+                    : running
+                      ? "Metrics are still being computed"
+                      : "No metrics were written"
+                }
                 description={
                   evaluation.status_reason ??
-                  (evaluation.status === "RUNNING"
-                    ? "The registry has a RUNNING event and no FINAL event yet. Reload later."
-                    : "The evaluator wrote a registry row but no metric rows.")
+                  (stale
+                    ? `The registry has a RUNNING event from ${formatDateTime(evaluation.recorded_at)} and no FINAL event. The evaluation most likely ended without recording a result, so no metrics are expected: evaluate the launch again to get them.`
+                    : running
+                      ? "The registry has a RUNNING event and no FINAL event yet. Reload later."
+                      : "The evaluator wrote a registry row but no metric rows.")
                 }
               />
               <ModelGraph
@@ -369,7 +397,9 @@ function RunPageContent() {
           ) : null}
         </TabsContent>
         <TabsContent value="pairs">
-          {tab === "pairs" ? <PairsPanel evaluationId={evaluationId} metrics={scopedMetrics} table={table} /> : null}
+          {tab === "pairs" ? (
+            <PairsPanel evaluationId={evaluationId} metrics={scopedMetrics} table={table} noMetrics={noMetrics} />
+          ) : null}
         </TabsContent>
         <TabsContent value="privacy">
           {tab === "privacy" ? (
@@ -388,7 +418,7 @@ function RunPageContent() {
           ) : null}
         </TabsContent>
         <TabsContent value="relational">
-          {tab === "relational" ? <RelationalPanel graph={derived.graph} table={table} /> : null}
+          {tab === "relational" ? <RelationalPanel graph={derived.graph} table={table} noMetrics={noMetrics} /> : null}
         </TabsContent>
         <TabsContent value="params">{tab === "params" ? <ParamsPanel evaluation={evaluation} /> : null}</TabsContent>
       </Tabs>
@@ -399,7 +429,7 @@ function RunPageContent() {
           BigQuery bytes for this view: {formatCompact(query.data.bytesEstimate)} B (dry run).
         </p>
       ) : null}
-      {evaluation.event === "RUNNING" ? (
+      {evaluation.event === "RUNNING" && !stale ? (
         <Callout tone="info" title="Still running">
           Numbers may change: the FINAL event has not been recorded yet
           {evaluation.finished_at ? "" : ` (started ${formatDateTime(evaluation.evaluated_at)})`}.

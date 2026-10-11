@@ -5,7 +5,7 @@
  */
 import { configure, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ecdfChart, histogramOverlay, qqChart } from "./lib/charts";
 import { fmtMetric, fmtSig } from "./lib/format";
@@ -14,7 +14,7 @@ import { columnSummaries, familyCards, heatmapModel } from "./lib/model";
 import { readingDomain } from "./lib/scale";
 import { readingOf } from "./lib/reading";
 import { FALLBACK_TOKENS } from "./lib/tokens";
-import { evaluation, metric, richDetail, rollups, wideDetail } from "./test/fixtures";
+import { evaluation, metric, richDetail, rollups, T0, wideDetail } from "./test/fixtures";
 import { EMPTY_PAGE, pageOf, renderAt, stubApi } from "./test/harness";
 
 configure({ asyncUtilTimeout: 15_000 });
@@ -76,6 +76,10 @@ describe("degenerate values", () => {
 });
 
 describe("degenerate runs", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("renders a run whose metrics are all null or not evaluated", async () => {
     const detail = richDetail();
     detail.metrics = detail.metrics.map((m) => ({
@@ -94,18 +98,89 @@ describe("degenerate runs", () => {
     expect(document.body.textContent).not.toMatch(/NaN|undefined|Infinity/);
   });
 
-  it("says a RUNNING evaluation has no metrics yet and still draws its tables", async () => {
+  // The fixture's RUNNING event is dated (T0): the clock decides whether it is running or stale.
+  it.each([
+    ["RUNNING evaluation has no metrics yet", 1, "Metrics are still being computed"],
+    ["stale evaluation has no metrics", 24 * 30, "No metrics, and no result recorded for more than 24 hours"],
+  ])("says a %s and still draws its tables", async (_name, hoursLater, title) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.parse(T0) + hoursLater * 3_600_000);
     const detail = { ...richDetail(), metrics: [], flags: [] };
     detail.evaluation = evaluation({ status: "RUNNING", event: "RUNNING", finished_at: null, overall_score: null });
     stub(detail);
     renderAt("/evaluation/eval-t001");
-    expect(await screen.findByText("Metrics are still being computed")).toBeInTheDocument();
+    expect(await screen.findByText(title)).toBeInTheDocument();
     expect(screen.getByRole("figure", { name: /Model graph/ })).toBeInTheDocument();
     const user = userEvent.setup();
     await user.click(screen.getByRole("tab", { name: "Columns" }));
     expect(await screen.findByText("No column metrics")).toBeInTheDocument();
     await user.click(screen.getByRole("tab", { name: "Privacy" }));
     expect(await screen.findByText("No privacy metrics")).toBeInTheDocument();
+    expect(document.body.textContent).not.toMatch(/NaN|undefined|Infinity/);
+  });
+
+  // An evaluation that wrote no metric at all (a launch closed as FAILED, a stale one) is not a
+  // one-table launch or a one-column table: the two sections say what is true of it.
+  it.each([
+    ["relational", "No relationship metrics", "so no relationship was measured", /The launch generated one table/],
+    ["pairs", "No pair metrics", "so no column pair was measured", /profiled no column pairs/],
+  ])("gives the %s section of a run with no metrics its real cause", async (tab, title, cause, other) => {
+    const detail = { ...richDetail(), metrics: [], flags: [] };
+    detail.evaluation = evaluation({ status: "FAILED", status_reason: "the launch ended", overall_score: null });
+    stub(detail);
+    renderAt(`/evaluation/eval-t001?tab=${tab}`);
+    const state = (await screen.findByText(title)).closest('[data-slot="empty-state"]')!;
+    expect(state).toHaveTextContent("This evaluation wrote no metric rows at all");
+    expect(state).toHaveTextContent(cause);
+    expect(state).not.toHaveTextContent(other);
+  });
+
+  // ... and an evaluation that is running has not finished writing: "yet", never "at all".
+  it.each([
+    ["relational", "No relationship metrics", "so no relationship has been measured so far"],
+    ["pairs", "No pair metrics", "so no column pair has been measured so far"],
+  ])("says the %s section of a running evaluation has no metric rows yet", async (tab, title, cause) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.parse(T0) + 3_600_000);
+    const detail = { ...richDetail(), metrics: [], flags: [] };
+    detail.evaluation = evaluation({ status: "RUNNING", event: "RUNNING", finished_at: null, overall_score: null });
+    stub(detail);
+    renderAt(`/evaluation/eval-t001?tab=${tab}`);
+    const state = (await screen.findByText(title)).closest('[data-slot="empty-state"]')!;
+    expect(state).toHaveTextContent("This evaluation has written no metric rows yet");
+    expect(state).toHaveTextContent(cause);
+    expect(state).not.toHaveTextContent("at all");
+  });
+
+  // Once its RUNNING event is stale it is no longer "yet": the same words as for a finished one.
+  it.each([
+    ["relational", "No relationship metrics"],
+    ["pairs", "No pair metrics"],
+  ])("drops the yet from the %s section once the RUNNING event is stale", async (tab, title) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.parse(T0) + 30 * 24 * 3_600_000);
+    const detail = { ...richDetail(), metrics: [], flags: [] };
+    detail.evaluation = evaluation({ status: "RUNNING", event: "RUNNING", finished_at: null, overall_score: null });
+    stub(detail);
+    renderAt(`/evaluation/eval-t001?tab=${tab}`);
+    const state = (await screen.findByText(title)).closest('[data-slot="empty-state"]')!;
+    expect(state).toHaveTextContent("This evaluation wrote no metric rows at all");
+    expect(state).not.toHaveTextContent("yet");
+  });
+
+  it.each([
+    ["relational", "No relationship metrics", "The launch generated one table, or its relationship model declares"],
+    ["pairs", "No pair metrics", "This evaluation profiled no column pairs (one-column tables, or pairs above"],
+  ])("keeps the %s section's own reason for a run that has other metrics", async (tab, title, reason) => {
+    const detail = richDetail();
+    // The column-level rows alone: no pair, no relationship, no table-level correlation row.
+    detail.metrics = detail.metrics.filter((m) => m.level === "column" || m.level === "field");
+    expect(detail.metrics.length).toBeGreaterThan(0);
+    stub(detail);
+    renderAt(`/evaluation/eval-t001?tab=${tab}`);
+    const state = (await screen.findByText(title)).closest('[data-slot="empty-state"]')!;
+    expect(state).toHaveTextContent(reason);
+    expect(state).not.toHaveTextContent("no metric rows");
   });
 
   it("shows an empty-profile drawer as a labelled state, with the metrics still listed", async () => {

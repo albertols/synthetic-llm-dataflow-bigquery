@@ -11,6 +11,8 @@
  */
 import type { EvaluationDetail, MetricRow } from "@contracts/api";
 
+import { isStale, STALE_AFTER_HOURS } from "@/lib/runState";
+
 import { FAMILY_LABEL, isRollup, metricMeta, metricShort } from "./catalogue";
 import { fmtCompared, fmtMetric, fmtSampleSize, fmtScore, fmtSig, scopeLabel } from "./format";
 import { countsPhrase, countStatuses, countsTotal, metricKey, statusRank } from "./model";
@@ -210,10 +212,15 @@ export function findings(detail: Pick<EvaluationDetail, "evaluation" | "metrics"
   );
 }
 
-/** The run in two or three sentences: the verdict, where the problems concentrate, what did not run. */
-export function headline(detail: Pick<EvaluationDetail, "evaluation" | "metrics">): string {
+/**
+ * The run in two or three sentences: the verdict, where the problems concentrate, what did not run.
+ * `now` (epoch milliseconds; the clock by default) tells a running evaluation from a stale one.
+ */
+export function headline(detail: Pick<EvaluationDetail, "evaluation" | "metrics">, now: number = Date.now()): string {
   const { evaluation, metrics } = detail;
   if (!metrics.length) {
+    if (isStale(evaluation, now))
+      return `The evaluation is stale: its last registry event is RUNNING, recorded more than ${STALE_AFTER_HOURS} hours ago, so it most likely ended without recording a result. No metrics have been written.`;
     if (evaluation.status === "RUNNING") return "The evaluation is still running: no metrics have been written yet.";
     return `No metrics were written${evaluation.status_reason ? `: ${evaluation.status_reason}` : "."}`;
   }

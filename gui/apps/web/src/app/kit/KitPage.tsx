@@ -606,9 +606,11 @@ export function KitPage() {
         <Card>
           <CardContent className="grid gap-4 pt-5">
             <div className="flex flex-wrap items-center gap-1.5">
-              {["pass", "warn", "fail", "info", "not_evaluated", "RUNNING", "PARTIAL", "SKIPPED"].map((status) => (
-                <StatusPill key={status} status={status} />
-              ))}
+              {["pass", "warn", "fail", "info", "not_evaluated", "RUNNING", "STALE", "PARTIAL", "SKIPPED"].map(
+                (status) => (
+                  <StatusPill key={status} status={status} />
+                ),
+              )}
             </div>
             <div className="flex flex-wrap items-center gap-1.5">
               {LEVEL_ORDER.map((level) => (

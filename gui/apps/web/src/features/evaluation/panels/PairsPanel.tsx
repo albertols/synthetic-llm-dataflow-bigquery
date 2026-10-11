@@ -314,10 +314,16 @@ export function PairsPanel({
   evaluationId,
   metrics,
   table,
+  noMetrics,
 }: {
   evaluationId: string;
   metrics: MetricRow[];
   table?: string;
+  /**
+   * The evaluation has no metric row at all: say that, not a guess at the tables. "yet" while it is
+   * running (its last event is RUNNING and not stale), "at-all" otherwise (it failed, or never finished).
+   */
+  noMetrics?: "yet" | "at-all";
 }) {
   const tokens = useChartTokens();
   const profiles = useProfiles(evaluationId, { table, kind: ["corr_matrix", "contingency"] });
@@ -333,7 +339,13 @@ export function PairsPanel({
     return (
       <EmptyState
         title="No pair metrics"
-        description="This evaluation profiled no column pairs (one-column tables, or pairs above pair_max_columns)."
+        description={
+          noMetrics === "yet"
+            ? "This evaluation has written no metric rows yet, so no column pair has been measured so far."
+            : noMetrics === "at-all"
+              ? "This evaluation wrote no metric rows at all, so no column pair was measured."
+              : "This evaluation profiled no column pairs (one-column tables, or pairs above pair_max_columns)."
+        }
       />
     );
   return (

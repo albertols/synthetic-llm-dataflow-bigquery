@@ -15,7 +15,9 @@ import { cn } from "@/lib/cn";
 
 /**
  * Metric statuses (evaluation_metrics.status), run statuses and scope
- * statuses (evaluation_data_history.status / scope_status), any case.
+ * statuses (evaluation_data_history.status / scope_status), any case; and
+ * STALE, the display state of a RUNNING event that is too old to be running
+ * (lib/runState.ts), which the registry never holds.
  */
 export type StatusValue =
   | "ok"
@@ -30,6 +32,7 @@ export type StatusValue =
   | "info"
   | "not_evaluated"
   | "RUNNING"
+  | "STALE"
   | "SUCCEEDED"
   | "SUCCEEDED_WITH_WARNINGS"
   | "PARTIAL"
@@ -45,6 +48,10 @@ const STATUS: Record<string, { tone: StatusTone; label: string; icon: LucideIcon
   info: { tone: "info", label: "Info", icon: Info },
   not_evaluated: { tone: "neutral", label: "Not evaluated", icon: CircleDashed },
   running: { tone: "info", label: "Running", icon: LoaderCircle },
+  // Needs attention: neither a success nor a failure the evaluator measured. Not the spinner, and not
+  // the triangle of "Succeeded with warnings". On purpose it shares its icon with the run status Skipped
+  // (neutral: nothing was measured there either) and its whole look with the scope status "Expired".
+  stale: { tone: "warn", label: "Stale", icon: CircleSlash },
   succeeded: { tone: "good", label: "Succeeded", icon: CircleCheck },
   succeeded_with_warnings: { tone: "warn", label: "Succeeded with warnings", icon: TriangleAlert },
   partial: { tone: "serious", label: "Partial", icon: OctagonAlert },
@@ -94,12 +101,14 @@ export type StatusPillProps = {
   label?: string;
   /** Overrides the tone (and, for statuses the map does not know, the icon). */
   tone?: StatusTone;
+  /** A longer reading: the hover text, also read by a screen reader after the label. */
+  title?: string;
   size?: "sm" | "md";
   className?: string;
 };
 
 /** Status as icon + label + tone: never colour alone. Tones are the reserved status palette. */
-export function StatusPill({ status, label, tone, size = "md", className }: StatusPillProps) {
+export function StatusPill({ status, label, tone, title, size = "md", className }: StatusPillProps) {
   const known = describeStatus(status);
   const meta = tone ? { ...known, tone, icon: isKnownStatus(status) ? known.icon : TONE_ICON[tone] } : known;
   const Icon = meta.icon;
@@ -108,6 +117,7 @@ export function StatusPill({ status, label, tone, size = "md", className }: Stat
     <span
       data-status={status}
       data-tone={meta.tone}
+      title={title}
       className={cn(
         "inline-flex items-center gap-1 rounded-full border font-medium whitespace-nowrap",
         size === "sm" ? "px-1.5 py-px text-[11px] [&_svg]:size-3" : "px-2 py-0.5 text-xs [&_svg]:size-3.5",
@@ -117,6 +127,7 @@ export function StatusPill({ status, label, tone, size = "md", className }: Stat
     >
       <Icon aria-hidden="true" className={cn(spinning && "motion-safe:animate-spin")} />
       {label ?? meta.label}
+      {title ? <span className="sr-only"> ({title})</span> : null}
     </span>
   );
 }

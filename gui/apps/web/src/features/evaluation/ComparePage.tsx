@@ -21,6 +21,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { InfoHint } from "@/components/InfoHint";
 import { LevelChip } from "@/components/LevelChip";
 import { PageHeader } from "@/components/PageHeader";
+import { RunStatusPill } from "@/components/RunStatusPill";
 import { StatusPill } from "@/components/StatusPill";
 import { Button } from "@/components/ui/button";
 import { Combobox } from "@/components/ui/combobox";
@@ -167,7 +168,7 @@ function RunsTable({ comparison }: { comparison: Comparison }) {
               </th>
               <TableCell className="text-xs whitespace-nowrap text-text-2">{formatDateTime(e.evaluated_at)}</TableCell>
               <TableCell>
-                <StatusPill status={e.status} size="sm" />
+                <RunStatusPill row={e} size="sm" />
               </TableCell>
               <TableCell className="text-xs whitespace-nowrap">
                 {e.engine ?? MISSING} · {shortModel(e.llm_model_uri)}
