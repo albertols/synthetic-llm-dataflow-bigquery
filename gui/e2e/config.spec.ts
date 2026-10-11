@@ -137,7 +137,8 @@ test("scenario: the 90M-from-1M-with-a-10k-seed preset and its outputs", async (
   await expect(page.getByTestId("distinct-sample")).toHaveText("≤ 470");
   // ADR 0033 D2: the source filter sizes the pool at the cap without the exact tier.
   await expect(page.getByTestId("pool-target")).toHaveText("512");
-  await expect(page.getByTestId("fleet-ramp")).toHaveText("1 → 4 @ +26 min");
+  // The preset runs the DAG's default topology (sdk_containers=multi): the R7 multi run's ramp.
+  await expect(page.getByTestId("fleet-ramp")).toHaveText("1 → 2 @ +29, 4 @ +37 min");
   await expect(page.getByTestId("pk-pool-dlq")).toHaveText("89,999,488");
   await expect(page.getByTestId("collision-prob")).toHaveText("100%");
   await expect(page.locator('[data-rec="exact-tier"]')).toBeVisible();

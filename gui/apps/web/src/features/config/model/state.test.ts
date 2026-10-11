@@ -24,7 +24,7 @@ describe("scenario ↔ URL", () => {
       K: 15,
       D: 99_000,
       s: 0.5,
-      sdk: "multi",
+      sdk: "single",
       warm: true,
       filter: false,
     };
@@ -42,7 +42,7 @@ describe("scenario ↔ URL", () => {
       keyspaceLog10: 15,
       columnDistinct: 99_000,
       nonEmptyShare: 0.5,
-      sdkContainers: "multi",
+      sdkContainers: "single",
       warm: true,
       sourceFilter: false,
     });

@@ -145,38 +145,47 @@ describe("the 90M / 1M / 10k preset", () => {
   });
 
   it("estimates time linearly from the measured R7 run of the default topology, with provenance", () => {
-    expect(preset90m.sdkContainers).toBe("single");
+    // The DAG's default topology is multi (sdk_containers), so the preset's basis is the R7 multi run.
+    expect(preset90m.sdkContainers).toBe("multi");
     const t = out.time;
-    expect(t.basis.label).toContain("R7 single");
+    expect(t.basis.label).toContain("R7 multi");
     expect(t.basis.rows).toBe(20_000_000);
     expect(t.scale).toBe(4.5);
-    expect(t.startupMin).toBe(13);
-    expect(t.poolBranchMin).toBe(10.1);
-    expect(t.generationMin).toBeCloseTo(163.8, 9);
-    expect(t.dedupLoadMin).toBeCloseTo(64.35, 9);
-    expect(t.totalMin).toBeCloseTo(251.25, 9);
-    const multi = estimateTime({ ...preset90m, sdkContainers: "multi" });
-    expect(multi.basis.label).toContain("R7 multi");
-    expect(multi.totalMin).toBeCloseTo(12.4 + 12.9 + 17.1 * 4.5 + 6.4 * 4.5, 9);
+    expect(t.startupMin).toBe(12.4);
+    expect(t.poolBranchMin).toBe(12.9);
+    expect(t.generationMin).toBeCloseTo(17.1 * 4.5, 9);
+    expect(t.dedupLoadMin).toBeCloseTo(6.4 * 4.5, 9);
+    expect(t.totalMin).toBeCloseTo(12.4 + 12.9 + 17.1 * 4.5 + 6.4 * 4.5, 9);
+    const single = estimateTime({ ...preset90m, sdkContainers: "single" });
+    expect(single.basis.label).toContain("R7 single");
+    expect(single.startupMin).toBe(13);
+    expect(single.poolBranchMin).toBe(10.1);
+    expect(single.generationMin).toBeCloseTo(163.8, 9);
+    expect(single.dedupLoadMin).toBeCloseTo(64.35, 9);
+    expect(single.totalMin).toBeCloseTo(251.25, 9);
     // The basis runs did not start full (ACCEPT_WORKERS_AT_4_MIN): the estimate says so.
-    expect(t.basis.fleetRamp).toBe("1 → 4 @ +26 min");
-    expect(multi.basis.fleetRamp).toBe("1 → 2 @ +29, 4 @ +37 min");
-    expect(recommend(preset90m, out).find((r) => r.id === "fleet")?.why).toContain("1 → 4 @ +26 min");
+    expect(t.basis.fleetRamp).toBe("1 → 2 @ +29, 4 @ +37 min");
+    expect(single.basis.fleetRamp).toBe("1 → 4 @ +26 min");
+    expect(recommend(preset90m, out).find((r) => r.id === "fleet")?.why).toContain("1 → 2 @ +29, 4 @ +37 min");
   });
 
   it("warm runs drop the pool branch; streaming has no measured barrier", () => {
     expect(estimateTime({ ...preset90m, warm: true }).poolBranchMin).toBe(0);
     expect(estimateTime({ ...preset90m, uniqueness: "streaming" }).dedupLoadMin).toBeNull();
     expect(estimateTime({ ...preset90m, uniqueness: "exact_chained" }).basis.label).toContain("R6 cold");
-    expect(estimateTime({ ...preset90m, sdkContainers: "multi" }).basis.label).toContain("R7 multi");
+    expect(estimateTime({ ...preset90m, sdkContainers: "single" }).basis.label).toContain("R7 single");
   });
 
   it("recommends the exact tier, the rare-category and tail fixes, and a wider keyspace — each cited", () => {
     const recs = recommend(preset90m, out);
     const ids = recs.map((r) => r.id);
     expect(ids).toEqual(
-      expect.arrayContaining(["exact-tier", "tail", "pool-reuse", "keyspace", "sdk-multi", "fleet", "noise-floor"]),
+      expect.arrayContaining(["exact-tier", "tail", "pool-reuse", "keyspace", "fleet", "noise-floor"]),
     );
+    // multi is the default topology: the switch to it is recommended only from single.
+    expect(ids).not.toContain("sdk-multi");
+    const single = { ...preset90m, sdkContainers: "single" as const };
+    expect(recommend(single, computeScenario(single)).map((r) => r.id)).toContain("sdk-multi");
     // n = 10k ≥ 2,995 rows: a 0.1 % category is seen, so no rare-category warning.
     expect(ids).not.toContain("rare");
     for (const rec of recs) expect(rec.cite.path).toMatch(/\.(md|py|yml)$/);

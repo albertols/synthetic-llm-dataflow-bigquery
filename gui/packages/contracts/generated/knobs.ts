@@ -1582,7 +1582,7 @@ export const knobs: KnobsFile = {
         "composer"
       ],
       "composer_param": "gpu",
-      "source": "composer/synthetic_beam_bigquery.py:309",
+      "source": "composer/synthetic_beam_bigquery.py:348",
       "source_token": "\"gpu\"",
       "related_adrs": [],
       "docs": []
@@ -1592,13 +1592,13 @@ export const knobs: KnobsFile = {
       "channel": "serving",
       "group": "Fleet",
       "label": "SDK containers per worker",
-      "value": "single",
+      "value": "multi",
       "unit": null,
       "settable_via": [
         "composer"
       ],
       "composer_param": "sdk_containers",
-      "source": "composer/synthetic_beam_bigquery.py:371",
+      "source": "composer/synthetic_beam_bigquery.py:410",
       "source_token": "\"sdk_containers\"",
       "related_adrs": [
         "0034"
@@ -1623,7 +1623,7 @@ export const knobs: KnobsFile = {
         "sampled"
       ],
       "help": "read every row, or a salted sample above --sample_rows (default: sampled on the DirectRunner, exact on Dataflow)",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:233",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:297",
       "source_token": "\"--mode\"",
       "related_adrs": [
         "0041"
@@ -1646,7 +1646,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--sample_rows",
       "flex_param": "sample_rows",
       "help": "sampled mode: rows read per side of a table larger than this",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:140",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:143",
       "source_token": "\"--sample_rows\"",
       "related_adrs": [
         "0041"
@@ -1669,7 +1669,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--privacy_sample_rows",
       "flex_param": "privacy_sample_rows",
       "help": "rows of the nearest-neighbour privacy sample",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:142",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:145",
       "source_token": "\"--privacy_sample_rows\"",
       "related_adrs": [
         "0041"
@@ -1692,7 +1692,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--detection_sample_rows",
       "flex_param": "detection_sample_rows",
       "help": "rows per side in the detection (C2ST) sample",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:144",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:147",
       "source_token": "\"--detection_sample_rows\"",
       "related_adrs": [
         "0041"
@@ -1715,7 +1715,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--pair_max_columns",
       "flex_param": "pair_max_columns",
       "help": "columns whose pairs are compared, per table",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:146",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:149",
       "source_token": "\"--pair_max_columns\"",
       "related_adrs": [
         "0041"
@@ -1738,7 +1738,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--row_flags_top_k",
       "flex_param": "row_flags_top_k",
       "help": "row flags kept per check and table",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:147",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:150",
       "source_token": "\"--row_flags_top_k\"",
       "related_adrs": [
         "0041"
@@ -1764,7 +1764,7 @@ export const knobs: KnobsFile = {
         "hashed"
       ],
       "help": "row flags carry the matched source key as a keyed hash only (raw keys are never written)",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:251",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:315",
       "source_token": "\"--row_flags_source_keys\"",
       "related_adrs": [
         "0041"
@@ -1787,7 +1787,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--max_bytes_billed",
       "flex_param": "max_bytes_billed",
       "help": "BigQuery bytes the evaluation may process (default 1 TiB)",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:257",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:321",
       "source_token": "\"--max_bytes_billed\"",
       "related_adrs": [
         "0041"
@@ -1810,7 +1810,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--max_shuffle_gb",
       "flex_param": "max_shuffle_gb",
       "help": "shuffle the value census may use before it is value-sampled",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:262",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:326",
       "source_token": "\"--max_shuffle_gb\"",
       "related_adrs": [
         "0041"
@@ -1841,7 +1841,7 @@ export const knobs: KnobsFile = {
         "manual"
       ],
       "help": "how the job's landing rows are isolated (default auto)",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:238",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:302",
       "source_token": "\"--scope\"",
       "related_adrs": [
         "0041"
@@ -1864,7 +1864,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--allow_contaminated",
       "flex_param": "allow_contaminated",
       "help": "evaluate a scope another writer touched; it stays `contaminated`",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:242",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:306",
       "source_token": "\"--allow_contaminated\"",
       "related_adrs": [
         "0041"
@@ -3084,7 +3084,7 @@ export const knobs: KnobsFile = {
     }
   ],
   "exported_from": {
-    "commit": "ce9528eba70ebaf83ed1e4b863b8349271de59da",
+    "commit": "f596310ea54743e7e6cb3562dc223890c7075a99",
     "dirty": []
   }
 };
