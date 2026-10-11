@@ -82,11 +82,16 @@ export const EVALUATION_FILTER_TYPES: Record<string, ParamType> = {
   q: "STRING",
 };
 
+/**
+ * An unset list filter binds as an empty ARRAY, which BigQuery receives as NULL:
+ * `ARRAY_LENGTH(NULL)` is NULL, so every guard reads `IFNULL(ARRAY_LENGTH(@p), 0) = 0`
+ * (a bare `ARRAY_LENGTH(@p) = 0` silently filters every row out).
+ */
 function evaluationWhere(a: string): string {
   const inList = (param: string, column: string) =>
-    `(ARRAY_LENGTH(@${param}) = 0 OR ${a}.${column} IN UNNEST(@${param}))`;
+    `(IFNULL(ARRAY_LENGTH(@${param}), 0) = 0 OR ${a}.${column} IN UNNEST(@${param}))`;
   return [
-    `(ARRAY_LENGTH(@tables) = 0 OR EXISTS (SELECT 1 FROM UNNEST(${a}.tables) AS t WHERE t.name IN UNNEST(@tables)))`,
+    `(IFNULL(ARRAY_LENGTH(@tables), 0) = 0 OR EXISTS (SELECT 1 FROM UNNEST(${a}.tables) AS t WHERE t.name IN UNNEST(@tables)))`,
     inList("engine", "engine"),
     inList("llm_model", "llm_model_uri"),
     inList("embedder", "embedder_id"),
@@ -219,7 +224,7 @@ WHERE evaluation_id IN UNNEST(@ids)
     description: "The distinct metric ids written in the last 400 days (facets).",
     types: {},
     fields: [field("metric_id", "STRING", "REQUIRED"), field("rows", "INT64")],
-    sql: (d) => `SELECT metric_id, COUNT(*) AS rows FROM \`${d.quality}.evaluation_metrics\`
+    sql: (d) => `SELECT metric_id, COUNT(*) AS \`rows\` FROM \`${d.quality}.evaluation_metrics\`
 WHERE evaluated_at >= TIMESTAMP_SUB(CURRENT_TIMESTAMP(), INTERVAL 400 DAY)
 GROUP BY metric_id`,
   },
@@ -239,8 +244,8 @@ GROUP BY metric_id`,
 WHERE evaluation_id = @id AND evaluated_at = TIMESTAMP(@evaluated_at)
   AND (@table IS NULL OR table_name = @table)
   AND (@column IS NULL OR column_name = @column)
-  AND (ARRAY_LENGTH(@kinds) = 0 OR profile_kind IN UNNEST(@kinds))
-  AND (ARRAY_LENGTH(@sides) = 0 OR side IN UNNEST(@sides))`,
+  AND (IFNULL(ARRAY_LENGTH(@kinds), 0) = 0 OR profile_kind IN UNNEST(@kinds))
+  AND (IFNULL(ARRAY_LENGTH(@sides), 0) = 0 OR side IN UNNEST(@sides))`,
   },
   "flags.byEvaluation": {
     name: "flags.byEvaluation",
@@ -300,14 +305,14 @@ LIMIT @limit`,
     },
     fields: fields("validation_runs"),
     sql: (d) => `SELECT * FROM \`${d.quality}.validation_runs\`
-WHERE (ARRAY_LENGTH(@run_ids) = 0 OR run_id IN UNNEST(@run_ids))
+WHERE (IFNULL(ARRAY_LENGTH(@run_ids), 0) = 0 OR run_id IN UNNEST(@run_ids))
   AND (@base_run_id IS NULL OR run_id = @base_run_id
     OR (STARTS_WITH(run_id, CONCAT(@base_run_id, '-'))
       AND REGEXP_CONTAINS(SUBSTR(run_id, LENGTH(@base_run_id) + 2), r'^[0-9]{2}-.+$')))
-  AND (ARRAY_LENGTH(@landing_table) = 0 OR landing_table IN UNNEST(@landing_table))
-  AND (ARRAY_LENGTH(@engine) = 0 OR engine IN UNNEST(@engine))
-  AND (ARRAY_LENGTH(@status) = 0 OR status IN UNNEST(@status))
-  AND (ARRAY_LENGTH(@env) = 0 OR env IN UNNEST(@env))
+  AND (IFNULL(ARRAY_LENGTH(@landing_table), 0) = 0 OR landing_table IN UNNEST(@landing_table))
+  AND (IFNULL(ARRAY_LENGTH(@engine), 0) = 0 OR engine IN UNNEST(@engine))
+  AND (IFNULL(ARRAY_LENGTH(@status), 0) = 0 OR status IN UNNEST(@status))
+  AND (IFNULL(ARRAY_LENGTH(@env), 0) = 0 OR env IN UNNEST(@env))
   AND (@from IS NULL OR created_at >= TIMESTAMP(@from))
   AND (@to IS NULL OR created_at < TIMESTAMP(@to))
 ORDER BY created_at DESC, run_id

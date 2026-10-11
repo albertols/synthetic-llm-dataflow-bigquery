@@ -422,6 +422,13 @@ describe("the named-query registry", { timeout: 60_000 }, () => {
     }
   });
 
+  it("guards every ARRAY parameter NULL-safely (BigQuery binds an empty array as NULL)", () => {
+   for (const query of Object.values(QUERIES)) {
+     const sql = query.sql(datasets, { sort: "evaluated_at", order: "desc" });
+     expect(sql.match(/(?<!IFNULL\()ARRAY_LENGTH\(@/g), query.name).toBeNull();
+   }
+  });
+
   it("assertReadOnly rejects anything that writes", () => {
     for (const sql of [
       "DELETE FROM t WHERE true",

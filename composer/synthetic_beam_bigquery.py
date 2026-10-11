@@ -409,7 +409,7 @@ default_dag_params = {
         ),
     "sdk_containers":
         Param(
-            default="single",
+            default="multi",
             type="string",
             enum=["single", "multi"],
             description="SDK-container topology for vLLM launches (ADR 0034). "

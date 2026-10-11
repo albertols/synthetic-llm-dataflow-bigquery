@@ -708,9 +708,9 @@ default_dag_params = {
         ),
     "max_workers":
         Param(
-            default=4,
+            default=8,
             type="integer",
-            minimum=1,
+            minimum=4,
             description="Dataflow maxWorkers: the most workers the "
             "evaluation job may use. Default 4.",
         ),
