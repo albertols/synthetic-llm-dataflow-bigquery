@@ -713,6 +713,8 @@ QUALIFY ROW_NUMBER() OVER (
 
 The id above is invented; put your own, several if you like, and say in `status_reason` why and that it was closed by hand. This is the callbacks' statement (`_CLOSE_RUNNING_SQL` in both DAG files) with the row named by its id instead of found by launch target, trigger and run start. **In this shape it has not been run against BigQuery**: step 2 uses the same `FROM`, `WHERE` and `QUALIFY`, so what it lists is what the insert copies. Afterwards `evaluation_latest` shows the evaluation as `FAILED` with your reason, and so does the GUI on a reload once its server's five-minute cache has passed.
 
+**4. What the dead launch left in the bucket.** A Dataflow launch that died during or after its `graph` step has staged its reference panel, or part of it: source rows, as objects under `<temp_location>/sdfb-evaluation/<evaluation_id>/panel/`, with the id you just closed. No job will read them. Remove them, or leave them to the bucket's lifecycle rule ([`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md), "Temp and staging locations: where the reference panel is"). A launch that died while planning, before `graph`, staged nothing.
+
 ---
 
 ## 6. Stores, flags, and experiment hygiene
