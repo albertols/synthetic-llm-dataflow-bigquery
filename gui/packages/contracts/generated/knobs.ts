@@ -1582,7 +1582,7 @@ export const knobs: KnobsFile = {
         "composer"
       ],
       "composer_param": "gpu",
-      "source": "composer/synthetic_beam_bigquery.py:348",
+      "source": "composer/synthetic_beam_bigquery.py:530",
       "source_token": "\"gpu\"",
       "related_adrs": [],
       "docs": []
@@ -1598,7 +1598,7 @@ export const knobs: KnobsFile = {
         "composer"
       ],
       "composer_param": "sdk_containers",
-      "source": "composer/synthetic_beam_bigquery.py:410",
+      "source": "composer/synthetic_beam_bigquery.py:592",
       "source_token": "\"sdk_containers\"",
       "related_adrs": [
         "0034"
@@ -3084,7 +3084,7 @@ export const knobs: KnobsFile = {
     }
   ],
   "exported_from": {
-    "commit": "f596310ea54743e7e6cb3562dc223890c7075a99",
+    "commit": "bf87ae6c11ad618fa0f27efd7ecaf5be971c2550",
     "dirty": []
   }
 };
