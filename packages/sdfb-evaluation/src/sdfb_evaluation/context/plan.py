@@ -30,7 +30,7 @@ table side.
           │  dry run fails is skipped as scope `unknown`, not the plan
           ▼             nothing billed before this point
     ONE planning SELECT per side → scope.verify(rows) → R/E/H panel
-          ▼
+          ▼             the tables' scans run at once ("Concurrent scans")
     [sampled] a salted sample CTAS per side above sample_rows ─► check again
           ▼
     census shares (fixed shuffle first, the rest max-min fair across
@@ -67,6 +67,37 @@ its bound and each quantile grid at 1001 * 8 B): a table past any of them
 is planned in several SELECTs over the same read, column groups that never
 split a column, each with its own `COUNT(*)`, which must agree. Columnar
 billing reads each column once, so the chunks cost what one SELECT would.
+
+Concurrent scans (Ruling R153). A scan is one table's billed reads: the
+planning SELECTs of both sides, the row-count check and the panel. Their
+time grows with the tables' rows, and a launcher has a fixed number of
+minutes, so the scans of the tables run at once, on `min(tables,
+SCAN_THREADS)` threads sharing the one BigQuery client:
+
+    dry runs (one table after another)
+          ▼
+    scan(users) ─┐
+    scan(orders) ├─ each its own statements, in order, on its own table's
+    scan(items) ─┘  scratch record; the statement count under a lock
+          ▼         every scan has ended, whatever the others did
+    the first failing table IN TABLE ORDER raises its own error
+          ▼
+    sampling, census, pairs, digests: one table after another, in table
+    order — they append to shared lists, so the plan never depends on
+    which scan ended first
+
+The plan is the one a table-after-table planning makes. What differs is
+a failure: the statements of the OTHER tables have run (and were billed)
+by the time the error is raised — a cost, never a result. When more
+than one table fails, the first in table order is raised and each other
+one is logged as a WARNING, so no paid-for failure goes unsaid.
+
+An interrupt is not a failure. Ctrl-C (or a `SystemExit`) reaches the
+thread that waits for the scans, not the scans. It leaves planning at
+once and stops them: the tables whose scan has not started are never
+scanned, and a scan in flight sends no further statement (it checks
+before each one; the statement BigQuery is already running cannot be
+called back, and the process ends when it returns).
 
 Determinism: BigQuery documents APPROX_QUANTILES, APPROX_COUNT_DISTINCT
 and APPROX_TOP_COUNT as approximate but says nothing about repeat runs
@@ -123,9 +154,11 @@ import json
 import logging
 import math
 import re
+import threading
 import time
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any, NamedTuple
@@ -228,6 +261,7 @@ MAX_ROW_BYTES = 90_000_000  # BigQuery's 100 MB result row, 10 % headroom
 TOP_VALUE_MAX_BYTES = 1024  # a longer value is never a category
 _MAX_QUERY_CHARS = 900_000  # under BigQuery's 1,024 K-character query text
 SAMPLE_MODULUS = 1_000_000
+SCAN_THREADS = 8  # the tables scanned at once (module docstring)
 _GRANT_TOLERANCE = 1e-9  # float round trips never downgrade an exact census
 
 MODES = ("exact", "sampled")
@@ -1453,13 +1487,29 @@ _STATEMENT_KINDS = {
     "execute": "DDL",
 }
 
+_ERROR_CHARS = 300  # of another table's error, in the planner's log
+
+
+def _first_line(exc: BaseException) -> str:
+  lines = str(exc).strip().splitlines()
+  return (lines[0] if lines else type(exc).__name__)[:_ERROR_CHARS]
+
+
+class _ScansInterruptedError(RuntimeError):
+  """Planning was interrupted while the tables were scanned: the scan
+  that meets this sends no further statement. No caller sees it: the
+  interrupt itself is what `scan_all` raises."""
+
 
 class _CountedBq:
   """The planner's `Bq`, counting the statements it sends by kind
-  (`_STATEMENT_KINDS`); everything else passes through."""
+  (`_STATEMENT_KINDS`); everything else passes through. The scans of
+  several tables send theirs from several threads at once, so a count is
+  taken under a lock (`counts[kind] += 1` is a read, then a write)."""
 
   def __init__(self, bq: Any):
     self._bq = bq
+    self._lock = threading.Lock()
     self.counts: Counter[str] = Counter()
 
   def __getattr__(self, name: str) -> Any:
@@ -1469,7 +1519,8 @@ class _CountedBq:
       return attribute
 
     def counted(*args: Any, **kwargs: Any) -> Any:
-      self.counts[kind] += 1
+      with self._lock:
+        self.counts[kind] += 1
       return attribute(*args, **kwargs)
 
     return counted
@@ -1503,6 +1554,7 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
     self.samples: list[PrepareStatement] = []
     self.planning_ddl: list[PrepareStatement] = []  # run in phase A (R57)
     self.multi = len(launch.tables_in_order) > 1
+    self._interrupted = threading.Event()  # set once: the scans stop
 
   @contextlib.contextmanager
   def timed(self, table: str, step: str) -> Iterator[None]:
@@ -2001,9 +2053,71 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
       return self._full_read_bytes(source)
 
   # --- running the scans -----------------------------------------------------
+  def scan_all(self, works: Sequence[_Work]) -> None:
+    """`scan` of every table of `works`, at once (module docstring,
+    Concurrent scans): `min(len(works), SCAN_THREADS)` threads, each
+    table's own statements in order on its own thread. Returns when
+    every scan has ended.
+
+    A scan writes only its own table's `_Work`; what the threads share
+    is the BigQuery client, the statement count (`_CountedBq`, locked),
+    the stop signal and the log.
+
+    Raises:
+      Exception: the error of the first table IN TABLE ORDER whose scan
+        failed — the object that scan raised, as a table-after-table
+        planning would have raised it. Every other scan has run to its
+        end by then, so their statements were billed: a cost, never a
+        result. Any other table's failure is logged as a WARNING.
+      BaseException: whatever interrupted this thread while it waited
+        (`KeyboardInterrupt`, `SystemExit`), at once: the scans not yet
+        started are cancelled and a scan in flight sends no further
+        statement.
+    """
+    if not works:
+      return
+    pool = ThreadPoolExecutor(
+        max_workers=min(len(works), SCAN_THREADS),
+        thread_name_prefix="sdfb-eval-scan")
+    try:
+      with self.timed(_ALL_TABLES, "scans"):
+        futures = [pool.submit(self.scan, work) for work in works]
+        pool.shutdown(wait=True)
+    except BaseException:
+      # Not a scan's error (those stay in the futures): this thread was
+      # interrupted while it waited. Stop everything it can still stop.
+      self._interrupted.set()
+      pool.shutdown(wait=False, cancel_futures=True)
+      raise
+    failed = [(work, future.exception())
+              for work, future in zip(works, futures, strict=True)]
+    errors = [(work, error) for work, error in failed if error is not None]
+    if not errors:
+      return
+    (first, raised), *others = errors
+    for work, error in others:
+      _LOGGER.warning(
+          "planning %s %s: its scan failed too (%s: %s); the error raised "
+          "is the one of %s, the first failing table in table order",
+          self.evaluation_id, work.name,
+          type(error).__name__, _first_line(error), first.name)
+    raise raised
+
+  def _proceed(self) -> None:
+    """Called by a scan before each statement it sends.
+
+    Raises:
+      _ScansInterruptedError: planning was interrupted (`scan_all`).
+    """
+    if self._interrupted.is_set():
+      raise _ScansInterruptedError(
+          "planning was interrupted: no further statement is sent")
+
   def scan(self, work: _Work) -> None:
     """The planning SELECTs of both sides, the row-count check and the
-    R/E/H panel."""
+    R/E/H panel of one table. Run on a thread of `scan_all`: it may
+    write `work` and nothing else of the planner, and it asks
+    `_proceed` before every statement."""
     assert work.scope is not None and work.pin is not None
     cap = self.budget.max_bytes_billed
     with self.timed(work.name, "planning statistics"):
@@ -2032,6 +2146,7 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
                         "R/E/H panel, so the reference-based privacy metrics "
                         "are not evaluated")
       return
+    self._proceed()
     work.panel = fetch_panel(
         self.bq,
         source_read_table=work.pin,
@@ -2042,6 +2157,7 @@ class _Planner:  # pylint: disable=too-many-instance-attributes  # holds one bui
       work.notes.append(f"{work.landing}: {work.panel.reason}")
 
   def _one(self, sql: str, params: Mapping[str, Any], cap: int) -> dict:
+    self._proceed()
     rows = self.bq.query(sql, dict(params), max_bytes=cap)
     if len(rows) != 1:
       raise ValueError(f"a planning SELECT returned {len(rows)} rows, "
@@ -2266,6 +2382,10 @@ def build_plan(*, launch: LaunchContext, models: Sequence[RelModel], bq: Any,
   off — then it is `standalone`), their scopes, source pins, dry runs
   (refused over `max_bytes_billed`), one planning SELECT per side, the
   panel, samples (`mode="sampled"`), census shares, pairs and digests.
+  The scans (planning SELECTs, row-count check, panel) of the tables run
+  at once, on up to `SCAN_THREADS` threads; everything after them runs
+  one table after another in table order, so the plan is the one a
+  table-after-table planning makes whichever scan ends first (R153).
   Only the planning SELECTs, the panel and the metadata reads run here;
   every DDL waits in `prepare_sql` (R5) — with ONE exception (R57): an
   `as_of_diff` scope's start snapshot (zero bytes billed, expiring in
@@ -2288,6 +2408,13 @@ def build_plan(*, launch: LaunchContext, models: Sequence[RelModel], bq: Any,
       `planning_ddl` lists what phase A already created (R58).
     ValueError: a bad mode/trigger/runner/knob, or malformed input that
       would reach SQL.
+    Exception: a table's scan failed (a BigQuery error, a planning
+      SELECT that did not return one row): the error of the first such
+      table in table order, raised once every scan has ended — the
+      other tables' statements have run by then (a cost, never a
+      result); another table's failure is logged as a WARNING.
+    KeyboardInterrupt, SystemExit: an interrupt during the scans, at
+      once; no further statement is sent (module docstring).
   """
   knobs = knobs if isinstance(knobs, Knobs) else Knobs.from_mapping(knobs)
   _check_call(mode, trigger, runner)
@@ -2314,8 +2441,8 @@ def build_plan(*, launch: LaunchContext, models: Sequence[RelModel], bq: Any,
     with planner.timed(_ALL_TABLES, "dry runs"):
       planner.dry_run(active)
     active = [w for w in active if w.active]  # a failed dry run skips a table
-    for work in active:
-      planner.scan(work)
+    planner.scan_all(active)
+    for work in active:  # in table order: sampling appends to shared lists
       with planner.timed(work.name, "sampling"):
         planner.sample(work)
     planner.budget.check_bytes(planner.bytes)

@@ -511,7 +511,7 @@ def thelook_launch(bq: PlanBq,
   writes, runs = [], []
   for i, table in enumerate(tables):
     name = table.rsplit(".", 1)[1]
-    start = datetime(2026, 9, 13, 13, 40 + 5 * i, tzinfo=UTC)
+    start = datetime(2026, 9, 13, 13, 40, tzinfo=UTC) + timedelta(minutes=5 * i)
     rows = len(bq.rows.get(table, []))
     writes.append(
         JobWrite(

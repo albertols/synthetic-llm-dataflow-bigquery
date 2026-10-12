@@ -1559,9 +1559,9 @@ def test_planning_logs_every_step_of_every_table_and_a_summary(caplog):
     plan, _ = _plan(bq, launch)
   lines = [r.getMessage() for r in caplog.records]
   steps = [m for m in map(_PLAN_LINE.fullmatch, lines) if m]
-  scans = ("planning statistics", "scope verification", "reference panel",
-           "sampling")
-  assert [(m["table"], m["step"]) for m in steps] == [
+  found = [(m["table"], m["step"]) for m in steps]
+  scan = ["planning statistics", "scope verification", "reference panel"]
+  assert found[:7] == [
       ("users", "locate"),
       ("users", "source pin"),
       ("users", "planning tables"),
@@ -1569,8 +1569,16 @@ def test_planning_logs_every_step_of_every_table_and_a_summary(caplog):
       ("orders", "source pin"),
       ("orders", "planning tables"),
       ("(all tables)", "dry runs"),
-      *[("users", step) for step in scans],
-      *[("orders", step) for step in scans],
+  ]
+  # The tables are scanned at once (R153): their lines interleave, each
+  # table's own stay in order, and one line times the whole phase.
+  scanned = found[7:7 + 2 * len(scan)]
+  for name in ("users", "orders"):
+    assert [step for table, step in scanned if table == name] == scan
+  assert found[7 + 2 * len(scan):] == [
+      ("(all tables)", "scans"),
+      ("users", "sampling"),
+      ("orders", "sampling"),
       ("(all tables)", "census"),
   ]
   assert all(m["id"] == plan.evaluation_id for m in steps)
