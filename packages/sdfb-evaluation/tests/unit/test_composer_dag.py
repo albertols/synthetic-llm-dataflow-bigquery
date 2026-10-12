@@ -2209,7 +2209,8 @@ def test_the_chained_callback_finds_the_row_by_this_runs_generation_job(
   (task,) = re.findall(r"xcom_pull\(task_ids='(\w+)'\)\['id'\]", _JOB_ID_XCOM)
   assert ast.unparse(_kw(_launch(tree, "start_sdfb"),
                          "task_id")) == "f'start_{app_name}'"
-  assert task == f"start_{_value(tree, ast.Name('app_name'))}"
+  app_name = _value(tree, ast.Name("app_name"))
+  assert task == f"start_{app_name}"
   body = ast.unparse(_function(tree, "_close_running_row"))
   assert f"xcom_pull(task_ids='{task}')" in body
   # its own launch's job id: the return value, then the key pushed before
