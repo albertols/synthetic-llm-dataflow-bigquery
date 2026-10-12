@@ -14,7 +14,8 @@
 """The composed evaluation pipeline: one Beam graph per evaluation.
 
     per evaluated table, per side (source, synthetic; reference and
-    holdout from the plan's panel when it has one):
+    holdout from the plan's panel when it has one — in the graph, or,
+    given a `staging`, as objects the workers read: `beam.staged`):
       Sources.read (once per landing table and side: the relational
       │             pass reuses the same read for its parent keys)
       │  BatchElements ─► EncodeBatchFn ──► failed ─┐ (table, reason)
@@ -208,6 +209,7 @@ from sdfb_evaluation.beam.membership import (
 )
 from sdfb_evaluation.beam.privacy import Privacy
 from sdfb_evaluation.beam.relational import SIDE_INPUT, Relational, plan_edges
+from sdfb_evaluation.beam.staged import Staging
 from sdfb_evaluation.context.bq import BqApiError, normalize_fqn, quote_fqn
 from sdfb_evaluation.context.bq import is_refusal
 from sdfb_evaluation.context.budget import (
@@ -560,21 +562,29 @@ def prepare_evaluation(plan: EvaluationPlan, bq: Any) -> EvaluationPlan:
 class _ReadOnce(Sources):
   """`Sources` that read each (landing table, side) once: a repeated read
   (the relational pass's parent rows) gets the same PCollection, and a
-  side that failed to read fails again with the same reason."""
+  side that failed to read fails again with the same reason. The panel
+  sides are read with the run's `staging` (None: embedded)."""
 
-  def __init__(self, inner: Sources):
+  def __init__(self, inner: Sources, staging: Staging | None = None):
     self._inner = inner
+    self._staging = staging
     self._reads: dict[tuple[str, Side], beam.PCollection] = {}
     self._errors: dict[tuple[str, Side], str] = {}
 
-  def read(self, p: beam.Pipeline, table: TablePlan,
-           side: Side | str) -> beam.PCollection:
+  def read(self,
+           p: beam.Pipeline,
+           table: TablePlan,
+           side: Side | str,
+           *,
+           staging: Staging | None = None) -> beam.PCollection:
+    del staging  # the run's own, given once
     key = (table.landing_table, Side(side))
     if key in self._errors:
       raise ValueError(self._errors[key])
     if key not in self._reads:
       try:
-        self._reads[key] = self._inner.read(p, table, side)
+        self._reads[key] = self._inner.read(
+            p, table, side, staging=self._staging)
       except TABLE_ERRORS as exc:
         self._errors[key] = (f"the {key[1]} side of {table.landing_table} "
                              f"cannot be read ({type(exc).__name__}: "
@@ -772,7 +782,8 @@ def build_evaluation_pipeline(  # pylint: disable=too-many-locals  # the composi
     stats_query: StatsQuery | None = None,
     label_key_reader: Reader | None = None,
     pools: Mapping[str, Mapping[str, FreeTextPool]] | None = None,
-    thresholds: Thresholds | None = None) -> dict[str, beam.PCollection]:
+    thresholds: Thresholds | None = None,
+    staging: Staging | None = None) -> dict[str, beam.PCollection]:
   """Compose the whole evaluation of `plan` on `p` (module docstring).
 
   `stats_query` reads the generator's source_table_stats on the driver
@@ -782,7 +793,12 @@ def build_evaluation_pipeline(  # pylint: disable=too-many-locals  # the composi
   (`census.read_pools`, per table); `thresholds` are the run's overrides
   of the catalogue's warn and fail (`{metric id: (warn, fail)}`, Ruling
   R93-6): every metric row of a named metric is graded, scored and
-  stored under them, roll-ups included. The RUNNING row is the driver's
+  stored under them, roll-ups included; `staging` is where the panel
+  data the driver built (the R and H rows, the census's column views,
+  each table's panel hashes and privacy inputs) is written as objects
+  for the workers to read (`beam.staged`, Ruling R154) instead of being
+  embedded in the graph — None, the default, embeds, and the driver
+  passes one for a Dataflow run only. The RUNNING row is the driver's
   (`assemble.running_row`); a plan with nothing to evaluate writes only
   its FINAL SKIPPED row.
 
@@ -792,11 +808,13 @@ def build_evaluation_pipeline(  # pylint: disable=too-many-locals  # the composi
 
   Raises:
     ValueError: `p` would run on Prism (module docstring, Runners).
+    StagedObjectError: a panel object could not be written under
+      `staging` (nothing is submitted: the driver's FAILED row).
   """
   _checked_runner(p)
   if plan.skip_reason is not None:
     return _skipped(p, plan, sinks)
-  reads = _ReadOnce(sources)
+  reads = _ReadOnce(sources, staging)
   failed: dict[str, str] = {}
   ready: list[TablePlan] = []
   side_rows: list[tuple[TablePlan, Side, beam.PCollection]] = []
@@ -829,19 +847,21 @@ def build_evaluation_pipeline(  # pylint: disable=too-many-locals  # the composi
       "batches": batches,
       "accumulators": dense_out["accumulators"]
   } | "Census" >> CensusMetrics(
-      ready, label_key=key, pools=pools)
+      ready, label_key=key, pools=pools, staging=staging)
   member_out = batches | "Membership" >> Membership(
       ready,
       salt=plan.salt,
       label_key=key,
-      row_flags_top_k=knobs.row_flags_top_k)
+      row_flags_top_k=knobs.row_flags_top_k,
+      staging=staging)
   privacy_out = batches | "Privacy" >> Privacy(
       ready,
       salt=plan.salt,
       label_key=key,
       privacy_sample_rows=knobs.privacy_sample_rows,
       detection_sample_rows=knobs.detection_sample_rows,
-      row_flags_top_k=knobs.row_flags_top_k)
+      row_flags_top_k=knobs.row_flags_top_k,
+      staging=staging)
   relational_out = batches | "Relational" >> Relational(
       list(plan.tables), sources=reads)
   stats = read_source_stats(plan, stats_query)

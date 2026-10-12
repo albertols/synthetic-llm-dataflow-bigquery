@@ -238,6 +238,7 @@ import apache_beam as beam
 import numpy as np
 from apache_beam.utils.shared import Shared
 
+from sdfb_evaluation.beam import staged
 from sdfb_evaluation.beam.encode import BatchEncoder, BatchLayout, EncodedBatch
 from sdfb_evaluation.beam.membership import (
     TABLE_ERRORS,
@@ -1882,7 +1883,9 @@ class Privacy(beam.PTransform):
   sample sizes and the flag cap are the plan's knobs
   (`privacy_sample_rows`, `detection_sample_rows`, `row_flags_top_k`).
   Each table's `PanelInputs` (Gower space, detection columns, panel rows)
-  is built here, on the driver, and shipped as one side input; only its
+  is built here, on the driver, and shipped as one side input — embedded
+  in the job graph, or, given a `staging`, as one object the workers
+  read (`beam.staged`, Ruling R154); only its
   slim `PrivacySpec` is pickled into the DoFns. A table whose spec cannot
   be built (`TABLE_ERRORS`) is not evaluated, with the reason; the others
   run.
@@ -1899,8 +1902,10 @@ class Privacy(beam.PTransform):
                label_key: beam.PCollection,
                privacy_sample_rows: int = 50_000,
                detection_sample_rows: int = 50_000,
-               row_flags_top_k: int = 100):
+               row_flags_top_k: int = 100,
+               staging: staged.Staging | None = None):
     super().__init__()
+    self._staging = staging
     if not isinstance(label_key, beam.PCollection):
       raise TypeError("label_key must be the LabelKey PCollection, never "
                       "bytes: a constructor argument is pickled into the job "
@@ -1956,7 +1961,7 @@ class Privacy(beam.PTransform):
              name: str) -> dict[str, beam.PCollection]:
     spec, inputs = self._specs[name], self._inputs[name]
     side_input = beam.pvalue.AsSingleton(
-        p | f"Inputs[{name}]" >> beam.Create([inputs]))
+        staged.create(p, f"Inputs[{name}]", [inputs], self._staging))
     sampled = batches | f"SampleParts[{name}]" >> beam.ParDo(
         _SamplePartsFn(spec)).with_outputs(
             _FAILED, main=_PARTS)

@@ -218,6 +218,7 @@ import apache_beam as beam
 import numpy as np
 from apache_beam.transforms.window import GlobalWindows
 
+from sdfb_evaluation.beam import staged
 from sdfb_evaluation.beam.encode import BatchLayout, EncodedBatch
 from sdfb_evaluation.beam.encode import cell_text
 from sdfb_evaluation.canonical import NULL_CODE, hash64, hashed_label
@@ -2884,8 +2885,10 @@ class CensusMetrics(beam.PTransform):
   `pools` maps table →
   column → `FreeTextPool` (the CLI's `read_pools`); None means the pool
   side input is absent. The panel's R/H views are built here, on the
-  driver, and shipped as a side input; only each table's slim
-  `CensusSpec` is pickled into the DoFns.
+  driver, and shipped as a side input — embedded in the job graph, or,
+  given a `staging`, as one object the workers read (`beam.staged`,
+  Ruling R154); only each table's slim `CensusSpec` is pickled into the
+  DoFns.
 
   Raises:
     TypeError: `label_key` is not a PCollection (bytes here would be
@@ -2896,8 +2899,10 @@ class CensusMetrics(beam.PTransform):
                tables: Sequence[TablePlan],
                *,
                label_key: beam.PCollection,
-               pools: Mapping[str, Mapping[str, FreeTextPool]] | None = None):
+               pools: Mapping[str, Mapping[str, FreeTextPool]] | None = None,
+               staging: staged.Staging | None = None):
     super().__init__()
+    self._staging = staging
     if not isinstance(label_key, beam.PCollection):
       raise TypeError("label_key must be the LabelKey PCollection, never "
                       "bytes: a constructor argument is pickled into the job "
@@ -2916,7 +2921,8 @@ class CensusMetrics(beam.PTransform):
     totals = beam.pvalue.AsDict(
         input_or_inputs["accumulators"]
         | "Totals" >> beam.FlatMap(_totals_entry, specs))
-    refs = beam.pvalue.AsDict(p | "Refs" >> beam.Create(self._refs))
+    refs = beam.pvalue.AsDict(
+        staged.create(p, "Refs", self._refs, self._staging))
     counted = batches | "PreAggregate" >> beam.ParDo(
         CensusPreAggregateFn(specs)).with_outputs(
             _MASKS, _LITERALS, _SUBSTANTIVE, main=_VALUES)

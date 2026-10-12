@@ -234,6 +234,7 @@ import numpy as np
 from apache_beam.transforms.window import GlobalWindows
 from apache_beam.utils.shared import Shared
 
+from sdfb_evaluation.beam import staged
 from sdfb_evaluation.beam.encode import BatchEncoder, BatchLayout, EncodedBatch
 from sdfb_evaluation.canonical import (
     NULL_CODE,
@@ -2496,7 +2497,9 @@ class Membership(beam.PTransform):
   makes on a worker, read as a side input when the flags are labelled, so
   the key never enters the job graph (Rulings R64, R68). `salt` must be
   the salt the batches were encoded with (the plan's). The panel hashes
-  are built here, on the driver, and shipped as one side input per table;
+  are built here, on the driver, and shipped as one side input per table
+  — embedded in the job graph, or, given a `staging`, as one object per
+  table the workers read (`beam.staged`, Ruling R154);
   only each table's slim `MembershipSpec` is pickled into the DoFns. A
   table whose spec or panel cannot be built (`TABLE_ERRORS`) is not
   evaluated, with the reason; the others run.
@@ -2513,8 +2516,10 @@ class Membership(beam.PTransform):
                label_key: beam.PCollection,
                row_flags_top_k: int = 100,
                panel_max_bytes: int = PANEL_SET_MAX_BYTES,
-               source_set_max_bytes: int = SOURCE_SET_MAX_BYTES):
+               source_set_max_bytes: int = SOURCE_SET_MAX_BYTES,
+               staging: staged.Staging | None = None):
     super().__init__()
+    self._staging = staging
     if not isinstance(label_key, beam.PCollection):
       raise TypeError("label_key must be the LabelKey PCollection, never "
                       "bytes: a constructor argument is pickled into the job "
@@ -2566,7 +2571,7 @@ class Membership(beam.PTransform):
     for i, name in enumerate(names):
       spec = specs[name]
       refs = beam.pvalue.AsSingleton(
-          p | f"Panel[{name}]" >> beam.Create([self._refs[name]]))
+          staged.create(p, f"Panel[{name}]", [self._refs[name]], self._staging))
       side_inputs: list[Any] = [refs]
       if spec.source_mode == SIDE_INPUT:
         hashed = parts[i] | f"SourceHashes[{name}]" >> beam.ParDo(

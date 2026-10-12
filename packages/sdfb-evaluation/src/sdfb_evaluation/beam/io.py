@@ -28,9 +28,12 @@
                                            tables of the projects that
                                            refused a read session: paged
                           InMemorySources  beam.Create(rows_by[(table, side)])
-      reference, holdout  both             beam.Create(table.panel.r_rows /
-                                           h_rows), projected to the plan
-                                           columns — never re-read (D3)
+      reference, holdout  every one        table.panel.r_rows / h_rows,
+                                           projected to the plan columns —
+                                           never re-read (D3): in the job
+                                           graph (beam.Create), or, given a
+                                           staging root, one object a worker
+                                           reads (`beam.staged`, R154)
 
     Sinks.write(rows, table) ─► the PCollections complete once the rows are
                                 committed (the FINAL registry row waits on
@@ -181,6 +184,7 @@ from apache_beam.io.gcp.bigquery import (
     WriteToBigQuery,
 )
 
+from sdfb_evaluation.beam import staged
 from sdfb_evaluation.canonical import json_safe
 from sdfb_evaluation.context.bq import normalize_fqn
 from sdfb_evaluation.schemas import TABLES, load_schema
@@ -326,9 +330,10 @@ def normalize_direct_read(row: Mapping[str, Any],
 # --------------------------------------------------------------------------
 def _panel_rows(table: TablePlan, side: Side) -> list[dict]:
   """The panel side's rows restricted to the plan's columns: the panel is
-  `SELECT ref.*` of the source, and `beam.Create` embeds its elements in
-  the job graph, so source-only columns would only make it bigger. A
-  plan column a row lacks stays absent (the encoder names it)."""
+  `SELECT ref.*` of the source, and the rows travel to the workers in
+  the job graph or as a staged object, so source-only columns would only
+  make either bigger. A plan column a row lacks stays absent (the
+  encoder names it)."""
   panel = table.panel
   if panel is None:
     raise ValueError(
@@ -343,25 +348,34 @@ def _panel_rows(table: TablePlan, side: Side) -> list[dict]:
 class Sources(abc.ABC):
   """Reads one (table, side) into a `PCollection[dict]`.
 
-  The reference and holdout sides always come from the plan's panel
-  (`beam.Create`), whatever the implementation — the exact rows the
-  planner read and verified.
+  The reference and holdout sides always come from the plan's panel,
+  whatever the implementation — the exact rows the planner read and
+  verified: embedded in the job graph (`beam.Create`), or, given a
+  `staging`, written by the driver as one object the workers read
+  (`beam.staged`).
   """
 
-  def read(self, p: beam.Pipeline, table: TablePlan,
-           side: Side | str) -> beam.PCollection:
+  def read(self,
+           p: beam.Pipeline,
+           table: TablePlan,
+           side: Side | str,
+           *,
+           staging: staged.Staging | None = None) -> beam.PCollection:
     """The rows of `table`'s `side`, labelled by landing table and side.
+    `staging` is where a panel side's rows are staged instead of
+    embedded (None: embedded); the source and synthetic sides never use
+    it.
 
     Raises:
       ValueError: a panel side with no panel, or (per implementation) a
         side with nothing to read.
+      StagedObjectError: the panel rows could not be staged.
     """
     side = Side(side)
     label = f"Read[{table.landing_table}/{side}]"
     if side in _PANEL_SIDES:
-      panel: beam.PCollection = p | label >> beam.Create(
-          _panel_rows(table, side))
-      return panel
+      return staged.create(
+          p, label, _panel_rows(table, side), staging, spread=True)
     return self._read(p, table, side, label)
 
   @abc.abstractmethod

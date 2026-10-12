@@ -28,6 +28,8 @@ pipeline (D7), and who writes the one terminal row.
     read path           DIRECT_READ, or the paged read when BigQuery
           ▼             refuses a read session ("The read path")
     pipeline(options from the PREPARED plan) ─► submit ─► wait
+          │             on Dataflow the panel is staged beside the graph
+          │             while the graph is built ("The panel")
           │  bq         the pipeline writes its rows and the FINAL row
           │  bq_client  local NDJSON, then one load job per table, the
           │             registry's FINAL row last
@@ -174,6 +176,31 @@ in) is not probed. The probe's answer is the workers' answer when the
 driver runs as the account they run as: a Flex Template launcher does,
 and so does a local runner.
 
+The panel. What the driver built from the reference panel (the R and H
+rows, the census's views of them, each table's panel hashes and privacy
+inputs) has to reach the workers. A local run embeds it in the job
+graph. A Dataflow run does not (Ruling R154): a graph with the panel in
+it weighed 44 MB for five invented tables at 10,000 reference rows
+(a laptop measurement), and `pipeline.run()` serialises the graph,
+rebuilds the pipeline from it and serialises it again inside a
+launcher's twelve minutes. So for a
+Dataflow run (`is_dataflow`) the driver hands the graph a staging root,
+`<temp_location>/sdfb-evaluation/<evaluation_id>/panel/`
+(`beam.staged.panel_root`), and each payload is written there as one
+object while the graph is built; the graph carries the object's name,
+digest and element count. The temp location is the one Beam settled on,
+read from the PIPELINE's options, never from the options the driver
+built: `beam.Pipeline` deep-copies what it is given and validates its
+copy, and for a Dataflow pipeline that is where a missing or invalid
+`--temp_location` becomes the staging location (or a default bucket).
+The driver's own options would say None for a launch that passes
+`--staging_location` alone. A write that fails raises before anything is
+submitted: the driver's FAILED row. One line says what was staged,
+`evaluation <id>: panel staging: <n> objects, <size>, <s>s (<w>s in the
+writes)`: `<s>` is everything staging took (pickling, hashing, writing)
+and `<w>` the part spent writing to storage. Both are inside the `graph`
+step's seconds. No flag turns it on or off.
+
 The launch is timed step by step (`_timed`): the submission's own line
 is the sum of the four before it (the free-text pools read, the pipeline
 options, the graph, `pipeline.run()`), and while the pipeline is handed
@@ -241,6 +268,7 @@ from sdfb_evaluation.beam.pipeline import (
     pipeline_options_defaults,
     prepare_evaluation,
 )
+from sdfb_evaluation.beam.staged import Staging, panel_root
 from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.cli.fixture import Fixture, load_fixture
 from sdfb_evaluation.cli.gate import EXIT_FAILED, final_exit_code
@@ -1420,7 +1448,16 @@ class _Run:
              sources: Sources | None = None) -> Any:
     """Build the pipeline of the prepared plan over `sources` (None: a
     fixture's own) and hand it to its runner; returns the runner's
-    result. Each step is timed (module docstring)."""
+    result. Each step is timed, and a Dataflow run's panel is staged
+    under its temp location while the graph is built (module docstring,
+    The panel).
+
+    Raises:
+      ValueError: a Dataflow run whose pipeline carries no temp
+        location (one Beam did not validate as a Dataflow service
+        pipeline: `beam.staged.panel_root`).
+      StagedObjectError: a panel object could not be written.
+    """
     args, fixture = self.args, self.fixture
     evaluation_id = self.attempt.evaluation_id
     pools: dict[str, dict[str, FreeTextPool]] | None = None
@@ -1437,6 +1474,13 @@ class _Run:
     if sources is None:
       sources = (
           self.env.make_sources() if fixture is None else fixture.sources())
+    staging: Staging | None = None
+    if is_dataflow(args.runner):
+      # The pipeline's options, not `options`: Beam deep-copied them and
+      # settled the temp location in ITS copy (the staging location, or a
+      # default bucket, when no valid --temp_location was given).
+      settled = pipeline.options.view_as(GoogleCloudOptions)
+      staging = Staging(panel_root(settled.temp_location, evaluation_id))
     with _timed(evaluation_id, "graph"):
       build_evaluation_pipeline(
           pipeline,
@@ -1445,7 +1489,13 @@ class _Run:
           sinks=self.sinks,
           stats_query=self.bq.query if fixture is None else None,
           pools=pools,
-          thresholds=getattr(args, "thresholds", None) or None)
+          thresholds=getattr(args, "thresholds", None) or None,
+          staging=staging)
+    if staging is not None:
+      _LOGGER.info(
+          "evaluation %s: panel staging: %d objects, %s, %.2fs (%.2fs in the "
+          "writes)", evaluation_id, len(staging.objects), _size(staging.size),
+          staging.seconds, staging.write_seconds)
     with _timed(evaluation_id, "pipeline run"), _relayed_uploads(evaluation_id):
       return self.env.submit(pipeline)
 
