@@ -543,6 +543,167 @@ project, and how the paged read behaves at the owner's volumes. The same
 launch spent almost five of its twelve minutes in the driver's submission
 step without saying where, so the driver now times the steps inside it.
 
+**Note (2026-10-11): a cold, full-size launch has to fit the launcher's
+twelve minutes, so planning scans the tables at once and, on Dataflow, the
+panel is staged beside the job graph.** The sixth real launch (2026-10-10)
+was the first chained evaluation of a full-size run: five tables,
+212.6 M landed rows, the launcher on `e2-standard-8`. The chain worked: the
+gate, the wait, the trigger, the right parameters, and a plan for all five
+tables. The launch itself was shut down with `Timeout in polling result
+file` before it had submitted the job. "By default, the Flex Template
+launch process has a timeout of 12 mins. This launch process includes
+pulling the template container image and executing the code to construct
+the job graph"
+([Google, troubleshoot Flex Templates](https://docs.cloud.google.com/dataflow/docs/guides/troubleshoot-templates));
+the page lists "The program that creates the graph takes too long to
+finish" and "Code running in the launcher VM takes too long to finish"
+among the causes.
+
+![Left: the twelve minutes of two evaluation launches. Right: the planning of the one that did not fit, table after table.](../designs/assets/eval-launch-budget.png)
+
+*Claim: the launch that did not fit spent 5 min 20 s of its 12 min 13 s
+planning five tables one after another, and the launcher was shut down
+1 min 24 s into handing the job graph over, before Beam's first upload.*
+Two things were inside the fixed window that grow with the data:
+
+1. **The planning scans, one table after another.** A table's planning
+   statistics scan both of its sides in full and its reference panel
+   scans its source, and the planner ran them table after table: 308 s
+   of the 320 s. The slowest table alone took 81 s. The fourth launch had
+   run the same 50
+   statements in 59 s. The likely reason for the difference is BigQuery's
+   result cache, and it is not confirmed: the planner's queries leave the
+   cache on, their text is the same for two evaluations of one generation
+   job with the same scope (the source is pinned with a literal time, a
+   `manual` scope reads the landing table itself), and the fourth launch
+   came 16 hours after another launch on the same job. "If you run the
+   exact same query again, BigQuery returns the results from the cached
+   table", for "approximately 24 hours", unless "any of the referenced
+   tables … have changed since the results were previously cached"
+   ([BigQuery, cached query results](https://docs.cloud.google.com/bigquery/docs/cached-results)).
+   The owner's job history can confirm it: a served query has
+   `statistics.query.cacheHit` true (`cache_hit` in
+   `INFORMATION_SCHEMA.JOBS`). What matters for the design holds either
+   way: a chained evaluation is the first reader of tables that have just
+   landed, so it always pays the scans in full.
+2. **The job graph, with the panel in it.** `beam.Create` embeds its
+   elements in the graph, and four places handed the workers what the
+   driver had built from the panel that way: the R and H rows, the
+   census's views of them, and each table's panel hashes and privacy
+   inputs. On Dataflow `pipeline.run()` serialises the graph, rebuilds the
+   pipeline from it and serialises it again before the first upload, so
+   every panel row was paid several times, on the launcher's clock.
+
+*Decision.*
+
+- **Planning scans the tables at once**, on up to eight threads sharing
+  the one BigQuery client; each table's own statements stay in order.
+  Sampling and everything after it run once every scan has ended, one
+  table after another in table order, so the plan is the one a
+  table-after-table planning makes whichever scan ends first. A table
+  whose scan fails raises its own error after the others have ended (a
+  second failing table is a warning in the log). An interrupt is not a
+  failure: it leaves planning at once, and no further statement is sent.
+  The dry runs (9 s) and the metadata reads stay as they were.
+- **On Dataflow the panel is staged, not embedded.** The launch writes
+  each of those payloads as one object under
+  `<temp_location>/sdfb-evaluation/<evaluation_id>/panel/` while it builds
+  the graph, and the graph carries the object's name, sha256 and element
+  count. The temp location is the one Beam settles on when it validates
+  the pipeline (`--temp_location`, or the staging location when none or
+  an invalid one is given). A worker checks the digest before it
+  unpickles the object and the count after; a missing or different
+  object fails the job naming it. A local run embeds as before.
+
+The mechanisms and their diagrams are the design document's
+[§5.1](../designs/2026-07-07-evaluation-framework-design.md#51-planning-before-a-row-is-read)
+(the scans) and
+[§4.9](../designs/2026-07-07-evaluation-framework-design.md#49-what-the-outputs-may-reveal),
+accepted channel 4 (the panel).
+
+**This changes accepted channel 4, and corrects it** (the owner's decision
+of 2026-10-11). The design said the panel rows were an object in the job's
+bucket only with the `upload_graph` experiment. Beam stages the whole
+pipeline as `pipeline.pb` under the staging location for every Dataflow
+job
+([`apiclient.py`, `create_job_description`, Beam 2.74.0](https://github.com/apache/beam/blob/v2.74.0/sdks/python/apache_beam/runners/dataflow/internal/apiclient.py#L834-L849));
+`upload_graph` adds `dataflow_graph.json` beside it. So the rows have been
+an object in the job's bucket since the first Dataflow launch. They are
+one still, under the temp location, and no longer in the graph: whoever
+can read objects under the temp location can read them, and nothing that
+shows the job's graph shows them.
+
+![The seconds until Beam's first upload could start, the panel in the graph and staged, at three sizes of the reference sample, on a laptop.](../designs/assets/eval-graph-staging.png)
+
+*Claim: with the panel staged, what `pipeline.run()` serialises no longer
+grows with the panel; building the graph still does.* This is a laptop
+measurement of the composed, never-run graph of five invented tables, not
+a launch: the launcher took 75 s for the `graph` step this laptop takes
+29 s for, and nothing in the figure is converted to launcher seconds. At
+10,000 reference rows the three steps `pipeline.run()` takes before its
+first upload fall from 55 s to 10 s, on a 3.5 MB graph where it was
+44 MB, and the staged graph is the same size at 1,000 and at 10,000
+reference rows. The `graph` step itself falls only from 29 s to 23 s: most
+of it is the launch computing the panel's hashes, views and privacy
+inputs, which staging does not move. **So the next launch should show
+`graph` close to what it was, and `pipeline run` below the 221 s it was
+estimated to need.** By how much is not known. At the launcher's pace
+the three steps timed here account for about 130–140 s of that estimate
+(an inference: the laptop's 55 s times the ratio of the two `graph`
+steps), and the rest of it was never measured. A `pipeline run` near
+100 s would be consistent with this change working; a pipeline file of
+tens of megabytes under the staging location would not.
+
+*Not changed.* `pipeline.run()` still serialises the graph, rebuilds the
+pipeline and serialises it again; the graph it does that to is smaller.
+BigQuery's cache is left as it was: a re-launch on the same job may still
+be served from it, a first launch never is. The dry runs are not
+concurrent. The staged objects are not deleted when the job ends: they
+follow the temp location's lifecycle, as `pipeline.pb` follows the staging
+location's, and deleting them from the job is the owner's decision to
+make.
+
+*Consequences.*
+
+- Nothing to import and no parameter: the same template, the same DAGs. A
+  deployment pulls, rebuilds the image and deploys the template.
+- The launcher now creates objects under the temp location, and the
+  workers read them. Dataflow already asks that the worker account can
+  read and write there ("Ensure that your user-managed service account has
+  read and write access to the staging and temporary locations specified
+  in the Dataflow job",
+  [Google](https://docs.cloud.google.com/dataflow/docs/concepts/security-and-permissions)),
+  and both DAGs put the two locations in one bucket; a launcher has so far
+  written only under the staging prefix.
+- The temp location holds source rows. Restrict it, and the staging
+  location, to the evaluator's account and its operators, with a lifecycle
+  rule longer than a job, scoped to the two prefixes. The staging location
+  is no less sensitive than it was: the graph still carries the plan's
+  per-column specs, the source's quantile grids with their extremes among
+  them.
+- A launch that fails or is killed after staging leaves its objects with
+  no job, under the `evaluation_id` of its `RUNNING` row; and a deleted
+  object stays recoverable while the bucket's
+  [soft-delete policy](https://docs.cloud.google.com/storage/docs/soft-delete)
+  retains it (seven days by default).
+- The digest guards against accidents and against a party who can write
+  under the temp prefix and cannot replace the graph. It keeps nothing
+  secret, and whoever can replace the graph can replace the digest with
+  it.
+- A scan that fails no longer stops the scans after it: the other tables'
+  statements have run, and were billed, by the time the error is raised.
+- Up to eight planning queries run at once. Whether the phase then takes
+  the slowest table's time rather than the sum depends on BigQuery serving
+  them side by side (slots), which only a launch shows.
+
+*Not verified until a launch:* that the scans overlap on BigQuery as they
+do on a laptop's fake; that the launcher can create objects under the temp
+location and the workers read them; the launcher's `graph` and `pipeline
+run` seconds with the panel staged; and that a job evaluated from a staged
+panel gives the metrics of one evaluated from an embedded panel (on a
+laptop the written rows are identical). `docs/RUN_PLAYBOOK.md` ("What a
+cold, full-size launch must show") lists the lines to read.
+
 ## Sources
 
 [Lin, Lucas & Shmueli 2013](https://doi.org/10.1287/isre.2013.0480) (p-values at scale) ·
@@ -557,5 +718,10 @@ step without saying where, so the driver now times the steps inside it.
 [reading with pagination](https://docs.cloud.google.com/bigquery/docs/paging-results),
 [quotas and limits](https://docs.cloud.google.com/bigquery/quotas),
 [exporting table data](https://docs.cloud.google.com/bigquery/docs/exporting-data) (the note of 2026-10-10) ·
+[troubleshooting Flex Templates](https://docs.cloud.google.com/dataflow/docs/guides/troubleshoot-templates),
+[BigQuery cached query results](https://docs.cloud.google.com/bigquery/docs/cached-results),
+[Dataflow security and permissions](https://docs.cloud.google.com/dataflow/docs/concepts/security-and-permissions),
+[Cloud Storage soft delete](https://docs.cloud.google.com/storage/docs/soft-delete),
+[Beam 2.74.0 `apiclient.py`](https://github.com/apache/beam/blob/v2.74.0/sdks/python/apache_beam/runners/dataflow/internal/apiclient.py) (the note of 2026-10-11) ·
 [uv workspaces](https://docs.astral.sh/uv/concepts/projects/workspaces/) ·
 [apache/beam#36563](https://github.com/apache/beam/issues/36563). The full list, each fetched and checked, is the design document's §14.

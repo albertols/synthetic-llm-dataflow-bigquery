@@ -69,12 +69,21 @@ Each figure carries one claim:
   eval-cpu-budget           (MEASURED) encoding bounds the per-row pass;
                             the nearest-neighbour block is fixed by the
                             sample knobs
+  eval-launch-budget        (MEASURED, a launcher) a cold full-size launch
+                            spent 5:20 of its 12:13 planning five tables
+                            one after another and was shut down 1:24 into
+                            handing the graph over
+  eval-graph-staging        (MEASURED, a laptop) with the panel staged
+                            beside the graph, what a launch builds and
+                            serialises no longer grows with the panel
 
 Colour follows the entity in every figure: BLUE = the source and the
 reference sample R; ORANGE = the synthetic side under test, or the reading
 that misleads; AQUA = the control: the holdout H, a faithful generator, a
-corrected reading. Gray is context (thresholds, model lines). The script
-prints the palette separation on every run.
+corrected reading. Gray is context (thresholds, model lines). In the two
+launch figures BLUE is planning, ORANGE the job graph with the panel in it
+(building it, handing it over) and AQUA the graph with the panel staged.
+The script prints the palette separation on every run.
 """
 
 # pyplot must be imported after matplotlib.use("Agg") selects the headless backend.
@@ -258,6 +267,79 @@ MEASURED_NN_NS_PER_OP = 0.84  # ns per (query, reference, feature), d = 50
 # the same load average of 6-10.
 MEASURED_DETECTION_SECONDS = 9.4
 
+# --- MEASURED (typed once; two Flex Template launches of 2026-10-10) -------
+# From the console logs of two evaluation launches in the owner's deployment,
+# as the timed lines of the evaluator's driver and planner print them (the
+# logs are not in the repository; no evidence bundle is committed). Seconds
+# since the launch was accepted. Both evaluate the same five tables.
+LAUNCH_BUDGET = 12 * 60 + 13  # accepted 17:23:05, the launcher VM shut down 17:35:18
+# The fourth launch (standalone DAG): it fitted, in 10:09. Its planning ran
+# the same 50 BigQuery statements as the sixth's.
+LAUNCH_FOURTH = (
+    ("VM, image pull, start", 3 * 60 + 44, "other"),
+    ("lookup", 9, "other"),
+    ("planning", 59, "planning"),
+    ("row, prepare", 5, "other"),
+    ("submission", 4 * 60 + 56, "graph"),
+)
+LAUNCH_FOURTH_END = 10 * 60 + 9
+# The sixth launch (the first chained evaluation of a full-size run: 212.6 M
+# landed rows, cold). `Timeout in polling result file`: the VM was shut down
+# 84 s into `pipeline run`, before Beam's first upload line.
+LAUNCH_SIXTH = (
+    ("VM, image pull, start", 3 * 60 + 57, "other"),
+    ("lookup", 8, "other"),
+    ("planning", 5 * 60 + 20, "planning"),
+    ("row, prepare, read path", 8, "other"),
+    ("graph", 75, "graph"),
+    ("pipeline run", 84, "graph"),
+)
+# An ESTIMATE, not a measurement: what `pipeline run` needed in all (the
+# fourth launch's submission less the sixth's graph). Drawn hatched.
+LAUNCH_SIXTH_RUN_NEEDED = 3 * 60 + 41
+# The sixth launch's planning, one table after another, in the order it ran:
+# (table alias, planning statistics seconds, reference panel seconds).
+PLANNING_SIXTH = (
+    ("B_TABLE", 22.55, 11.27),
+    ("C_TABLE", 62.79, 11.39),
+    ("E_TABLE", 62.65, 12.14),
+    ("A_TABLE", 66.69, 14.65),
+    ("F_TABLE", 32.63, 11.43),
+)
+PLANNING_SIXTH_TOTAL = 320.21  # `done in 320.21s: 5 tables, 50 BigQuery statements`
+PLANNING_FOURTH_TOTAL = 59.07  # the same 50 statements, 16 hours after a launch on the same job
+
+# --- MEASURED (typed once; one laptop, 2026-10-11, not a launcher) ---------
+# What a launch does with the evaluation's job graph before Beam's first
+# upload, the panel embedded in the graph and staged beside it. Five invented
+# thelook-shaped tables (11, 7, 6, 11 and 7 columns, about 236 bytes of JSON
+# a panel row), `BigQuerySinks`, composed and never run; wall seconds of
+# `build_evaluation_pipeline`, `Pipeline.to_runner_api`,
+# `Pipeline.from_runner_api` and `to_runner_api` again, which is what
+# `Pipeline.run()` does on Dataflow. One pass over the six configurations,
+# one process each, on the two-core 2.9 GHz i5 of the micro-benchmarks above
+# at a load average of about 4 (the machine was shared with other work, so:
+# comparisons, not benchmarks); the 10,000-row configurations ran twice and
+# the faster run is kept. The script was a scratch one and is not
+# committed. The launcher of the launches above took 75 s for the `graph`
+# step this laptop takes 29 s for; nothing here is converted to launcher
+# seconds.
+# (reference_rows_limit, where the panel is, graph, serialise, rebuild,
+#  serialise again, the pipeline proto in MB)
+MEASURED_GRAPH = (
+    (0, "embedded", 5.66, 3.41, 2.21, 3.36, 3.64),
+    (0, "staged", 5.36, 3.58, 2.30, 3.23, 3.24),
+    (1_000, "embedded", 9.15, 5.59, 2.95, 5.35, 8.47),
+    (1_000, "staged", 8.08, 3.62, 2.35, 3.72, 3.52),
+    (10_000, "embedded", 29.44, 22.78, 9.30, 22.98, 44.26),
+    (10_000, "staged", 23.29, 4.09, 2.61, 3.72, 3.53),
+)
+# The staged objects of the 10,000-row configuration, written to a local
+# directory: how many, their megabytes in all, the seconds the writes took.
+MEASURED_STAGED_OBJECTS = (21, 33.99, 0.51)
+MEASURED_GRAPH_STEPS = ("build the graph", "serialise", "rebuild",
+                        "serialise again")
+
 
 # --------------------------------------------------------------------------
 # thresholds: the catalogue's, read at run time and never retyped here
@@ -363,9 +445,13 @@ def _row_labels(ax, left, right=None):
     spine.set_visible(False)
 
 
-def _save(fig, name, *, kind="concept", seed=None, pad=1.6):
-  """Stamp what kind of figure this is into the image, then write it."""
-  if kind == "measured":
+def _save(fig, name, *, kind="concept", seed=None, pad=1.6, stamp=None):
+  """Stamp what kind of figure this is into the image, then write it.
+  `stamp` replaces the stamp of the kind (a measured figure that is not
+  the laptop micro-benchmarks says where its numbers were observed)."""
+  if stamp is not None:
+    pass
+  elif kind == "measured":
     stamp = ("MEASURED on one laptop core (interim micro-benchmarks)"
              " - not a Dataflow run")
   elif seed is None:
@@ -1919,6 +2005,334 @@ def fig_cpu_budget():
 
 
 # --------------------------------------------------------------------------
+def _clock(seconds: float) -> str:
+  """Seconds as m:ss."""
+  minutes, rest = divmod(round(seconds), 60)
+  return f"{minutes}:{rest:02d}"
+
+
+_STEP_COLOUR = {"other": CONTEXT, "planning": BLUE, "graph": ORANGE}
+_LABELLED_FROM = 50  # seconds: a narrower step is drawn, not labelled
+
+
+def _launch_row(ax, y, steps, *, height=0.42, joined=()):
+  """One launch as consecutive steps on the time axis, a surface gap
+  between them; returns where the last one ends. The steps named in
+  `joined` are neighbours too narrow for a label each: they share one,
+  centred over both."""
+  left = 0.0
+  spans = {}
+  for name, seconds, kind in steps:
+    ax.barh(
+        y,
+        seconds / 60,
+        left=left / 60,
+        height=height,
+        color=_STEP_COLOUR[kind],
+        edgecolor=SURFACE,
+        linewidth=2.0)
+    spans[name] = (left, seconds)
+    left += seconds
+  labels = [(f"{name}\n{_clock(seconds)}", start + seconds / 2)
+            for name, (start, seconds) in spans.items()
+            if seconds >= _LABELLED_FROM and name not in joined]
+  if joined:
+    last = spans[joined[-1]]
+    text = " · ".join(f"{name} {_clock(spans[name][1])}" for name in joined)
+    ax.text(
+        (last[0] + last[1]) / 60 - 0.08,
+        y + height / 2 + 0.06,
+        text,
+        color=INK,
+        fontsize=8.3,
+        ha="right",
+        va="bottom")
+  for text, centre in labels:
+    ax.text(
+        centre / 60,
+        y + height / 2 + 0.06,
+        text,
+        color=INK,
+        fontsize=8.3,
+        ha="center",
+        va="bottom",
+        linespacing=1.25)
+  return left
+
+
+def fig_launch_budget():
+  """MEASURED on a launcher: where the twelve minutes of two evaluation
+  launches went, and the planning of the one that did not fit
+  (`cli.driver._timed`, `context.plan._Planner.timed`; what changed:
+  `context.plan._Planner.scan_all`, `beam.staged`)."""
+  fig, axes = plt.subplots(
+      1,
+      2,
+      figsize=(14.5, 5.0),
+      facecolor=SURFACE,
+      gridspec_kw={"width_ratios": (1.5, 1)})
+  ax = axes[0]
+  budget = LAUNCH_BUDGET / 60
+  _launch_row(ax, 2, LAUNCH_FOURTH)
+  ax.barh(
+      2, (LAUNCH_FOURTH_END - sum(s for _, s, _ in LAUNCH_FOURTH)) / 60,
+      left=sum(s for _, s, _ in LAUNCH_FOURTH) / 60,
+      height=0.42,
+      color=CONTEXT,
+      edgecolor=SURFACE,
+      linewidth=2.0)
+  ax.text(
+      LAUNCH_FOURTH_END / 60 + 0.12,
+      2,
+      f"accepted\nat {_clock(LAUNCH_FOURTH_END)}",
+      color=INK,
+      fontsize=8.5,
+      va="center",
+      linespacing=1.25)
+  ended = _launch_row(ax, 1, LAUNCH_SIXTH, joined=("graph", "pipeline run"))
+  done = LAUNCH_SIXTH[-1][1]
+  ax.barh(
+      1, (LAUNCH_SIXTH_RUN_NEEDED - done) / 60,
+      left=ended / 60,
+      height=0.42,
+      color=SURFACE,
+      edgecolor=ORANGE,
+      hatch="////",
+      linewidth=1.2)
+  needed = ended - done + LAUNCH_SIXTH_RUN_NEEDED
+  ax.text(
+      needed / 60 + 0.12,
+      1,
+      f"estimate: {_clock(needed)}\nto submit the job",
+      color=INK,
+      fontsize=8.5,
+      va="center",
+      linespacing=1.25)
+  ax.barh(
+      0,
+      budget,
+      height=0.42,
+      color=SURFACE,
+      edgecolor=CONTEXT,
+      linestyle=(0, (4, 3)),
+      linewidth=1.2)
+  ax.text(
+      budget / 2,
+      0,
+      "to be measured: scans at once, the panel staged beside the graph",
+      color=MUTED,
+      fontsize=8.8,
+      ha="center",
+      va="center")
+  ax.axvline(budget, color=INK, linewidth=1.2, zorder=3)
+  ax.text(
+      budget - 0.1,
+      2.86,
+      f"the launcher's {_clock(LAUNCH_BUDGET)}:\nthe VM is shut down",
+      color=INK,
+      fontsize=8.5,
+      ha="right",
+      va="top",
+      linespacing=1.25)
+  ax.set_xlim(0, 16.6)
+  ax.set_ylim(-0.55, 2.95)
+  ax.set_xticks(range(0, 17, 2))
+  _style(ax, grid_axis="x")
+  _row_labels(ax, [
+      "next cold launch",
+      "sixth launch\nchained, cold\nkilled",
+      "fourth launch\nstandalone\nfitted",
+  ])
+  _title(
+      ax, "A cold full-size launch ran out of its twelve minutes",
+      "two evaluation launches of the same five tables, 2026-10-10; minutes "
+      "since the launch was accepted")
+  ax.set_xlabel("minutes", color=MUTED, fontsize=9)
+  ax.legend(
+      handles=[
+          Rectangle((0, 0), 1, 1, color=CONTEXT),
+          Rectangle((0, 0), 1, 1, color=BLUE),
+          Rectangle((0, 0), 1, 1, color=ORANGE),
+          Rectangle((0, 0),
+                    1,
+                    1,
+                    facecolor=SURFACE,
+                    edgecolor=ORANGE,
+                    hatch="////"),
+      ],
+      labels=[
+          "the VM, the image pull, the short steps",
+          "planning",
+          "the job graph: built, then handed over",
+          "estimate, not measured",
+      ],
+      frameon=False,
+      labelcolor=INK,
+      fontsize=8.3,
+      loc="upper center",
+      bbox_to_anchor=(0.5, -0.16),
+      ncol=4,
+      handlelength=1.4,
+      columnspacing=1.4)
+
+  ax = axes[1]
+  rows = PLANNING_SIXTH[::-1]
+  began = {}
+  clock = 0.0
+  for table, statistics, panel in PLANNING_SIXTH:
+    began[table] = clock
+    clock += statistics + panel
+  for y, (table, statistics, panel) in enumerate(rows):
+    first = y == len(rows) - 1
+    ax.barh(
+        y,
+        statistics,
+        left=began[table],
+        height=0.5,
+        color=BLUE,
+        edgecolor=SURFACE,
+        linewidth=2.0,
+        label="planning statistics" if first else None)
+    ax.barh(
+        y,
+        panel,
+        left=began[table] + statistics,
+        height=0.5,
+        color=CONTEXT,
+        edgecolor=SURFACE,
+        linewidth=2.0,
+        label="reference panel" if first else None)
+    ax.text(
+        began[table] + statistics + panel + 5,
+        y,
+        f"{statistics + panel:.0f} s",
+        color=INK,
+        fontsize=9,
+        va="center")
+  slowest = max(s + p for _, s, p in PLANNING_SIXTH)
+  ax.axvline(slowest, color=CONTEXT, linewidth=1.0, zorder=1)
+  ax.text(
+      slowest + 5,
+      -0.62,
+      f"the slowest table alone: {slowest:.0f} s",
+      color=MUTED,
+      fontsize=8.5,
+      va="center")
+  ax.set_xlim(0, 345)
+  ax.set_ylim(-0.95, len(rows) - 0.4)
+  _style(ax, grid_axis="x")
+  _row_labels(ax, [table for table, _, _ in rows])
+  _title(
+      ax, f"Its planning: five scans in a row, {clock:.0f} s",
+      f"the sixth launch; the same 50 statements took "
+      f"{PLANNING_FOURTH_TOTAL:.0f} s in the fourth, "
+      f"{PLANNING_SIXTH_TOTAL:.0f} s here")
+  ax.set_xlabel("seconds since the first scan began", color=MUTED, fontsize=9)
+  _legend(ax, loc="upper right")
+  _save(
+      fig,
+      "eval-launch-budget",
+      stamp="MEASURED on a Flex Template launcher (the console logs of two "
+      "launches, 2026-10-10); the hatched bar is an estimate")
+
+
+def fig_graph_staging():
+  """MEASURED on a laptop: with the panel staged beside the graph, what
+  `Pipeline.run()` serialises no longer grows with the panel; building
+  the graph still does (`beam.staged.create`, `cli.driver._Run.submit`)."""
+  fig, ax = plt.subplots(figsize=(12.5, 5.2), facecolor=SURFACE)
+  # bottom to top: the largest panel on top, embedded above staged
+  rows = sorted(MEASURED_GRAPH, key=lambda row: (row[0], row[1] == "embedded"))
+  colour = {"embedded": ORANGE, "staged": AQUA}
+  ys = []
+  for index, (limit, how, *steps, megabytes) in enumerate(rows):
+    y = index + 0.28 * (index // 2)  # the two bars of one limit sit together
+    ys.append(y)
+    left = 0.0
+    for step, seconds in enumerate(steps):
+      ax.barh(
+          y,
+          seconds,
+          left=left,
+          height=0.62,
+          color=CONTEXT if step == 0 else colour[how],
+          edgecolor=SURFACE,
+          linewidth=2.0)
+      left += seconds
+    ran = sum(steps[1:])
+    ax.text(
+        left + 0.9,
+        y,
+        f"{left:.0f} s, {ran:.0f} s of them after the graph is built",
+        color=INK,
+        fontsize=9,
+        va="center")
+    if (limit, how) == (MEASURED_GRAPH[-1][0], "staged"):
+      count, size, seconds = MEASURED_STAGED_OBJECTS
+      ax.text(
+          left + 34,
+          y, f"its {count} objects: {size:.0f} MB, written in {seconds:.1f} s "
+          "(a local disk)",
+          color=MUTED,
+          fontsize=8.5,
+          va="center")
+    del megabytes
+  top = rows[-1]
+  left = 0.0
+  for name, seconds in zip(MEASURED_GRAPH_STEPS, top[2:6], strict=True):
+    ax.text(
+        left + seconds / 2,
+        ys[-1] + 0.4,
+        name,
+        color=MUTED,
+        fontsize=8.3,
+        ha="center",
+        va="bottom")
+    left += seconds
+  ax.set_xlim(0, 125)
+  ax.set_ylim(-0.6, ys[-1] + 0.95)
+  _style(ax, grid_axis="x")
+  ax.set_yticks(ys)
+  ax.set_yticklabels([
+      f"{limit:,} rows, {megabytes:.1f} MB graph\n" +
+      ("panel in the graph" if how == "embedded" else "panel staged")
+      for limit, how, *_, megabytes in rows
+  ],
+                     color=INK,
+                     fontsize=9.3,
+                     linespacing=1.35)
+  ax.spines["left"].set_visible(False)
+  _title(
+      ax, "Staged, the graph a launch serialises no longer grows with the "
+      "panel",
+      "five tables at three sizes of the reference sample; seconds on a "
+      "laptop, not on the launcher")
+  ax.set_xlabel(
+      "seconds until Beam's first upload could start", color=MUTED, fontsize=9)
+  ax.legend(
+      handles=[
+          Rectangle((0, 0), 1, 1, color=CONTEXT),
+          Rectangle((0, 0), 1, 1, color=ORANGE),
+          Rectangle((0, 0), 1, 1, color=AQUA),
+      ],
+      labels=[
+          "building the graph: the panel's hashes and views are computed "
+          "here either way",
+          "pipeline.run() before the first upload, the panel in the graph",
+          "the same steps, the panel staged",
+      ],
+      frameon=False,
+      labelcolor=INK,
+      fontsize=8.5,
+      loc="lower right")
+  _save(
+      fig,
+      "eval-graph-staging",
+      stamp="MEASURED on a laptop (two cores, shared with other work), "
+      "2026-10-11 - not a launcher, not a Dataflow run")
+
+
+# --------------------------------------------------------------------------
 # palette check (OKLab distances x100, as the dataviz validator computes them)
 _CVD = {
     # Machado, Oliveira & Fernandes (2009), severity 1.0, on linear RGB
@@ -1995,6 +2409,8 @@ FIGURES = {
     "eval-fanout": fig_fanout,
     "eval-count-rule": fig_count_rule,
     "eval-cpu-budget": fig_cpu_budget,
+    "eval-launch-budget": fig_launch_budget,
+    "eval-graph-staging": fig_graph_staging,
 }
 
 

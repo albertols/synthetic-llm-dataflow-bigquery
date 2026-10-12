@@ -180,14 +180,19 @@ Secret Manager version `projects/P/secrets/S/versions/V`, a `gs://` object
 or an absolute path) labels are stable across runs. A worker reads the
 key; the registry records only `operator` or `ephemeral`.
 
-The key stays out of the job graph, but source rows do not: the reference
-panel of every table (the R and H rows, up to twice `reference_rows_limit`
-source rows, in clear) is embedded in the pipeline. On Dataflow the graph
-is also uploaded to the job's staging location, so treat that bucket as
-holding source data: restrict who can read it and expire its objects with a
-lifecycle rule
+The key stays out of the job graph. So does the reference panel on
+Dataflow, but source rows still leave BigQuery: the panel of every table
+(the R and H rows, up to twice `reference_rows_limit` source rows, in
+clear) is written by the launch as objects under
+`<temp_location>/sdfb-evaluation/<evaluation_id>/panel/`, where the workers
+read it (the temp location Beam settles on: `--temp_location`, or the
+staging location when none is given). Treat the job's temp location as
+holding source data: restrict
+who can read it and expire its objects with a lifecycle rule, since they
+are not deleted when the job ends
 ([`DEPLOYMENT_PREREQUISITES.md`](../../docs/DEPLOYMENT_PREREQUISITES.md),
-design §4.9).
+design §4.9). A local run keeps the panel in the pipeline, in the memory
+of the process.
 
 ### 4. Read the result
 
@@ -360,6 +365,29 @@ BigQuery Storage Read API refused a read session on project`), with their
 rows and bytes; the registry row keeps it in `warnings`. Nothing has to be
 set, and granting the role later moves the same image to the fast read.
 Design: [§5.2](../../docs/designs/2026-07-07-evaluation-framework-design.md#52-the-graph).
+
+**What the launch prints, and where its time goes.** A Flex Template
+launch has 12 minutes for everything below up to the job's submission,
+the image pull included, so each step says how long it took.
+
+| Line, in order | What it times |
+|---|---|
+| `evaluation <id>: target check`, `launch lookup`, `relationship models` | naming the tables and resolving the launch |
+| `planning <id> <table>: locate`, `source pin`, `planning tables` | per table, one after another: metadata only |
+| `planning <id> (all tables): dry runs` | the byte budget, before anything is billed |
+| `planning <id> <table>: planning statistics`, `scope verification`, `reference panel` | one table's scans. **The tables are scanned at once (up to eight), so these lines overlap and their seconds do not add up** |
+| `planning <id> (all tables): scans` | the wall time of that whole phase |
+| `planning <id> <table>: sampling`, then `(all tables): census` and the `done in …` summary | table after table again |
+| `evaluation <id>: RUNNING row`, `prepare statements`, `read path` | the registry row, the DDL, the read-session probe |
+| `evaluation <id>: free text pools`, `pipeline options`, `graph`, `pipeline run`, then `submission` (their sum) | building the pipeline and handing it to the runner |
+| `evaluation <id>: panel staging: <n> objects, <size>, <s>s (<w>s in the writes)` (Dataflow only, after `graph`) | the panel objects written under the temp location while the graph was built: `<s>` is everything staging took (pickling, hashing, writing), `<w>` the part spent writing to storage; both are part of `graph`'s seconds |
+| `evaluation <id>: pipeline run: Starting GCS upload to …` | Beam's own lines, relayed: the uploads inside `pipeline run` |
+
+A plan is the same whichever table's scan ends first; a scan that fails
+raises its own error once the others have ended (their statements have
+been billed by then; a second failing table is a `WARNING` in the log).
+Ctrl-C during the scans stops them: the tables not yet started are not
+scanned and a scan in flight sends nothing further.
 
 | What | Where | Note |
 |---|---|---|

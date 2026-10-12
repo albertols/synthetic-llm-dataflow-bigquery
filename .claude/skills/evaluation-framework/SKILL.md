@@ -109,6 +109,14 @@ that must match the generator is mirrored and pinned by the two-sided golden fil
   project …`), also in the registry row's `warnings`. Paging is slower (a quota of the project that contains the
   table) and fails the job if a table changes meanwhile; for large tables use `--mode sampled`. A public project
   is expected to refuse (not observed).
+- A Flex Template launch has 12 minutes, and a chained evaluation is always the first reader of freshly landed
+  tables. Planning scans the tables at once (up to eight): the per-table `planning statistics` /
+  `reference panel` lines overlap, and `planning <id> (all tables): scans <s>s` is the phase's wall time. On
+  Dataflow the reference panel is staged, not embedded in the graph: `evaluation <id>: panel staging: <n>
+  objects, <size>, <s>s (<w>s in the writes)`, objects under `<temp_location>/sdfb-evaluation/<evaluation_id>/panel/`
+  that the workers verify by sha256 before reading. The temp location therefore holds source rows (restrict it, give
+  it a lifecycle rule; a launch that dies after staging leaves its objects there). Ctrl-C during the scans stops
+  them. Neither has run on a launcher yet: `docs/RUN_PLAYBOOK.md` lists what the next launch must show.
 - On the shared image an evaluation launch must pass `sdfb_job=evaluation` (else it is a generation launch) and
   `disk_size_gb=200` (the image is multi-GB; the evaluator pins no boot disk). Both DAGs do.
 - A chained evaluation (`trigger=chained`, from the generation DAG) names its tables with `--seed_table` (its enabled component in the model, else the table alone) and the job id only as the launch's identity (`--generation_job_id` next to the seed: only the Dataflow job is read, needs `roles/dataflow.viewer`, never the log): its row carries the job id and window and is listed in `evaluation_latest_per_job`; with `--validation_runs_table` and the window it also reads this launch's `validation_runs` rows (one query), whose digest verifies the reference sample so the reference-based privacy metrics (nearest-neighbour ones, panel-based rates and lifts) are evaluated, otherwise they are `not_evaluated` with the reason; a model the launch adjusted is not seen. It is not waited for: if its job dies after

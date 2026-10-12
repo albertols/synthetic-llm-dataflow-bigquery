@@ -1236,15 +1236,79 @@ flowchart LR
    record's key (`source_key` is always NULL). The synthetic key is the
    synthetic table's own key in clear, not hashed, so for a whole-row copy
    (keys included) it is the copied source row's key in clear.
-4. **The reference panel travels in the job graph (R113).** The R and H
-   rows of every table, up to 2n source rows in clear, are read on the
-   driver and embedded in the pipeline (`beam.Create` in `beam/io.py`);
-   the panel inputs of the privacy pass travel the same way. Whoever can
-   read the Dataflow job can read them, and with the `upload_graph`
-   experiment the graph is also an object under the job's staging
-   location. Restrict that bucket to the evaluator's service account and
-   its operators and give it a lifecycle rule; see
-   [`DEPLOYMENT_PREREQUISITES.md`](../DEPLOYMENT_PREREQUISITES.md).
+4. **The reference panel reaches the workers as data the driver read
+   (R113, R154).** The R and H rows of every table, up to 2n source rows
+   in clear, are read on the driver, and what the driver builds from them
+   is handed to the workers: the rows themselves (`beam/io.py`), the
+   census's per-column views of them, and each table's panel hashes and
+   privacy inputs (the inputs hold the rows again, projected to the
+   plan's columns). **One panel per runner:**
+
+   ```mermaid
+   flowchart LR
+     classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+     classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+     classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+
+     subgraph local["💻 local run: embedded"]
+       D1["⚙️ driver<br/>panel data"]:::cpu --> G1["🔀 job graph<br/>the rows inside"]:::beam --> W1["🔀 worker"]:::beam
+     end
+     subgraph dataflow["☁️ Dataflow: staged"]
+       D2["⚙️ driver<br/>panel data"]:::cpu --> O[("🪣 temp location<br/>one object each")]:::store
+       D2 --> G2["🔀 job graph<br/>name, sha256, count"]:::beam --> W2["🔀 worker<br/>digest, then unpickle"]:::beam
+       O --> W2
+     end
+   ```
+
+   | Run | Where the panel data is | Who can read the rows |
+   | --- | --- | --- |
+   | Dataflow | objects under `<temp_location>/sdfb-evaluation/<evaluation_id>/panel/`, written by the launch while it builds the graph and read by the workers (`beam/staged.py`). The job graph holds each object's name, its sha256 and its element count, and no row | whoever can read objects under the job's temp location |
+   | A local run (the DirectRunner, a fixture) | embedded in the pipeline (`beam.Create`), in the memory of the one process | whoever runs that process |
+
+   A worker checks an object's sha256 against the graph's before it
+   unpickles it and the element count after, so the panel a job evaluates
+   is the one its launch wrote or the job fails naming the object; it is
+   never an empty or a partial panel. What the digest covers, and what it
+   does not:
+
+   | It stops | It does not |
+   | --- | --- |
+   | an accident: a truncated, overwritten or missing object | keep anything secret: the objects are the rows, in clear |
+   | a party who can write under the temp prefix and cannot replace the graph | stop whoever can replace the graph, digests included (in the DAGs' layout both sit in one bucket). The graph is already code the workers run, so this is no new exposure |
+
+   The temp location is the one Beam settles on when it validates the
+   pipeline: `--temp_location`, or the staging location when none or an
+   invalid one is given (`cli/driver.py` reads the pipeline's own options
+   for it).
+
+   Until 2026-10-11 the panel was embedded on every runner, and this
+   section said that the graph was an object in the job's bucket only
+   with the `upload_graph` experiment. That was wrong. Beam stages the
+   whole pipeline as `pipeline.pb` under the staging location for every
+   Dataflow job ([`apiclient.py`, `create_job_description`][beam-apiclient]);
+   `upload_graph` adds `dataflow_graph.json` beside it. So the panel rows
+   have been an object in the job's bucket since the first Dataflow
+   launch. They are one still: under the temp location now, and no longer
+   in the graph, so nothing that shows the job's graph shows them.
+
+   Restrict both locations to the evaluator's service account and its
+   operators: the temp location holds the panel, the staging location
+   the graph. The rows have left the graph; the source has not: the
+   graph still names every table and column and carries, pickled into
+   its transforms, the plan's per-column specs, the source's 1,001-point
+   quantile grids with their extremes among them, and this section
+   treats a source extreme as one record's literal value. So nothing
+   here is a reason to relax access to the staging location. The worker
+   account already needs [read and write access][dataflow-security] to
+   both; what is new is that the launch writes under the temp one. Give
+   both prefixes a lifecycle rule: the panel objects are not deleted
+   when the job ends, a launch that fails or is killed after staging
+   leaves its objects with no job (under the `evaluation_id` of its
+   `RUNNING` row), and a deleted object stays recoverable while the
+   bucket's [soft-delete policy][gcs-soft-delete] retains it.
+   See [`DEPLOYMENT_PREREQUISITES.md`](../DEPLOYMENT_PREREQUISITES.md).
+   Why the panel left the graph is
+   [ADR 0041's note of 2026-10-11](../adr/0041-evaluation-standalone-package.md).
 
 **Counts below k, by design.** The count rule governs which grid VALUES
 are published. These payloads and rows still store a count that can be
@@ -1420,6 +1484,38 @@ billed before the byte budget has been checked.
 | distinct count | `APPROX_COUNT_DISTINCT` |
 | 1,001-point grid, mean, deviation, extremes, atoms | `APPROX_QUANTILES(v, 1000)`, `AVG`, `STDDEV_POP`, `MIN`, `MAX`, `APPROX_TOP_COUNT(v, 11)` |
 | dictionaries, census head | `APPROX_TOP_COUNT(x, 255)`, values over 1 KiB excluded |
+
+**The scans of the tables run at once (R153).** A scan is one table's
+billed reads: the planning SELECT of each side, the row-count check and
+the panel. Their time grows with the tables, and planning runs inside a
+Flex Template launch's fixed [twelve minutes][flex-troubleshoot], so the
+scans do not queue behind each other:
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  DRY["🛡️ dry runs<br/>table after table"]:::cpu --> S1["⚙️ scan users"]:::cpu & S2["⚙️ scan orders"]:::cpu & S3["⚙️ scan order_items"]:::cpu
+  S1 & S2 & S3 --> BQ[("🗄️ BigQuery<br/>one client")]:::store
+  S1 & S2 & S3 --> J["🛡️ every scan ended<br/>first failure raises"]:::cpu --> R["⚙️ sampling, census<br/>table after table"]:::cpu --> P["⚪ the plan"]:::data
+```
+
+At most eight tables are scanned at once (`context/plan.py::SCAN_THREADS`),
+each on its own thread with its own statements in order. Sampling, the
+census shares, the pairs and the digests run after every scan has ended,
+one table after another in table order, so the plan is the one a
+table-after-table planning makes whichever scan ends first
+(`_Planner.scan_all`; a test plans the same launch with the scans forced
+to end in every order). A failing table raises its own error once every
+scan has ended; the other tables' statements have been billed by then,
+and a second failing table is a warning in the log. An interrupt is not
+a failure: Ctrl-C leaves planning at once, the scans not yet started are
+cancelled and a scan in flight sends no further statement. The
+dry runs and the metadata reads are not concurrent. The log keeps one line
+per table and step, whose seconds now overlap, and adds
+`planning <id> (all tables): scans <s>s` for the phase.
 
 A string column is routed by source statistics alone: a key or identity
 column is an `identifier`; at most 1,000 distinct values is `categorical`;
@@ -2505,6 +2601,10 @@ that metric's fail is proved separately on a heavy copier.
 | Prism is refused | The pipeline will not be built on a runner that breaks the side-input contract |
 | The flag surface | The template metadata lists exactly the public flags of `run` |
 | Independence | No import of the generator's packages, by syntax tree and by an isolated install |
+| The plan does not depend on which scan ends first | The same launch planned with the scans forced to end in every order, all in flight at once and one table at a time, exact and sampled: one plan (§5.1) |
+| A staged panel is the embedded panel | The fixture evaluation run twice on the in-process runner, its panel in the graph and staged under a local root: the same metric, profile, flag and registry rows; the staged graph does not grow with the panel (§4.9) |
+| A staged object is the launch's or nothing | A changed, truncated or missing object, another element count, or one a worker cannot unpickle fails the step naming the object; a changed one is not unpickled. A panel object that cannot be WRITTEN fails the launch through the real graph builder: the table is not set aside as not evaluated |
+| An interrupt stops planning | A real SIGINT with eight of twelve tables being scanned: eight statements sent, none after it, the other four tables never scanned |
 
 Tests that need live GCP are marked `gcp` and excluded by default. None
 has been run.
@@ -2586,13 +2686,24 @@ is relieved by direct labels.
 | Fan-out | `assets/eval-fanout.png` | An equal mean fan-out can hide a wrong shape | CONCEPT | 19 |
 | Count rule | `assets/eval-count-rule.png` | An edge is published only with 10 source records on each side | CONCEPT | 20 |
 | CPU budget | `assets/eval-cpu-budget.png` | Encoding bounds the per-row pass; the neighbour block is fixed by the sample knobs | MEASURED, laptop | — |
+| Launch budget | `assets/eval-launch-budget.png` | A cold full-size launch spent 5:20 of its 12:13 planning five tables one after another and was shut down 1:24 into handing the graph over | MEASURED, a Flex Template launcher | — |
+| Graph staging | `assets/eval-graph-staging.png` | With the panel staged beside the graph, what a launch serialises no longer grows with the panel; building the graph still does | MEASURED, laptop | — |
 
-`eval-cpu-budget` is the only figure with measured numbers, and it is
-interim: laptop micro-benchmarks recorded while the package was built, not
-a committed evidence bundle, to be replaced by the first Dataflow run. The
-numbers are typed once, in the script's `MEASURED` block, with where they
-came from: one laptop core. One command reproduces the dense-pass row:
-`pytest packages/sdfb-evaluation/tests/beam/test_dense.py::test_throughput_8192_by_30_batch -s`. Diagrams are inline mermaid, in the
+Three figures carry measured numbers, each typed once in a `MEASURED`
+block of the script with where it came from, and none is a committed
+evidence bundle. `eval-cpu-budget` is interim: laptop micro-benchmarks
+recorded while the package was built, to be replaced by the first
+Dataflow run; one command reproduces its dense-pass row:
+`pytest packages/sdfb-evaluation/tests/beam/test_dense.py::test_throughput_8192_by_30_batch -s`.
+`eval-launch-budget` holds the timed lines of two launches of 2026-10-10,
+read from their console logs (the logs are not in the repository); its one
+hatched bar is an estimate. `eval-graph-staging` is a laptop measurement of
+the composed, never-run graph of five invented tables, taken with a scratch
+script while the machine was shared: comparisons, not benchmarks, and not
+launcher seconds. Both are shown in
+[ADR 0041's note of 2026-10-11](../adr/0041-evaluation-standalone-package.md);
+in them blue is planning, orange the job graph with the panel in it and
+aqua the graph with the panel staged. Diagrams are inline mermaid, in the
 repository's house classes: orange for Beam code, blue for stores, green
 for CPU work, gray for plain values.
 
@@ -2672,6 +2783,11 @@ list, and two BigQuery reference pages in `schemas/__init__.py`.
 | [BigQuery: quotas and limits][bq-quotas] | the `tabledata.list` limits, §5.2 | Read on 2026-10-10 with `curl -sL` and a text search (the fetch tool used for the other pages returns this one's navigation only). On the page: "Maximum tabledata.list bytes per minute: 7.5 GB in multi-regions; 3.7 GB in all other regions", "This quota applies to the project that contains the table being read", "Other APIs including jobs.getQueryResults and fetching results from jobs.query and jobs.insert can also consume this quota", 1,000 `tabledata.list` requests per second and 100,000 rows per response. No rows-per-second limit is on the page |
 | [BigQuery: troubleshoot quota errors][bq-quota-errors] | the throttling error and its remedy, §5.2 | Read on 2026-10-10 with `curl -sL`. The section "Maximum tabledata.list bytes per second per project quota errors" gives the message and "retries with exponential backoff" and names no reason; the overview's example of a quota error is a 403 whose reason is `quotaExceeded` |
 | [BigQuery: export table data][bq-export] | the read path not built, ADR 0041 | Fetched 2026-10-10; `bigquery.tables.export`, the Cloud Storage permissions and DATETIME as a string in Avro are on the page. The page does not say whether a table snapshot can be exported |
+| [Dataflow: troubleshoot Flex Templates][flex-troubleshoot] | the launch's time limit, §5.1, ADR 0041 | Read on 2026-10-11 with `curl -sL` and a text search. On the page: "By default, the Flex Template launch process has a timeout of 12 mins. This launch process includes pulling the template container image and executing the code to construct the job graph. If the launch doesn't complete within this 12 minute window, the job fails with the error "Timeout in polling result file"", and among the causes "The program that creates the graph takes too long to finish" and "Code running in the launcher VM takes too long to finish" |
+| [BigQuery: use cached query results][bq-cached-results] | why a re-launch may plan faster than a first launch, ADR 0041 | Read on 2026-10-11 with `curl -sL`. On the page: "If you run the exact same query again, BigQuery returns the results from the cached table, if it exists", "cached in temporary tables for approximately 24 hours", "maintained per-user, per-project", not cached "If any of the referenced tables or logical views have changed since the results were previously cached", and "the job statistics property `statistics.query.cacheHit` returns as true". The page does not mention time travel. Whether the launches in question were served from it is not confirmed |
+| [Dataflow: security and permissions][dataflow-security] | the worker account's access to the temp location, §4.9 | Read on 2026-10-11 with `curl -sL`. On the page: "Ensure that your user-managed service account has read and write access to the staging and temporary locations specified in the Dataflow job" |
+| [Beam 2.74.0 `apiclient.py`][beam-apiclient] | `pipeline.pb` is staged for every Dataflow job, §4.9 | Read on 2026-10-11 at the release tag and in the evaluator's environment (the same lines): `create_job_description` stages `pipeline.pb` under the staging location unconditionally (lines 834 to 849); the `upload_graph` branch (line 755) adds `dataflow_graph.json` |
+| [Cloud Storage: soft delete][gcs-soft-delete] | a deleted panel object stays recoverable, §4.9 | Read on 2026-10-12 with `curl -sL`. On the page: "The soft delete feature preserves objects and buckets that get deleted or overwritten by retaining them in a soft-deleted state for a specified period of time", "Soft delete is enabled by default for all buckets that support it, with a default retention duration of 7 days", and the caution that for a bucket of temporary data it "can result in significantly increased storage costs" |
 | [apache/beam#36563][beam-36563] | Prism and side inputs, §5.4 | Fetched; the issue title matches and the issue is closed |
 | [SDMetrics documentation][sdmetrics] | the origin of several metric names, §4.3 | Fetched; title matches |
 
@@ -2741,5 +2857,10 @@ list, and two BigQuery reference pages in `schemas/__init__.py`.
 [bq-quotas]: https://docs.cloud.google.com/bigquery/quotas
 [bq-quota-errors]: https://docs.cloud.google.com/bigquery/docs/troubleshoot-quotas
 [bq-export]: https://docs.cloud.google.com/bigquery/docs/exporting-data
+[flex-troubleshoot]: https://docs.cloud.google.com/dataflow/docs/guides/troubleshoot-templates
+[bq-cached-results]: https://docs.cloud.google.com/bigquery/docs/cached-results
+[dataflow-security]: https://docs.cloud.google.com/dataflow/docs/concepts/security-and-permissions
+[beam-apiclient]: https://github.com/apache/beam/blob/v2.74.0/sdks/python/apache_beam/runners/dataflow/internal/apiclient.py#L834-L849
+[gcs-soft-delete]: https://docs.cloud.google.com/storage/docs/soft-delete
 [beam-36563]: https://github.com/apache/beam/issues/36563
 [sdmetrics]: https://docs.sdv.dev/sdmetrics
