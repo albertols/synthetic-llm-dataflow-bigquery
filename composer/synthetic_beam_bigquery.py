@@ -627,6 +627,18 @@ default_dag_params = {
             "mid-job scale-downs between the parent and child "
             "stages).",
         ),
+    "launcher_machine_type":
+        Param(
+            default="e2-standard-8",
+            type="string",
+            description="Machine type of the Flex Template LAUNCHER VM of the "
+            "generation launch (not the workers): it pulls the multi-GB "
+            "image, then reads every table's reference sample, measures the "
+            "source fan-outs and declared PKs, builds the graph and hands it "
+            "over, all inside Google's 12-minute launch limit. A larger one "
+            "pulls faster. The limit itself cannot be set from a DAG. "
+            "Default e2-standard-8.",
+        ),
     "uniqueness_mode":
         Param(
             default="exact",
@@ -1074,6 +1086,15 @@ with models.DAG(
                       "env": env_name,
                       "dag": dag_id,
                   },
+                  # The launcher VM, not the workers: the image pull and the
+                  # whole driver-side preflight (one table after another)
+                  # share Google's 12 minutes. On Dataflow's default launcher
+                  # the five-table launch of 2026-10-12 spent 7 min 24 s
+                  # pulling the image, had its graph ready 11 min 19 s in
+                  # and was shut down 66 s into handing it over (`Timeout in
+                  # polling result file`).
+                  "launcherMachineType":
+                      "{{ params.launcher_machine_type }}",
                   "machineType":
                       "{{ ('g2-standard-8' if params.gpu == 'l4' else 'n1-standard-8') "
                       "if params.client_type == 'vllm' else 'e2-standard-8' }}",

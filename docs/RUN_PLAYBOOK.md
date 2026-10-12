@@ -256,6 +256,37 @@ child is the one number certainly wrong.
   and re-provisioned VMs for the child — ≈ 4 min per job. `R7`/`R7m`
   now carry `initial_workers=4` + `autoscaling=fixed`; an explicit Beam
   `--autoscaling_algorithm` always wins.
+- **Launcher VM — `launcher_machine_type` (default `e2-standard-8`).**
+  The generation launch has the same 12 minutes as an evaluation launch
+  (§5a), and on Dataflow's default launcher VM the image pull takes most of
+  them. The five-table launch of 2026-10-12 (1 M root rows, 83.4 M
+  projected) named no launcher machine and was shut down 12 min 25 s after
+  it was accepted, with `Timeout in polling result file` and no job
+  submitted:
+
+  | at | step | took |
+  |---|---|---|
+  | 0:00 | the VM starts, up to the pull's first line | 54 s |
+  | 0:54 | image pull: every layer downloaded after 65 s, the rest is extraction | 7 min 24 s |
+  | 8:18 | launcher start and Python imports, up to `build_info` | 19 s |
+  | 8:38 | preflight of the five tables, one after another (21 to 29 s each), and the two reports | 2 min 10 s |
+  | 10:48 | graph | 31 s |
+  | 11:19 | pipeline run, cut off before Beam's first upload line | 66 s |
+
+  The param sets `environment.launcherMachineType`. On `e2-standard-8` the
+  chained evaluation launch of 2026-10-10 printed its first Python line
+  3 min 57 s after it was accepted (the figure in
+  [ADR 0041, note of 2026-10-11](adr/0041-evaluation-standalone-package.md)),
+  against 8 min 38 s here. Not yet run on a generation launch, and how long
+  the generator's `pipeline run` needs in all is not known: it never
+  finished. The preflight is the small part at this size, but it scans
+  each source in full (the reference sample ordered by a row fingerprint,
+  the driving edge's fan-out, the declared PK), so it grows with the
+  source. To read a launch's log: `build_info` is the launcher's first
+  Python line, each `Extracting DDL for <source table>` starts a table's
+  preflight, and `Relational pipeline launched` is printed when the graph
+  is built, **before** the job is submitted — Beam's `Starting GCS upload`
+  has to follow it.
 - **SDK-container topology — `sdk_containers=single|multi` (ADR 0034).**
   `single` is the pin described in the next bullet. `multi` (the
   Composer DAG's default since 2026-10-11; the personal-GCP tiers keep

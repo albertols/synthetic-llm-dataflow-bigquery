@@ -771,15 +771,17 @@ def resolve_schemas(
        still raises — the operator's declared fallback is broken.
     2. **Target-only steering metadata.** Structure (columns/types/modes)
        mirrors the SOURCE table, but the description surfaces — the
-       `llm_prompt_constraint` clauses and the `{"sdfb":1,…}` contract —
-       are overlaid from the LANDING (synthetic/target) table, which the
-       synthetic-data team owns and Terraforms. The source (lake) table's
-       descriptions are another team's prose and must NEVER steer
-       generation: with the target unreachable they are STRIPPED, not
-       inherited. The offline pin is the one exception — it is the
-       operator's declared fallback, extracted from the landing table per
-       the propagation runbook, so its descriptions stand when the target
-       is also unreachable.
+       per-column `llm_prompt_constraint` clauses, and the table
+       description as plain prose — are overlaid from the LANDING
+       (synthetic/target) table, which the synthetic-data team owns and
+       Terraforms. PK / FK / identity are NOT among them: they come from
+       `config/relationships/` and no description is parsed for them
+       (ADR 0032). The source (lake) table's descriptions are another
+       team's prose and must NEVER steer generation: with the target
+       unreachable they are STRIPPED, not inherited. The offline pin is
+       the one exception — it is the operator's declared fallback,
+       extracted from the landing table per the propagation runbook, so
+       its descriptions stand when the target is also unreachable.
 
     The landing ``TableSchema`` travels back out because its column
     MODES — not the source's — decide a conditional edge's NULL policy

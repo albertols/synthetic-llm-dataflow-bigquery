@@ -1626,28 +1626,35 @@ def test_the_standalone_dags_tasks_pass_only_arguments_known_to_work():
   assert "worker slot" in docstring and "triggerer" in docstring
 
 
-def test_both_evaluation_launches_name_the_launcher_machine():
+def test_every_launch_names_the_launcher_machine():
+  """The generation launch too: its five-table preflight runs on the launcher,
+  inside the same 12 minutes as the image pull (the launch of 2026-10-12 was
+  shut down 66 s into handing its graph over)."""
   generation = _tree(GENERATION_DAG)
   ours = _entry(
       _launch(generation, "trigger_evaluation"), "launcherMachineType")
   assert ast.literal_eval(
       ours) == "{{ params.evaluation_launcher_machine_type }}"
-  assert "launcherMachineType" not in ast.unparse(
-      _launch(generation, "start_sdfb"))
+  generator = _entry(_launch(generation, "start_sdfb"), "launcherMachineType")
+  assert ast.literal_eval(generator) == "{{ params.launcher_machine_type }}"
   standalone = _tree(EVALUATION_DAG)
   theirs = _entry(
       _one(standalone, "DataflowStartFlexTemplateOperator"),
       "launcherMachineType")
   assert ast.literal_eval(theirs) == "{{ params.launcher_machine_type }}"
   for tree, name in ((generation, "evaluation_launcher_machine_type"),
+                     (generation, "launcher_machine_type"),
                      (standalone, "launcher_machine_type")):
     param = _params(tree)[name]
     assert ast.literal_eval(_kw(param, "default")) == "e2-standard-8"
     description = ast.literal_eval(_kw(param, "description"))
     assert "launcher" in description.lower() and "12" in description
   # no timeout field exists in the public API: none is invented
-  for launch in (_launch(generation, "trigger_evaluation"),
-                 _one(standalone, "DataflowStartFlexTemplateOperator")):
+  launches = [
+      _launch(generation, name) for name in ("start_sdfb", "trigger_evaluation")
+  ]
+  launches.append(_one(standalone, "DataflowStartFlexTemplateOperator"))
+  for launch in launches:
     assert "timeout" not in ast.unparse(_entry(launch, "environment")).lower()
 
 

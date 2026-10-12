@@ -189,10 +189,12 @@ LLM pool. Launcher-visible in the `generation_plan` milestone's
   never source copies, per the privacy note such clauses carry.
 - **Anything else** → the LLM pool ladder, as before.
 
-**PK columns** (declared in the table contract): preflight P4 refuses a
-launch whose PK generator cannot cover `num_rows` unique values — give
-PK columns a samplable `pattern`. Declared FKs require
-`--fk_parent_landing` at launch (P6; `skip` is the loud opt-out).
+**PK columns** (declared under `pk:` in `config/relationships/`, §3):
+preflight P4 refuses a launch whose PK generator cannot cover `num_rows`
+unique values — give PK columns a samplable `pattern`. Enforced FK edges
+need no launch flag: parents are read from the `--landing_table` dataset
+(`--fk_parent_landing` is an expert override for parents landed
+elsewhere), and `--generate_fk_relationships=false` is the loud opt-out.
 
 Debugging the result: run with `--prompt_debug=redacted` and grep Dataflow
 worker logs for `freetext_pool_prompt` — you see exactly the instruction +
