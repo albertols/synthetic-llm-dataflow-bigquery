@@ -3,7 +3,10 @@
  * card leads with the model roll-up score and its status, breaks it down per
  * table and per catalogue level (LevelChip + status counts), and lists the
  * metrics to look at first with their raw value, score, baseline and noise
- * floor side by side.
+ * floor side by side. A PK duplicate rate on a key the launch adjusted
+ * (ADR 0038) shows the generator's verdict, both key-repeat shares and the
+ * evaluator's own status and value; the card's key-failure count stays the
+ * evaluator's, with the number of them on adjusted keys under it.
  */
 import type { MetricRow } from "@contracts/api";
 

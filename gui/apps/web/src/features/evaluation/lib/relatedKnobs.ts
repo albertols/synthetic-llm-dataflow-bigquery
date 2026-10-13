@@ -36,6 +36,16 @@ export const RELATED_KNOBS: Readonly<Record<string, readonly RelatedKnob[]>> = {
       why: "An LLM-pooled column's entropy is capped by the pool size, log₂ of at most this many values.",
     },
   ],
+  "table.pk_duplicate_rate": [
+    {
+      knob: "on_model_conflict",
+      why: "With adjust (the default), a declared key the source disproved is dropped and its repeats land on purpose (ADR 0038): the rate is then above 0 by design.",
+    },
+    {
+      knob: "repeat_share_tolerance",
+      why: "On an adjusted key the generator judges the copy by this tolerance on the two key-repeat shares, not by a rate of 0.",
+    },
+  ],
   "column.dow_tvd": [SIMILARITY_TEMPORAL],
   "column.month_tvd": [SIMILARITY_TEMPORAL],
   "column.hour_tvd": [SIMILARITY_TEMPORAL],
