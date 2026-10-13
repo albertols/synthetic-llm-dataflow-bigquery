@@ -558,7 +558,11 @@ describe("adjusted keys in the run view (ADR 0038)", () => {
     expect(within(strip).getByRole("button", { name: ABOUT_SHARES })).toBeInTheDocument();
     expect(strip.querySelectorAll('[data-slot="interval-ref"]')).toHaveLength(4);
     expect(strip.querySelectorAll('[data-slot="interval-band"]')).toHaveLength(4);
-    expect(within(strip).getByText("source 50.3% · synthetic 50.3% · Δ −0.0 pt")).toBeInTheDocument();
+    // Each row says its tick and its dot in numbers (source → synthetic) and the difference.
+    const stripRow = within(strip).getByText("C_TABLE").closest("div.grid")!;
+    expect(stripRow).toHaveTextContent("66.2% → 42.0%");
+    expect(stripRow).toHaveTextContent("Δ −24.2 pt");
+    expect(within(stripRow as HTMLElement).getByText("Adjusted · under")).toBeInTheDocument();
     expect(within(strip).getByRole("button", { name: "View data" })).toBeInTheDocument();
 
     // The readout keeps the evaluator's raw value, status and rule next to the generator's half.

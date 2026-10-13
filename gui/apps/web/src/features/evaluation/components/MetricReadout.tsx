@@ -91,14 +91,16 @@ export function MetricReadout({ row, adjusted, showScope = true, headingLevel = 
         {replaced ? null : (
           <StatusPill status={reading.documented && row.status !== "not_evaluated" ? "info" : row.status} size="sm" />
         )}
+        {reading.downgradedFrom ? <NoiseDowngrade from={reading.downgradedFrom} /> : null}
         {generator && adjusted ? (
+          // On its own line: the metric's name keeps its place in the header.
           <AdjustmentPill
             verdict={adjusted.adjustment.verdict}
             disagree={generator.kind === "disagree"}
             evaluator={generator.evaluatorText}
+            className="basis-full"
           />
         ) : null}
-        {reading.downgradedFrom ? <NoiseDowngrade from={reading.downgradedFrom} /> : null}
       </header>
       {showScope ? <p className="-mt-1 truncate font-mono text-[11px] text-text-3">{scopeLabel(row)}</p> : null}
       {notEvaluated ? null : <MetricBar reading={reading} />}

@@ -77,7 +77,8 @@ function repeatShareRows(rows: readonly AdjustmentRow[]): IntervalRow[] {
       return {
         key: r.table,
         label: r.table,
-        sublabel: r.keyColumns.join(", ") || undefined,
+        // Source → synthetic, the tick and the dot in numbers (the declared key is in the table above).
+        sublabel: `${fmtRepeatShare(source)} → ${fmtRepeatShare(r.adjustment.landing_repeat_share)}`,
         value: r.adjustment.landing_repeat_share,
         // The band belongs to the reference, not to the dot: no whisker of the dot's own.
         lo: null,
@@ -89,7 +90,7 @@ function repeatShareRows(rows: readonly AdjustmentRow[]): IntervalRow[] {
         },
         status: r.reading?.status ?? "info",
         mark: <AdjustmentPill verdict={r.adjustment.verdict} disagree={r.reading?.kind === "disagree"} hint={false} />,
-        detail: `source ${fmtRepeatShare(source)} · synthetic ${fmtRepeatShare(r.adjustment.landing_repeat_share)} · Δ ${fmtPoints(r.adjustment.repeat_share_delta)}`,
+        detail: `Δ ${fmtPoints(r.adjustment.repeat_share_delta)}`,
       };
     });
 }
@@ -150,13 +151,15 @@ function ModelAdjustments({ rows }: { rows: readonly AdjustmentRow[] }) {
               const a = r.adjustment;
               return (
                 <TableRow key={r.table} data-table={r.table} data-verdict={a.verdict}>
-                  <TableCell className="text-xs">
+                  <TableCell className="text-xs whitespace-nowrap">
                     <span className="font-mono font-semibold text-text-1">{r.table}</span>
                     <span className="block text-[11px] text-text-3">
                       {a.run_id ? (JOINED_BY[a.joined_by ?? ""] ?? "joined") : "no validation_runs row joined"}
                     </span>
                   </TableCell>
-                  <TableCell className="font-mono text-xs break-all">{r.keyColumns.join(", ") || MISSING}</TableCell>
+                  <TableCell className="font-mono text-xs [overflow-wrap:anywhere]">
+                    {r.keyColumns.join(", ") || MISSING}
+                  </TableCell>
                   <TableCell className="text-right font-mono text-xs tabular-nums">
                     {fmtRepeatShare(a.source_repeat_share)}
                   </TableCell>
@@ -185,7 +188,7 @@ function ModelAdjustments({ rows }: { rows: readonly AdjustmentRow[] }) {
                       <span className="text-xs text-text-3">{MISSING}</span>
                     )}
                   </TableCell>
-                  <TableCell className="font-mono text-xs">
+                  <TableCell className="font-mono text-xs whitespace-nowrap">
                     {a.excluded_rules.length ? a.excluded_rules.join(", ") : MISSING}
                     {a.pk_duplicate_dlq !== null && a.adjusted ? (
                       <span className="block text-[11px] text-text-3">
@@ -203,7 +206,7 @@ function ModelAdjustments({ rows }: { rows: readonly AdjustmentRow[] }) {
         <VisualFrame
           title="Synthetic key-repeat share against the source's"
           concept="eval:repeat-share"
-          description={`Tick: the source's share. Band: the generator's tolerance, ${fmtTolerance()}. Dot: the synthetic share — inside the band, the copy is faithful.`}
+          description={`Tick: the source's share. Band: the generator's tolerance, ${fmtTolerance()}. Dot: the synthetic share — inside the band, the copy is faithful. Under each table: source → synthetic.`}
           data={rows.map((r) => ({
             table: r.table,
             declared_pk: r.keyColumns.join(", "),

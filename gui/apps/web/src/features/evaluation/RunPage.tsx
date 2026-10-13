@@ -285,7 +285,7 @@ function RunPageContent() {
         <Callout tone="danger" title="Wrong generation job: this evaluation points at an evaluator job">
           This evaluation points at an evaluator job, not a generation launch; scope and adjustments cannot be joined.
           The registry row names{" "}
-          <code className="font-mono text-text-1">
+          <code className="font-mono [overflow-wrap:anywhere] text-text-1">
             {evaluation.generation_job_name ?? evaluation.generation_job_id}
           </code>{" "}
           as its generation job
@@ -295,7 +295,8 @@ function RunPageContent() {
               <Link
                 to="/evaluation/$evaluationId"
                 params={{ evaluationId: evaluatorJob }}
-                className="text-link hover:underline"
+                // Underlined: a link inside a sentence is never told apart by colour alone (WCAG 1.4.1).
+                className="text-link underline underline-offset-2"
               >
                 {evaluatorJob}
               </Link>
