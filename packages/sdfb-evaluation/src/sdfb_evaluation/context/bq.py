@@ -74,6 +74,7 @@ _HTTP_NOT_FOUND = 404
 REFUSED_STATUSES = frozenset(
     {_HTTP_BAD_REQUEST, _HTTP_FORBIDDEN, _HTTP_NOT_FOUND})
 
+# A TypeVar, not PEP 695 type parameters: yapf 0.43 cannot parse those.
 _T = TypeVar("_T")
 
 
@@ -135,7 +136,7 @@ def _is_google_api_error(exc: BaseException) -> bool:
   return isinstance(exc, exceptions.GoogleAPIError)
 
 
-def _translated(call: Callable[[], _T], what: str) -> _T:
+def _translated(call: Callable[[], _T], what: str) -> _T:  # noqa: UP047
   """Run a client call; an API failure becomes `PermissionError` (403),
   `LookupError` (404) or `BqApiError` (anything else), its message
   starting with `what`."""

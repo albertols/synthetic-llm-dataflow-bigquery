@@ -374,8 +374,9 @@ def test_client_load_sinks_load_after_the_pipeline_registry_last(
     table = fqn.rsplit(".", 1)[1]
     assert fqn == f"{PROJECT}.{QDS}.{table}"
     assert schema == load_schema(table)
-    assert sorted(map(json_line, rows, [table] * len(rows))) == sorted(
-        json_line(r, table) for r in sinks.read_rows(table))
+    assert sorted(map(json_line, rows, [table] * len(rows),
+                      strict=True)) == sorted(
+                          json_line(r, table) for r in sinks.read_rows(table))
   assert jobs == {
       "evaluation_metrics": "job_1",
       "evaluation_profiles": "job_2",
