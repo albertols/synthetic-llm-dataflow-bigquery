@@ -133,6 +133,17 @@ def char_class_fractions(values: Iterable[str]) -> dict[str, float]:
   return {cls: counts[cls] / n for cls in _CHARACTER_CLASSES}
 
 
+def _plain_sum(values: Iterable[float]) -> float:
+  """`values` added left to right. Not the builtin `sum()`: CPython 3.12
+  made the `sum()` of floats compensated, which moves the last bit of a
+  total, and a metric must not depend on the interpreter that computed it.
+  """
+  total = 0.0
+  for value in values:
+    total += value
+  return total
+
+
 def char_class_l1(
     src_frac: Mapping[str, float],
     syn_frac: Mapping[str, float],
@@ -140,10 +151,9 @@ def char_class_l1(
   """`sum_k |syn_frac[k] - src_frac[k]|` over the five character classes; a
   class missing from either mapping counts as 0.
   """
-  return float(
-      sum(
-          abs(syn_frac.get(cls, 0.0) - src_frac.get(cls, 0.0))
-          for cls in _CHARACTER_CLASSES))
+  return _plain_sum(
+      abs(syn_frac.get(cls, 0.0) - src_frac.get(cls, 0.0))
+      for cls in _CHARACTER_CLASSES)
 
 
 def shape_head_tv(
@@ -165,16 +175,17 @@ def shape_head_tv(
   bucket that a perfect generator scores near 0 on.
 
   VERBATIM port of `scripts/e2e/freetext_crosscheck.py`'s `_shape_tv`, with
-  its `_SHAPE_MASS_MIN` module constant turned into the `floor` parameter.
+  its `_SHAPE_MASS_MIN` module constant turned into the `floor` parameter
+  and its sums added left to right (`_plain_sum`).
   """
-  raw = 0.5 * sum(
+  raw = 0.5 * _plain_sum(
       abs(src_mass.get(s, 0.0) - syn_mass.get(s, 0.0))
       for s in set(src_mass) | set(syn_mass))
   head_shapes = {s for s, m in src_mass.items() if m >= floor}
-  src_other = sum(m for s, m in src_mass.items() if s not in head_shapes)
-  syn_other = sum(m for s, m in syn_mass.items() if s not in head_shapes)
+  src_other = _plain_sum(m for s, m in src_mass.items() if s not in head_shapes)
+  syn_other = _plain_sum(m for s, m in syn_mass.items() if s not in head_shapes)
   head = 0.5 * (
-      sum(
+      _plain_sum(
           abs(src_mass.get(s, 0.0) - syn_mass.get(s, 0.0))
           for s in head_shapes) + abs(src_other - syn_other))
   return raw, head, head_shapes

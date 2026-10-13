@@ -31,6 +31,15 @@ def test_dkw_10k_is_1_36_percent():
   assert math.isclose(noise.dkw_epsilon(10_000), 0.013581, rel_tol=1e-3)
 
 
+def test_tvd_null_expectation_is_the_value_python_3_11_computed():
+  """CPython 3.12 made the builtin `sum()` of floats compensated, which
+  moved the last bit of this floor. The categories are added left to
+  right, as 3.11 added them."""
+  p = [10 / 27, 4 / 27, 13 / 27]
+  assert noise.tvd_null_expectation(p, 1000,
+                                    500).hex() == "0x1.def189f6eb274p-6"
+
+
 def test_ks_critical_matches_asymptotic_table():
   # c(0.05)=1.358 -> n=m=1000: 1.358*sqrt(2/1000)=0.06073
   assert math.isclose(noise.ks_critical(1000, 1000), 0.06073, rel_tol=2e-3)

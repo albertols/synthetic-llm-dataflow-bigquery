@@ -153,6 +153,13 @@ def test_chao_shen_term_sums_to_chao_shen_bits():
   assert total_nats / math.log(2.0) == pytest.approx(d.chao_shen_bits(counts))
 
 
+def test_chao_shen_bits_is_the_value_python_3_11_computed():
+  """CPython 3.12 made the builtin `sum()` of floats compensated, which
+  moved the last bit of this total. The terms are added left to right, as
+  3.11 added them and as the pipeline's combiners add them."""
+  assert d.chao_shen_bits([7, 1, 5, 8, 7, 5]).hex() == "0x1.3e3d03ab4b0d8p+1"
+
+
 def test_chao_shen_bits_empty_is_none():
   assert d.chao_shen_bits([]) is None
   assert d.chao_shen_bits([0, 0]) is None

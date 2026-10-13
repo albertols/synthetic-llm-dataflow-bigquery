@@ -181,3 +181,28 @@ def test_shape_head_tv_custom_floor():
   assert head_shapes_default == {"a", "b"}
   assert head_shapes_wide == {"b"}
   assert head_default == pytest.approx(head_wide)
+
+
+# CPython 3.12 made the builtin `sum()` of floats compensated, which moved
+# the last bit of the values below. Both functions add their terms left to
+# right, as 3.11 added them: these are the values 3.11 computed.
+def test_char_class_l1_is_the_value_python_3_11_computed():
+  src = {"digit": 0.1, "upper": 0.95, "lower": 0.0, "space": 0.75, "punct": 0.4}
+  syn = {"digit": 0.7, "upper": 0.28, "lower": 0.24, "space": 0.9, "punct": 0.6}
+  assert s.char_class_l1(src, syn).hex() == "0x1.dc28f5c28f5c3p+0"
+
+
+def test_shape_head_tv_is_the_value_python_3_11_computed():
+  """One head shape and four tail shapes, so the two "other" sums run over
+  four masses each, in the mappings' own order."""
+  src = {"AAAA": 0.94, "A9": 0.02, "AA9": 0.02, "A99": 0.01, "AA99": 0.01}
+  syn = {"AAAA": 0.955, "A9": 0.015, "AA9": 0.005, "A99": 0.01, "AA99": 0.015}
+  raw, head, head_shapes = s.shape_head_tv(src, syn, floor=0.5)
+  assert head_shapes == {"AAAA"}
+  assert head.hex() == "0x1.eb851eb851ebep-7"
+  # `raw` runs over a set, whose order follows the process's hash seed: it
+  # is the plain sum in that order, whatever the order is.
+  total = 0.0
+  for shape in set(src) | set(syn):
+    total += abs(src.get(shape, 0.0) - syn.get(shape, 0.0))
+  assert raw.hex() == (0.5 * total).hex()

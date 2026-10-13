@@ -876,20 +876,24 @@ build and run their pipelines unchanged, and no launch passes the opt-out
   started with `subprocess`, which does not depend on the start method.
 - Since Python 3.12 the builtin `sum()` adds floats with a compensated sum
   ([What's new in Python 3.12](https://docs.python.org/3.12/whatsnew/3.12.html#other-language-changes)),
-  which moves the last bit of a total. Five functions here sum floats
+  which moves the last bit of a total. Five functions here summed floats
   with it: `stats/noise.py::tvd_null_expectation` (the noise floor of the
   TVD family), `stats/shapes.py::char_class_l1` and `shape_head_tv`,
   `beam/census.py::_baseline_diversity` (the reference side's
   `sum(c ln c)`) and `stats/diversity.py::chao_shen_bits` (which only the
-  tests call). No written value moves. A row's floats are rounded to nine
+  tests call). No written value moved. A row's floats are rounded to nine
   significant digits before they are written and graded
   (`beam/assemble.py`, Determinism), and the three evaluations of the
   acceptance test (the good launch, the one with planted defects, the
   heavy copier) write the same metric, profile and flag rows on 3.11 and
-  on 3.14. Nothing else in the package follows the interpreter's
-  arithmetic: it imports neither `statistics` nor `random`, its means use
-  `math.fsum`, and numpy, scipy and scikit-learn are the same versions on
-  both sides.
+  on 3.14. The five functions add left to right again, as 3.11 did, so
+  they also return the same bits, and a test pins a 3.11 value for each.
+  Nothing else in the package follows the interpreter's arithmetic: it
+  imports neither `statistics` nor `random`, its means use `math.fsum`,
+  and numpy, scipy and scikit-learn are the same versions on both sides.
+  One thing a plain sum brings back: `shape_head_tv` sums over a set, so
+  its last bit follows the process's hash seed, as it did on 3.11. The
+  rounding absorbs that as well.
 
 *Not verified until a build and a launch:* that the image builds on
 `apache/beam_python3.14_sdk:2.76.0` and its build-time import of the

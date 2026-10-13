@@ -2028,12 +2028,17 @@ def _baseline_diversity(v: _View) -> tuple[dict[str, Any] | None, str | None]:
     return None, ("no source row fell in the reference-matched subsample (the "
                   "source row count was unknown or zero)")
   r = v.ref.r_counts
+  # Added left to right, not with the builtin sum(): CPython 3.12 made the
+  # sum() of floats compensated, which moves this total's last bit.
+  clc_r = 0.0
+  for c in r.values():
+    clc_r += c * math.log(c)
   acc = CensusAccumulator(
       n_src_m=round(v.c.n_src_r),
       clc_src_m=v.c.clc_src_r,
       k_src_m=round(v.c.k_src_r),
       n_syn_m=sum(r.values()),
-      clc_syn_m=sum(c * math.log(c) for c in r.values()),
+      clc_syn_m=clc_r,
       k_syn_m=len(r))
   return summarize(acc), None
 
