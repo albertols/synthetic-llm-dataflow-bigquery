@@ -55,11 +55,11 @@ Full machine setup: [`docs/M4_SETUP.md`](docs/M4_SETUP.md).
 
 ```
 packages/sdfb-core/    no Beam, no GCP, no torch. Pydantic, codegen, ABC, prompt templates.
-packages/sdfb-beam/    imports sdfb-core; adds apache-beam[gcp], pandera, whylogs, pandas.
+packages/sdfb-beam/    imports sdfb-core; adds apache-beam[gcp], pandera, pandas.
                        Optional extras: [gpu] (vllm+torch), [embedding] (faiss+transformers),
                                         [library] (sdgx — B.2 candidate).
 packages/sdfb-tests/   imports both; pytest + hypothesis + DirectRunner fixtures.
-packages/sdfb-evaluation/  STANDALONE (own lock, Python 3.11, excluded from the uv workspace, ADR 0041):
+packages/sdfb-evaluation/  STANDALONE (own lock, same Python 3.14 and Beam pin as the workspace, excluded from it, ADR 0041):
                        imports none of the three above. A separate CPU job that scores landed
                        tables against the source -> `synthetic_data_quality.evaluation_*`.
 ```
@@ -83,7 +83,7 @@ Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the ot
 - `beam-dofn.md` — writing/testing Beam DoFns (lifecycle, tagged outputs, side inputs, metrics)
 - `model-handler.md` — the `ModelClient` Protocol + the engine-owned vLLM server (why not `RunInference`)
 - `ddl-codegen.md` — Pydantic ↔ Pandera ↔ BQ DDL derivation
-- `validation-mode-a.md` — three lines of defense, DLQ, whylogs merge
+- `validation-mode-a.md` — three lines of defense, DLQ
 - `reference-data.md` — live BQ SELECT + canonical provenance digest
 - `gpu-dockerfile.md` — L4 + vLLM custom-container recipe
 - `evaluation-framework/SKILL.md` — running and reading `sdfb-eval`, extending the metric catalogue

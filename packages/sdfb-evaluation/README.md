@@ -6,7 +6,9 @@ written to BigQuery (`synthetic_data_quality.*`).
 
 This package is **not** a workspace member of the root
 `synthetic-llm-dataflow-bigquery` project (`[tool.uv.workspace] exclude`,
-ADR 0041). It has its own `pyproject.toml`, `uv.lock`, and Python 3.11 pin,
+ADR 0041). It has its own `pyproject.toml`, `uv.lock`, and Python 3.14 pin
+(held equal to the generator's, as is its Beam version: the shared image
+runs it on the generator's environment),
 and it installs and runs with none of the generator packages — `sdfb-core`,
 `sdfb-beam`, `sdfb-tests` — present. An AST test
 (`tests/unit/test_independence.py`) enforces that nothing under `src/` ever

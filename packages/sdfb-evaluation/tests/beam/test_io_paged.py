@@ -366,7 +366,7 @@ def fixture_read_client(monkeypatch) -> type[_ReadClient]:
 
 
 def test_the_probe_asks_what_a_direct_read_worker_asks(read_client):
-  """Beam 2.74's `_CustomBigQueryStorageSource.split`: the session's
+  """Beam 2.76's `_CustomBigQueryStorageSource.split`: the session's
   parent is the READ TABLE's project, the table by its resource name,
   Arrow, the plan's columns. One stream, and no row is read."""
   probe_direct_read("demo-other-project.thelook_source.order_items",

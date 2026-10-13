@@ -1,7 +1,7 @@
 {
  "generated_by": "scripts/gui/export_golden_fixtures.py",
  "cases_from": "scripts/gui/export_scoring_golden.py",
- "python": "3.11",
+ "python": "3.14",
  "source": "packages/sdfb-evaluation/src/sdfb_evaluation/scoring/__init__.py (to_metric_row, status_for, score_value, aggregate_scores, headline_counts)",
  "encoding": "non-finite inputs are the strings '+inf', '-inf', 'nan'; row numbers are JSON-safe (non-finite -> null)",
  "cases": [

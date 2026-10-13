@@ -68,7 +68,7 @@ _REPO_ROOT = next(
 _DOCKERFILE = _REPO_ROOT / "docker" / "Dockerfile"
 _EVALUATOR = _REPO_ROOT / "packages" / "sdfb-evaluation"
 _EVALUATOR_SRC = "/workspace/packages/sdfb-evaluation/src"
-_VENV_SITE = "/workspace/.venv/lib/python3.11/site-packages"
+_VENV_SITE = "/workspace/.venv/lib/python3.14/site-packages"
 _ENTRY_MODULES = ("sdfb_evaluation.cli.run_evaluation",
                   "sdfb_evaluation.beam.pipeline")
 
@@ -80,8 +80,8 @@ _IMAGE_ENVIRONMENT = {
     "platform_machine": "x86_64",
     "implementation_name": "cpython",
     "platform_python_implementation": "CPython",
-    "python_version": "3.11",
-    "python_full_version": "3.11.0",
+    "python_version": "3.14",
+    "python_full_version": "3.14.0",
 }
 
 

@@ -100,7 +100,7 @@ source row read:
                                                   no full-source flag (panel
                                                   flags remain)
 
-Task 26 sizes `max_cache_memory_usage_mb` (Beam 2.74 defaults to 0, no
+Task 26 sizes `max_cache_memory_usage_mb` (Beam 2.76 defaults to 0, no
 side-input cache) to the SUM of the side inputs a worker holds at once,
 so each is materialised once; the derived panel index is built once per
 worker behind `apache_beam.utils.shared.Shared`, tagged by the panel's

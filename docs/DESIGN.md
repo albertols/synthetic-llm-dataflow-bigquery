@@ -57,6 +57,8 @@ flowchart LR
 - **One image and one template serve two jobs** ([ADR 0041](adr/0041-evaluation-standalone-package.md), amendment of 2026-10-06). The
   template's entry is a dispatcher, `docker/flex_entry.py`: without the parameter `sdfb_job` a launch is a generation launch, as
   before; `sdfb_job=evaluation` runs the evaluator (§11) when the image was built from a tree that has it.
+  Both jobs run on the image's interpreter and Beam, so the evaluator's own Python and Beam pins are held equal to the
+  generator's and move with them (amendment of 2026-10-13).
 - All sinks use BigQuery `FILE_LOADS`: the job is batch-shaped.
 
 Code: [`sdfb_beam/pipeline.py::build_pipeline`](../packages/sdfb-beam/src/sdfb_beam/pipeline.py).

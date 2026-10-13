@@ -49,11 +49,11 @@
 #   packages/sdfb-evaluation still builds: the image then runs generation only.
 #
 # Base images (both public; override with --build-arg to use a mirror):
-#   Beam SDK: apache/beam_python3.11_sdk:2.74.0 (Docker Hub)
-#     → amd64, Debian-based, Python 3.11, /opt/apache/beam/boot included
-#     → apache-beam pinned ==2.74.0 in packages/sdfb-beam to match (Runner v2
+#   Beam SDK: apache/beam_python3.14_sdk:2.76.0 (Docker Hub)
+#     → amd64, Debian-based, Python 3.14, /opt/apache/beam/boot included
+#     → apache-beam pinned ==2.76.0 in packages/sdfb-beam to match (Runner v2
 #       needs the boot binary and the wheel at the same version)
-#   Launcher: gcr.io/dataflow-templates-base/python311-template-launcher-base
+#   Launcher: gcr.io/dataflow-templates-base/python314-template-launcher-base
 #     → only /opt/google/dataflow/python_template_launcher is copied from it
 #
 # No system CUDA install: vLLM/torch wheels bundle their own CUDA runtime libs
@@ -61,8 +61,8 @@
 # Dataflow's `install-nvidia-driver` experiment (mounted at /usr/local/nvidia/).
 # ---------------------------------------------------------------------------
 
-ARG BEAM_SDK_IMAGE="apache/beam_python3.11_sdk:2.74.0"
-ARG LAUNCHER_IMAGE="gcr.io/dataflow-templates-base/python311-template-launcher-base"
+ARG BEAM_SDK_IMAGE="apache/beam_python3.14_sdk:2.76.0"
+ARG LAUNCHER_IMAGE="gcr.io/dataflow-templates-base/python314-template-launcher-base"
 
 # ---------------------------------------------------------------------------
 # Stage 1 — Flex Template launcher (just need the binary).
@@ -87,7 +87,7 @@ RUN mkdir -p /out \
        fi
 
 # ---------------------------------------------------------------------------
-# Stage 3 — Final image: Beam SDK base (amd64, Python 3.11, has /opt/apache/beam).
+# Stage 3 — Final image: Beam SDK base (amd64, Python 3.14, has /opt/apache/beam).
 # ---------------------------------------------------------------------------
 FROM ${BEAM_SDK_IMAGE}
 
@@ -157,9 +157,9 @@ COPY config config
 # src dir is named in both places, LAST on PYTHONPATH and as a second line of
 # the bridge (a plain path line of a .pth file; `site` adds it only when the
 # directory exists, so it does nothing in an image built without the evaluator).
-ENV PYTHONPATH="/workspace/.venv/lib/python3.11/site-packages:/workspace/packages/sdfb-core/src:/workspace/packages/sdfb-beam/src:/workspace/packages/sdfb-evaluation/src"
+ENV PYTHONPATH="/workspace/.venv/lib/python3.14/site-packages:/workspace/packages/sdfb-core/src:/workspace/packages/sdfb-beam/src:/workspace/packages/sdfb-evaluation/src"
 RUN SITE="$(python -c 'import site; print(site.getsitepackages()[0])')" \
-    && printf "import site; site.addsitedir('/workspace/.venv/lib/python3.11/site-packages')\n/workspace/packages/sdfb-evaluation/src\n" \
+    && printf "import site; site.addsitedir('/workspace/.venv/lib/python3.14/site-packages')\n/workspace/packages/sdfb-evaluation/src\n" \
         > "${SITE}/zz_sdfb_bridge.pth" \
     && echo "Wrote worker bridge .pth -> ${SITE}/zz_sdfb_bridge.pth"
 

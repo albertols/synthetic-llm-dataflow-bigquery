@@ -1,7 +1,7 @@
 {
  "generated_by": "scripts/gui/export_golden_fixtures.py",
  "cases_from": "scripts/gui/export_compare_golden.py",
- "python": "3.11",
+ "python": "3.14",
  "source": "packages/sdfb-evaluation/src/sdfb_evaluation/report/render.py (compare: _delta, _noise, _direction)",
  "encoding": "non-finite inputs are the strings '+inf', '-inf', 'nan'; `noise` is what the delta was judged against ('floor <the hypotenuse of the two floors, 4 significant digits>', 'CI overlap', 'no noise floor'), null without a delta",
  "verdicts": {

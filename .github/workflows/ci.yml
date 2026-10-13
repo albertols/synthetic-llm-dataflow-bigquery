@@ -51,7 +51,7 @@ jobs:
           cache-dependency-glob: |
             **/uv.lock
             **/pyproject.toml
-          python-version: "3.11"
+          python-version: "3.14"
 
       - name: Sync workspace
         run: uv sync --group dev
@@ -63,7 +63,7 @@ jobs:
         run: uv run yapf --diff -r --style yapf packages scripts composer public_cloud dsg docker
 
       - name: Pylint (dsg/pylintrc, vendored from the Dataflow Solution Guides)
-        # On the Python DSG CI uses: pylint's findings differ between 3.11 and 3.14.
+        # The Python DSG CI uses (and the workspace now pins): 3.14.
         run: uv run --no-project --python 3.14 --with "pylint>=4,<5" python -m pylint --rcfile dsg/pylintrc --ignore=.venv,venv,.gradle,build,bin,third_party packages scripts composer public_cloud dsg docker
 
       - name: DSG overlay shell syntax
@@ -150,7 +150,7 @@ jobs:
         run: echo "Test job complete. See above for pass/fail and counts."
 
   evaluation:
-    # sdfb-evaluation is a standalone uv project (own lock, Python 3.11); it
+    # sdfb-evaluation is a standalone uv project (own lock, Python 3.14); it
     # must install and pass alone — none of sdfb-core/beam/tests present (ADR 0041).
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -161,7 +161,7 @@ jobs:
           version: latest
           enable-cache: true
           cache-dependency-glob: packages/sdfb-evaluation/uv.lock
-          python-version: "3.11"
+          python-version: "3.14"
       - name: Sync (frozen)
         run: uv sync --project packages/sdfb-evaluation --frozen
       - name: Stands alone

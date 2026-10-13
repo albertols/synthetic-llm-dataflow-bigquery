@@ -3,7 +3,7 @@
 [![CI](https://github.com/albertols/synthetic-llm-dataflow-bigquery/actions/workflows/ci.yml/badge.svg)](https://github.com/albertols/synthetic-llm-dataflow-bigquery/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/albertols/synthetic-llm-dataflow-bigquery?label=release&color=0f9d58)](https://github.com/albertols/synthetic-llm-dataflow-bigquery/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![Python](https://img.shields.io/badge/python-3.11-blue.svg)](pyproject.toml)
+[![Python](https://img.shields.io/badge/python-3.14-blue.svg)](pyproject.toml)
 [![Apache Beam](https://img.shields.io/badge/Apache%20Beam-Dataflow-ff6d00.svg)](https://beam.apache.org/)
 [![LLM](https://img.shields.io/badge/LLM-self--hosted%20vLLM-6f42c1.svg)](#cpugpu-split--vllm-serving)
 [![Beam Summit](https://img.shields.io/badge/Beam%20Summit-2025-4285f4.svg)](https://beamsummit.org)
@@ -209,7 +209,7 @@ Skew is tracked with **normalised entropy** and **`top1_share`** (a balanced enu
 
 **Memorization gate.** Any identical real/synthetic row match, or a per-column `copy_ratio` at/above the privacy threshold on a high-cardinality column, fails the run — in every environment (pass criteria: [`docs/RUN_PLAYBOOK.md`](docs/RUN_PLAYBOOK.md)).
 
-**Evaluation (a separate job, after generation).** [`packages/sdfb-evaluation`](packages/sdfb-evaluation/README.md) is a standalone package (its own lock, Python 3.11, not a workspace member) that reads the landing tables and the full source and writes four tables to `synthetic_data_quality`: fidelity, privacy, integrity and diversity metrics, each with its own noise floor and a baseline. It never gates or fails the generation run: a status describes the evaluation run, and `--fail_on` is an optional exit-code gate for a calling script. Design: [`docs/DESIGN.md` §11](docs/DESIGN.md#11-evaluation-sdfb-evaluation) and [ADR 0041](docs/adr/0041-evaluation-standalone-package.md). On Dataflow it needs no image or template of its own: the generation image carries it and the generation template runs it when a launch passes `sdfb_job=evaluation`. **Not yet run on Google Cloud**: so far it has run on invented data only, with fake BigQuery clients.
+**Evaluation (a separate job, after generation).** [`packages/sdfb-evaluation`](packages/sdfb-evaluation/README.md) is a standalone package (its own lock, Python 3.14, not a workspace member) that reads the landing tables and the full source and writes four tables to `synthetic_data_quality`: fidelity, privacy, integrity and diversity metrics, each with its own noise floor and a baseline. It never gates or fails the generation run: a status describes the evaluation run, and `--fail_on` is an optional exit-code gate for a calling script. Design: [`docs/DESIGN.md` §11](docs/DESIGN.md#11-evaluation-sdfb-evaluation) and [ADR 0041](docs/adr/0041-evaluation-standalone-package.md). On Dataflow it needs no image or template of its own: the generation image carries it and the generation template runs it when a launch passes `sdfb_job=evaluation`. **Not yet run on Google Cloud**: so far it has run on invented data only, with fake BigQuery clients.
 
 ```bash
 cd packages/sdfb-evaluation && uv sync --frozen

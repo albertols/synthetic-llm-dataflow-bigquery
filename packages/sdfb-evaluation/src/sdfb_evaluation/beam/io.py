@@ -60,7 +60,7 @@ DIRECT_READ types. The encoder hashes canonical values, so a cell must
 reach it with the Python type the BigQuery client gives the same cell —
 the client is what reads the R/H panel (`context.reference.fetch_panel`)
 and what the generator read its reference sample with
-(`sdfb_beam.io.bq_sources.load_reference_rows`). Beam 2.74's
+(`sdfb_beam.io.bq_sources.load_reference_rows`). Beam 2.76's
 `_CustomBigQueryStorageSource` reads Avro through fastavro by default and
 Arrow (`read_arrow`, each cell `.as_py()`) with `use_native_datetime=True`:
 
@@ -434,7 +434,7 @@ class BigQuerySources(Sources):
 def probe_direct_read(read_table: str, columns: Sequence[str]) -> None:
   """Ask the BigQuery Storage Read API for ONE read session on
   `read_table`, as a DIRECT_READ worker does when it splits the read
-  (Beam 2.74, `_CustomBigQueryStorageSource.split`): the same call
+  (Beam 2.76, `_CustomBigQueryStorageSource.split`): the same call
   (`BigQueryReadClient.create_read_session`), the same parent — the READ
   TABLE's own project, which is where `bigquery.readsessions.create` is
   checked — Arrow, the plan's columns, and one stream instead of many. No

@@ -51,7 +51,7 @@ The FINAL row waits for every write to commit (D7). `BigQuerySinks`
 returns `WriteToBigQuery`'s `destination_load_jobid_pairs` and
 `destination_copy_jobid_pairs`, `LocalJsonSinks` its finalised files,
 and the FINAL step reads every one of them as an `AsIter` side input.
-What the two job-id PCollections are in Beam 2.74 (read in the installed
+What the two job-id PCollections are in Beam 2.76 (read in the installed
 `apache_beam/io/gcp/bigquery_file_loads.py`):
 
     PCollection   produced by                       relative to the wait
@@ -135,7 +135,7 @@ refuses a pipeline whose runner is Beam's switching `DirectRunner` or
 Runner defaults (`pipeline_options_defaults`): the runner as above;
 `save_main_session` False (every DoFn is importable);
 `max_cache_memory_usage_mb` sized to the side inputs a worker holds at
-once (Beam 2.74's default is 0: no side-input cache, so every bundle
+once (Beam 2.76's default is 0: no side-input cache, so every bundle
 would re-read them) and at least 512 (it matters on Dataflow and has
 no effect on a local run, whose in-process runner's embedded worker has
 a fixed cache); on Dataflow `--experiments=upload_graph` (a graph this wide exceeds the job-creation

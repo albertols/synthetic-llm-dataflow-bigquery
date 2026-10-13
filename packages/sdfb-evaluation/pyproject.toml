@@ -16,11 +16,11 @@
 name = "sdfb-evaluation"
 version = "0.1.0"
 description = "Standalone statistical evaluation of synthetic BigQuery tables against their source (Apache Beam, BigQuery)."
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.14,<3.15"
 license = { text = "Apache-2.0" }
 readme = "README.md"
 dependencies = [
-    "apache-beam[gcp]==2.74.0",
+    "apache-beam[gcp]==2.76.0",
     "numpy>=2.0",
     "scipy>=1.14",
     "scikit-learn>=1.6",
@@ -35,10 +35,6 @@ sdfb-eval = "sdfb_evaluation.cli.main:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0", "pytest-timeout>=2.3", "hypothesis>=6.100", "mypy>=1.11", "types-PyYAML", "types-requests", "jinja2>=3.1"]
-
-[tool.uv]
-# Beam 2.74 → envoy-data-plane → betterproto==2.0.0b6 (pre-release): same pin as the root workspace.
-constraint-dependencies = ["betterproto==2.0.0b6"]
 
 [build-system]
 requires = ["hatchling"]
@@ -63,7 +59,7 @@ timeout_method = "thread"
 faulthandler_timeout = 240
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.14"
 warn_return_any = true
 warn_unused_configs = true
 warn_unused_ignores = true

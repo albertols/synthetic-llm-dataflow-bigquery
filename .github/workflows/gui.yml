@@ -131,7 +131,7 @@ jobs:
           cache-dependency-glob: |
             **/uv.lock
             **/pyproject.toml
-          python-version: "3.11"
+          python-version: "3.14"
 
       - name: Sync workspace
         run: uv sync --group dev
