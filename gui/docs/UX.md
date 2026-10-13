@@ -135,10 +135,126 @@ Follow the dataviz method: pick the form first, colour last.
   still render the mock's dated `RUNNING` evaluation under the real clock
   (Stale); none asserts on it.
 
+- **A PK duplicate rate on a key the launch adjusted goes through
+  `AdjustmentPill`** next to (or, for a readable verdict, in place of) the
+  evaluator's pill: [Adjusted keys](#adjusted-keys-adr-0038).
 - `LevelChip` for FIELD, COLUMN, PAIR, ROW, TABLE, RELATIONSHIP, MODEL.
 - The top nav always shows the data source: **MOCK** or **BIGQUERY
   <project>**. Views that show a BigQuery bytes estimate (from the BFF's
   response header) put it next to the data it cost.
+
+## Adjusted keys (ADR 0038)
+
+**Claim: a PK duplicate rate on a key the launch adjusted is shown with the
+generator's verdict and the evaluator's status together, and the evaluator's
+row is never changed.** The two answer different questions about the same
+declared key, so a red FAIL alone reads an intended copy of the source's
+repetition as a defect.
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  SRC[("🗄️ source table<br/>declared pk: K<br/>K repeats")]:::store
+
+  subgraph GEN["the launch"]
+    G1["🛡️ measured conflict<br/>K leaves the effective model"]:::cpu
+    G2["🔀 streaming uniqueness<br/>pk.duplicate counted<br/>no row removed"]:::beam
+    G3["🛡️ gate leaves pk.duplicate out<br/>two shares compared"]:::cpu
+  end
+  subgraph EVAL["the evaluation"]
+    E1["⚙️ reads the declared model<br/>pk: K"]:::cpu
+    E2["⚙️ rows on a repeated key<br/>warn = fail = 0"]:::cpu
+  end
+  VR[("🗄️ validation_runs<br/>excluded rule<br/>source and landing share")]:::store
+  EM[("🗄️ evaluation_metrics<br/>table.pk_duplicate_rate")]:::store
+  UI["⚪ run view<br/>Adjusted pill<br/>evaluator status kept"]:::data
+
+  SRC --> G1 --> G2 --> G3 --> VR --> UI
+  SRC -. "repetition not read" .-> E1 --> E2 --> EM --> UI
+```
+
+_Two measures over the same declared key reach the run view by two tables.
+The launch measured the key repeating in the source, dropped it from the
+effective model and copied the repetition
+([ADR 0038](../../docs/adr/0038-measured-conflicts-adjust-the-model.md) D1 to
+D4, D10; streaming uniqueness is
+[ADR 0036](../../docs/adr/0036-parent-driven-fanout-generation.md) D6). The
+evaluator grades the declared key, with no source baseline, so any repeat
+fails._
+
+- **Two formulas.** The generator's **repeat share** is the share of rows
+  beyond the first per key, `1 − distinct keys ÷ rows`, compared with the
+  source's own share within the code's tolerance (`REPEAT_SHARE_TOLERANCE`,
+  the knob `repeat_share_tolerance`). The evaluator's **duplicate rate** is the
+  share of rows whose key occurs at least twice, first rows included. The (i)
+  `eval:repeat-share` puts them side by side with a worked example;
+  `eval:model-adjusted` says what the launch did and how to read each verdict.
+- **A re-reading, never a rewrite.** The evaluator's row, its status, the
+  headline and every status count stay as stored, as they do under the
+  documented-edge rule (Ruling R42) and the noise downgrade (Ruling R40).
+  Wherever the Adjusted pill takes the place of the evaluator's pill, the
+  evaluator's status stays on screen in words beside it
+  (`evaluator: FAIL (threshold 0)`).
+- **Checked before it is shown.** `1 − distinct_keys ÷ rows`, from the
+  evaluator's own `detail`, must equal the generator's landing share to 1e-6.
+  When it does not, the view says **Measures disagree** and gives no verdict.
+- **Orphan rates do not change.** Referential integrity is another question;
+  the orphan table, documented edges and noise downgrades render as before.
+
+| Generator's verdict  | Pill                                              | Finding severity       | The evaluator's status stays as                 |
+| :------------------- | :------------------------------------------------ | :--------------------- | :---------------------------------------------- |
+| faithful             | `Adjusted · faithful`, info tone, scale icon      | info                   | words beside the pill, and the readout's figure |
+| under / over         | `Adjusted · under` / `Adjusted · over`, warn tone | warn                   | the same                                        |
+| unmeasured / unknown | the evaluator's own pill + `Adjusted?` outline    | the evaluator's, as is | its own pill, untouched                         |
+| not adjusted         | the evaluator's own pill                          | the evaluator's, as is | its own pill, untouched                         |
+| measures disagree    | the evaluator's own pill + `Measures disagree`    | the evaluator's, as is | its own pill, untouched                         |
+
+_Unmeasured: the launch adjusted the key but measured no source share, so it
+wrote none. Unknown: no `validation_runs` row could be joined to the table
+([join order](DATA_CONTRACTS.md#model-adjustments-adr-0038)); the badge is not
+shown when the registry itself says the launch adjusted nothing
+(`model_adjusted = false`)._
+
+![The adjusted-keys strip of eval-0041 in mock mode: five tables, each with its source key-repeat share as a tick, the tolerance as a band and the synthetic share as a dot; one dot sits on its tick, three are left of their band and one is right of it](assets/evaluation-adjusted-keys-1440.png)
+
+_One row per adjusted table: the tick is the source's key-repeat share, the
+band the generator's tolerance around it, the dot the synthetic share. A dot
+inside its band is a faithful copy (`E_TABLE`); a dot left of it repeats the
+key less than the source, right of it more. `A_TABLE`'s dot sits at zero: a
+fully unique table that the evaluator passes and the generator does not. Mock
+mode, 1440 px; provenance in [`assets/README.md`](assets/README.md)._
+
+Where it shows, in the order a reader meets it:
+
+1. **Interpretation.** Adjusted findings rank after the real FAILs (a copy that
+   missed) or just before the documented INFO (a faithful one), each with its
+   sentence in the launch's own numbers. One line under the headline says how
+   many of the FAILs counted above are on adjusted keys. A table the evaluator
+   passed but whose copy missed gains a WARN finding.
+2. **Scorecards.** The PK row under "Look first" shows the pill, both shares,
+   the delta and the tolerance beside the evaluator's value; the key-failure
+   count stays the evaluator's, with the number on adjusted keys under it.
+3. **Relational**, section "Model adjustments (ADR 0038)" above the orphan
+   rates: one row per table, then the strip above, then each PK row's readout
+   with the generator's half under the evaluator's numbers. The section appears
+   only when a table has a verdict or a question.
+4. **Model graph.** A "PK adj." chip per adjusted table, with a glyph per
+   reading (≈ faithful, ↓ under, ↑ over, ? not readable), explained in the
+   legend.
+5. **Parameters.** A NULL `model_adjusted` reads
+   `— (validation_runs says adjusted on N tables)` when the joined rows say so.
+6. **CONFIG, guardrails.** The BLOCKER gate part lists the runs whose gate left
+   a rule out, with the same pill.
+
+**An evaluation wired to the wrong job.** When a registry row's
+`generation_job_name` is an evaluator job's name, or its `generation_job_id` is
+another evaluation's `evaluation_job_id`, a danger callout under the header
+says so: scope and adjustments are then joined to the wrong job, and the
+tables' verdicts read `Adjusted?`.
 
 ## Data on screen
 
