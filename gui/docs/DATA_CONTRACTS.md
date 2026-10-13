@@ -167,8 +167,8 @@ What it shows today:
 
 A golden file is the same on every machine: its numbers are integer arithmetic,
 SHA-256 or correctly rounded IEEE 754 operations, and its `python` stamp is the
-minor version (`3.11`), never the patch. The patch is whatever a machine
-resolves `3.11` to (a laptop's uv and CI's differ), and a stamp that carried it
+minor version (`3.14`), never the patch. The patch is whatever a machine
+resolves `3.14` to (a laptop's uv and CI's differ), and a stamp that carried it
 made `--check` fail in CI with nothing else changed. A failed `--check` prints
 the first line that differs.
 

@@ -61,7 +61,7 @@ _EVAL_SRC = REPO / "packages" / "sdfb-evaluation" / "src"
 _EVALUATED_AT = "2026-09-28T12:00:00+00:00"
 # The golden files' `python` stamp: the minor version only. What they hold
 # (float repr, `str.isspace()`'s Unicode tables) is fixed within a minor, and
-# the patch is whatever the machine resolved "3.11" to, so stamping it made
+# the patch is whatever the machine resolved the minor to, so stamping it made
 # every file differ between a laptop and CI with nothing else changed.
 PYTHON = ".".join(platform.python_version_tuple()[:2])
 _INF = math.inf

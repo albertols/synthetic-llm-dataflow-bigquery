@@ -17,11 +17,11 @@
     "gui/packages/contracts/generated/knobs.json": "72179b302c32a33d7ca41a53de91ef48dfba2269086477ae563508bd305d81d6",
     "gui/packages/contracts/generated/relationships.json": "4e09bf88dc86ca2adcb01a468d2f28e813f51177b7cf861734eb6760d336cef2",
     "gui/packages/contracts/generated/dlq_rules.json": "a4e08838b90113d66aa637c34b0170e98ec9fe618a17b30fc035e5fcbc9447de",
-    "gui/packages/contracts/generated/golden/compare.json": "b62612b541a150ee447e7ee7275df5a963aab5c1126c8781e3d4c1eddb4636b0",
-    "gui/packages/contracts/generated/golden/great_serialize.json": "e1dbe4d9b93cca7877afa89f2560f20f97118bc165f859c7a87248c1c6af3c19",
-    "gui/packages/contracts/generated/golden/hashing_embedder.json": "7b0b3c3654fdfddc608f6004269b65e752fc007711e8be08dd63e574b9ca80a0",
-    "gui/packages/contracts/generated/golden/retrieval.json": "c9996802599f3a56073703f18839cd0f74dd9c32b27da73889fab45511a306f8",
-    "gui/packages/contracts/generated/golden/scoring.json": "fee752811ea84e374e9d56ac050dcb9099845df1865dcc3424a3702ce9e48aa6"
+    "gui/packages/contracts/generated/golden/compare.json": "8cb397653527cf8e69e9ab107c9c5f0989912b82f67f9126a7cf635bd519904d",
+    "gui/packages/contracts/generated/golden/great_serialize.json": "f8f80eab3936eb4eaa0aebdb009673820bc09706f2d59d2126dc111a7e26fded",
+    "gui/packages/contracts/generated/golden/hashing_embedder.json": "a1b5dc3b342bb457ba6c99338e1c002fb8bdfa4d78a280549f95c27a2d8376e8",
+    "gui/packages/contracts/generated/golden/retrieval.json": "6e1cfa588aaa264ab7e3d8d9893a037ae09c1b085a7a023aacd37d02de8bc630",
+    "gui/packages/contracts/generated/golden/scoring.json": "e005e5426b705be7b25b676c712d040efed6eef0b8164ee21844c0fbcfc92f2f"
   },
   "outputs": [
     "schemas.ts",
