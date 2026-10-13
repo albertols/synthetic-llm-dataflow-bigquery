@@ -12,10 +12,11 @@ import type { MetricRow } from "@contracts/api";
 import { catalogueById, type MetricId } from "@contracts/generated/catalogue";
 import golden from "@contracts/generated/golden/scoring.json";
 
-import { metric, richDetail } from "../test/fixtures";
+import { adjustedAdjustments, adjustedDetail, adjustmentOf, metric, pkRow, richDetail } from "../test/fixtures";
+import { readAdjustedPk } from "./adjustment";
 import { fmtCompared } from "./format";
 import { buildGraph } from "./graph";
-import { interpretRow } from "./interpret";
+import { findings, headline, interpretRow } from "./interpret";
 import { explainStatus, isDocumentedEdge, readingOf, ruleStatus } from "./reading";
 
 /** The row the BFF would serve for golden case `id` (Python's to_metric_row output). */
@@ -180,6 +181,153 @@ describe("R66 in the views: a copy rate is gated only on free text", () => {
     expect(ruleStatus(row)).toBe("fail");
     expect(readingOf(row).ungated).toBeNull();
     expect(explainStatus(row)).toMatch(/→ FAIL\./);
+  });
+});
+
+describe("an adjusted key reads the generator's verdict, in its own numbers (ADR 0038)", () => {
+  const sentence = (table: string) => readAdjustedPk(pkRow(table), adjustmentOf(table))!.sentence;
+
+  it("what the evaluator's row says on its own: a FAIL whose rule expects a unique key", () => {
+    expect(interpretRow(pkRow("E_TABLE"))).toBe(
+      "PK duplicates 99.999% on E_TABLE — FAIL (any value above 0 fails). Any value above 0 fails: joins on this key fan out and downstream counts double.",
+    );
+  });
+
+  it("faithful — the copy matched: both shares, the delta and the tolerance", () => {
+    expect(sentence("E_TABLE")).toBe(
+      "E_TABLE's declared key repeats in the source (50.3% of rows), so the launch adjusted the model (ADR 0038) and copied that share: synthetic 50.3% (Δ −0.0 pt, within ±5 pt). The evaluator's 99.999% counts every row on a repeated key, first rows included.",
+    );
+  });
+
+  it("under — the copy missed in the direction opposite to the FAIL text: more unique than the source", () => {
+    expect(sentence("C_TABLE")).toBe(
+      "C_TABLE's declared key repeats in 66.2% of source rows but only 42.0% of synthetic rows (Δ −24.2 pt, outside ±5 pt): the synthetic table is more unique than its source. The evaluator's 67.7% counts every row on a repeated key, first rows included.",
+    );
+    expect(sentence("F_TABLE")).toBe(
+      "F_TABLE's declared key repeats in 66.4% of source rows but only 53.6% of synthetic rows (Δ −12.8 pt, outside ±5 pt): the synthetic table is more unique than its source. The evaluator's 78.6% counts every row on a repeated key, first rows included.",
+    );
+  });
+
+  it("under, fully unique — the evaluator PASSES what the generator calls a failed copy", () => {
+    expect(sentence("A_TABLE")).toBe(
+      "A_TABLE's declared key repeats in 50.9% of source rows but in none of the synthetic rows (Δ −50.9 pt, outside ±5 pt): the synthetic table is fully unique where its source is not. The evaluator's 0% passes its own rule, which expects a unique key.",
+    );
+  });
+
+  it("over — more repeated than the source", () => {
+    const landing = adjustmentOf("E_TABLE").landing_repeat_share!;
+    const over = adjustmentOf("E_TABLE", {
+      source_repeat_share: 0.3312,
+      repeat_share_delta: landing - 0.3312,
+      within_tolerance: false,
+      verdict: "over",
+    });
+    expect(readAdjustedPk(pkRow("E_TABLE"), over)!.sentence).toBe(
+      "E_TABLE's declared key repeats in 33.1% of source rows but 50.3% of synthetic rows (Δ +17.1 pt, outside ±5 pt): the synthetic table repeats its key more than its source. The evaluator's 99.999% counts every row on a repeated key, first rows included.",
+    );
+  });
+
+  it("unmeasured and unknown — a question added to the evaluator's own sentence, never a verdict", () => {
+    const unmeasured = adjustmentOf("E_TABLE", {
+      source_repeat_share: null,
+      landing_repeat_share: null,
+      repeat_share_delta: null,
+      within_tolerance: null,
+      verdict: "unmeasured",
+    });
+    expect(readAdjustedPk(pkRow("E_TABLE"), unmeasured)!.sentence).toBe(
+      "The launch adjusted this key (ADR 0038: pk.duplicate is left out of E_TABLE's gate) but measured no source repeat share, so whether these repeats copy the source is not known.",
+    );
+    const unknown = adjustmentOf("E_TABLE", { verdict: "unknown", adjusted: null, run_id: null, joined_by: null });
+    expect(readAdjustedPk(pkRow("E_TABLE"), unknown)!.sentence).toBe(
+      "No validation_runs row could be joined to E_TABLE, so whether the launch adjusted this key (ADR 0038) is not known: read the launch log's model_adjustment milestones.",
+    );
+  });
+
+  it("the numbers come from the rows: another launch, another sentence", () => {
+    const row = pkRow("E_TABLE", {
+      value: 0.6,
+      n_synthetic: 1000,
+      detail: { duplicate_rows: 600, distinct_keys: 700, null_key_rows: 0, key_columns: ["COL_001"] },
+    });
+    const adjustment = adjustmentOf("E_TABLE", {
+      source_repeat_share: 0.31,
+      landing_repeat_share: 0.3,
+      repeat_share_delta: 0.3 - 0.31,
+      within_tolerance: true,
+      verdict: "faithful",
+    });
+    expect(readAdjustedPk(row, adjustment)!.sentence).toBe(
+      "E_TABLE's declared key repeats in the source (31.0% of rows), so the launch adjusted the model (ADR 0038) and copied that share: synthetic 30.0% (Δ −1.0 pt, within ±5 pt). The evaluator's 60% counts every row on a repeated key, first rows included.",
+    );
+  });
+});
+
+describe("findings with the generator's half (ADR 0038)", () => {
+  const detail = adjustedDetail();
+  const { model_adjustments } = adjustedAdjustments();
+
+  it("without it, the evaluator's three FAILs read as defects and A_TABLE's failed copy is invisible", () => {
+    const list = findings(detail);
+    const pk = list.filter((f) => f.metricId === "table.pk_duplicate_rate");
+    expect(pk.map((f) => [f.target.table, f.severity, f.adjusted])).toEqual([
+      ["C_TABLE", "fail", null],
+      ["E_TABLE", "fail", null],
+      ["F_TABLE", "fail", null],
+    ]);
+  });
+
+  it("the three FAILs become Adjusted findings, A_TABLE gains a WARN, and the evaluator's status rides along", () => {
+    const list = findings(detail, model_adjustments);
+    const pk = list.filter((f) => f.metricId === "table.pk_duplicate_rate");
+    expect(pk.map((f) => [f.target.table, f.severity, f.adjusted?.label, f.adjusted?.evaluatorStatus])).toEqual([
+      ["A_TABLE", "warn", "Adjusted · under", "pass"],
+      ["C_TABLE", "warn", "Adjusted · under", "fail"],
+      ["F_TABLE", "warn", "Adjusted · under", "fail"],
+      ["E_TABLE", "info", "Adjusted · faithful", "fail"],
+    ]);
+    expect(pk.find((f) => f.target.table === "E_TABLE")!.text).toBe(
+      readAdjustedPk(pkRow("E_TABLE"), adjustmentOf("E_TABLE"))!.sentence,
+    );
+    // The unadjusted root keeps the normal rule, and passes: no finding.
+    expect(pk.some((f) => f.target.table === "B_TABLE")).toBe(false);
+    // The evidence is on the Relational tab.
+    expect(new Set(pk.map((f) => f.target.tab))).toEqual(new Set(["relational"]));
+  });
+
+  it("ranks them after the real FAILs and before the documented INFO", () => {
+    const order = findings(detail, model_adjustments).map((f) =>
+      f.adjusted ? `adjusted:${f.severity}` : `${f.metricId}:${f.severity}`,
+    );
+    expect(order).toEqual([
+      "column.hour_tvd:fail",
+      "adjusted:warn",
+      "adjusted:warn",
+      "adjusted:warn",
+      "adjusted:info",
+      "relationship.orphan_rate:info",
+    ]);
+  });
+
+  it("a key whose adjustment cannot be read keeps the evaluator's FAIL, with the question appended", () => {
+    const open = model_adjustments.map((a) =>
+      a.table === "F_TABLE" ? adjustmentOf("F_TABLE", { verdict: "unknown", adjusted: null, run_id: null }) : a,
+    );
+    const f = findings(detail, open).find((x) => x.target.table === "F_TABLE")!;
+    expect([f.severity, f.adjusted?.kind, f.adjusted?.label]).toEqual(["fail", "question", "Adjusted?"]);
+    expect(f.text).toBe(
+      `${interpretRow(pkRow("F_TABLE"))} No validation_runs row could be joined to F_TABLE, so whether the launch adjusted this key (ADR 0038) is not known: read the launch log's model_adjustment milestones.`,
+    );
+    // It ranks with the FAILs it still is.
+    expect(findings(detail, open).findIndex((x) => x === f)).toBeLessThan(2);
+  });
+
+  it("does not touch the evaluator's rows, the headline or its counts", () => {
+    const before = JSON.stringify(detail.metrics);
+    findings(detail, model_adjustments);
+    expect(JSON.stringify(detail.metrics)).toBe(before);
+    // Three PK FAILs and one real one: the adjusted reading moves none of them out of the count.
+    expect(headline(detail)).toMatch(/over 11 measured metrics: 4 fail, 6 pass, 1 info\./);
   });
 });
 

@@ -3,7 +3,16 @@
  * level, family and value kind from the catalogue), profiles and comparisons,
  * shaped like the generated BigQuery schemas. Invented names only.
  */
-import type { Comparison, EvaluationDetail, EvaluationRecord, MetricRow, ProfileRow, RowFlag } from "@contracts/api";
+import { tableModelAdjustmentOf, type TableModelAdjustment } from "@contracts/adjustments";
+import type {
+  Comparison,
+  EvaluationAdjustments,
+  EvaluationDetail,
+  EvaluationRecord,
+  MetricRow,
+  ProfileRow,
+  RowFlag,
+} from "@contracts/api";
 
 import { metricMeta } from "../lib/catalogue";
 
@@ -446,4 +455,171 @@ export function countsDetail(): EvaluationDetail {
     }),
   ];
   return detail;
+}
+
+// ------------------------------------------------- adjusted keys (ADR 0038) --
+
+/**
+ * A five-table launch whose declared keys the source disproved, under the repository's aliases:
+ * per table the landed rows, the distinct declared-key tuples, the rows on a repeated key (what
+ * the evaluator counts) and the source's key-repeat share (null on the root, which the launch did
+ * not adjust). The generator's landing share, delta and verdict are derived from these.
+ */
+export const ADJUSTED_TABLES = [
+  { table: "B_TABLE", key: ["COL_001"], rows: 1_000_000, distinct: 1_000_000, duplicateRows: 0, source: null },
+  {
+    table: "E_TABLE",
+    key: ["COL_001"],
+    rows: 2_010_415,
+    distinct: 1_000_000,
+    duplicateRows: 2_010_391,
+    source: 0.5027,
+  },
+  {
+    table: "F_TABLE",
+    key: ["COL_001", "COL_002"],
+    rows: 3_144_398,
+    distinct: 1_458_608,
+    duplicateRows: 2_471_497,
+    source: 0.6637,
+  },
+  {
+    table: "C_TABLE",
+    key: ["COL_001", "COL_003"],
+    rows: 5_913_652,
+    distinct: 3_431_581,
+    duplicateRows: 4_001_177,
+    source: 0.6617,
+  },
+  {
+    table: "A_TABLE",
+    key: ["COL_001", "COL_003", "COL_004"],
+    rows: 16_126_514,
+    distinct: 16_126_514,
+    duplicateRows: 0,
+    source: 0.5087,
+  },
+] as const;
+
+type AdjustedTable = (typeof ADJUSTED_TABLES)[number];
+
+const adjustedTable = (table: string): AdjustedTable => ADJUSTED_TABLES.find((t) => t.table === table)!;
+
+/** The evaluator's `table.pk_duplicate_rate` row for one of those tables, as `_key_duplicates` writes it. */
+export function pkRow(table: string, overrides: Partial<MetricRow> = {}): MetricRow {
+  const t = adjustedTable(table);
+  return metric("table.pk_duplicate_rate", {
+    table_name: t.table,
+    value: t.duplicateRows / t.rows,
+    score: t.duplicateRows > 0 ? 0 : 1,
+    status: t.duplicateRows > 0 ? "fail" : "pass",
+    n_source: null,
+    n_synthetic: t.rows,
+    detail: {
+      duplicate_rows: t.duplicateRows,
+      distinct_keys: t.distinct,
+      null_key_rows: 0,
+      key_columns: [...t.key],
+      null_key_note: "rows whose key has a NULL part are not duplicates; a NULL key is its own integrity defect",
+    },
+    ...overrides,
+  });
+}
+
+/** The generator's `validation_runs` row for one of those tables, joined: what the adjustments route returns. */
+export function adjustmentOf(table: string, overrides: Partial<TableModelAdjustment> = {}): TableModelAdjustment {
+  const t = adjustedTable(table);
+  const pkDuplicate = t.rows - t.distinct;
+  const landing = t.source === null ? null : pkDuplicate / t.rows;
+  const delta = t.source === null || landing === null ? null : landing - t.source;
+  return {
+    ...tableModelAdjustmentOf(t.table, {
+      joinedBy: "run_id",
+      run: {
+        run_id: `run-adj-${t.table}`,
+        landing_table: `demo-project.synthetic_data.${t.table}`,
+        created_at: T0,
+        excluded_blocker_rules: t.source === null ? "" : "pk.duplicate",
+        source_repeat_share: t.source,
+        landing_repeat_share: landing,
+        repeat_share_delta: delta,
+        repeat_share_within_tolerance: delta === null ? null : Math.abs(delta) <= 0.05,
+        dlq_by_rule_map: t.source === null ? {} : { "pk.duplicate": pkDuplicate },
+      },
+    }),
+    ...overrides,
+  };
+}
+
+export function adjustedAdjustments(overrides: Partial<EvaluationAdjustments> = {}): EvaluationAdjustments {
+  return {
+    evaluation_id: "eval-t001",
+    model_adjustments: ADJUSTED_TABLES.map((t) => adjustmentOf(t.table)),
+    generation_job_evaluation_id: null,
+    ...overrides,
+  };
+}
+
+const ADJUSTED_EDGES = [
+  "E_TABLE(COL_001) -> B_TABLE(COL_001)",
+  "F_TABLE(COL_001) -> E_TABLE(COL_001)",
+  "C_TABLE(COL_001) -> B_TABLE(COL_001)",
+  "A_TABLE(COL_001,COL_003) -> C_TABLE(COL_001,COL_003)",
+];
+
+/** That launch as the evaluator scored it: five PK rows (three FAIL), four clean enforced edges, the roll-ups. */
+export function adjustedDetail(): EvaluationDetail {
+  const metrics: MetricRow[] = [
+    ...ADJUSTED_TABLES.map((t) => pkRow(t.table)),
+    ...ADJUSTED_EDGES.map((edge) =>
+      metric("relationship.orphan_rate", {
+        table_name: edge.split("(")[0]!,
+        edge,
+        value: 0,
+        detail: { orphans: 0, enforced: true, role: "driving" },
+      }),
+    ),
+    // One real FAIL and one documented-edge INFO, to rank the adjusted findings between.
+    metric("column.hour_tvd", {
+      table_name: "B_TABLE",
+      column_name: "COL_012",
+      column_kind: "temporal",
+      value: 0.25,
+      noise_floor: 0.006,
+      noise_floor_method: "tvd_null",
+      score: 0,
+      status: "fail",
+    }),
+    metric("relationship.orphan_rate", {
+      table_name: "A_TABLE",
+      edge: "A_TABLE(COL_009) -> B_TABLE(COL_001)",
+      value: 0.01,
+      score: null,
+      status: "info",
+      detail: { orphans: 161_265, enforced: false, role: "documented" },
+    }),
+    ...ADJUSTED_TABLES.flatMap((t) => rollups(t.table, "adjusted_keys_demo", 0.8).filter((m) => m.level === "table")),
+    ...rollups("B_TABLE", "adjusted_keys_demo", 0.8).filter((m) => m.level === "model"),
+  ];
+  return {
+    evaluation: evaluation({
+      relationship_model: "adjusted_keys_demo",
+      // NULL: the registry did not read the launch log; validation_runs says what was adjusted.
+      model_adjusted: null,
+      tables: ADJUSTED_TABLES.map((t) =>
+        tableEntry(t.table, {
+          role: t.source === null ? "root" : "driven",
+          run_id: `run-adj-${t.table}`,
+          rows_synthetic: t.rows,
+          rows_expected: t.rows,
+        }),
+      ),
+      run_ids: ADJUSTED_TABLES.map((t) => `run-adj-${t.table}`),
+      metrics_total: metrics.length,
+    }),
+    events: [],
+    metrics,
+    profiles: [],
+    flags: [],
+  };
 }

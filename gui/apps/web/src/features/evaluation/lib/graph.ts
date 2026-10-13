@@ -9,6 +9,7 @@
 import type { EvaluationDetail, MetricRow } from "@contracts/api";
 import { findEdge, formatEdge, parseEdge, type RelationshipModel } from "@contracts/relational";
 
+import type { AdjustedReading, AdjustmentRow } from "./adjustment";
 import { statusRank, worstStatus } from "./model";
 import { isDocumentedEdge, onDocumentedEdge } from "./reading";
 
@@ -18,6 +19,12 @@ export interface GraphNode {
   role: string | null;
   score: number | null;
   status: string | null;
+  /**
+   * ADR 0038: the generator's reading of this table's declared key, when the launch adjusted it
+   * (or when that cannot be read); null on a table whose key is graded as unique. Drawn as the
+   * "PK adj." chip — the node's score and status stay the evaluator's.
+   */
+  adjustment: Pick<AdjustedReading, "kind" | "verdict" | "tone" | "label"> | null;
   layer: number;
   x: number;
   y: number;
@@ -57,8 +64,10 @@ function lastSegment(name: string): string {
 export function buildGraph(
   detail: Pick<EvaluationDetail, "evaluation" | "metrics">,
   model?: RelationshipModel | null,
+  adjustments?: readonly AdjustmentRow[],
 ): Graph {
   const { evaluation, metrics } = detail;
+  const readings = new Map((adjustments ?? []).map((a) => [a.table, a.reading]));
   const tables = new Map<string, { role: string | null }>();
   for (const t of evaluation.tables) if (t.name) tables.set(t.name, { role: t.role });
   for (const t of model?.tables ?? []) if (!tables.has(t.name)) tables.set(t.name, { role: null });
@@ -177,6 +186,7 @@ export function buildGraph(
         role: info?.role ?? "external",
         score: scoreRow?.value ?? registry?.table_score ?? null,
         status: scoreRow?.status ?? null,
+        adjustment: readings.get(name) ?? null,
         layer,
         x: PAD + layer * (NODE_W + COL_GAP),
         y: PAD + offset + index * (NODE_H + ROW_GAP),
