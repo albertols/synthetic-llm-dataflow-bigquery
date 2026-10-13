@@ -7,6 +7,7 @@ import type {
   ChunkMeta,
   Comparison,
   DlqSummary,
+  EvaluationAdjustments,
   EvaluationDetail,
   EvaluationFilterParsed,
   EvaluationSummary,
@@ -21,14 +22,23 @@ import type {
   TrendQueryParsed,
   ValidationRun,
 } from "@synthetic-platform/contracts";
-import { getMockDataset, MOCK_RELATIONSHIP_MODEL, type MockDataset } from "@synthetic-platform/mock";
+import {
+  ADJUSTED_RELATIONSHIP_MODEL,
+  getMockDataset,
+  MOCK_RELATIONSHIP_MODEL,
+  type MockDataset,
+} from "@synthetic-platform/mock";
 
 import {
+  ADJUSTMENT_RUNS_LIMIT,
+  adjustmentRunsFilter,
   assembleSourceStats,
   blockerFlags,
+  buildAdjustments,
   buildComparison,
   buildFacets,
   latestPerEvaluation,
+  matchesAdjustmentRuns,
   matchesFilter,
   parseCounts,
   parseJsonText,
@@ -71,7 +81,8 @@ export class MockProvider implements DataProvider {
   }
 
   relationshipModels(): Promise<RelationshipModel[]> {
-    return Promise.resolve([MOCK_RELATIONSHIP_MODEL]);
+    // The storyline's model, and the adjusted-keys launch's (ADR 0038): both invented.
+    return Promise.resolve([MOCK_RELATIONSHIP_MODEL, ADJUSTED_RELATIONSHIP_MODEL]);
   }
 
   private latest() {
@@ -120,6 +131,26 @@ export class MockProvider implements DataProvider {
           (!q.side?.length || q.side.includes(p.side)),
       ),
     );
+  }
+
+  evaluationAdjustments(id: string): Promise<EvaluationAdjustments | null> {
+    const latest = this.latest();
+    const evaluation = latest.find((r) => r.evaluation_id === id);
+    if (!evaluation) return Promise.resolve(null);
+    const filter = adjustmentRunsFilter(evaluation);
+    // As runs.forEvaluation: the candidate rows, newest first.
+    const runs = this.dataset.validationRuns
+      .filter((r) => matchesAdjustmentRuns(r, filter))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at) || a.run_id.localeCompare(b.run_id))
+      .slice(0, ADJUSTMENT_RUNS_LIMIT);
+    // As evaluations.byJobId: another evaluation that ran as this row's "generation" job.
+    const sameJob = evaluation.generation_job_id
+      ? latest
+          .filter((r) => r.evaluation_id !== id && r.evaluation_job_id === evaluation.generation_job_id)
+          .map((r) => r.evaluation_id)
+          .sort()[0]
+      : undefined;
+    return Promise.resolve(buildAdjustments(evaluation, runs, sameJob ?? null));
   }
 
   metricTrend(q: TrendQueryParsed): Promise<TrendPoint[]> {

@@ -5,13 +5,17 @@
  */
 import {
   canonicalTimestamp,
+  dottedTable,
   effectiveTier,
+  joinModelAdjustments,
+  joinWindow,
   knobs,
   profilerStatsSchema,
   snapshotKey,
   type ComparedMetric,
   type Comparison,
   type DlqSummary,
+  type EvaluationAdjustments,
   type EvaluationFilterParsed,
   type EvaluationRecord,
   type EvaluationSummary,
@@ -24,6 +28,7 @@ import {
   type SourceStatsSnapshot,
   type SourceTableStatsRow,
   type TrendPoint,
+  type ValidationRunsRow,
 } from "@synthetic-platform/contracts";
 
 /** `evaluation_latest`: the last event per evaluation_id (by recorded_at). */
@@ -385,6 +390,77 @@ export function sortDlq(rows: DlqSummary[]): DlqSummary[] {
   return rows.sort(
     (a, b) => a.run_id.localeCompare(b.run_id) || b.count - a.count || (a.rule_id ?? "").localeCompare(b.rule_id ?? ""),
   );
+}
+
+// ------------------------------------------------- model adjustments (ADR 0038) --
+
+/** At most this many `validation_runs` rows per adjustments request (a launch writes one per table). */
+export const ADJUSTMENT_RUNS_LIMIT = 1000;
+
+/**
+ * What `runs.forEvaluation` is asked: the three keys `joinModelAdjustments` joins on. A row matches
+ * ANY of them, so an unset key must match nothing (the reverse of a list FILTER, where unset = all).
+ */
+export interface AdjustmentRunsFilter {
+  run_ids: string[];
+  base_run_id: string | null;
+  /** Each landing table as the dotted name and as a Beam table spec (`project:dataset.table`). */
+  landing_tables: string[];
+  /** `[generation_started_at, generation_finished_at + 1 h]`; both null when the registry lacks an end. */
+  from: string | null;
+  to: string | null;
+}
+
+export function adjustmentRunsFilter(evaluation: EvaluationRecord): AdjustmentRunsFilter {
+  const generated = evaluation.tables.filter((t) => t.role !== "external");
+  const window = joinWindow(evaluation);
+  const landing = new Set<string>();
+  for (const table of generated) {
+    if (!table.landing_table) continue;
+    const dotted = dottedTable(table.landing_table);
+    landing.add(dotted);
+    if (dotted.split(".").length === 3) landing.add(dotted.replace(".", ":"));
+  }
+  return {
+    run_ids: [...new Set(generated.map((t) => t.run_id).filter((id): id is string => !!id))].sort(),
+    base_run_id: evaluation.base_run_id,
+    landing_tables: [...landing].sort(),
+    from: window?.from ?? null,
+    to: window?.to ?? null,
+  };
+}
+
+/** No key at all: nothing to ask `validation_runs` for. */
+export function hasAdjustmentKeys(f: AdjustmentRunsFilter): boolean {
+  return f.run_ids.length > 0 || !!f.base_run_id || (f.landing_tables.length > 0 && !!f.from && !!f.to);
+}
+
+/** The in-memory twin of the `runs.forEvaluation` WHERE clause. */
+export function matchesAdjustmentRuns(
+  run: Pick<ValidationRunsRow, "run_id" | "landing_table" | "created_at">,
+  f: AdjustmentRunsFilter,
+): boolean {
+  if (f.run_ids.includes(run.run_id)) return true;
+  if (f.base_run_id && (run.run_id === f.base_run_id || run.run_id.startsWith(`${f.base_run_id}-`))) return true;
+  if (!f.from || !f.to || run.landing_table === null || !f.landing_tables.includes(run.landing_table)) return false;
+  const at = canonicalTimestamp(run.created_at) ?? run.created_at;
+  return at >= f.from && at <= f.to;
+}
+
+/** The route's answer: the join (contracts `joinModelAdjustments`) over the candidate rows, newest first. */
+export function buildAdjustments(
+  evaluation: EvaluationRecord,
+  runs: readonly ValidationRunsRow[],
+  generationJobEvaluationId: string | null,
+): EvaluationAdjustments {
+  return {
+    evaluation_id: evaluation.evaluation_id,
+    model_adjustments: joinModelAdjustments(
+      evaluation,
+      runs.map((r) => ({ ...r, dlq_by_rule_map: parseCounts(r.dlq_by_rule) })),
+    ),
+    generation_job_evaluation_id: generationJobEvaluationId,
+  };
 }
 
 // ---------------------------------------------------------- source stats --

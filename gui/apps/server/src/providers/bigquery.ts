@@ -29,6 +29,7 @@ import {
   type ChunkMeta,
   type Comparison,
   type DlqSummary,
+  type EvaluationAdjustments,
   type EvaluationDetail,
   type EvaluationFilterParsed,
   type EvaluationRecord,
@@ -62,10 +63,14 @@ import {
   type SortKey,
 } from "../queries/registry";
 import {
+  ADJUSTMENT_RUNS_LIMIT,
+  adjustmentRunsFilter,
   assembleSourceStats,
   blockerFlags,
+  buildAdjustments,
   buildComparison,
   buildFacets,
+  hasAdjustmentKeys,
   parseCounts,
   parseJsonText,
   resolveTable,
@@ -321,6 +326,36 @@ export class BigQueryProvider implements DataProvider {
       z.array(evaluationProfilesRowSchema),
       ctx,
     );
+  }
+
+  /**
+   * ADR 0038: the registry row, then (in parallel) the `validation_runs` rows its tables can be
+   * joined to and any evaluation that ran as its "generation" job. Read-only, like every query here.
+   */
+  async evaluationAdjustments(id: string, ctx = newContext()): Promise<EvaluationAdjustments | null> {
+    const events = await this.run("evaluations.events", { id }, z.array(evaluationDataHistoryRowSchema), ctx);
+    if (!events.length) return null;
+    const evaluation = events.at(-1)!;
+    const filter = adjustmentRunsFilter(evaluation);
+    const [runs, sameJob] = await Promise.all([
+      hasAdjustmentKeys(filter)
+        ? this.run(
+            "runs.forEvaluation",
+            { ...filter, limit: ADJUSTMENT_RUNS_LIMIT },
+            z.array(validationRunsRowSchema),
+            ctx,
+          )
+        : Promise.resolve([] as ValidationRunsRow[]),
+      evaluation.generation_job_id
+        ? this.run(
+            "evaluations.byJobId",
+            { job_id: evaluation.generation_job_id, id },
+            z.array(z.object({ evaluation_id: z.string() })),
+            ctx,
+          )
+        : Promise.resolve([]),
+    ]);
+    return buildAdjustments(evaluation, runs, sameJob[0]?.evaluation_id ?? null);
   }
 
   /** The newest `limit` points (the query orders newest first), returned oldest first. */

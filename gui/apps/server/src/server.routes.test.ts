@@ -14,6 +14,7 @@ import {
   comparisonSchema,
   decodeVectorEnvelope,
   dlqSummarySchema,
+  evaluationAdjustmentsSchema,
   evaluationDetailSchema,
   evaluationPageSchema,
   evaluationProfilesRowSchema,
@@ -26,8 +27,10 @@ import {
   trendPointSchema,
   validationRunSchema,
   type ChunkMeta,
+  type EvaluationAdjustments,
   type Facets,
 } from "@synthetic-platform/contracts";
+import { ADJUSTED_EVALUATIONS, getMockDataset, STORYLINE } from "@synthetic-platform/mock";
 import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -39,6 +42,8 @@ import { MockProvider } from "./providers/mock";
 let app: FastifyInstance;
 let staticDir: string;
 let facets: Facets;
+/** Every evaluation the mock holds: the storyline's, and the adjusted-keys launch's two. */
+const EVALUATIONS = STORYLINE.length + ADJUSTED_EVALUATIONS.length;
 
 beforeAll(async () => {
   staticDir = mkdtempSync(join(tmpdir(), "spa-"));
@@ -79,7 +84,9 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
   });
 
   it("/api/facets lists every filter option", () => {
-    expect(facets.counts.evaluations).toBe(40);
+    // The storyline's 40 and the two evaluations of the adjusted-keys launch.
+    expect(facets.counts.evaluations).toBe(EVALUATIONS);
+    expect(facets.relationship_models).toEqual(["adjusted_keys_demo", "thelook_demo"]);
     expect(facets.engines).toEqual(["b1_rag", "b2_library"]);
     expect(facets.tables).toEqual(expect.arrayContaining(["users", "orders", "order_items", "user_features"]));
     expect(facets.latest?.evaluation_id).toBe("eval-0039");
@@ -89,7 +96,7 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
 
   it("/api/evaluations pages, filters and sorts", async () => {
     const first = await get("/api/evaluations?limit=10", evaluationPageSchema);
-    expect(first.total).toBe(40);
+    expect(first.total).toBe(EVALUATIONS);
     expect(first.items).toHaveLength(10);
     expect(first.items[0]!.evaluation_id).toBe("eval-0040");
     const b2 = await get("/api/evaluations?engine=b2_library&limit=500", evaluationPageSchema);
@@ -113,7 +120,7 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
     await get("/api/evaluations?sort=nope", apiErrorSchema, 400);
     // A page past the end still reports the total.
     const past = await get("/api/evaluations?offset=100&limit=10", evaluationPageSchema);
-    expect([past.items.length, past.total]).toEqual([0, 40]);
+    expect([past.items.length, past.total]).toEqual([0, EVALUATIONS]);
     // from/to are ISO timestamps (with offset) or dates; anything else is a 400.
     await get("/api/evaluations?from=yesterday", apiErrorSchema, 400);
     await get("/api/evaluations?to=2026-09-01T10:00:00", apiErrorSchema, 400);
@@ -292,10 +299,144 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
   it("/api/relationships serves the committed examples and, in mock mode, the mock's model", async () => {
     const { models } = await get("/api/relationships", relationshipsResponseSchema);
     expect(models.find((m) => m.model === "gcp_public_thelook")?.origin).toBe("committed_example");
-    const demo = models.find((m) => m.model === facets.relationship_models[0])!;
-    expect(demo.origin).toBe("mock");
+    // Every model a mock registry row names resolves here, as the mock's own.
+    for (const name of facets.relationship_models) expect(models.find((m) => m.model === name)?.origin).toBe("mock");
+    const demo = models.find((m) => m.model === "thelook_demo")!;
     const documented = demo.tables.flatMap((t) => t.fk).filter((e) => e.role === "documented");
     expect(documented.map((e) => e.enforced)).toEqual([false]);
+    const adjusted = models.find((m) => m.model === "adjusted_keys_demo")!;
+    expect(adjusted.generation_order[0]).toBe("B_TABLE");
+    expect(adjusted.tables.find((t) => t.name === "E_TABLE")!.pk).toEqual(["COL_001"]);
+  });
+
+  it("/api/evaluations/:id/adjustments joins each table to its validation_runs row (ADR 0038)", async () => {
+    const verdicts = (a: EvaluationAdjustments) =>
+      Object.fromEntries(a.model_adjustments.map((t) => [t.table, t.verdict]));
+    // 1. Exact: the chained evaluation carries every table's run id.
+    const chained = await get("/api/evaluations/eval-0041/adjustments", evaluationAdjustmentsSchema);
+    expect(chained.evaluation_id).toBe("eval-0041");
+    expect(chained.model_adjustments.map((t) => t.joined_by)).toEqual(Array(7).fill("run_id"));
+    expect(verdicts(chained)).toEqual({
+      B_TABLE: "not_adjusted",
+      C_TABLE: "under",
+      D_TABLE: "over",
+      E_TABLE: "faithful",
+      G_TABLE: "unmeasured",
+      A_TABLE: "under",
+      F_TABLE: "under",
+    });
+    const e = chained.model_adjustments.find((t) => t.table === "E_TABLE")!;
+    expect(e).toMatchObject({
+      adjusted: true,
+      excluded_rules: ["pk.duplicate"],
+      source_repeat_share: 0.5027,
+      within_tolerance: true,
+      pk_duplicate_dlq: 1_010_415,
+    });
+    expect(e.landing_repeat_share).toBeCloseTo(0.5026, 4);
+    expect(e.run_id).toMatch(/-03-E_TABLE$/);
+    expect(chained.model_adjustments.find((t) => t.table === "B_TABLE")).toMatchObject({
+      adjusted: false,
+      excluded_rules: [],
+      pk_duplicate_dlq: null,
+    });
+    // A_TABLE landed fully unique: zero counted duplicates, and still an adjusted table.
+    expect(chained.model_adjustments.find((t) => t.table === "A_TABLE")).toMatchObject({
+      adjusted: true,
+      landing_repeat_share: 0,
+      pk_duplicate_dlq: 0,
+    });
+    expect(chained.generation_job_evaluation_id).toBeNull();
+
+    // 4. Unknown: the mis-wired evaluation knows one run id; nothing else can be joined, and its
+    //    "generation job" is the chained evaluation's own Dataflow job.
+    const miswired = await get("/api/evaluations/eval-0042/adjustments", evaluationAdjustmentsSchema);
+    expect(miswired.model_adjustments.map((t) => [t.table, t.verdict, t.joined_by])).toEqual([
+      ["B_TABLE", "not_adjusted", "run_id"],
+      ...["C_TABLE", "D_TABLE", "E_TABLE", "G_TABLE", "A_TABLE", "F_TABLE"].map((t) => [t, "unknown", null]),
+    ]);
+    expect(miswired.model_adjustments[1]).toMatchObject({ run_id: null, adjusted: null, excluded_rules: [] });
+    expect(miswired.generation_job_evaluation_id).toBe("eval-0041");
+
+    // A storyline launch: every table joins by its run id, and none was adjusted.
+    const plain = await get("/api/evaluations/eval-0021/adjustments", evaluationAdjustmentsSchema);
+    expect(plain.model_adjustments.map((t) => [t.table, t.verdict, t.joined_by])).toEqual([
+      ["users", "not_adjusted", "run_id"],
+      ["orders", "not_adjusted", "run_id"],
+      ["order_items", "not_adjusted", "run_id"],
+    ]);
+    expect(plain.generation_job_evaluation_id).toBeNull();
+    // The 200-column table, launched alone: its one run is the base id itself.
+    const wide = await get("/api/evaluations/eval-0032/adjustments", evaluationAdjustmentsSchema);
+    expect(wide.model_adjustments.map((t) => [t.table, t.verdict])).toEqual([["user_features", "not_adjusted"]]);
+    await get("/api/evaluations/nope/adjustments", apiErrorSchema, 404);
+  });
+
+  it("the adjustments join falls back from run id to launch base to generation window, never across launches", async () => {
+    // Registry rows the evaluator can write for the SAME launch, knowing less each time.
+    const data = getMockDataset();
+    const final = data.registry.find((r) => r.evaluation_id === "eval-0041" && r.event === "FINAL")!;
+    const variant = (id: string, patch: Partial<typeof final>) =>
+      structuredClone({
+        ...final,
+        ...patch,
+        evaluation_id: id,
+        tables: final.tables.map((t) => ({ ...t, run_id: null })),
+        run_ids: [],
+      });
+    const variants = [
+      // 2. No per-table run ids, but the launch's base run id.
+      variant("eval-9002", {}),
+      // 3. No ids at all: the landing tables inside the generation job's window.
+      variant("eval-9003", { base_run_id: null }),
+      // 4. No ids and no window: nothing to join on.
+      variant("eval-9004", { base_run_id: null, generation_started_at: null, generation_finished_at: null }),
+      // A window that ended more than an hour before the rows were written.
+      variant("eval-9005", {
+        base_run_id: null,
+        generation_started_at: "2026-09-13T01:00:00.000000Z",
+        generation_finished_at: "2026-09-13T02:00:00.000000Z",
+      }),
+      // Another launch's base run id: its rows are not this launch's, whatever the window says.
+      variant("eval-9006", { base_run_id: "sdfb-20260912-0000-ffff" }),
+    ];
+    const config = loadConfig({ LOG_LEVEL: "silent", STATIC_DIR: staticDir });
+    const other = await buildApp({
+      config,
+      provider: new MockProvider(() => ({ ...data, registry: [...data.registry, ...variants] })),
+      serveStatic: false,
+    });
+    const adjustments = async (id: string) => {
+      const res = await other.inject({
+        url: `/api/evaluations/${id}/adjustments`,
+        headers: { host: "127.0.0.1:8787" },
+      });
+      expect(res.statusCode, res.body.slice(0, 300)).toBe(200);
+      return evaluationAdjustmentsSchema.parse(res.json());
+    };
+    const exact = await adjustments("eval-0041");
+    const withoutJoin = (a: EvaluationAdjustments) => a.model_adjustments.map(({ joined_by: _j, ...rest }) => rest);
+    for (const [id, joinedBy] of [
+      ["eval-9002", "base_run_id"],
+      ["eval-9003", "window"],
+    ] as const) {
+      const joined = await adjustments(id);
+      expect(
+        joined.model_adjustments.map((t) => t.joined_by),
+        id,
+      ).toEqual(Array(7).fill(joinedBy));
+      // The same rows, so the same numbers and verdicts as the exact join.
+      expect(withoutJoin(joined), id).toEqual(withoutJoin(exact));
+    }
+    for (const id of ["eval-9004", "eval-9005", "eval-9006"]) {
+      const none = await adjustments(id);
+      expect(new Set(none.model_adjustments.map((t) => t.verdict)), id).toEqual(new Set(["unknown"]));
+      expect(
+        none.model_adjustments.every((t) => t.run_id === null && t.joined_by === null),
+        id,
+      ).toBe(true);
+    }
+    await other.close();
   });
 
   it("refuses a foreign Host (DNS rebinding) and cross-site API requests", async () => {
