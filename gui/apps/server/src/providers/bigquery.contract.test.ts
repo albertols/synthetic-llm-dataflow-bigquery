@@ -8,6 +8,7 @@
  */
 import {
   bqTables,
+  evaluationAdjustmentsSchema,
   evaluationDetailSchema,
   facetsSchema,
   type BqField,
@@ -20,6 +21,7 @@ import { buildApp } from "../app";
 import { loadConfig } from "../config";
 import { assertReadOnly, QUERIES } from "../queries/registry";
 import { BigQueryProvider, type BigQueryClient } from "./bigquery";
+import { MockProvider } from "./mock";
 import { BytesCapError, ContractError, newContext } from "./types";
 
 const config = loadConfig({
@@ -236,6 +238,82 @@ describe("the BigQuery provider", { timeout: 60_000 }, () => {
     expect(runs[0]!.dlq_by_rule_map).toEqual(JSON.parse(data.validationRuns[0]!.dlq_by_rule!));
   });
 
+  it("adjustments: asks validation_runs with parameters only, and joins as the mock does (ADR 0038)", async () => {
+    const id = "eval-0041";
+    const events = data.registry.filter((r) => r.evaluation_id === id);
+    const base = events[0]!.base_run_id!;
+    const launchRuns = data.validationRuns.filter((r) => r.run_id.startsWith(`${base}-`));
+    expect(launchRuns).toHaveLength(7);
+    const { client, calls } = stubClient({
+      "evaluations.events": () => tableRows("evaluation_data_history", events),
+      "runs.forEvaluation": () => tableRows("validation_runs", launchRuns),
+      "evaluations.byJobId": () => [{ evaluation_id: "eval-0042" }],
+    });
+    const provider = new BigQueryProvider(config, () => Promise.resolve(client));
+    const ctx = newContext();
+    const live = (await provider.evaluationAdjustments(id, ctx))!;
+    expect(evaluationAdjustmentsSchema.safeParse(live).success).toBe(true);
+    // The recorded rows (INT64 text, BigQueryTimestamp objects) join to the same answer as the mock's.
+    const mock = (await new MockProvider().evaluationAdjustments(id))!;
+    expect(live.model_adjustments).toEqual(mock.model_adjustments);
+    expect(live.generation_job_evaluation_id).toBe("eval-0042");
+    expect(ctx).toMatchObject({ queries: 3, cacheHits: 0, bytesEstimate: 3 * 12_345_678 });
+
+    const label = (c: Call) => (c.options.labels as { query: string }).query;
+    const runsCalls = calls.filter((c) => label(c) === "runs_forevaluation");
+    expect(runsCalls.map((c) => c.options.dryRun ?? false)).toEqual([true, false]);
+    const final = events.at(-1)!;
+    for (const { options } of runsCalls) {
+      const params = options.params as Record<string, unknown>;
+      expect(params.run_ids).toEqual([...final.run_ids].sort());
+      expect(params.base_run_id).toBe(base);
+      // Each landing table under both spellings a row may carry: dotted, and the Beam table spec.
+      expect(params.landing_tables).toEqual(
+        expect.arrayContaining(["demo-project.synthetic_data.E_TABLE", "demo-project:synthetic_data.E_TABLE"]),
+      );
+      expect(params.landing_tables).toHaveLength(14);
+      // [generation_started_at, generation_finished_at + 1 h], microseconds kept.
+      expect(params.from).toBe(final.generation_started_at);
+      expect(Date.parse(params.to as string) - Date.parse(final.generation_finished_at!)).toBe(3_600_000);
+      expect((params.to as string).slice(19)).toBe(final.generation_finished_at!.slice(19));
+      expect(options.maximumBytesBilled).toBe("1000000000");
+      const sql = options.query as string;
+      expect(() => assertReadOnly(sql)).not.toThrow();
+      expect(sql).not.toContain(base);
+      expect(sql).not.toContain("E_TABLE");
+      expect(sql).toContain("`demo-project.synthetic_data_quality.validation_runs`");
+    }
+    const jobCall = calls.find((c) => label(c) === "evaluations_byjobid" && !c.options.dryRun)!;
+    expect(jobCall.options.params).toEqual({ job_id: final.generation_job_id, id });
+
+    // No registry row: null (the route's 404), and validation_runs is never asked.
+    const { client: empty, calls: none } = stubClient({});
+    expect(await new BigQueryProvider(config, () => Promise.resolve(empty)).evaluationAdjustments("nope")).toBeNull();
+    expect(none.map(label)).toEqual(["evaluations_events", "evaluations_events"]);
+  });
+
+  it("adjustments: a registry row with no id and no window asks validation_runs nothing", async () => {
+    const final = data.registry.find((r) => r.evaluation_id === "eval-0041" && r.event === "FINAL")!;
+    const bare = {
+      ...final,
+      base_run_id: null,
+      generation_job_id: null,
+      generation_started_at: null,
+      generation_finished_at: null,
+      run_ids: [],
+      tables: final.tables.map((t) => ({ ...t, run_id: null })),
+    };
+    const { client, calls } = stubClient({ "evaluations.events": () => tableRows("evaluation_data_history", [bare]) });
+    const provider = new BigQueryProvider(config, () => Promise.resolve(client));
+    const live = (await provider.evaluationAdjustments("eval-0041"))!;
+    expect(new Set(live.model_adjustments.map((t) => t.verdict))).toEqual(new Set(["unknown"]));
+    expect(live.generation_job_evaluation_id).toBeNull();
+    expect(calls.map((c) => (c.options.labels as { query: string }).query)).toEqual([
+      "evaluations_events",
+      "evaluations_events",
+    ]);
+  });
+
   it("turns chunk rows into metadata plus Float32 vectors", async () => {
     const set = data.rag[0]!;
     const rows = set.chunks
@@ -403,7 +481,9 @@ describe("the BigQuery provider", { timeout: 60_000 }, () => {
     expect(res.headers["x-data-source"]).toBe("bigquery");
     expect(Number(res.headers["x-bq-bytes-estimate"])).toBe(6 * 12_345_678);
     const facets = facetsSchema.parse(res.json());
-    expect(facets.counts).toMatchObject({ evaluations: 40, runs: 215, metrics: 900 });
+    // The stub's registry is the mock's: the storyline's 40 and the adjusted-keys launch's two.
+    expect(facets.counts).toMatchObject({ evaluations: latest.size, runs: 215, metrics: 900 });
+    expect(latest.size).toBe(42);
     const health = await app.inject({ url: "/api/health", headers: { host: "127.0.0.1:8787" } });
     expect(health.json()).toMatchObject({ mode: "bigquery", project: "demo-project" });
     await app.close();

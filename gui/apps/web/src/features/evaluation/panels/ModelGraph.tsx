@@ -3,7 +3,9 @@
  * bar per node (length = table overall score, sequential colour), arrows from
  * child to parent marked with the edge's orphan / fan-out status as an icon
  * and a word, never colour alone. Documented edges are dashed and INFO.
- * Nodes are buttons: click (or Enter) scopes the run view to that table.
+ * A table whose declared key the launch adjusted (ADR 0038) carries a
+ * "PK adj." chip. Nodes are buttons: click (or Enter) scopes the run view to
+ * that table.
  */
 import { useId, useMemo, useState, type KeyboardEvent } from "react";
 
@@ -23,6 +25,34 @@ const STATUS_STROKE: Record<string, string> = {
   info: "var(--status-neutral)",
   not_evaluated: "var(--status-neutral)",
 };
+
+/**
+ * The "PK adj." chip of a node (ADR 0038): the launch adjusted this table's declared key. A glyph
+ * and a stroke per reading, never colour alone — ≈ the copy is faithful, ↓ / ↑ the synthetic key
+ * repeats less / more than the source's, ? the adjustment cannot be read, ≠ the measures disagree.
+ */
+const ADJUSTMENT_GLYPH: Record<string, string> = {
+  faithful: "≈",
+  under: "↓",
+  over: "↑",
+  unmeasured: "?",
+  unknown: "?",
+};
+const CHIP_W = 62;
+const CHIP_H = 15;
+
+function adjustmentChip(adjustment: NonNullable<GraphNode["adjustment"]>): { text: string; stroke: string } {
+  if (adjustment.kind === "disagree") return { text: "PK adj. ≠", stroke: "var(--status-warn)" };
+  return {
+    text: `PK adj. ${ADJUSTMENT_GLYPH[adjustment.verdict] ?? "?"}`,
+    stroke:
+      adjustment.tone === "info"
+        ? "var(--status-info)"
+        : adjustment.tone === "warn"
+          ? "var(--status-warn)"
+          : "var(--status-neutral)",
+  };
+}
 
 function seqForScore(score: number | null): string {
   if (score === null) return "var(--slate)";
@@ -130,13 +160,18 @@ function NodeBox({
   const score = node.score;
   const barWidth = (NODE_W - 20) * Math.max(0, Math.min(1, score ?? 0));
   const glyph = STATUS_GLYPH[node.status ?? ""] ?? "";
+  const chip = node.adjustment ? adjustmentChip(node.adjustment) : null;
+  const adjusted = node.adjustment
+    ? `, primary key: ${node.adjustment.kind === "disagree" ? "measures disagree" : node.adjustment.label} (ADR 0038)`
+    : "";
   return (
     <g
       role="button"
       tabIndex={0}
       aria-pressed={selected}
-      aria-label={`${node.name}${node.external ? " (external)" : ""}: overall score ${fmtScore(score)}${node.status ? `, ${node.status}` : ""}. ${selected ? "Showing only this table; press to show all tables." : "Press to scope the views to this table."}`}
+      aria-label={`${node.name}${node.external ? " (external)" : ""}: overall score ${fmtScore(score)}${node.status ? `, ${node.status}` : ""}${adjusted}. ${selected ? "Showing only this table; press to show all tables." : "Press to scope the views to this table."}`}
       data-table={node.name}
+      data-adjustment={node.adjustment?.verdict}
       onClick={() => onSelect(node.name)}
       onKeyDown={onKeyDown}
       onFocus={() => setFocused(true)}
@@ -185,6 +220,30 @@ function NodeBox({
       <text x={node.x + 10} y={node.y + 53} fontSize={10} fill="var(--text-3)">
         {node.role ?? ""}
       </text>
+      {chip ? (
+        <g data-slot="pk-adjusted">
+          <rect
+            x={node.x + NODE_W - 10 - CHIP_W}
+            y={node.y + 43}
+            width={CHIP_W}
+            height={CHIP_H}
+            rx={CHIP_H / 2}
+            fill="var(--surface-1)"
+            stroke={chip.stroke}
+            strokeWidth={1.5}
+            strokeDasharray={node.adjustment?.kind === "question" ? "3 2" : undefined}
+          />
+          <text
+            x={node.x + NODE_W - 10 - CHIP_W / 2}
+            y={node.y + 54}
+            textAnchor="middle"
+            fontSize={9.5}
+            fill="var(--text-1)"
+          >
+            {chip.text}
+          </text>
+        </g>
+      ) : null}
     </g>
   );
 }
@@ -212,6 +271,11 @@ export function ModelGraph({
         role: n.role,
         overall_score: n.score,
         status: n.status,
+        pk_adjustment: n.adjustment
+          ? n.adjustment.kind === "disagree"
+            ? "measures disagree"
+            : n.adjustment.verdict
+          : null,
       })),
       ...graph.edges.map((e) => ({
         kind: "edge",
@@ -258,6 +322,12 @@ export function ModelGraph({
             dashed arrow: documented edge <InfoHint concept="eval:documented-edge" />
           </span>
           <span>dashed box: external parent</span>
+          {graph.nodes.some((n) => n.adjustment) ? (
+            <span className="inline-flex items-center gap-0.5" data-testid="pk-adjusted-legend">
+              PK adj.: the launch adjusted the declared key — ≈ faithful · ↓ under · ↑ over · ? not readable
+              <InfoHint concept="eval:model-adjusted" />
+            </span>
+          ) : null}
         </div>
       }
     >

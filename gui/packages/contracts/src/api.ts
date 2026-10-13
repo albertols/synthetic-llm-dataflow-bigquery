@@ -32,6 +32,7 @@ import {
   sourceTableStatsRowSchema,
   validationRunsRowSchema,
 } from "../generated/schemas";
+import { adjustmentJoins, adjustmentVerdicts, type TableModelAdjustment } from "./adjustments";
 import type { RelationshipModel } from "./relational";
 import { profilerStatsSchema } from "./sourceStats";
 import { canonicalBound } from "./timestamps";
@@ -236,6 +237,52 @@ export interface ProfileQuery {
   kind?: string[];
   side?: string[];
 }
+
+// ------------------------------------------------- model adjustments (ADR 0038) --
+
+/**
+ * One table of an evaluation with the GENERATOR's verdict on its declared key, read off the
+ * table's `validation_runs` row (adjustments.ts: `joinModelAdjustments`, `adjustmentVerdict`).
+ * A re-reading next to the evaluator's `table.pk_duplicate_rate` row — it never replaces that row.
+ */
+export const tableModelAdjustmentSchema = z.object({
+  /** `tables[].name`, else the landing table's short name. */
+  table: z.string(),
+  /** The joined `validation_runs.run_id`; null when no row was joined. */
+  run_id: z.string().nullable(),
+  /** `pk.duplicate` is among the excluded rules; null when no row was joined. */
+  adjusted: z.boolean().nullable(),
+  /** `excluded_blocker_rules`, split (the column is comma-separated text). */
+  excluded_rules: z.array(z.string()),
+  source_repeat_share: z.number().nullable(),
+  landing_repeat_share: z.number().nullable(),
+  /** landing − source. */
+  repeat_share_delta: z.number().nullable(),
+  /** `repeat_share_within_tolerance`, as the generator wrote it. */
+  within_tolerance: z.boolean().nullable(),
+  /** `dlq_by_rule["pk.duplicate"]`; null when the row has no such entry or no row was joined. */
+  pk_duplicate_dlq: z.int().nonnegative().nullable(),
+  verdict: z.enum(adjustmentVerdicts),
+  /** Which key joined the row: the table's run id, the launch's base run id, or the generation window. */
+  joined_by: z.enum(adjustmentJoins).nullable(),
+}) satisfies z.ZodType<TableModelAdjustment>;
+
+/**
+ * `GET /api/evaluations/:id/adjustments` — what the generator recorded about the keys of the
+ * launch this evaluation scored. A sibling of the detail route, not a field of it: it reads a
+ * second table (`validation_runs`), so a failure here leaves the evaluation readable.
+ */
+export const evaluationAdjustmentsSchema = z.object({
+  evaluation_id: z.string(),
+  /** One entry per generated table (external parents excluded), in registry order. */
+  model_adjustments: z.array(tableModelAdjustmentSchema),
+  /**
+   * Another evaluation whose `evaluation_job_id` is this row's `generation_job_id`: the registry
+   * row points at an evaluator job, not at a generation launch. Null when there is none.
+   */
+  generation_job_evaluation_id: z.string().nullable(),
+});
+export type EvaluationAdjustments = z.infer<typeof evaluationAdjustmentsSchema>;
 
 // ------------------------------------------------------------------ trend --
 

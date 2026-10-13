@@ -7,6 +7,7 @@ import type {
   ChunkMeta,
   Comparison,
   DlqSummary,
+  EvaluationAdjustments,
   EvaluationDetail,
   EvaluationFilterParsed,
   EvaluationSummary,
@@ -83,6 +84,11 @@ export interface DataProvider {
     ctx?: QueryContext,
   ): Promise<EvaluationDetail | null>;
   profiles(id: string, q: ProfileFilter, ctx?: QueryContext): Promise<ProfileRow[] | null>;
+  /**
+   * ADR 0038: each generated table of the evaluation joined to its `validation_runs` row, with the
+   * generator's verdict on the declared key; null when the id does not exist.
+   */
+  evaluationAdjustments(id: string, ctx?: QueryContext): Promise<EvaluationAdjustments | null>;
   metricTrend(q: TrendQueryParsed, ctx?: QueryContext): Promise<TrendPoint[]>;
   compare(ids: string[], ctx?: QueryContext): Promise<Comparison>;
   runs(q: RunFilterParsed, ctx?: QueryContext): Promise<ValidationRun[]>;

@@ -7,12 +7,16 @@
  *
  * Findings are ranked (FAIL, WARN, NOT EVALUATED, documented INFO, then the
  * PASS rows the evaluator downgraded as sampling noise — "≈ within noise, was
- * FAIL", Ruling R40) and point at the view that holds the evidence.
+ * FAIL", Ruling R40) and point at the view that holds the evidence. A PK
+ * duplicate rate on a key the launch adjusted reads the generator's verdict
+ * instead (ADR 0038, lib/adjustment.ts), between the real FAILs and the INFO.
  */
+import type { TableModelAdjustment } from "@contracts/adjustments";
 import type { EvaluationDetail, MetricRow } from "@contracts/api";
 
 import { isStale, STALE_AFTER_HOURS } from "@/lib/runState";
 
+import { adjustmentFor, PK_METRIC, readAdjustedPk, type AdjustedReading } from "./adjustment";
 import { FAMILY_LABEL, isRollup, metricMeta, metricShort } from "./catalogue";
 import { fmtCompared, fmtMetric, fmtSampleSize, fmtScore, fmtSig, scopeLabel } from "./format";
 import { countsPhrase, countStatuses, countsTotal, metricKey, statusRank } from "./model";
@@ -29,6 +33,11 @@ export interface Finding {
   text: string;
   /** The status sampling noise explained away (a PASS finding), else null. */
   downgradedFrom: "warn" | "fail" | null;
+  /**
+   * The generator's reading of this table's declared key (ADR 0038), else null. It carries the
+   * evaluator's own status: `severity` above is the finding's, not the stored row's.
+   */
+  adjusted: AdjustedReading | null;
   /** Where the evidence lives. */
   target: { tab: RunTab; column?: string; table?: string };
 }
@@ -167,32 +176,64 @@ function referenceNFor(detail: Pick<EvaluationDetail, "evaluation">, table: stri
   return detail.evaluation.tables.find((t) => t.name === table)?.reference_n ?? null;
 }
 
-/** Ranked findings: FAIL, WARN, NOT EVALUATED, then documented edges (INFO). */
-export function findings(detail: Pick<EvaluationDetail, "evaluation" | "metrics">): Finding[] {
+/**
+ * Where a finding ranks. ADR 0038: an adjusted key is neither the FAIL the evaluator stored nor
+ * an ordinary WARN or INFO, so its findings sit after the real FAILs and before the documented
+ * INFO — a copy that missed directly after the FAILs it replaced, a faithful one just before
+ * the documented edges. A question keeps the evaluator's own rank.
+ */
+function findingRank(finding: Finding): number {
+  if (finding.adjusted?.kind !== "adjusted") return statusRank(finding.severity);
+  return finding.severity === "warn" ? 0.5 : 2.75;
+}
+
+/**
+ * Ranked findings: FAIL, adjusted keys that missed their copy, WARN, NOT EVALUATED, adjusted keys
+ * that are faithful, then documented edges (INFO). `adjustments` is the generator's half
+ * (ADR 0038, the adjustments route): without it every row reads as the evaluator stored it.
+ */
+export function findings(
+  detail: Pick<EvaluationDetail, "evaluation" | "metrics">,
+  adjustments?: readonly TableModelAdjustment[],
+): Finding[] {
   const orphanSource = new Map<string, number | null>();
   for (const row of detail.metrics)
     if (row.metric_id === "relationship.orphan_rate_source" && row.edge) orphanSource.set(row.edge, row.value);
   const out: Finding[] = [];
+  const pkTables = new Set<string>();
   for (const row of detail.metrics) {
     if (isRollup(row.metric_id)) continue;
     const reading = readingOf(row);
+    // ADR 0038: the generator's verdict on this table's declared key, layered on the row.
+    const adjusted =
+      row.metric_id === PK_METRIC
+        ? readAdjustedPk(row, adjustmentFor(row.table_name, adjustments), {
+            modelAdjusted: detail.evaluation.model_adjusted,
+          })
+        : null;
+    if (row.metric_id === PK_METRIC) pkTables.add(row.table_name);
     const notable =
       row.status === "fail" ||
       row.status === "warn" ||
       row.status === "not_evaluated" ||
       (row.metric_id === "relationship.orphan_rate" && reading.documented) ||
       reading.downgradedFrom !== null ||
-      statusRank(row.status) === 2.5;
+      statusRank(row.status) === 2.5 ||
+      // A copy that missed is a finding even where the evaluator's own rule passed.
+      adjusted?.kind === "adjusted";
     if (!notable) continue;
-    const tab = tabFor(row);
+    const tab = adjusted ? "relational" : tabFor(row);
+    const own = interpretRow(row, referenceNFor(detail, row.table_name), row.edge ? orphanSource.get(row.edge) : null);
     out.push({
       key: metricKey(row),
-      severity: row.status,
+      // An adjusted reading sets the severity; a question or a disagreement keeps the evaluator's.
+      severity: adjusted?.kind === "adjusted" ? adjusted.status : row.status,
       level: row.level,
       family: row.family,
       metricId: row.metric_id,
-      text: interpretRow(row, referenceNFor(detail, row.table_name), row.edge ? orphanSource.get(row.edge) : null),
+      text: !adjusted ? own : adjusted.kind === "adjusted" ? adjusted.sentence : `${own} ${adjusted.sentence}`,
       downgradedFrom: reading.downgradedFrom,
+      adjusted,
       target: {
         tab,
         table: row.level === "model" ? undefined : row.table_name,
@@ -200,12 +241,29 @@ export function findings(detail: Pick<EvaluationDetail, "evaluation" | "metrics"
       },
     });
   }
+  // An adjusted table the evaluator wrote no PK row for still has the generator's verdict.
+  for (const adjustment of adjustments ?? []) {
+    if (pkTables.has(adjustment.table)) continue;
+    const adjusted = readAdjustedPk(null, adjustment, { modelAdjusted: detail.evaluation.model_adjusted });
+    if (adjusted?.kind !== "adjusted") continue;
+    out.push({
+      key: [PK_METRIC, adjustment.table, "", "", ""].join("|"),
+      severity: adjusted.status,
+      level: "table",
+      family: "integrity",
+      metricId: PK_METRIC,
+      text: adjusted.sentence,
+      downgradedFrom: null,
+      adjusted,
+      target: { tab: "relational", table: adjustment.table },
+    });
+  }
   const levelOrder = ["row", "table", "relationship", "field", "column", "pair", "model"];
   const familyOrder = ["privacy", "integrity", "fidelity", "diversity"];
   const familyRank = (f: string) => (familyOrder.includes(f) ? familyOrder.indexOf(f) : familyOrder.length);
   return out.sort(
     (a, b) =>
-      statusRank(a.severity) - statusRank(b.severity) ||
+      findingRank(a) - findingRank(b) ||
       familyRank(a.family) - familyRank(b.family) ||
       levelOrder.indexOf(a.level) - levelOrder.indexOf(b.level) ||
       a.key.localeCompare(b.key),

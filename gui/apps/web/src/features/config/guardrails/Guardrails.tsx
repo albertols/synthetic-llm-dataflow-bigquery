@@ -2,15 +2,18 @@
  * The guardrails explainer: Mode A's lines of defence in the order the code
  * runs them, every DLQ rule as the code emits it (emitted / declared /
  * counted, from generated/dlq_rules.json), the uniqueness modes and the env
- * BLOCKER gate. Where the docs disagree with the code, the code is drawn and
- * a "Docs differ" note says so.
+ * BLOCKER gate, with the runs whose gate left a rule out and the generator's
+ * verdict on each (ADR 0038). Where the docs disagree with the code, the code
+ * is drawn and a "Docs differ" note says so.
  */
 import { ArrowDown, CircleCheck, CircleMinus, CircleX } from "lucide-react";
 import { useMemo, type ReactNode } from "react";
 
+import { adjustmentVerdict, parseExcludedRules } from "@contracts/adjustments";
 import type { DlqRule } from "@contracts/relational";
 import { dlqRules } from "@contracts/generated/dlqRules";
 
+import { AdjustmentPill } from "@/components/AdjustmentPill";
 import { Callout } from "@/components/Callout";
 import { InfoHint } from "@/components/InfoHint";
 import { MiniDiagram } from "@/components/MiniDiagram";
@@ -19,6 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableContainer, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { fmtPoints, fmtRepeatShare, fmtTolerance, verdictMark } from "@/lib/adjustments";
 import { useRuns } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { formatCount, formatFixed, formatPercent, MISSING } from "@/lib/format";
@@ -536,6 +540,110 @@ function BlockerGate({ onOpenKnob }: { onOpenKnob: (id: string) => void }) {
           <CodeLink source={CITES.gateRatio.source} />
         </CardContent>
       </Card>
+      <AdjustedRuns />
     </Part>
+  );
+}
+
+/** `project.dataset.table` (or a Beam `project:dataset.table` spec) → the table's own name. */
+const shortTable = (table: string | null) => (table ? (table.replace(":", ".").split(".").at(-1) ?? table) : MISSING);
+
+/**
+ * The runs whose gate left a rule out (ADR 0038): `validation_runs.excluded_blocker_rules`, with
+ * the two key-repeat shares the generator compared and its verdict. The same pill the EVALUATION
+ * run view shows next to the evaluator's PK duplicate rate.
+ */
+function AdjustedRuns() {
+  const runs = useRuns({ limit: 1000 });
+  const adjusted = useMemo(
+    () => (runs.data?.data ?? []).filter((run) => parseExcludedRules(run.excluded_blocker_rules).length > 0),
+    [runs.data],
+  );
+  const source = runs.data?.dataSource ?? null;
+  return (
+    <Card data-testid="adjusted-runs">
+      <CardHeader>
+        <CardTitle className="flex items-center gap-1 text-sm">
+          Runs whose gate excluded a rule{source ? ` (${source})` : ""} <InfoHint concept="eval:model-adjusted" />
+        </CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-3 text-sm text-text-2">
+        <p>
+          A launch that measured a declared pk: repeating in the source drops that key and lands the repeats on purpose
+          (ADR 0038). Its validation_runs row names the excluded rule and compares the landing key-repeat share with the
+          source&apos;s, within {fmtTolerance()}.
+        </p>
+        {runs.isPending ? (
+          <p className="text-text-3">Loading validation_runs…</p>
+        ) : runs.error ? (
+          <p className="text-text-3">validation_runs could not be read: {String(runs.error.message)}</p>
+        ) : adjusted.length ? (
+          <TableContainer aria-label="Runs whose gate excluded a rule">
+            <Table>
+              <TableHeader>
+                <TableRow className="hover:bg-transparent">
+                  <TableHead scope="col">Landing table · run_id</TableHead>
+                  <TableHead scope="col">
+                    <span className="inline-flex items-center gap-0.5 whitespace-nowrap">
+                      Gate <InfoHint concept="config:blocker-gate" />
+                    </span>
+                  </TableHead>
+                  <TableHead scope="col">
+                    <span className="inline-flex items-center gap-0.5 whitespace-nowrap">
+                      excluded_blocker_rules <InfoHint concept="eval:model-adjusted" />
+                    </span>
+                  </TableHead>
+                  {(["Source share", "Landing share", "Δ"] as const).map((label) => (
+                    <TableHead key={label} scope="col" className="text-right">
+                      <span className="inline-flex items-center gap-0.5 whitespace-nowrap">
+                        {label} <InfoHint concept="eval:repeat-share" />
+                      </span>
+                    </TableHead>
+                  ))}
+                  <TableHead scope="col">
+                    <span className="inline-flex items-center gap-0.5 whitespace-nowrap">
+                      Verdict <InfoHint concept="eval:model-adjusted" />
+                    </span>
+                  </TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {adjusted.map((run) => (
+                  <TableRow key={`${run.run_id}|${run.created_at}`} data-run={run.run_id}>
+                    <TableCell className="text-xs">
+                      <span className="font-mono font-semibold text-text-1">{shortTable(run.landing_table)}</span>
+                      <span className="block font-mono text-[11px] break-all text-text-3">{run.run_id}</span>
+                    </TableCell>
+                    <TableCell className="font-mono text-xs whitespace-nowrap">{run.status ?? MISSING}</TableCell>
+                    <TableCell className="font-mono text-xs">{run.excluded_blocker_rules}</TableCell>
+                    <TableCell className="text-right font-mono text-xs tabular-nums">
+                      {fmtRepeatShare(run.source_repeat_share)}
+                    </TableCell>
+                    <TableCell className="text-right font-mono text-xs tabular-nums">
+                      {fmtRepeatShare(run.landing_repeat_share)}
+                    </TableCell>
+                    <TableCell className="text-right font-mono text-xs tabular-nums">
+                      {fmtPoints(run.repeat_share_delta)}
+                    </TableCell>
+                    <TableCell>
+                      {verdictMark(adjustmentVerdict(run)) ? (
+                        <AdjustmentPill verdict={adjustmentVerdict(run)} />
+                      ) : (
+                        // Another rule was left out, not pk.duplicate: no key was adjusted here.
+                        <span className="text-xs text-text-3">not a key adjustment</span>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+              </TableBody>
+            </Table>
+          </TableContainer>
+        ) : (
+          <p className="text-text-3">
+            No run in validation_runs excluded a rule: every table&apos;s pk.duplicate was weighed by its gate.
+          </p>
+        )}
+      </CardContent>
+    </Card>
   );
 }

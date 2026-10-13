@@ -54,8 +54,9 @@ test("filter the list, open a run, open a column drawer, then compare two runs",
 
   await page.goto("/evaluation");
   await expect(page.getByRole("heading", { level: 1, name: "Evaluations" })).toBeVisible();
-  // The first request warms the mock (a few seconds on a busy machine).
-  await expect(page.getByRole("heading", { level: 2, name: "40 evaluations" })).toBeVisible({ timeout: 45_000 });
+  // The first request warms the mock (a few seconds on a busy machine). 42: the storyline's 40
+  // and the two evaluations of the adjusted-keys launch.
+  await expect(page.getByRole("heading", { level: 2, name: "42 evaluations" })).toBeVisible({ timeout: 45_000 });
   await expectNoSeriousViolations(page, "list");
 
   // Filter: engine = b2_library (a multi-select combobox; the filter lives in the URL).
@@ -65,7 +66,7 @@ test("filter the list, open a run, open a column drawer, then compare two runs",
   await page.getByRole("option", { name: /b2_library/ }).click();
   await page.keyboard.press("Escape");
   await expect.poll(async () => (await routeSearch(page)).engine).toEqual(["b2_library"]);
-  await expect(page.getByRole("heading", { level: 2, name: /^\d+ evaluations?$/ })).not.toHaveText("40 evaluations");
+  await expect(page.getByRole("heading", { level: 2, name: /^\d+ evaluations?$/ })).not.toHaveText("42 evaluations");
   await expect(page.getByRole("button", { name: "Remove filter Engine: b2_library" })).toBeVisible();
   await noHorizontalScroll(page);
 
@@ -219,6 +220,85 @@ test("a RUNNING event more than 24 hours old reads Stale, with the reason on top
   expect(errors).toEqual([]);
 });
 
+// eval-0041 and eval-0042 evaluate one launch whose declared keys the source disproved (ADR 0038,
+// packages/mock/src/adjusted.ts): the first is chained to it, the second was handed an evaluator job.
+test("adjusted keys read the generator's verdict next to the evaluator's FAIL", async ({ page }) => {
+  test.setTimeout(240_000);
+  const errors = watchErrors(page);
+
+  await page.goto("/evaluation/eval-0041");
+  await expect(page.getByTestId("adjusted-summary")).toContainText(
+    "4 PK-duplicate FAILs are on keys the launch adjusted (ADR 0038) — 1 faithful, 2 under-reproduced, 1 over-reproduced.",
+    { timeout: 45_000 },
+  );
+  // The evaluator's own counts stand: its five key failures, four of them on adjusted keys.
+  const integrity = page.getByRole("region", { name: /^Integrity/ });
+  await expect(integrity.getByText("5 key failures")).toBeVisible();
+  await expect(integrity.getByTestId("adjusted-key-failures")).toHaveText(/4 on adjusted keys/);
+  // A copy that missed ranks right after the FAILs; a faithful one sits further down, before the INFO.
+  const findings = page.getByRole("list", { name: "Findings, most severe first" });
+  const under = findings.getByRole("listitem").filter({ hasText: "C_TABLE's declared key" });
+  await expect(under.locator('[data-status="adjusted"]')).toHaveText(/Adjusted · under/);
+  await expect(under).toContainText("evaluator: FAIL (threshold 0)");
+  await page.getByRole("button", { name: /^Show all \d+ findings$/ }).click();
+  const faithful = findings.getByRole("listitem").filter({ hasText: "E_TABLE's declared key" });
+  await expect(faithful.locator('[data-status="adjusted"]')).toHaveText(/Adjusted · faithful/);
+  await expect(faithful).toContainText("evaluator: FAIL (threshold 0)");
+  await expect(page.getByTestId("pk-adjusted-legend")).toBeVisible();
+  await expectNoSeriousViolations(page, "adjusted overview");
+  await noHorizontalScroll(page);
+
+  await page.goto("/evaluation/eval-0041?tab=relational");
+  const section = page.getByTestId("model-adjustments");
+  await expect(section).toBeVisible();
+  await expect(section).toHaveAccessibleName(/^Model adjustments \(ADR 0038\)/);
+  const row = (table: string) => section.locator(`tr[data-table="${table}"]`);
+  await expect(row("B_TABLE")).toContainText("not adjusted: a unique key is expected");
+  await expect(row("E_TABLE")).toContainText("Adjusted · faithful");
+  await expect(row("E_TABLE")).toContainText("99.999%");
+  await expect(row("C_TABLE")).toContainText("Adjusted · under");
+  await expect(row("A_TABLE")).toContainText("Adjusted · under");
+  await expect(row("D_TABLE")).toContainText("Adjusted · over");
+  await expect(row("G_TABLE")).toContainText("Adjusted?");
+  const strip = section.getByRole("figure", { name: /Synthetic key-repeat share against the source's/ });
+  await expect(strip.locator('[data-slot="interval-ref"]')).toHaveCount(5);
+  // The (i) of a pill opens the concept.
+  await row("E_TABLE").scrollIntoViewIfNeeded();
+  await section.getByRole("button", { name: "About: Adjusted model (ADR 0038)" }).first().click();
+  await expect(page.getByRole("dialog", { name: "Adjusted model (ADR 0038)" })).toBeVisible();
+  await page.keyboard.press("Escape");
+  // Orphan rates are another question: still there, still clean.
+  await expect(page.getByRole("region", { name: "Orphan rate per foreign key" })).toBeVisible();
+  await expectNoSeriousViolations(page, "adjusted relational");
+  await noHorizontalScroll(page);
+
+  await page.goto("/evaluation/eval-0041?tab=params");
+  await expect(page.getByTestId("model-adjusted-inferred")).toContainText(
+    "(validation_runs says adjusted on 6 tables)",
+  );
+
+  // The mis-wired evaluation: a danger banner, and nothing but the root joins.
+  await page.goto("/evaluation/eval-0042?tab=relational");
+  const banner = page.getByRole("note").filter({ hasText: "Wrong generation job" });
+  await expect(banner).toContainText(
+    "This evaluation points at an evaluator job, not a generation launch; scope and adjustments cannot be joined.",
+  );
+  await expect(banner.getByRole("link", { name: "eval-0041" })).toBeVisible();
+  const unjoined = page.getByRole("region", { name: /^Model adjustments \(ADR 0038\)/ });
+  await expect(unjoined.locator('tr[data-verdict="unknown"]')).toHaveCount(6);
+  await expect(unjoined.locator('tr[data-table="E_TABLE"]')).toContainText("no validation_runs row joined");
+  await expectNoSeriousViolations(page, "mis-wired evaluation");
+  await noHorizontalScroll(page);
+
+  // CONFIG's guardrails list the same runs with the same verdicts.
+  await page.goto("/config?section=guardrails");
+  const runs = page.getByTestId("adjusted-runs");
+  await expect(runs.getByRole("region", { name: "Runs whose gate excluded a rule" })).toBeVisible({ timeout: 60_000 });
+  await expect(runs.locator('[data-slot="adjustment"]')).toHaveCount(6);
+  await expectNoSeriousViolations(page, "guardrails adjusted runs");
+  expect(errors).toEqual([]);
+});
+
 test("degenerate registry states render labelled empty states, never a crash", async ({ page }) => {
   test.setTimeout(180_000);
   const errors = watchErrors(page);
@@ -283,4 +363,14 @@ test("screenshots of the evaluation tab (set GUI_SHOTS_DIR to capture)", async (
   await page.goto("/evaluation/eval-0032?tab=columns");
   await expect(page.getByRole("table", { name: /Columns by metric/ })).toBeVisible({ timeout: 30_000 });
   await shoot("wide-table");
+  // The adjusted-keys strip (docs/UX.md): an element shot of the figure, nothing cropped by hand.
+  // The viewport grows to the page first, so neither the sticky header nor the docked legend covers it.
+  await page.goto("/evaluation/eval-0041?tab=relational");
+  const strip = page.getByRole("figure", { name: /Synthetic key-repeat share against the source's/ });
+  await expect(strip).toBeVisible({ timeout: 30_000 });
+  const pageHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+  await page.setViewportSize({ width, height: Math.min(pageHeight, 12_000) });
+  await page.waitForTimeout(1500);
+  await strip.screenshot({ path: `${dir}/evaluation-adjusted-keys-${width}.png` });
+  await page.setViewportSize({ width, height: isMobile(testInfo.project.name) ? 844 : 900 });
 });

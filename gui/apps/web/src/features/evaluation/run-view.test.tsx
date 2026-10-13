@@ -14,7 +14,18 @@ import { buildGraph } from "./lib/graph";
 import { findings, headline, interpretRow } from "./lib/interpret";
 import { columnSummaries, countStatuses, countsTotal, familyCards } from "./lib/model";
 import { explainStatus, readingOf } from "./lib/reading";
-import { countsDetail, evaluation, flag, metric, profile, richDetail, tableEntry } from "./test/fixtures";
+import {
+  adjustedAdjustments,
+  adjustedDetail,
+  adjustmentOf,
+  countsDetail,
+  evaluation,
+  flag,
+  metric,
+  profile,
+  richDetail,
+  tableEntry,
+} from "./test/fixtures";
 import { pageOf, renderAt, stubApi } from "./test/harness";
 
 // The first render lazy-loads the route chunk and the concept batch: give async queries room.
@@ -26,14 +37,25 @@ vi.mock("@/components/EChartCanvas", () => ({
 }));
 
 function stubRun(detail = richDetail(), extra: Record<string, unknown> = {}) {
+  const id = detail.evaluation.evaluation_id;
   return stubApi({
-    [`/api/evaluations/${detail.evaluation.evaluation_id}`]: detail,
+    [`/api/evaluations/${id}`]: detail,
     "/api/evaluations": pageOf(detail.evaluation),
     "/api/relationships": { models: [] },
-    [`/api/evaluations/${detail.evaluation.evaluation_id}/profiles`]: [],
+    [`/api/evaluations/${id}/profiles`]: [],
+    // No table of the launch was adjusted (ADR 0038) unless a test says otherwise.
+    [`/api/evaluations/${id}/adjustments`]: {
+      evaluation_id: id,
+      model_adjustments: [],
+      generation_job_evaluation_id: null,
+    },
     ...extra,
   });
 }
+
+const ADJUSTMENTS = "/api/evaluations/eval-t001/adjustments";
+const ABOUT_ADJUSTED = "About: Adjusted model (ADR 0038)";
+const ABOUT_SHARES = "About: Key-repeat share and duplicate rate";
 
 describe("reading a metric row", () => {
   it("explains a PASS under warn by the threshold, and says it is indistinguishable at this n", () => {
@@ -384,6 +406,293 @@ describe("the run view", () => {
     const summaries = columnSummaries(richDetail().metrics);
     expect(summaries.map((s) => s.key)).toEqual(["users.created_at", "users.age"]);
     expect(summaries[1]!.worst).toBe("pass");
+  });
+});
+
+describe("adjusted keys in the run view (ADR 0038)", () => {
+  const findingOf = (list: HTMLElement, table: string) =>
+    within(list)
+      .getByText(new RegExp(`^${table}'s declared key`))
+      .closest("li")!;
+
+  it("the three FAIL findings render as Adjusted, A_TABLE gains a WARN, and the evaluator's status stays", async () => {
+    stubRun(adjustedDetail(), { [ADJUSTMENTS]: adjustedAdjustments() });
+    renderAt("/evaluation/eval-t001");
+    const list = await screen.findByRole("list", { name: "Findings, most severe first" });
+
+    // The line under the headline; the headline itself still counts the evaluator's four FAILs.
+    expect(screen.getByTestId("adjusted-summary")).toHaveTextContent(
+      "3 PK-duplicate FAILs are on keys the launch adjusted (ADR 0038) — 1 faithful, 2 under-reproduced. 1 more adjusted key passes the evaluator's rule and is under-reproduced.",
+    );
+    expect(screen.getByTestId("run-headline")).toHaveTextContent(/over 11 measured metrics: 4 fail, 6 pass, 1 info\./);
+    expect(
+      within(screen.getByTestId("adjusted-summary").closest("p")!).getByRole("button", { name: ABOUT_ADJUSTED }),
+    ).toBeInTheDocument();
+
+    // E_TABLE: faithful — an Adjusted pill at info tone where the Fail pill was.
+    const e = findingOf(list, "E_TABLE");
+    expect(e).toHaveAttribute("data-severity", "info");
+    expect(e).toHaveAttribute("data-evaluator-status", "fail");
+    const ePill = within(e).getByText("Adjusted · faithful").closest("[data-status]")!;
+    expect(ePill).toHaveAttribute("data-status", "adjusted");
+    expect(ePill).toHaveAttribute("data-tone", "info");
+    expect(within(e).getByText("evaluator: FAIL (threshold 0)")).toBeInTheDocument();
+    expect(within(e).queryByText("Fail")).toBeNull();
+    expect(e).toHaveTextContent("copied that share: synthetic 50.3% (Δ −0.0 pt, within ±5 pt)");
+
+    // C_TABLE and F_TABLE: under-reproduced — Adjusted at warn tone.
+    for (const table of ["C_TABLE", "F_TABLE"]) {
+      const item = findingOf(list, table);
+      expect(item, table).toHaveAttribute("data-severity", "warn");
+      const pill = within(item).getByText("Adjusted · under").closest("[data-status]")!;
+      expect(pill, table).toHaveAttribute("data-tone", "warn");
+      expect(within(item).getByText("evaluator: FAIL (threshold 0)")).toBeInTheDocument();
+      expect(within(item).queryByText("Fail")).toBeNull();
+    }
+
+    // A_TABLE: the evaluator passed it; the generator's verdict is a finding all the same.
+    const a = findingOf(list, "A_TABLE");
+    expect(a).toHaveAttribute("data-severity", "warn");
+    expect(a).toHaveAttribute("data-evaluator-status", "pass");
+    expect(within(a).getByText("Adjusted · under")).toBeInTheDocument();
+    expect(within(a).getByText("evaluator: PASS (threshold 0)")).toBeInTheDocument();
+    expect(a).toHaveTextContent("in none of the synthetic rows (Δ −50.9 pt, outside ±5 pt)");
+
+    // Every Adjusted pill has its (i); the real FAIL and the documented INFO keep their own pills.
+    const items = within(list).getAllByRole("listitem");
+    expect(items.map((li) => li.getAttribute("data-severity"))).toEqual([
+      "fail",
+      "warn",
+      "warn",
+      "warn",
+      "info",
+      "info",
+    ]);
+    for (const item of items.slice(1, 5))
+      expect(within(item).getByRole("button", { name: ABOUT_ADJUSTED })).toBeInTheDocument();
+    expect(within(items[0]!).getByText("Fail")).toBeInTheDocument();
+    expect(within(items[5]!).getByText("Info")).toBeInTheDocument();
+
+    // The integrity card still counts the evaluator's three key failures, and says where they sit.
+    const integrity = screen.getByRole("region", { name: /^Integrity/ });
+    expect(within(integrity).getByText("3 key failures")).toBeInTheDocument();
+    expect(within(integrity).getByTestId("adjusted-key-failures")).toHaveTextContent("3 on adjusted keys");
+    expect(document.body.textContent).not.toMatch(/NaN/);
+  });
+
+  it("the scorecard's PK row shows the Adjusted pill, both shares, the delta, the tolerance and the raw value", async () => {
+    stubRun(adjustedDetail(), { [ADJUSTMENTS]: adjustedAdjustments() });
+    renderAt("/evaluation/eval-t001");
+    const integrity = await screen.findByRole("region", { name: /^Integrity/ });
+    const row = integrity.querySelector<HTMLElement>('li[data-adjusted="true"]')!;
+    expect(row).not.toBeNull();
+    // "Look first" lists one row per metric id: the first PK row by key is C_TABLE.
+    expect(within(row).getByText("Adjusted · under")).toBeInTheDocument();
+    expect(within(row).getByText("evaluator: FAIL (threshold 0)")).toBeInTheDocument();
+    expect(within(row).getByRole("button", { name: ABOUT_ADJUSTED })).toBeInTheDocument();
+    expect(row).toHaveTextContent(
+      "source 66.2% · synthetic 42.0% · Δ −24.2 pt · tolerance ±5 pt · evaluator value 67.7%",
+    );
+  });
+
+  it("the Relational tab lists every table above the orphan rates, with the strip and the readouts", async () => {
+    stubRun(adjustedDetail(), { [ADJUSTMENTS]: adjustedAdjustments() });
+    renderAt("/evaluation/eval-t001?tab=relational");
+    const section = await screen.findByRole("region", { name: /^Model adjustments \(ADR 0038\)/ });
+    const orphans = screen.getByRole("region", { name: /^Orphan rates/ });
+    expect(section.compareDocumentPosition(orphans) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(section).getAllByRole("button", { name: ABOUT_ADJUSTED }).length).toBeGreaterThan(1);
+    expect(within(section).getAllByRole("button", { name: ABOUT_SHARES }).length).toBeGreaterThan(1);
+
+    const table = within(section).getByRole("region", { name: "Model adjustments per table" });
+    const cells = (name: string) =>
+      within(within(table).getByText(name).closest("tr")!)
+        .getAllByRole("cell")
+        .map((cell) => cell.textContent);
+    expect(cells("E_TABLE")).toEqual([
+      "E_TABLEjoined by run id",
+      "COL_001",
+      "50.3%",
+      "50.3%",
+      "−0.0 pt",
+      expect.stringContaining("Adjusted · faithful"),
+      "99.999%",
+      "Fail",
+      "pk.duplicate1,010,415 counted, none removed",
+    ]);
+    expect(cells("C_TABLE").slice(1, 8)).toEqual([
+      "COL_001, COL_003",
+      "66.2%",
+      "42.0%",
+      "−24.2 pt",
+      expect.stringContaining("Adjusted · under"),
+      "67.7%",
+      "Fail",
+    ]);
+    // The evaluator PASSED A_TABLE; the generator did not.
+    expect(cells("A_TABLE").slice(2, 8)).toEqual([
+      "50.9%",
+      "0.0%",
+      "−50.9 pt",
+      expect.stringContaining("Adjusted · under"),
+      "0%",
+      "Pass",
+    ]);
+    // The root was not adjusted: the normal rule, and no share.
+    expect(cells("B_TABLE").slice(2, 9)).toEqual([
+      "—",
+      "—",
+      "—",
+      "not adjusted: a unique key is expected",
+      "0%",
+      "Pass",
+      "—",
+    ]);
+    // Every column header but the table's name explains itself, and so does every pill.
+    const headers = within(table).getAllByRole("columnheader");
+    expect(headers.map((h) => h.textContent?.trim())).toEqual([
+      "Table",
+      "Declared PK",
+      "Source share",
+      "Synthetic share",
+      "Δ (syn − src)",
+      "Verdict",
+      "Evaluator duplicate rate",
+      "Evaluator status",
+      "Excluded rules",
+    ]);
+    for (const header of headers.slice(1))
+      expect(within(header).getByRole("button", { name: /^About: / }), header.textContent ?? "").toBeInTheDocument();
+    for (const i of [2, 3, 4]) expect(within(headers[i]!).getByRole("button", { name: ABOUT_SHARES })).toBeVisible();
+    for (const i of [1, 5, 8]) expect(within(headers[i]!).getByRole("button", { name: ABOUT_ADJUSTED })).toBeVisible();
+    const pills = [...section.querySelectorAll<HTMLElement>('[data-slot="adjustment"]')];
+    expect(pills.length).toBeGreaterThanOrEqual(12);
+    for (const pill of pills) expect(within(pill).getByRole("button", { name: ABOUT_ADJUSTED })).toBeInTheDocument();
+
+    // The strip: one row per adjusted table, the source's share as the tick, ±5 pt as the band.
+    const strip = within(section).getByRole("figure", { name: /Synthetic key-repeat share against the source's/ });
+    expect(within(strip).getByRole("button", { name: ABOUT_SHARES })).toBeInTheDocument();
+    expect(strip.querySelectorAll('[data-slot="interval-ref"]')).toHaveLength(4);
+    expect(strip.querySelectorAll('[data-slot="interval-band"]')).toHaveLength(4);
+    // Each row says its tick and its dot in numbers (source → synthetic) and the difference.
+    const stripRow = within(strip).getByText("C_TABLE").closest("div.grid")!;
+    expect(stripRow).toHaveTextContent("66.2% → 42.0%");
+    expect(stripRow).toHaveTextContent("Δ −24.2 pt");
+    expect(within(stripRow as HTMLElement).getByText("Adjusted · under")).toBeInTheDocument();
+    expect(within(strip).getByRole("button", { name: "View data" })).toBeInTheDocument();
+
+    // The readout keeps the evaluator's raw value, status and rule next to the generator's half.
+    const readout = section.querySelector<HTMLElement>('article[data-metric="table.pk_duplicate_rate"]')!;
+    expect(readout).toHaveAttribute("data-status", "fail");
+    const figures = Object.fromEntries(
+      [...readout.querySelectorAll("dt")].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]),
+    );
+    expect(figures).toMatchObject({
+      Value: "100%",
+      "Warn / fail": "0% / 0%",
+      "Source share": "50.3%",
+      "Synthetic share": "50.3%",
+      "Δ (syn − src)": "−0.0 pt",
+      Tolerance: "±5 pt",
+      Evaluator: "FAIL",
+    });
+    expect(within(readout).getByText("evaluator: FAIL (threshold 0)")).toBeInTheDocument();
+    expect(readout).toHaveTextContent(/Evaluator's rule: value 99\.999% > 0 → FAIL/);
+    expect(within(readout).getByRole("button", { name: ABOUT_SHARES })).toBeInTheDocument();
+
+    // Orphan rates are another question: unchanged, and nothing fails there.
+    expect(within(orphans).queryByText("Fail")).toBeNull();
+    expect(within(orphans).getByText("Info · documented")).toBeInTheDocument();
+  });
+
+  it("marks adjusted tables in the model graph and explains the chip in its legend", async () => {
+    stubRun(adjustedDetail(), { [ADJUSTMENTS]: adjustedAdjustments() });
+    renderAt("/evaluation/eval-t001");
+    const graph = await screen.findByRole("figure", { name: /^Model graph/ });
+    const node = (table: string) => graph.querySelector<SVGGElement>(`g[data-table="${table}"]`)!;
+    expect(node("E_TABLE").querySelector('[data-slot="pk-adjusted"]')).toHaveTextContent("PK adj. ≈");
+    expect(node("C_TABLE").querySelector('[data-slot="pk-adjusted"]')).toHaveTextContent("PK adj. ↓");
+    expect(node("B_TABLE").querySelector('[data-slot="pk-adjusted"]')).toBeNull();
+    expect(node("E_TABLE")).toHaveAccessibleName(/primary key: Adjusted · faithful \(ADR 0038\)/);
+    const legend = within(graph).getByTestId("pk-adjusted-legend");
+    expect(legend).toHaveTextContent("PK adj.: the launch adjusted the declared key");
+    expect(within(legend).getByRole("button", { name: ABOUT_ADJUSTED })).toBeInTheDocument();
+  });
+
+  it("Parameters: a NULL model_adjusted is filled from validation_runs, and says where from", async () => {
+    stubRun(adjustedDetail(), { [ADJUSTMENTS]: adjustedAdjustments() });
+    renderAt("/evaluation/eval-t001?tab=params");
+    const inferred = await screen.findByTestId("model-adjusted-inferred");
+    expect(inferred).toHaveTextContent("— (validation_runs says adjusted on 4 tables)");
+    expect(within(inferred).getByRole("button", { name: ABOUT_ADJUSTED })).toBeInTheDocument();
+  });
+
+  it("a key whose adjustment cannot be read keeps the evaluator's FAIL, with an Adjusted? badge", async () => {
+    const adjustments = adjustedAdjustments();
+    adjustments.model_adjustments = adjustments.model_adjustments.map((a) =>
+      a.table === "F_TABLE"
+        ? adjustmentOf("F_TABLE", { verdict: "unknown", adjusted: null, run_id: null, joined_by: null })
+        : a,
+    );
+    stubRun(adjustedDetail(), { [ADJUSTMENTS]: adjustments });
+    renderAt("/evaluation/eval-t001");
+    const list = await screen.findByRole("list", { name: "Findings, most severe first" });
+    const f = within(list)
+      .getByText(/^PK duplicates 78\.6% on F_TABLE — FAIL/)
+      .closest("li")!;
+    expect(f).toHaveAttribute("data-severity", "fail");
+    expect(within(f).getByText("Fail")).toBeInTheDocument();
+    const badge = within(f).getByText("Adjusted?");
+    expect(badge.closest("[data-slot='adjustment']")).toHaveAttribute("data-kind", "question");
+    expect(within(f).getByRole("button", { name: ABOUT_ADJUSTED })).toBeInTheDocument();
+    expect(f).toHaveTextContent("No validation_runs row could be joined to F_TABLE");
+  });
+
+  it("without the adjustments route the page still renders, and says the generator's half is missing", async () => {
+    // No stub for the adjustments route: the harness answers 404.
+    stubRun(adjustedDetail(), { [ADJUSTMENTS]: undefined });
+    renderAt("/evaluation/eval-t001?tab=relational");
+    expect(await screen.findByText("The launch's model adjustments could not be loaded")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: /^Model adjustments/ })).toBeNull();
+    expect(screen.getByRole("region", { name: /^Orphan rates/ })).toBeInTheDocument();
+  });
+
+  it("warns when the registry row names an evaluator job as its generation job", async () => {
+    const detail = adjustedDetail();
+    detail.evaluation.generation_job_name = "sdfb-evaluation-v0-5-3-20260913t090211";
+    stubRun(detail, { [ADJUSTMENTS]: adjustedAdjustments({ generation_job_evaluation_id: "eval-t000" }) });
+    renderAt("/evaluation/eval-t001");
+    const banner = (await screen.findByText(/^Wrong generation job/)).closest("[role='note']")!;
+    expect(banner).toHaveAttribute("data-tone", "danger");
+    expect(banner).toHaveTextContent(
+      "This evaluation points at an evaluator job, not a generation launch; scope and adjustments cannot be joined.",
+    );
+    expect(banner).toHaveTextContent("sdfb-evaluation-v0-5-3-20260913t090211");
+    expect(within(banner as HTMLElement).getByRole("link", { name: "eval-t000" })).toHaveAttribute(
+      "href",
+      "/evaluation/eval-t000",
+    );
+  });
+
+  it("the same banner on the other evaluation's job id alone, and none on a generation launch", async () => {
+    const detail = adjustedDetail();
+    stubRun(detail, { [ADJUSTMENTS]: adjustedAdjustments({ generation_job_evaluation_id: "eval-t000" }) });
+    const first = renderAt("/evaluation/eval-t001");
+    expect(await screen.findByText(/^Wrong generation job/)).toBeInTheDocument();
+    first.unmount();
+    stubRun(detail, { [ADJUSTMENTS]: adjustedAdjustments() });
+    renderAt("/evaluation/eval-t001");
+    await screen.findByTestId("run-headline");
+    expect(screen.queryByText(/^Wrong generation job/)).toBeNull();
+  });
+
+  it("an evaluation whose launch adjusted nothing shows none of it", async () => {
+    stubRun();
+    renderAt("/evaluation/eval-t001?tab=relational");
+    await screen.findByRole("region", { name: /^Orphan rates/ });
+    expect(screen.queryByRole("region", { name: /^Model adjustments/ })).toBeNull();
+    expect(screen.queryByText(/Adjusted/)).toBeNull();
+    expect(screen.queryByText("The launch's model adjustments could not be loaded")).toBeNull();
   });
 });
 

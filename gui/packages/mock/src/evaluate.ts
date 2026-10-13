@@ -54,10 +54,12 @@ import {
   scoreRow,
   sha256Hex,
   spearman,
+  tableFamilyScores,
   tvd,
   tvdNullExpectation,
   w1FromBins,
   wilson,
+  type FamilyScores,
 } from "@synthetic-platform/stats";
 
 import type { EvalSpec } from "./storyline";
@@ -1528,7 +1530,12 @@ export class TableEvaluator {
 
   // ----------------------------------------------------------------- table --
 
-  tableLevel(detectionShift: number) {
+  /**
+   * `keys`: a launch whose declared-key counts are known (adjusted.ts) writes the PK row as the
+   * evaluator's `_key_duplicates` does — the rate with its counts in `detail` — and, having
+   * declared no identity, a `not_evaluated` identity row. Without it, the storyline's draw.
+   */
+  tableLevel(detectionShift: number, keys?: KeyCounts) {
     const { rowsSynthetic, rowsExpected, nSynthetic } = this.ctx;
     this.metric("table.row_count_ratio", {
       value: rowsSynthetic / rowsExpected,
@@ -1537,11 +1544,28 @@ export class TableEvaluator {
       nSynthetic: rowsSynthetic,
     });
     const pk = this.ctx.table.columns.find((c) => c.role === "pk");
-    const dupRate =
-      this.ctx.spec.uniquenessMode === "streaming" ? this.ctx.rng.poisson(nSynthetic * 2e-7) / nSynthetic : 0;
-    if (pk) {
-      this.metric("table.pk_duplicate_rate", { value: dupRate, nSynthetic: rowsSynthetic });
-      this.metric("table.identity_duplicate_rate", { value: dupRate, nSynthetic: rowsSynthetic });
+    if (keys) {
+      this.metric("table.pk_duplicate_rate", {
+        value: keys.duplicateRows / rowsSynthetic,
+        nSource: null,
+        nSynthetic: rowsSynthetic,
+        detail: {
+          duplicate_rows: keys.duplicateRows,
+          distinct_keys: keys.distinctKeys,
+          null_key_rows: 0,
+          key_columns: keys.columns,
+          null_key_note: NULL_KEY_NOTE,
+        },
+      });
+      this.notEvaluated("table.identity_duplicate_rate", NO_IDENTITY, { nSource: null, nSynthetic: null });
+    } else {
+      // Drawn whether or not the table has a key: the seeded stream stays where it was.
+      const dupRate =
+        this.ctx.spec.uniquenessMode === "streaming" ? this.ctx.rng.poisson(nSynthetic * 2e-7) / nSynthetic : 0;
+      if (pk) {
+        this.metric("table.pk_duplicate_rate", { value: dupRate, nSynthetic: rowsSynthetic });
+        this.metric("table.identity_duplicate_rate", { value: dupRate, nSynthetic: rowsSynthetic });
+      }
     }
     const nDetect = Math.min(50_000, nSynthetic);
     const auc = Math.min(0.99, 0.5 + detectionShift);
@@ -1582,4 +1606,156 @@ export function sum(values: readonly number[]): number {
 /** Children-per-parent histogram at n parents from shares (the last bucket is "≥"). */
 export function fanoutCounts(rng: Random, shares: readonly number[], parents: number): number[] {
   return rng.multinomial(parents, normalize(shares));
+}
+
+/** The five `table.*_score` or `model.*_score` rows, under `table` (a table, or the model's name). */
+export function familyRows(ev: TableEvaluator, table: string, scores: FamilyScores, level: "table" | "model") {
+  const prefix = level === "table" ? "table" : "model";
+  for (const family of ["fidelity", "privacy", "integrity", "diversity", "overall"] as const) {
+    const id = `${prefix}.${family}_score` as const;
+    const row = ev.metric(id, { value: scores[family], nSource: null, nSynthetic: null, method: "exact" });
+    row.table_name = table;
+  }
+}
+
+/**
+ * One evaluated table's roll-ups (Ruling R11) and its SDMetrics-style shape / trend scores, added
+ * to `ev`; returns the family scores. The evaluator's roll-up (aggregate_scores): `score: none`
+ * measured rows score null (R26).
+ */
+export function tableRollups(ev: TableEvaluator): FamilyScores {
+  const scores = tableFamilyScores(ev.result.metrics);
+  const columnFidelity = ev.result.metrics.filter(
+    (m) => m.family === "fidelity" && m.level === "column" && m.score !== null,
+  );
+  const byColumn = new Map<string, number[]>();
+  for (const m of columnFidelity)
+    byColumn.set(m.column_name ?? "", [...(byColumn.get(m.column_name ?? "") ?? []), m.score!]);
+  const meanOf = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+  ev.metric("table.column_shape_score", {
+    value: meanOf([...byColumn.values()].map((xs) => meanOf(xs)!)),
+    nSource: null,
+    nSynthetic: null,
+  });
+  ev.metric("table.pair_trend_score", {
+    value: meanOf(ev.result.metrics.filter((m) => m.level === "pair" && m.score !== null).map((m) => m.score!)),
+    nSource: null,
+    nSynthetic: null,
+  });
+  familyRows(ev, ev.ctx.table.name, scores, "table");
+  return scores;
+}
+
+/** The declared primary key's counts on the landed table (what the evaluator's `_key_duplicates` reports). */
+export interface KeyCounts {
+  /** The declared PK columns (`detail.key_columns`). */
+  columns: string[];
+  /** Rows whose key occurs at least twice — first rows included. */
+  duplicateRows: number;
+  /** Distinct key tuples. */
+  distinctKeys: number;
+}
+
+/** `_NULL_KEY_NOTE` and `_NO_IDENTITY` of sdfb_evaluation/beam/membership.py, verbatim. */
+const NULL_KEY_NOTE = "rows whose key has a NULL part are not duplicates; a NULL key is its own integrity defect";
+const NO_IDENTITY = "no identity columns declared in the relationship model";
+
+/** One foreign-key edge as the relationship producers read it. */
+export interface EdgeReading {
+  /** The evaluator's label: `child(col) -> parent(col)`. */
+  label: string;
+  /** false on a documented edge: its orphan rate is INFO (Ruling R42). */
+  enforced: boolean;
+  role: string;
+  /** The parent is not generated by the launch: its key pool can lag (orphans). */
+  external: boolean;
+  /** Children per parent in the source: fanout[k] = share of parents with k children (the last bucket is "≥"). */
+  fanout: readonly number[];
+  /** Extra corruption of the synthetic fan-out (0 = none). */
+  drift: number;
+  /** Share of child keys with no landed parent, on an external edge. */
+  orphanShare: number;
+  parentsSource: number;
+  parentsSynthetic: number;
+}
+
+/**
+ * The relationship-level rows of one edge: orphan rates (synthetic and source), the fan-out
+ * distances, adherence and parent coverage. The evaluator publishes no fan-out histogram: the
+ * comparison is in these metrics.
+ */
+export function edgeMetrics(ev: TableEvaluator, edge: EdgeReading, rng: Random) {
+  const { label, parentsSource, parentsSynthetic } = edge;
+  const hs = fanoutCounts(rng, edge.fanout, parentsSource);
+  const shares = edge.fanout.map((s, i) => s * (1 + edge.drift * (i - 2) * 0.5));
+  const hy = fanoutCounts(rng, shares, parentsSynthetic);
+  const mean = (h: number[]) => h.reduce((acc, c, i) => acc + c * i, 0) / Math.max(sum(h), 1);
+  const children = hy.reduce((acc, c, i) => acc + c * i, 0);
+  const sourceChildren = sum(hs.map((c, i) => c * i));
+  // Enforced edges orphan only when the external key pool lags (orphanShare); a documented edge
+  // copies its key from the driving edge, so it has none — while the source, with deleted
+  // parents, has a few: the INFO comparison the catalogue describes.
+  const orphans = edge.external ? rng.binomial(children, edge.orphanShare) : 0;
+  const sourceOrphans = edge.enforced ? 0 : rng.binomial(sourceChildren, 0.0021);
+  // A documented edge (enforced: false) is context, not a verdict: the scorer writes its orphan
+  // rate as INFO, unscored and out of the roll-ups (Ruling R42).
+  ev.metric("relationship.orphan_rate", {
+    edge: label,
+    value: orphans / Math.max(children, 1),
+    sourceValue: sourceOrphans / Math.max(sourceChildren, 1),
+    nSource: sourceChildren,
+    nSynthetic: children,
+    detail: { orphans, enforced: edge.enforced, role: edge.role },
+    enforced: edge.enforced,
+  });
+  ev.metric("relationship.orphan_rate_source", {
+    edge: label,
+    value: sourceOrphans / Math.max(sourceChildren, 1),
+    nSource: sourceChildren,
+    detail: { orphans: sourceOrphans, enforced: edge.enforced, role: edge.role },
+  });
+  ev.metric("relationship.fanout_tvd", {
+    edge: label,
+    enforced: edge.enforced,
+    value: tvd(hs, hy),
+    noiseFloor: tvdNullExpectation(hs, parentsSource, parentsSynthetic),
+    nSource: parentsSource,
+    nSynthetic: parentsSynthetic,
+  });
+  ev.metric("relationship.fanout_w1", {
+    edge: label,
+    value: w1FromBins([0.5, 1.5, 2.5, 3.5], hs, hy),
+    nSource: parentsSource,
+    nSynthetic: parentsSynthetic,
+  });
+  ev.metric("relationship.fanout_mean_ratio", {
+    edge: label,
+    value: mean(hy) / mean(hs),
+    sourceValue: mean(hs),
+    syntheticValue: mean(hy),
+    nSource: parentsSource,
+    nSynthetic: parentsSynthetic,
+  });
+  ev.metric("relationship.zero_child_share_delta", {
+    edge: label,
+    value: Math.abs(hy[0]! / parentsSynthetic - hs[0]! / parentsSource),
+    ...foldedNewcombeCi(hy[0]!, parentsSynthetic, hs[0]!, parentsSource),
+    nSource: parentsSource,
+    nSynthetic: parentsSynthetic,
+  });
+  ev.metric("relationship.cardinality_adherence", {
+    edge: label,
+    value: 1 - orphans / Math.max(children, 1),
+    ...(children > 0 ? wilsonCi(children - orphans, children) : {}),
+    nSynthetic: children,
+  });
+  const covered = (h: number[]) => 1 - h[0]! / Math.max(sum(h), 1);
+  ev.metric("relationship.parent_coverage", {
+    edge: label,
+    value: covered(hy) / covered(hs),
+    sourceValue: covered(hs),
+    syntheticValue: covered(hy),
+    nSource: parentsSource,
+    nSynthetic: parentsSynthetic,
+  });
 }

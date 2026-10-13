@@ -10,6 +10,7 @@ import { getRouteApi, Link } from "@tanstack/react-router";
 import { ArrowLeft, GitCompareArrows, SearchX } from "lucide-react";
 import { useCallback, useMemo } from "react";
 
+import { isEvaluatorJobName } from "@contracts/adjustments";
 import type { EvaluationDetail } from "@contracts/api";
 
 import { Callout } from "@/components/Callout";
@@ -21,12 +22,13 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ApiError, useEvaluation, useEvaluations, useRelationships } from "@/lib/api";
+import { ApiError, useEvaluation, useEvaluationAdjustments, useEvaluations, useRelationships } from "@/lib/api";
 import { formatCompact, formatCount, formatDateTime } from "@/lib/format";
 import { CLOSE_BY_HAND, isStale, STALE_AFTER_HOURS } from "@/lib/runState";
 
 import { NoiseLegend } from "./components/NoiseLegend";
 import { StatusCounts } from "./components/StatusCounts";
+import { adjustedSummary, adjustedTableCount, adjustmentRows, PK_METRIC } from "./lib/adjustment";
 import { isRollup } from "./lib/catalogue";
 import { fmtScore, shortModel } from "./lib/format";
 import { buildGraph } from "./lib/graph";
@@ -111,9 +113,14 @@ function RunPageContent() {
   // and the (much larger) detail request only goes out for an id that exists.
   const lookup = useEvaluations({ q: evaluationId.slice(0, 200), limit: 50 });
   const exists = lookup.data ? lookup.data.data.items.some((e) => e.evaluation_id === evaluationId) : undefined;
-  const query = useEvaluation(exists === false || lookup.isPending ? undefined : evaluationId);
+  const knownId = exists === false || lookup.isPending ? undefined : evaluationId;
+  const query = useEvaluation(knownId);
+  // ADR 0038: the generator's own verdict on each table's declared key, from validation_runs. Its
+  // own request, so a failure there never blanks the evaluation (the Relational section says so).
+  const adjustmentsQuery = useEvaluationAdjustments(knownId);
   const relationships = useRelationships();
   const detail = query.data?.data;
+  const adjustments = adjustmentsQuery.data?.data;
   const previous = usePrevious(detail);
 
   const setSearch = useCallback(
@@ -127,17 +134,23 @@ function RunPageContent() {
     if (!detail) return null;
     const model = relationships.data?.data.models.find((m) => m.model === detail.evaluation.relationship_model) ?? null;
     const summaries = columnSummaries(detail.metrics);
+    // A re-reading layered on the evaluator's rows: the cards, the headline and the counts below
+    // are computed from the rows as stored, whatever the adjustments say.
+    const adjusted = adjustmentRows(detail, adjustments?.model_adjustments);
     return {
       model,
       summaries,
+      adjusted,
+      adjustedSummary: adjustedSummary(adjusted),
+      adjustedTables: adjustedTableCount(adjustments?.model_adjustments),
       cards: familyCards(detail),
-      findings: findings(detail),
+      findings: findings(detail, adjustments?.model_adjustments),
       headline: headline(detail),
-      graph: buildGraph(detail, model),
+      graph: buildGraph(detail, model, adjusted),
       tables: tableNames(detail.evaluation, detail.metrics),
       counts: countStatuses(detail.metrics.filter((m) => !isRollup(m.metric_id))),
     };
-  }, [detail, relationships.data]);
+  }, [detail, adjustments, relationships.data]);
 
   const table = search.table && derived?.tables.includes(search.table) ? search.table : undefined;
   const scopedMetrics = useMemo(
@@ -169,7 +182,10 @@ function RunPageContent() {
   const openColumn = useCallback((key: string) => setSearch({ column: key }), [setSearch]);
 
   const notFound = exists === false || (query.error instanceof ApiError && query.error.status === 404);
-  if (!notFound && (lookup.isPending || query.isPending)) return <Loading id={evaluationId} />;
+  // Wait for the adjustments too (they settle, failed or not): a FAIL shown first and re-read a
+  // moment later would be a reading the page is about to retract.
+  if (!notFound && (lookup.isPending || query.isPending || adjustmentsQuery.isLoading))
+    return <Loading id={evaluationId} />;
   if (notFound || query.error || !detail || !derived || !heatmap) {
     return (
       <div className="flex flex-col gap-6">
@@ -203,6 +219,19 @@ function RunPageContent() {
   // No metric row in the whole evaluation (not the table scope): "yet" only while its last event is a live RUNNING.
   const noMetrics = hasMetrics ? undefined : evaluation.event === "RUNNING" && !stale ? "yet" : "at-all";
   const rowsSynthetic = evaluation.tables.reduce((acc, t) => acc + (t.rows_synthetic ?? 0), 0);
+  // The registry row names an evaluator job as its generation job: by that job's name, or because
+  // another evaluation ran as it. Scope and adjustments are then joined to the wrong job.
+  const evaluatorJob = adjustments?.generation_job_evaluation_id ?? null;
+  const wrongJob = isEvaluatorJobName(evaluation.generation_job_name) || evaluatorJob !== null;
+  const adjustmentsError = adjustmentsQuery.error ? String(adjustmentsQuery.error.message) : null;
+  // Without the generator's half a PK-duplicate FAIL reads as a defect: say that it is missing.
+  const unreadFails =
+    adjustmentsError && detail.metrics.some((m) => m.metric_id === PK_METRIC && m.status === "fail")
+      ? "The launch's model adjustments (ADR 0038) could not be loaded, so every PK-duplicate FAIL below reads as the evaluator stored it."
+      : null;
+  const bytes = [query.data?.bytesEstimate, adjustmentsQuery.data?.bytesEstimate].filter(
+    (b): b is number => b !== null && b !== undefined,
+  );
 
   return (
     <div className="flex flex-col gap-6">
@@ -249,6 +278,32 @@ function RunPageContent() {
           stays as it is until someone closes it. Before closing it, check that no Dataflow job is still running for it:
           see <SourceLink path={`${CLOSE_BY_HAND.doc}#${CLOSE_BY_HAND.anchor}`}>{CLOSE_BY_HAND.title}</SourceLink> in
           the run playbook.
+        </Callout>
+      ) : null}
+
+      {wrongJob ? (
+        <Callout tone="danger" title="Wrong generation job: this evaluation points at an evaluator job">
+          This evaluation points at an evaluator job, not a generation launch; scope and adjustments cannot be joined.
+          The registry row names{" "}
+          <code className="font-mono [overflow-wrap:anywhere] text-text-1">
+            {evaluation.generation_job_name ?? evaluation.generation_job_id}
+          </code>{" "}
+          as its generation job
+          {evaluatorJob ? (
+            <>
+              , which is the Dataflow job of evaluation{" "}
+              <Link
+                to="/evaluation/$evaluationId"
+                params={{ evaluationId: evaluatorJob }}
+                // Underlined: a link inside a sentence is never told apart by colour alone (WCAG 1.4.1).
+                className="text-link underline underline-offset-2"
+              >
+                {evaluatorJob}
+              </Link>
+            </>
+          ) : null}
+          . The metrics below describe the landing tables as the evaluator found them; evaluate the launch again with
+          its own job id to join its window, its run ids and its model adjustments.
         </Callout>
       ) : null}
 
@@ -331,9 +386,14 @@ function RunPageContent() {
                   footnote={`${derived.tables.length} table${derived.tables.length === 1 ? "" : "s"} · ${formatCount(detail.flags.length)} flagged rows`}
                 />
               </div>
-              <Scorecards cards={derived.cards} selectedTable={table} onOpen={onOpen} />
+              <Scorecards cards={derived.cards} selectedTable={table} adjustments={derived.adjusted} onOpen={onOpen} />
               <div className="grid gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
-                <InterpretationPanel headline={derived.headline} findings={derived.findings} onOpen={onOpen} />
+                <InterpretationPanel
+                  headline={derived.headline}
+                  findings={derived.findings}
+                  adjusted={derived.adjustedSummary ?? unreadFails}
+                  onOpen={onOpen}
+                />
                 <ModelGraph
                   graph={derived.graph}
                   modelName={evaluation.relationship_model}
@@ -418,15 +478,25 @@ function RunPageContent() {
           ) : null}
         </TabsContent>
         <TabsContent value="relational">
-          {tab === "relational" ? <RelationalPanel graph={derived.graph} table={table} noMetrics={noMetrics} /> : null}
+          {tab === "relational" ? (
+            <RelationalPanel
+              graph={derived.graph}
+              table={table}
+              noMetrics={noMetrics}
+              adjustments={derived.adjusted}
+              adjustmentsError={adjustmentsError}
+            />
+          ) : null}
         </TabsContent>
-        <TabsContent value="params">{tab === "params" ? <ParamsPanel evaluation={evaluation} /> : null}</TabsContent>
+        <TabsContent value="params">
+          {tab === "params" ? <ParamsPanel evaluation={evaluation} adjustedTables={derived.adjustedTables} /> : null}
+        </TabsContent>
       </Tabs>
 
       {query.isFetching && !query.isPending ? <p className="sr-only">Refreshing…</p> : null}
-      {query.data?.bytesEstimate !== null && query.data?.bytesEstimate !== undefined ? (
+      {bytes.length ? (
         <p className="text-xs text-text-3">
-          BigQuery bytes for this view: {formatCompact(query.data.bytesEstimate)} B (dry run).
+          BigQuery bytes for this view: {formatCompact(bytes.reduce((a, b) => a + b, 0))} B (dry run).
         </p>
       ) : null}
       {evaluation.event === "RUNNING" && !stale ? (

@@ -195,6 +195,18 @@ ORDER BY recorded_at`,
     sql: (d) => `SELECT * FROM \`${d.quality}.evaluation_latest\`
 WHERE evaluation_id IN UNNEST(@ids)`,
   },
+  "evaluations.byJobId": {
+    name: "evaluations.byJobId",
+    description:
+      "Another evaluation that ran as this Dataflow job: a registry row whose generation_job_id is one points at " +
+      "an evaluator job, not at a generation launch.",
+    types: { job_id: "STRING", id: "STRING" },
+    fields: [field("evaluation_id", "STRING", "REQUIRED")],
+    sql: (d) => `SELECT evaluation_id FROM \`${d.quality}.evaluation_latest\`
+WHERE evaluation_job_id = @job_id AND evaluation_id != @id
+ORDER BY evaluation_id
+LIMIT 1`,
+  },
   "evaluations.slim": {
     name: "evaluations.slim",
     description: "evaluation_latest without the JSON snapshots, for facets.",
@@ -315,6 +327,31 @@ WHERE (IFNULL(ARRAY_LENGTH(@run_ids), 0) = 0 OR run_id IN UNNEST(@run_ids))
   AND (IFNULL(ARRAY_LENGTH(@env), 0) = 0 OR env IN UNNEST(@env))
   AND (@from IS NULL OR created_at >= TIMESTAMP(@from))
   AND (@to IS NULL OR created_at < TIMESTAMP(@to))
+ORDER BY created_at DESC, run_id
+LIMIT @limit`,
+  },
+  "runs.forEvaluation": {
+    name: "runs.forEvaluation",
+    description:
+      "The validation_runs rows one evaluation's tables can be joined to (ADR 0038 adjustments): the tables' " +
+      "run ids, any run of the launch's base run id, or the landing tables inside the generation window. A row " +
+      "matches ANY key, so each guard requires its parameter to be set (an unset key matches nothing).",
+    types: {
+      run_ids: ["STRING"],
+      base_run_id: "STRING",
+      landing_tables: ["STRING"],
+      from: "STRING",
+      to: "STRING",
+      limit: "INT64",
+    },
+    fields: fields("validation_runs"),
+    sql: (d) => `SELECT * FROM \`${d.quality}.validation_runs\`
+WHERE (IFNULL(ARRAY_LENGTH(@run_ids), 0) > 0 AND run_id IN UNNEST(@run_ids))
+  OR (@base_run_id IS NOT NULL
+    AND (run_id = @base_run_id OR STARTS_WITH(run_id, CONCAT(@base_run_id, '-'))))
+  OR (IFNULL(ARRAY_LENGTH(@landing_tables), 0) > 0 AND landing_table IN UNNEST(@landing_tables)
+    AND @from IS NOT NULL AND @to IS NOT NULL
+    AND created_at >= TIMESTAMP(@from) AND created_at <= TIMESTAMP(@to))
 ORDER BY created_at DESC, run_id
 LIMIT @limit`,
   },

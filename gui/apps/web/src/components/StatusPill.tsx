@@ -7,6 +7,7 @@ import {
   Info,
   LoaderCircle,
   OctagonAlert,
+  Scale,
   TriangleAlert,
   type LucideIcon,
 } from "lucide-react";
@@ -15,11 +16,13 @@ import { cn } from "@/lib/cn";
 
 /**
  * Metric statuses (evaluation_metrics.status), run statuses and scope
- * statuses (evaluation_data_history.status / scope_status), any case; and
- * STALE, the display state of a RUNNING event that is too old to be running
- * (lib/runState.ts), which the registry never holds.
+ * statuses (evaluation_data_history.status / scope_status), any case; and two
+ * display states no table holds: STALE, a RUNNING event that is too old to be
+ * running (lib/runState.ts), and `adjusted`, the generator's reading of a key
+ * the launch adjusted (ADR 0038, lib/adjustments.ts).
  */
 export type StatusValue =
+  | "adjusted"
   | "ok"
   | "count_mismatch"
   | "contaminated"
@@ -46,6 +49,9 @@ const STATUS: Record<string, { tone: StatusTone; label: string; icon: LucideIcon
   warn: { tone: "warn", label: "Warn", icon: TriangleAlert },
   fail: { tone: "critical", label: "Fail", icon: CircleX },
   info: { tone: "info", label: "Info", icon: Info },
+  // A key the launch adjusted (ADR 0038): the generator's reading, weighed against the source.
+  // Never stored by the evaluator; the caller sets the tone (info: faithful copy, warn: it missed).
+  adjusted: { tone: "info", label: "Adjusted", icon: Scale },
   not_evaluated: { tone: "neutral", label: "Not evaluated", icon: CircleDashed },
   running: { tone: "info", label: "Running", icon: LoaderCircle },
   // Needs attention: neither a success nor a failure the evaluator measured. Not the spinner, and not

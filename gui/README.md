@@ -80,7 +80,9 @@ answers but every page returns 503 "The web app is not built".
 
 The mock is 40 invented evaluations of a thelook-shaped model
 (`users ──< orders ──< order_items >── products`), computed by the same maths
-the views use; [`docs/DATA_CONTRACTS.md`](docs/DATA_CONTRACTS.md#the-mock-world-packagesmock)
+the views use, plus two evaluations of one launch whose declared keys the
+source disproved (ADR 0038, aliased table names);
+[`docs/DATA_CONTRACTS.md`](docs/DATA_CONTRACTS.md#the-mock-world-packagesmock)
 describes its storyline and edge cases.
 
 ## Quickstart: live mode (BigQuery)
@@ -204,7 +206,12 @@ plan instead of judging them. An evaluation whose last registry event is
 or the job most likely ended without recording a result, and the row stays
 `RUNNING` in the registry until it is closed
 ([the rule](docs/UX.md#status-levels-data-source);
-[closing it](../docs/RUN_PLAYBOOK.md#a-running-row-that-never-closes)).
+[closing it](../docs/RUN_PLAYBOOK.md#a-running-row-that-never-closes)). A PK
+duplicate rate on a key the launch adjusted
+([ADR 0038](../docs/adr/0038-measured-conflicts-adjust-the-model.md)) is shown
+with the generator's verdict (faithful, under- or over-reproduced) next to the
+evaluator's status, never as a bare FAIL
+([how it reads](docs/UX.md#adjusted-keys-adr-0038)).
 
 ![EVALUATION compare: three runs side by side, with the notice that they are not directly comparable and why](docs/assets/evaluation-compare-1440.png)
 

@@ -3,17 +3,23 @@
  * card leads with the model roll-up score and its status, breaks it down per
  * table and per catalogue level (LevelChip + status counts), and lists the
  * metrics to look at first with their raw value, score, baseline and noise
- * floor side by side.
+ * floor side by side. A PK duplicate rate on a key the launch adjusted
+ * (ADR 0038) shows the generator's verdict, both key-repeat shares and the
+ * evaluator's own status and value; the card's key-failure count stays the
+ * evaluator's, with the number of them on adjusted keys under it.
  */
 import type { MetricRow } from "@contracts/api";
 
+import { AdjustmentPill } from "@/components/AdjustmentPill";
 import { InfoHint } from "@/components/InfoHint";
 import { LevelChip } from "@/components/LevelChip";
 import { StatusPill } from "@/components/StatusPill";
+import { fmtPoints, fmtRepeatShare, fmtTolerance } from "@/lib/adjustments";
 import { cn } from "@/lib/cn";
 
+import { PK_METRIC, type AdjustmentRow } from "../lib/adjustment";
 import { FAMILY_LABEL, FAMILY_QUESTION, isLevel, metricConcept, metricShort } from "../lib/catalogue";
-import { fmtMetric, fmtScore, scopeLabel } from "../lib/format";
+import { fmtCompared, fmtMetric, fmtScore, scopeLabel } from "../lib/format";
 import type { RunTab } from "../lib/interpret";
 import { tabFor } from "../lib/interpret";
 import type { FamilyCard } from "../lib/model";
@@ -38,15 +44,41 @@ function ScoreBar({ score, warn, fail }: { score: number | null; warn: number; f
   );
 }
 
-function WorstRow({ row, onOpen }: { row: MetricRow; onOpen: (target: OpenTarget) => void }) {
+/** The generator's reading of a PK row's key (ADR 0038), when the adjustments say anything about its table. */
+function adjustedFor(row: MetricRow, adjustments: readonly AdjustmentRow[]): AdjustmentRow | null {
+  if (row.metric_id !== PK_METRIC) return null;
+  const found = adjustments.find((a) => a.table === row.table_name);
+  return found?.reading ? found : null;
+}
+
+function WorstRow({
+  row,
+  adjustments,
+  onOpen,
+}: {
+  row: MetricRow;
+  adjustments: readonly AdjustmentRow[];
+  onOpen: (target: OpenTarget) => void;
+}) {
   const k = row.value_kind;
   const reading = readingOf(row);
-  const tab = tabFor(row);
+  const adjusted = adjustedFor(row, adjustments);
+  // The adjusted reading's evidence (both shares, the strip) is on the Relational tab.
+  const tab = adjusted ? "relational" : tabFor(row);
   const concept = metricConcept(row.metric_id);
+  const replaced = adjusted?.reading?.kind === "adjusted";
   return (
-    <li className="grid min-w-0 gap-0.5 border-t border-border pt-2">
-      <div className="flex min-w-0 items-center gap-1.5">
-        <StatusPill status={row.status} size="sm" />
+    <li className="grid min-w-0 gap-0.5 border-t border-border pt-2" data-adjusted={adjusted ? "true" : undefined}>
+      {/* Only a row with a reading wraps: every other row keeps its one line, truncated. */}
+      <div className={cn("flex min-w-0 items-center gap-1.5", adjusted && "flex-wrap")}>
+        {replaced ? null : <StatusPill status={row.status} size="sm" />}
+        {adjusted?.reading ? (
+          <AdjustmentPill
+            verdict={adjusted.adjustment.verdict}
+            disagree={adjusted.reading.kind === "disagree"}
+            evaluator={adjusted.reading.evaluatorText}
+          />
+        ) : null}
         {reading.downgradedFrom ? <NoiseDowngrade from={reading.downgradedFrom} /> : null}
         <button
           type="button"
@@ -72,6 +104,14 @@ function WorstRow({ row, onOpen }: { row: MetricRow; onOpen: (target: OpenTarget
             value {undefinedValueText(reading).split(":")[0]} · gate {reading.gateSource} {fmtMetric(reading.gate, k)} ·
             score {fmtScore(row.score)}
           </>
+        ) : replaced && adjusted ? (
+          // The generator's two shares, and the evaluator's own value kept beside them.
+          <>
+            source {fmtRepeatShare(adjusted.adjustment.source_repeat_share)} · synthetic{" "}
+            {fmtRepeatShare(adjusted.adjustment.landing_repeat_share)} · Δ{" "}
+            {fmtPoints(adjusted.adjustment.repeat_share_delta)} · tolerance {fmtTolerance()} · evaluator value{" "}
+            {fmtCompared([row.value, 0], k)[0]}
+          </>
         ) : (
           <>
             value {fmtMetric(row.value, k)} · score {fmtScore(row.score)} · baseline {fmtMetric(row.baseline_value, k)}{" "}
@@ -86,15 +126,22 @@ function WorstRow({ row, onOpen }: { row: MetricRow; onOpen: (target: OpenTarget
 function Card({
   card,
   selectedTable,
+  adjustments,
   onOpen,
 }: {
   card: FamilyCard;
   selectedTable?: string;
+  adjustments: readonly AdjustmentRow[];
   onOpen: (t: OpenTarget) => void;
 }) {
   const titleId = `scorecard-${card.family}`;
   const warn = card.rollup?.threshold_warn ?? 0.85;
   const fail = card.rollup?.threshold_fail ?? 0.7;
+  // ADR 0038: of the key failures the evaluator counted, those on keys the launch adjusted. The
+  // count itself stays the evaluator's.
+  const adjustedKeyFailures = card.metrics.filter(
+    (m) => m.status === "fail" && adjustedFor(m, adjustments)?.reading?.kind === "adjusted",
+  ).length;
   return (
     <section
       aria-labelledby={titleId}
@@ -122,6 +169,15 @@ function Card({
                 label={`${card.keyFailures} key ${card.keyFailures === 1 ? "failure" : "failures"}`}
                 size="sm"
               />
+            </span>
+          ) : null}
+          {card.keyFailures && adjustedKeyFailures ? (
+            <span
+              data-testid="adjusted-key-failures"
+              className="inline-flex items-center gap-0.5 text-[11px] whitespace-nowrap text-text-3"
+            >
+              {adjustedKeyFailures} on adjusted {adjustedKeyFailures === 1 ? "key" : "keys"}
+              <InfoHint concept="eval:model-adjusted" />
             </span>
           ) : null}
         </div>
@@ -170,7 +226,12 @@ function Card({
           <h4 className="text-[11px] font-medium tracking-wide text-text-3 uppercase">Look first</h4>
           <ul className="grid gap-2">
             {card.worst.map((row) => (
-              <WorstRow key={`${row.metric_id}|${scopeLabel(row)}`} row={row} onOpen={onOpen} />
+              <WorstRow
+                key={`${row.metric_id}|${scopeLabel(row)}`}
+                row={row}
+                adjustments={adjustments}
+                onOpen={onOpen}
+              />
             ))}
           </ul>
         </div>
@@ -181,13 +242,18 @@ function Card({
   );
 }
 
+const NO_ADJUSTMENTS: readonly AdjustmentRow[] = [];
+
 export function Scorecards({
   cards,
   selectedTable,
+  adjustments = NO_ADJUSTMENTS,
   onOpen,
 }: {
   cards: FamilyCard[];
   selectedTable?: string;
+  /** ADR 0038: per table, the generator's verdict on its declared key (lib/adjustment.ts `adjustmentRows`). */
+  adjustments?: readonly AdjustmentRow[];
   onOpen: (target: OpenTarget) => void;
 }) {
   return (
@@ -200,7 +266,7 @@ export function Scorecards({
       </div>
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {cards.map((card) => (
-          <Card key={card.family} card={card} selectedTable={selectedTable} onOpen={onOpen} />
+          <Card key={card.family} card={card} selectedTable={selectedTable} adjustments={adjustments} onOpen={onOpen} />
         ))}
       </div>
     </section>

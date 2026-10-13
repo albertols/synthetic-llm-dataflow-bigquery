@@ -132,7 +132,8 @@ test("the BFF answers /api/* in mock mode and serves client routes", async ({ re
   expect(health.headers()["x-data-source"]).toBe("mock");
   expect(await health.json()).toMatchObject({ status: "ok", mode: "mock", project: null });
   const page = (await (await request.get("/api/evaluations?limit=2")).json()) as { total: number; items: unknown[] };
-  expect(page.total).toBe(40);
+  // The storyline's 40 and the two evaluations of the adjusted-keys launch.
+  expect(page.total).toBe(42);
   expect(page.items).toHaveLength(2);
   const spa = await request.get("/evaluation/eval-0001");
   expect(spa.ok()).toBe(true);

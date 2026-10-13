@@ -11,6 +11,7 @@ const CATALOGUE = `${REPO}/packages/sdfb-evaluation/src/sdfb_evaluation/catalogu
 const SCHEMAS = `${REPO}/packages/sdfb-evaluation/src/sdfb_evaluation/schemas`;
 const RELATIONSHIPS = `${REPO}/config/relationships/README.md`;
 const CONTRACTS = `${REPO}/gui/docs/DATA_CONTRACTS.md`;
+const ADR_0038 = `${REPO}/docs/adr/0038-measured-conflicts-adjust-the-model.md`;
 
 const catalogueLink = { label: "Metric catalogue (metrics.yaml)", url: CATALOGUE, kind: "code" } as const;
 
@@ -365,6 +366,55 @@ export const concepts = defineConcepts([
       tip: "Compare the synthetic orphan rate with orphan_rate_source: a source with deleted parents has orphans too.",
     },
     links: [{ label: "Relationship models — enforced and enabled", url: RELATIONSHIPS, kind: "docs" }],
+  },
+  {
+    id: "eval:model-adjusted",
+    title: "Adjusted model (ADR 0038)",
+    purpose:
+      "The relationship model declared this key as unique, but a full scan of the source proved it repeats. The launch trusted the data: it dropped the key from the effective model, kept generating the source's children-per-parent distribution, still counted pk.duplicate without removing rows, excluded only that rule from this table's gate, and then compared the synthetic repeat share with the source's.",
+    interpretation: {
+      good: "Faithful: the synthetic key repeats as often as the source's (within ±5 points). A non-zero PK duplicate rate is then the intended copy, not a defect.",
+      bad: "Under / over: the copy missed — the synthetic key is more unique (under) or more repeated (over) than the source. Fix the fan-out or the declared key, not the duplicates.",
+      tip: "If joins on this key must be unique downstream, the declared pk: is wrong for this source — declare the real key (add the completing columns) in config/relationships/*.yaml.",
+    },
+    pitfalls:
+      "The evaluator's table.pk_duplicate_rate counts every row on a repeated key (first rows included) and has no source baseline, so it reads ≈ 2× the generator's repeat share on a 2-children-per-key table and always FAILs. “Adjusted?” means the generator row could not be joined to this evaluation, or that the launch measured no source share — read the launch log's model_adjustment milestones.",
+    links: [
+      { label: "ADR 0038 — measured conflicts adjust the model", url: ADR_0038, kind: "adr" },
+      {
+        label: "ADR 0036 — parent-driven fan-out generation (D6)",
+        url: `${REPO}/docs/adr/0036-parent-driven-fanout-generation.md`,
+        kind: "adr",
+      },
+      { label: "Relationship models — README", url: RELATIONSHIPS, kind: "docs" },
+      { label: "config/thresholds.yml — pk.duplicate", url: `${REPO}/config/thresholds.yml`, kind: "code" },
+      { label: "Metric catalogue — table.pk_duplicate_rate", url: CATALOGUE, kind: "code" },
+    ],
+    level: "table",
+  },
+  {
+    id: "eval:repeat-share",
+    title: "Key-repeat share and duplicate rate",
+    purpose:
+      "Two measures over the same declared key. The generator's repeat share is the share of rows beyond the first per key; the evaluator's duplicate rate is the share of rows whose key occurs at least twice, first rows included.",
+    formula:
+      "\\begin{aligned} \\text{repeat share} &= 1 - \\frac{\\text{distinct keys}}{\\text{rows}} \\\\ \\text{duplicate rate} &= \\frac{\\text{rows whose key occurs} \\ge 2 \\text{ times}}{\\text{rows}} \\end{aligned}",
+    interpretation: {
+      good: "They describe one fact: 1 − distinct keys ÷ rows, from the evaluator's own counts, equals the generator's landing repeat share. The run view checks that (to 1e-6) before it shows a verdict.",
+      tip: "E_TABLE: 1,000,000 distinct keys over 2,010,415 rows give a repeat share of 0.5026, while 2,010,391 of those rows sit on a repeated key: a duplicate rate of 0.99999. Only 24 rows have a key to themselves.",
+    },
+    pitfalls:
+      "Where every key holds exactly two rows the duplicate rate is 1 and the repeat share 0.5: the rate reads about twice the share, and neither is a defect by itself. A row whose key has a NULL part is left out of the evaluator's keys, while the generator groups NULL as a value, so on NULL keys the two can differ: the run view then says the measures disagree instead of giving a verdict.",
+    links: [
+      { label: "ADR 0038 — measured conflicts adjust the model (D4)", url: ADR_0038, kind: "adr" },
+      {
+        label: "model_adjustment.py — repeat shares and the ±0.05 tolerance",
+        url: `${REPO}/packages/sdfb-core/src/sdfb_core/contracts/model_adjustment.py`,
+        kind: "code",
+      },
+      { label: "Metric catalogue — table.pk_duplicate_rate", url: CATALOGUE, kind: "code" },
+    ],
+    level: "table",
   },
   {
     id: "eval:fanout",

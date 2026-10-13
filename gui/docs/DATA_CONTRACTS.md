@@ -49,9 +49,10 @@ The API contract (`src/api.ts`), the payload parsers (`src/payloads.ts`) and
 the relational and source-stats helpers are hand-written zod **on top of**
 these generated rows. Most response shapes embed the row schemas whole or
 reuse their vocabularies (`evaluationMetricsRowSchema.shape.status`). A few
-joined shapes, such as `trendPointSchema`, restate columns by hand; those are
-not regenerated, so a column type change on the Python side has to be followed
-there by hand.
+joined shapes, such as `trendPointSchema` and `tableModelAdjustmentSchema`
+([model adjustments](#model-adjustments-adr-0038)), restate columns by hand;
+those are not regenerated, so a column type change on the Python side has to
+be followed there by hand.
 
 ## Status
 
@@ -210,6 +211,114 @@ _The registry's five status counts always add up to its total:
   `metrics_info = NULL`; the cell then shows the remainder as "info or other".
   Counts that do not add up are shown as inconsistent data, in words.
 
+## Model adjustments (ADR 0038)
+
+**Claim: the generator's verdict on a declared key reaches the browser as its
+own payload, joined to the evaluation by the strongest key the registry row
+has, and never across launches.**
+
+`GET /api/evaluations/:id/adjustments` → `EvaluationAdjustments`
+(`evaluationAdjustmentsSchema`, `src/api.ts`):
+
+```ts
+type TableModelAdjustment = {
+  table: string; // tables[].name, else the landing table's short name
+  run_id: string | null; // the joined validation_runs.run_id
+  adjusted: boolean | null; // pk.duplicate is in excluded_rules; null = no row joined
+  excluded_rules: string[]; // excluded_blocker_rules, split
+  source_repeat_share: number | null;
+  landing_repeat_share: number | null;
+  repeat_share_delta: number | null; // landing − source
+  within_tolerance: boolean | null; // repeat_share_within_tolerance, as written
+  pk_duplicate_dlq: number | null; // dlq_by_rule["pk.duplicate"]
+  verdict: "not_adjusted" | "faithful" | "under" | "over" | "unmeasured" | "unknown";
+  joined_by: "run_id" | "base_run_id" | "window" | null;
+};
+type EvaluationAdjustments = {
+  evaluation_id: string;
+  model_adjustments: TableModelAdjustment[]; // one per generated table, registry order
+  generation_job_evaluation_id: string | null; // another evaluation that ran as this row's generation job
+};
+```
+
+Two `validation_runs` columns are not what their names suggest:
+`excluded_blocker_rules` is comma-separated text (`""` on a table the launch
+did not adjust, `NULL` on rows older than the column), and `dlq_by_rule` is a
+JSON string. `parseExcludedRules` and the route's `parseCounts` read them; the
+generated zod keeps both as `string | null`.
+
+```mermaid
+flowchart TD
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  T[("🗄️ registry row<br/>one tables entry")]:::store
+  Q1{"🛡️ the table has<br/>a run_id"}:::cpu
+  Q2{"🛡️ the row has<br/>a base_run_id"}:::cpu
+  Q3{"🛡️ a generation window<br/>and one launch in it"}:::cpu
+  J1["⚪ run_id<br/>equal to tables.run_id"]:::data
+  J2["⚪ base_run_id<br/>plus the table suffix"]:::data
+  J3["⚪ window<br/>landing table and created_at"]:::data
+  U["∅ unknown<br/>no row joined"]:::data
+
+  T --> Q1
+  Q1 -- "yes" --> J1
+  Q1 -- "no" --> Q2
+  Q2 -- "yes" --> J2
+  Q2 -- "no" --> Q3
+  Q3 -- "yes" --> J3
+  Q3 -- "no" --> U
+  J1 -. "no such row" .-> U
+  J2 -. "no such row" .-> U
+```
+
+_`joinModelAdjustments` (`src/adjustments.ts`), per table. A key the row has
+is never traded for a weaker one: a table with a run id joins that run or
+nothing, and a row with a base run id joins that launch or nothing._
+
+| Step | Join key                                                                                                                                  | `joined_by`   |
+| :--- | :---------------------------------------------------------------------------------------------------------------------------------------- | :------------ |
+| 1    | `tables[].run_id = validation_runs.run_id`                                                                                                | `run_id`      |
+| 2    | `base_run_id` + the table's suffix: `<base>-NN-<table>` (`<table>` is the landing table's short name), or `<base>` for a one-table launch | `base_run_id` |
+| 3    | the landing table, with `created_at` inside `[generation_started_at, generation_finished_at + 1 h]`, when every such row is of one launch | `window`      |
+| 4    | none                                                                                                                                      | `null`        |
+
+- **Never across launches.** Step 3 runs only when the registry row has no
+  base run id; two launches writing the same landing table inside the window
+  are ambiguous and give `unknown`, not the newer row. A Beam table spec
+  (`project:dataset.table`) and the dotted name are one landing table.
+  Several rows of one run (a retried write) are one launch: the newest is read.
+- **The verdict is the generator's.** `faithful` is the stored
+  `repeat_share_within_tolerance = true`; `under` / `over` is the sign of the
+  delta when it is `false`; an excluded rule with no share is `unmeasured`
+  (ADR 0038 D4: a launch that measured none writes none). Nothing is
+  recomputed against the GUI's own copy of the tolerance.
+- **The wrong job.** `generation_job_evaluation_id` is set when another
+  evaluation's `evaluation_job_id` equals this row's `generation_job_id`
+  (`evaluations.byJobId`). The job-name check needs no query:
+  `isEvaluatorJobName` knows the two prefixes the evaluator runs under
+  (`sdfb-evaluation-` from the composer DAGs, `sdfb-eval-` from its CLI). They
+  are kept by hand in `adjustments.ts`: no exporter carries them, so a renamed
+  evaluator job is not caught by `contracts:check`.
+
+**Why a sibling route and not a field of the detail.** The brief allowed
+either. The adjustments read a second table (`validation_runs`), with its own
+dry run, bytes cap and row contract. As a field, a failure there (a cap, a
+permission, a drifted column) would answer 4xx or 5xx for the whole evaluation;
+as a route, the evaluation renders and the run view says the generator's half
+is missing. `EvaluationDetail` stays what the evaluator wrote, and the compare
+view, which reads details too, pays nothing. The run view requests both at
+once and waits for both before its first paint, so a FAIL is never shown and
+then re-read.
+
+Two named queries serve it (`queries/registry.ts`), both parameterised and
+read-only. `runs.forEvaluation` returns the candidate rows: a row matches
+**any** of the three keys, so each guard requires its parameter to be set
+(`IFNULL(ARRAY_LENGTH(@run_ids), 0) > 0 AND …`), where a list **filter**
+treats an unset parameter as "all". It scans `validation_runs` whole (one row
+per table per launch), as `runs.list` does.
+
 ## How to add a metric
 
 ```mermaid
@@ -310,7 +419,10 @@ Fetched rows are cached in memory (LRU) and never persisted.
 - E-mail addresses only at `example.com`; no 15–16-digit integers; no real
   corporate identifiers — invented or public thelook names only.
 - Every metric value is computed from mock distributions by `packages/stats`,
-  never typed.
+  never typed. One declared exception: the adjusted-keys launch replays
+  recorded row and key counts, typed once in `adjusted.ts` (`LAUNCH`); every
+  share, rate, delta, DLQ count, gate ratio and verdict is derived from them
+  (see below).
 
 ### The mock world (`packages/mock`)
 
@@ -320,8 +432,8 @@ Fetched rows are cached in memory (LRU) and never persisted.
   `order_items.user_id → users.id` is **documented** (`enforced: false`), so
   its `relationship.orphan_rate` is `info` (score null) next to a non-zero
   `relationship.orphan_rate_source`. Invented, so not in
-  `relationships.json`: the BFF serves it from `/api/relationships` in mock
-  mode. Project `demo-project`: sources in `synthetic_source`, landings in
+  `relationships.json`: the BFF serves it (and `adjusted_keys_demo`, below)
+  from `/api/relationships` in mock mode. Project `demo-project`: sources in `synthetic_source`, landings in
   `synthetic_data`. Plus `user_features`, a 200-column table launched alone
   with no relationship model (role `standalone`).
 - **Identifiers as the pipeline writes them:** per-table run ids
@@ -356,6 +468,28 @@ Fetched rows are cached in memory (LRU) and never persisted.
   evaluator 0.1.0 → 0.2.0 at `eval-0021` (which changes
   `encoding_plan_digest`), so comparisons across either are flagged not
   comparable, with the reason.
+- **The adjusted-keys launch** (`adjusted.ts`, ADR 0038): one more launch,
+  next to the storyline and inside its dates (2026-09-13), of a second
+  invented model, `adjusted_keys_demo`, under the repository's aliases:
+  `B_TABLE` (root) and six driven children, five of which declare a `pk:`
+  their source repeats. It replays the counts of one recorded five-table
+  launch (`B_TABLE`, `C_TABLE`, `E_TABLE`, `A_TABLE`, `F_TABLE`) and adds two
+  invented tables for the verdicts that launch did not produce (`D_TABLE`
+  over-reproduced, `G_TABLE` unmeasured). Its `validation_runs` rows are folded
+  as `build_run_summary` folds them: `excluded_blocker_rules = "pk.duplicate"`
+  (`""` on the root), `pk.duplicate` = rows − distinct keys counted and not
+  removed, the landing share written only next to a source share, the gate's
+  ratio without the excluded rule. The evaluator's PK rows carry their counts
+  in `detail` (`duplicate_rows`, `distinct_keys`, `null_key_rows`,
+  `key_columns`), as `_key_duplicates` writes them; the storyline's PK rows
+  predate that and carry none. Two evaluations read the launch, so the mock
+  holds 42: `eval-0041`, chained to it (every table joins by its run id;
+  `model_adjusted` is NULL, which the run view fills from `validation_runs`),
+  and `eval-0042`, a composer evaluation handed an evaluator job as its
+  generation job (one run id, no base run id, the evaluator's window: the
+  other six tables are `unknown`, and the run view shows the wrong-job
+  callout). `mock.storyline.test.ts` ("the adjusted-keys launch") recomputes
+  every derived number and holds the six verdicts.
 - **Computation** (`evaluate.ts`): profiles are counts drawn at the stated n
   from the generated rows' distributions; every metric is a `packages/stats`
   function of those profiles (KS bracket, PIT-W1, TVD, JSD, PSI, rate-ratio

@@ -3,7 +3,7 @@
  * DataProvider (mock or BigQuery, identical routes) and the built SPA.
  *
  * Routes: /api/health, /api/facets, /api/evaluations, /api/evaluations/:id,
- * /api/evaluations/:id/profiles, /api/compare, /api/trend, /api/runs, /api/dlq,
+ * /api/evaluations/:id/profiles, /api/evaluations/:id/adjustments, /api/compare, /api/trend, /api/runs, /api/dlq,
  * /api/source-stats, /api/rag/chunks (binary), /api/rag/pools, /api/relationships,
  * /api/knobs, /api/catalogue. A tab may add read-only routes in `routes/<tab>.extra.ts`
  * (evaluation, rag, config): a default-exported Fastify plugin, registered
