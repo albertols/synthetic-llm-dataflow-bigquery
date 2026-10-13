@@ -1,8 +1,9 @@
 /**
  * Exact ports of `sdfb_core.rag.retrieval` over the pure-Python exact index
- * (`_PyExactIPIndex`): the same arithmetic in the same order (sequential sums
- * from 0, as CPython 3.11's `sum()` does), so picks match the goldens exactly.
- * Items are indices into `vectors`.
+ * (`_PyExactIPIndex`): the same arithmetic in the same order (sums added left
+ * to right from 0, as the Python side's loops do; not the builtin `sum()`,
+ * which CPython 3.12 made compensated for floats), so picks match the goldens
+ * exactly. Items are indices into `vectors`.
  *
  * - `centroidTopK`: the k vectors nearest the centroid by cosine (densest
  *   region); descending score, ascending index on ties. The pipeline's control arm.
