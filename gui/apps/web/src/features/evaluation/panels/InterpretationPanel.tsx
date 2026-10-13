@@ -14,6 +14,7 @@ import { InfoHint } from "@/components/InfoHint";
 import { LevelChip } from "@/components/LevelChip";
 import { StatusPill } from "@/components/StatusPill";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/cn";
 
 import { NoiseDowngrade } from "../components/NoiseDowngrade";
 import { isLevel } from "../lib/catalogue";
@@ -86,7 +87,8 @@ export function InterpretationPanel({
                   data-evaluator-status={reading?.evaluatorStatus ?? undefined}
                   className="grid gap-1.5 rounded-md border border-border bg-surface-2/40 p-3 sm:grid-cols-[auto_minmax(0,1fr)_auto] sm:items-start sm:gap-3"
                 >
-                  <div className="flex flex-wrap items-center gap-1.5 sm:max-w-60">
+                  {/* Only a finding with a reading wraps: every other finding keeps its one row of pills. */}
+                  <div className={cn("flex items-center gap-1.5", reading && "flex-wrap sm:max-w-60")}>
                     {replaced ? null : (
                       <StatusPill status={finding.severity === "info" ? "info" : finding.severity} size="sm" />
                     )}

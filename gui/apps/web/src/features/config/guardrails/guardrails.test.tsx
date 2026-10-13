@@ -122,11 +122,31 @@ describe("guardrails: runs whose gate excluded a rule (ADR 0038)", () => {
     expect(within(table).queryByText("B_TABLE")).toBeNull();
     expect(within(table).getAllByRole("row")).toHaveLength(6);
 
-    // The card, the share column and the verdict column each carry their (i).
-    expect(within(card).getAllByRole("button", { name: "About: Adjusted model (ADR 0038)" })).toHaveLength(2);
+    // The card's title, every column header but the first, and every pill carry their (i).
+    const adjustedHint = { name: "About: Adjusted model (ADR 0038)" };
     expect(
-      within(card).getByRole("button", { name: "About: Key-repeat share and duplicate rate" }),
-    ).toBeInTheDocument();
+      within(card.querySelector<HTMLElement>('[data-slot="card-title"]') ?? card).getAllByRole("button", adjustedHint)
+        .length,
+    ).toBeGreaterThan(0);
+    const headers = within(table).getAllByRole("columnheader");
+    expect(headers.map((h) => h.textContent?.trim())).toEqual([
+      "Landing table · run_id",
+      "Gate",
+      "excluded_blocker_rules",
+      "Source share",
+      "Landing share",
+      "Δ",
+      "Verdict",
+    ]);
+    for (const header of headers.slice(1))
+      expect(within(header).getByRole("button", { name: /^About: / }), header.textContent ?? "").toBeInTheDocument();
+    for (const i of [3, 4, 5])
+      expect(
+        within(headers[i]!).getByRole("button", { name: "About: Key-repeat share and duplicate rate" }),
+      ).toBeInTheDocument();
+    const pills = [...card.querySelectorAll<HTMLElement>('[data-slot="adjustment"]')];
+    expect(pills).toHaveLength(4);
+    for (const pill of pills) expect(within(pill).getByRole("button", adjustedHint)).toBeInTheDocument();
     expect(card).toHaveTextContent("within ±5 pt");
   });
 

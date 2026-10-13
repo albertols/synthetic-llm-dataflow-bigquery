@@ -583,21 +583,25 @@ function AdjustedRuns() {
               <TableHeader>
                 <TableRow className="hover:bg-transparent">
                   <TableHead scope="col">Landing table · run_id</TableHead>
-                  <TableHead scope="col">Gate</TableHead>
-                  <TableHead scope="col">excluded_blocker_rules</TableHead>
-                  <TableHead scope="col" className="text-right">
-                    <span className="inline-flex items-center gap-0.5">
-                      Source share <InfoHint concept="eval:repeat-share" />
+                  <TableHead scope="col">
+                    <span className="inline-flex items-center gap-0.5 whitespace-nowrap">
+                      Gate <InfoHint concept="config:blocker-gate" />
                     </span>
                   </TableHead>
-                  <TableHead scope="col" className="text-right">
-                    Landing share
-                  </TableHead>
-                  <TableHead scope="col" className="text-right">
-                    Δ
-                  </TableHead>
                   <TableHead scope="col">
-                    <span className="inline-flex items-center gap-0.5">
+                    <span className="inline-flex items-center gap-0.5 whitespace-nowrap">
+                      excluded_blocker_rules <InfoHint concept="eval:model-adjusted" />
+                    </span>
+                  </TableHead>
+                  {(["Source share", "Landing share", "Δ"] as const).map((label) => (
+                    <TableHead key={label} scope="col" className="text-right">
+                      <span className="inline-flex items-center gap-0.5 whitespace-nowrap">
+                        {label} <InfoHint concept="eval:repeat-share" />
+                      </span>
+                    </TableHead>
+                  ))}
+                  <TableHead scope="col">
+                    <span className="inline-flex items-center gap-0.5 whitespace-nowrap">
                       Verdict <InfoHint concept="eval:model-adjusted" />
                     </span>
                   </TableHead>
@@ -623,7 +627,7 @@ function AdjustedRuns() {
                     </TableCell>
                     <TableCell>
                       {verdictMark(adjustmentVerdict(run)) ? (
-                        <AdjustmentPill verdict={adjustmentVerdict(run)} hint={false} />
+                        <AdjustmentPill verdict={adjustmentVerdict(run)} />
                       ) : (
                         // Another rule was left out, not pk.duplicate: no key was adjusted here.
                         <span className="text-xs text-text-3">not a key adjustment</span>

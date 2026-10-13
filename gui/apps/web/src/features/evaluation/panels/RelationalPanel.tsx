@@ -7,7 +7,7 @@
  * FAIL) and the edge's fan-out and adherence metrics. The evaluator compares
  * the two fan-out distributions and stores the distances, not the histograms.
  */
-import { useId } from "react";
+import { useId, type ReactNode } from "react";
 
 import type { MetricRow } from "@contracts/api";
 
@@ -60,6 +60,15 @@ function EdgeDetail({ edge }: { edge: GraphEdge }) {
   );
 }
 
+/** A column header with its (i). */
+function Hinted({ concept, children }: { concept: string; children: ReactNode }) {
+  return (
+    <span className="inline-flex items-center gap-0.5 whitespace-nowrap">
+      {children} <InfoHint concept={concept} />
+    </span>
+  );
+}
+
 const JOINED_BY: Record<string, string> = {
   run_id: "joined by run id",
   base_run_id: "joined by the launch's base run id",
@@ -89,7 +98,7 @@ function repeatShareRows(rows: readonly AdjustmentRow[]): IntervalRow[] {
           hi: Math.min(1, source + REPEAT_SHARE_TOLERANCE),
         },
         status: r.reading?.status ?? "info",
-        mark: <AdjustmentPill verdict={r.adjustment.verdict} disagree={r.reading?.kind === "disagree"} hint={false} />,
+        mark: <AdjustmentPill verdict={r.adjustment.verdict} disagree={r.reading?.kind === "disagree"} />,
         detail: `Δ ${fmtPoints(r.adjustment.repeat_share_delta)}`,
       };
     });
@@ -120,30 +129,30 @@ function ModelAdjustments({ rows }: { rows: readonly AdjustmentRow[] }) {
           <TableHeader>
             <TableRow className="hover:bg-transparent">
               <TableHead scope="col">Table</TableHead>
-              <TableHead scope="col">Declared PK</TableHead>
-              <TableHead scope="col" className="text-right">
-                <span className="inline-flex items-center gap-0.5">
-                  Source share <InfoHint concept="eval:repeat-share" />
-                </span>
+              <TableHead scope="col">
+                <Hinted concept="eval:model-adjusted">Declared PK</Hinted>
               </TableHead>
               <TableHead scope="col" className="text-right">
-                Synthetic share
+                <Hinted concept="eval:repeat-share">Source share</Hinted>
               </TableHead>
               <TableHead scope="col" className="text-right">
-                Δ (syn − src)
+                <Hinted concept="eval:repeat-share">Synthetic share</Hinted>
+              </TableHead>
+              <TableHead scope="col" className="text-right">
+                <Hinted concept="eval:repeat-share">Δ (syn − src)</Hinted>
               </TableHead>
               <TableHead scope="col">
-                <span className="inline-flex items-center gap-0.5">
-                  Verdict <InfoHint concept="eval:model-adjusted" />
-                </span>
+                <Hinted concept="eval:model-adjusted">Verdict</Hinted>
               </TableHead>
               <TableHead scope="col" className="text-right">
-                <span className="inline-flex items-center gap-0.5">
-                  Evaluator duplicate rate <InfoHint concept="metric:table.pk_duplicate_rate" />
-                </span>
+                <Hinted concept="metric:table.pk_duplicate_rate">Evaluator duplicate rate</Hinted>
               </TableHead>
-              <TableHead scope="col">Evaluator status</TableHead>
-              <TableHead scope="col">Excluded rules</TableHead>
+              <TableHead scope="col">
+                <Hinted concept="core:status">Evaluator status</Hinted>
+              </TableHead>
+              <TableHead scope="col">
+                <Hinted concept="eval:model-adjusted">Excluded rules</Hinted>
+              </TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
@@ -171,7 +180,7 @@ function ModelAdjustments({ rows }: { rows: readonly AdjustmentRow[] }) {
                   </TableCell>
                   <TableCell className="text-xs">
                     {r.reading ? (
-                      <AdjustmentPill verdict={a.verdict} disagree={r.reading.kind === "disagree"} hint={false} />
+                      <AdjustmentPill verdict={a.verdict} disagree={r.reading.kind === "disagree"} />
                     ) : (
                       <span className="text-text-3">
                         {a.verdict === "not_adjusted" ? "not adjusted: a unique key is expected" : MISSING}

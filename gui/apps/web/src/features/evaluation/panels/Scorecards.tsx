@@ -69,7 +69,8 @@ function WorstRow({
   const replaced = adjusted?.reading?.kind === "adjusted";
   return (
     <li className="grid min-w-0 gap-0.5 border-t border-border pt-2" data-adjusted={adjusted ? "true" : undefined}>
-      <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+      {/* Only a row with a reading wraps: every other row keeps its one line, truncated. */}
+      <div className={cn("flex min-w-0 items-center gap-1.5", adjusted && "flex-wrap")}>
         {replaced ? null : <StatusPill status={row.status} size="sm" />}
         {adjusted?.reading ? (
           <AdjustmentPill

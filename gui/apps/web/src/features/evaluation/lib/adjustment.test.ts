@@ -2,12 +2,18 @@
  * The adjusted reading of `table.pk_duplicate_rate` (ADR 0038): the evaluator's
  * row is never changed; the generator's verdict is read on top of it. Pins the
  * six verdicts, the evaluator ↔ generator cross-check (1e-6) and that the raw
- * evaluator status survives every reading. The join fallbacks themselves are
- * pinned where the join lives (`@contracts/adjustments`, adjustments.test.ts).
+ * evaluator status survives every reading, and the four join fallbacks from
+ * the registry row to the reading. The join's own edge cases are pinned where
+ * it lives (`@contracts/adjustments`, adjustments.test.ts).
  */
 import { describe, expect, it } from "vitest";
 
-import { adjustmentVerdicts, type AdjustmentVerdict } from "@contracts/adjustments";
+import {
+  adjustmentVerdicts,
+  joinModelAdjustments,
+  type AdjustmentRun,
+  type AdjustmentVerdict,
+} from "@contracts/adjustments";
 
 import { ADJUSTED_TABLES, adjustedAdjustments, adjustedDetail, adjustmentOf, metric, pkRow } from "../test/fixtures";
 import {
@@ -244,6 +250,70 @@ describe("readAdjustedPk: one reading per verdict, the evaluator's status always
     expect(PK_METRIC).toBe("table.pk_duplicate_rate");
     const identity = metric("table.identity_duplicate_rate", { table_name: "E_TABLE", value: 0.2, status: "fail" });
     expect(readAdjustedPk(identity, adjustmentOf("E_TABLE"))).toBeNull();
+  });
+});
+
+describe("join fallbacks 1–4, from the registry row to the reading", () => {
+  // The same validation_runs row reached by a weaker key each time; the reading only changes
+  // when no key is left. (The join itself is `joinModelAdjustments`, shared with the BFF.)
+  const detail = adjustedDetail();
+  const entry = detail.evaluation.tables.find((t) => t.name === "E_TABLE")!;
+  const landing = adjustmentOf("E_TABLE").landing_repeat_share!;
+  const run: AdjustmentRun = {
+    run_id: "sdfb-launch-a-01-E_TABLE",
+    landing_table: entry.landing_table,
+    created_at: "2026-09-13T08:30:00.000000Z",
+    excluded_blocker_rules: "pk.duplicate",
+    source_repeat_share: 0.5027,
+    landing_repeat_share: landing,
+    repeat_share_delta: landing - 0.5027,
+    repeat_share_within_tolerance: true,
+    dlq_by_rule_map: { "pk.duplicate": 1_010_415 },
+  };
+  const window = {
+    generation_started_at: "2026-09-13T06:10:00.000000Z",
+    generation_finished_at: "2026-09-13T08:40:00.000000Z",
+  };
+  const cases = [
+    { step: "1. the table's run id", base: "sdfb-launch-a", runId: run.run_id, ...window, joinedBy: "run_id" },
+    { step: "2. the launch's base run id", base: "sdfb-launch-a", runId: null, ...window, joinedBy: "base_run_id" },
+    { step: "3. landing table + window", base: null, runId: null, ...window, joinedBy: "window" },
+    {
+      step: "4. nothing to join on",
+      base: null,
+      runId: null,
+      generation_started_at: null,
+      generation_finished_at: null,
+      joinedBy: null,
+    },
+  ] as const;
+
+  it.each(cases)("$step", ({ base, runId, joinedBy, generation_started_at, generation_finished_at }) => {
+    const [adjustment] = joinModelAdjustments(
+      {
+        base_run_id: base,
+        generation_started_at,
+        generation_finished_at,
+        tables: [{ ...entry, run_id: runId }],
+      },
+      [run],
+    );
+    expect(adjustment!.joined_by).toBe(joinedBy);
+    const reading = readAdjustedPk(pkRow("E_TABLE"), adjustment)!;
+    if (joinedBy === null) {
+      expect(reading).toMatchObject({ kind: "question", verdict: "unknown", label: "Adjusted?", status: "fail" });
+    } else {
+      expect(reading).toMatchObject({ kind: "adjusted", verdict: "faithful", status: "info", agrees: true });
+      expect(reading.sentence).toBe(readAdjustedPk(pkRow("E_TABLE"), adjustmentOf("E_TABLE"))!.sentence);
+    }
+  });
+
+  it("another launch's row for the same landing table is never read", () => {
+    const [adjustment] = joinModelAdjustments(
+      { base_run_id: "sdfb-launch-b", ...window, tables: [{ ...entry, run_id: null }] },
+      [run],
+    );
+    expect(adjustment!.verdict).toBe("unknown");
   });
 });
 

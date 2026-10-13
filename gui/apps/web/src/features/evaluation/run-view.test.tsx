@@ -548,10 +548,26 @@ describe("adjusted keys in the run view (ADR 0038)", () => {
       "Pass",
       "—",
     ]);
-    // Column headers explain themselves.
+    // Every column header but the table's name explains itself, and so does every pill.
     const headers = within(table).getAllByRole("columnheader");
-    expect(within(headers[2]!).getByRole("button", { name: ABOUT_SHARES })).toBeInTheDocument();
-    expect(within(headers[5]!).getByRole("button", { name: ABOUT_ADJUSTED })).toBeInTheDocument();
+    expect(headers.map((h) => h.textContent?.trim())).toEqual([
+      "Table",
+      "Declared PK",
+      "Source share",
+      "Synthetic share",
+      "Δ (syn − src)",
+      "Verdict",
+      "Evaluator duplicate rate",
+      "Evaluator status",
+      "Excluded rules",
+    ]);
+    for (const header of headers.slice(1))
+      expect(within(header).getByRole("button", { name: /^About: / }), header.textContent ?? "").toBeInTheDocument();
+    for (const i of [2, 3, 4]) expect(within(headers[i]!).getByRole("button", { name: ABOUT_SHARES })).toBeVisible();
+    for (const i of [1, 5, 8]) expect(within(headers[i]!).getByRole("button", { name: ABOUT_ADJUSTED })).toBeVisible();
+    const pills = [...section.querySelectorAll<HTMLElement>('[data-slot="adjustment"]')];
+    expect(pills.length).toBeGreaterThanOrEqual(12);
+    for (const pill of pills) expect(within(pill).getByRole("button", { name: ABOUT_ADJUSTED })).toBeInTheDocument();
 
     // The strip: one row per adjusted table, the source's share as the tick, ±5 pt as the band.
     const strip = within(section).getByRole("figure", { name: /Synthetic key-repeat share against the source's/ });
