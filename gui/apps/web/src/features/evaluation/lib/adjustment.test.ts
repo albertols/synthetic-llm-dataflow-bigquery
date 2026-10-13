@@ -14,6 +14,7 @@ import {
   type AdjustmentRun,
   type AdjustmentVerdict,
 } from "@contracts/adjustments";
+import { concepts } from "@contracts/concepts/evaluation";
 
 import { ADJUSTED_TABLES, adjustedAdjustments, adjustedDetail, adjustmentOf, metric, pkRow } from "../test/fixtures";
 import {
@@ -52,6 +53,22 @@ describe("repeatShareFromEvaluator: 1 − detail.distinct_keys ÷ rows", () => {
     expect(repeatShareFromEvaluator(pkRow("A_TABLE"), 16_126_514)).toBe(0);
     // The row's own n_synthetic is the denominator when none is given.
     expect(repeatShareFromEvaluator(row)).toBe(repeatShareFromEvaluator(row, row.n_synthetic));
+  });
+
+  it("the (i)'s worked example is this arithmetic, on the same counts", () => {
+    // eval:repeat-share quotes E_TABLE; its numbers are held to the counts, not typed twice.
+    const t = ADJUSTED_TABLES.find((x) => x.table === "E_TABLE")!;
+    const tip = concepts.find((c) => c.id === "eval:repeat-share")!.interpretation.tip;
+    const count = (n: number) => n.toLocaleString("en-US");
+    for (const quoted of [
+      count(t.distinct),
+      count(t.rows),
+      count(t.duplicateRows),
+      repeatShareFromEvaluator(pkRow("E_TABLE"))!.toFixed(4),
+      pkRow("E_TABLE").value!.toFixed(5),
+      `Only ${t.rows - t.duplicateRows} rows`,
+    ])
+      expect(tip, quoted).toContain(quoted);
   });
 
   it("is null without the counts: no detail, no distinct_keys, no rows", () => {
