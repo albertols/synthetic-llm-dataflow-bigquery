@@ -991,7 +991,7 @@ def test_runs_are_sequential_and_the_header_says_which_knob_changes_that():
 
 
 # --------------------------------------------------------------------------- #
-# The generation DAG's opt-in evaluation, chained inside the DAG itself
+# The generation DAG's evaluation, chained inside the DAG itself
 # --------------------------------------------------------------------------- #
 #
 #   start_sdfb >> run_evaluation_gate >> wait_for_generation
@@ -1047,9 +1047,9 @@ _GPU_ONLY = ("accelerator", "nvidia", "reservation",
              "params.client_type", "g2-standard", "n1-standard")
 
 
-def test_generation_dag_opt_in_param_defaults_off():
+def test_generation_dag_evaluates_its_run_unless_turned_off():
   param = _params(_tree(GENERATION_DAG))["run_evaluation"]
-  assert ast.literal_eval(_kw(param, "default")) is False
+  assert ast.literal_eval(_kw(param, "default")) is True
   assert ast.literal_eval(_kw(param, "type")) == "boolean"
 
 
@@ -1097,7 +1097,7 @@ def test_generation_dag_triggers_no_other_dag():
   assert "evaluation_framework" not in code
 
 
-def test_generation_dag_gate_is_the_opt_in_short_circuit():
+def test_generation_dag_gate_is_the_run_evaluation_short_circuit():
   tree = _tree(GENERATION_DAG)
   gate = _one(tree, "ShortCircuitOperator")
   callable_name = _kw(gate, "python_callable")
@@ -1301,7 +1301,7 @@ def test_generation_dag_gains_four_evaluation_params_and_nothing_else():
   assert ast.literal_eval(_kw(params["evaluation_mode"],
                               "enum")) == ["", "exact", "sampled"]
   assert default("evaluation_machine_type") == "e2-standard-8"
-  assert default("evaluation_max_workers") == 4
+  assert default("evaluation_max_workers") == 8
   assert ast.literal_eval(_kw(params["evaluation_max_workers"],
                               "type")) == "integer"
   # the quality dataset of the DAG's own validation-runs table, read in
@@ -1408,9 +1408,9 @@ def test_evaluation_job_name_is_a_dataflow_job_name(version, expected):
       "f'{evaluation_job_name}-{{{{ ts_nodash | lower }}}}'")
 
 
-def test_generation_dag_default_path_is_unchanged():
-  """With `run_evaluation` False the gate skips the rest, so the default
-  path is `start_sdfb` alone. Its call is pinned whole, against the commit
+def test_generation_dag_path_without_evaluation_is_unchanged():
+  """With `run_evaluation` False the gate skips the rest, so that path is
+  `start_sdfb` alone. Its call is pinned whole, against the commit
   before this chain, in the generator's own surface test
   (packages/sdfb-tests/tests/unit/docker/test_launch_surfaces.py); here:
   nothing is upstream of it and nothing of the evaluation is inside it."""

@@ -486,8 +486,8 @@ environment has run them.
 #### 6.1 The generation DAG evaluates its own run
 
 `composer/synthetic_beam_bigquery.py` is the only DAG the deployment has to
-import. Trigger it with the parameter `run_evaluation` true and it evaluates
-the run it has just launched:
+import. Its parameter `run_evaluation` is true by default, so a run evaluates
+what it has just launched (trigger it with false to launch generation alone):
 
 ```mermaid
 flowchart LR
@@ -504,9 +504,9 @@ flowchart LR
 
 | Param | Default | Goes to |
 |---|---|---|
-| `run_evaluation` | false | the `run_evaluation_gate` short-circuit |
+| `run_evaluation` | true | the `run_evaluation_gate` short-circuit |
 | `evaluation_mode` | empty (`exact`, `sampled`) | template `mode`; empty is the evaluator's default |
-| `evaluation_machine_type`, `evaluation_max_workers` | `e2-standard-8`, 4 | the evaluation launch's environment |
+| `evaluation_machine_type`, `evaluation_max_workers` | `e2-standard-8`, 8 | the evaluation launch's environment |
 | `evaluation_output_dataset` | the dataset of the DAG's validation-runs table (`synthetic_data_quality` when that value is not `project.dataset.table`) | template `output_dataset` |
 | `source_dataset` | empty (the dataset of `table_fqn`) | template `reference_dataset`: the dataset of the source tables, same names as the landed ones |
 

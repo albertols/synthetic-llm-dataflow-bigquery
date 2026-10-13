@@ -595,11 +595,11 @@ flowchart LR
   T[("📄 one template<br/>one image")]:::store --> E{"⚙️ flex_entry.py<br/>reads sdfb_job"}:::cpu
   E -- "absent" --> G["🔀 generation job<br/>GPU workers"]:::beam
   E -- "evaluation" --> V["🔀 evaluation job<br/>CPU workers"]:::beam
-  G -. "launched table and job id,<br/>when the DAG is opted in" .-> V
+  G -. "launched table and job id,<br/>unless run_evaluation is false" .-> V
 ```
 
 *Not built, not launched.* The Composer DAG of the generator, where a
-deployment has one, chains the two when its `run_evaluation` parameter is true
+deployment has one, chains the two unless its `run_evaluation` parameter is false (true by default)
 (the evaluation is given the launched table and the relationship model, and the
 job only as the launch's identity: it reads the Dataflow job for its window, one query on the generator's
 `validation_runs` for the digest that verifies the reference sample, and no job log);

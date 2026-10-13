@@ -132,7 +132,7 @@ readable.
 and flex template (`packages/sdfb-evaluation/deploy/build_flex_template.sh`),
 launched by `sdfb-eval run`, by the template, or by a Composer DAG
 (`composer/evaluation_framework.py`) that the generation DAG may trigger,
-opt-in and off by default. *(Amended 2026-10-06, see [the amendment](#amendment-2026-10-06-one-image-one-template).)* A local run executes on Beam's in-process
+opt-in and off by default. *(Amended 2026-10-06, see [the amendment](#amendment-2026-10-06-one-image-one-template); on by default since the note of 2026-10-14.)* A local run executes on Beam's in-process
 `FnApiRunner`; `--runner DirectRunner` is the user-facing spelling. Beam 2.74's
 `DirectRunner` hands a batch pipeline to Prism, which could start a step before
 its side input was complete in this package's tests (see
@@ -312,10 +312,10 @@ flowchart LR
   classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
   classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
 
-  subgraph OFF["run_evaluation = False, the default"]
+  subgraph OFF["run_evaluation = False"]
     S1["🔀 start_sdfb<br/>launch, no wait"]:::beam --> G1{"🛡️ gate"}:::cpu --> X1["∅ nothing else runs<br/>as before"]:::data
   end
-  subgraph ON["run_evaluation = True"]
+  subgraph ON["run_evaluation = True, the default since 2026-10-14"]
     S2["🔀 start_sdfb<br/>launch, no wait"]:::beam --> G2{"🛡️ gate"}:::cpu
     G2 --> W["⚙️ wait_for_generation<br/>reschedule sensor"]:::cpu
     W --> T["🔀 trigger_evaluation<br/>same template<br/>sdfb_job=evaluation"]:::beam
@@ -325,7 +325,8 @@ flowchart LR
 
 *The two modes of the generation DAG's `run_evaluation` parameter
 (`composer/synthetic_beam_bigquery.py`). The last task was added on
-2026-10-11: see the note of that date below.*
+2026-10-11, and the default became True on 2026-10-14: see the notes of
+those dates below.*
 
 **A4. The chain is inside the generation DAG.** `start_sdfb >>
 run_evaluation_gate >> wait_for_generation >> trigger_evaluation` (and, since
@@ -756,6 +757,20 @@ run` seconds with the panel staged; and that a job evaluated from a staged
 panel gives the metrics of one evaluated from an embedded panel (on a
 laptop the written rows are identical). `docs/RUN_PLAYBOOK.md` ("What a
 cold, full-size launch must show") lists the lines to read.
+
+**Note (2026-10-14): a generation DAG run evaluates itself by default.**
+`run_evaluation` defaults to True (it was False) and
+`evaluation_max_workers` to 8 (it was 4), on the owner's decision. The chain,
+its tasks and its launch are unchanged; what changes is what a trigger with
+no parameters does. It now also launches the CPU evaluation job (up to eight
+`e2-standard-8` workers), keeps the DAG's one run slot until the generation
+job has ended and the evaluation's launch is over (A4 and the note of
+2026-10-11), and is marked failed when that launch dies. It therefore needs
+what an evaluation needs: the four `evaluation_*` tables and the two views,
+and the evaluator's roles for the Dataflow service account
+(`docs/DEPLOYMENT_PREREQUISITES.md`). A trigger with `run_evaluation` false
+launches generation alone, as before. The standalone DAG's own `max_workers`
+is unchanged. Not run on a deployment.
 
 ## Amendment (2026-10-13): Python 3.14 and Beam 2.76, with the shared image
 

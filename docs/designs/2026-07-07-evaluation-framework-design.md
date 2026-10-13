@@ -2384,7 +2384,8 @@ tests and their pure functions are executed; Airflow has never parsed
 either.
 
 **The generation DAG evaluates its own run** when its parameter
-`run_evaluation` is true. Nothing else has to be imported.
+`run_evaluation` is true (the default since 2026-10-14). Nothing else has
+to be imported.
 
 ```mermaid
 flowchart LR
@@ -2425,7 +2426,7 @@ flowchart LR
   writes its own `FINAL` row.
 - **Five new parameters**, all read only when `run_evaluation` is true:
   `evaluation_mode` (empty: the evaluator's default), `evaluation_machine_type`
-  (`e2-standard-8`), `evaluation_max_workers` (4) and
+  (`e2-standard-8`), `evaluation_max_workers` (8) and
   `evaluation_output_dataset` (`synthetic_data_quality`) and `source_dataset`
   (the dataset of the source tables; empty: that of `table_fqn`). No new
   substitution marker and no new Airflow Variable.

@@ -40,9 +40,9 @@ other's::
 What a generation launch must supply is therefore the CLI's to say
 (``sdfb_tests.launch_surface.generator_required``), and the DAG's launch is
 checked against that. The same DAG now holds a second launch operator
-(``trigger_evaluation``, behind the opt-in gate); every helper here reads
-the generation one, ``start_sdfb``, which must carry nothing of the
-evaluation: with the gate off it is the whole default path.
+(``trigger_evaluation``, behind the ``run_evaluation`` gate); every helper
+here reads the generation one, ``start_sdfb``, which must carry nothing of
+the evaluation: with the gate off it is the whole path.
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
@@ -129,7 +129,7 @@ def _param_keyword(param: ast.Call, keyword: str):
 
 def _composer_launch_operator() -> ast.Call:
   """The GENERATION launch (`start_sdfb`). The DAG holds a second launch
-    operator, the opt-in evaluation's, so the task id picks this one."""
+    operator, the chained evaluation's, so the task id picks this one."""
   tree = ast.parse(_COMPOSER_DAG.read_text())
   (operator,) = [
       node for node in ast.walk(tree)
@@ -440,11 +440,11 @@ def test_every_template_parameter_is_well_formed():
 
 
 # --------------------------------------------------------------------------
-# the default path knows nothing of the evaluation
+# the generation launch knows nothing of the evaluation
 # --------------------------------------------------------------------------
 def test_the_generation_launch_knows_nothing_of_the_evaluation():
   """With `run_evaluation` False the DAG runs this task and skips the
-    rest, so the default path is this call alone. It names no evaluation
+    rest, so that path is this call alone. It names no evaluation
     parameter and passes no job selector, so the image's entry runs
     generation. This holds for whatever launch a deployment's own DAG
     makes, which a pin of this repository's call could not."""

@@ -50,11 +50,11 @@ engine, batch_size, similarity, client_type) + Airflow Variables for infra
 DATAFLOW_NETWORK_TAGS) — changeable without re-importing. client_type=fake
 selects a CPU smoke (no L4) — see below.
 
-Opt-in evaluation (`run_evaluation`, default False), chained in THIS DAG::
+Chained evaluation (`run_evaluation`, default True), in THIS DAG::
 
     start_sdfb ─► run_evaluation_gate ─► wait_for_generation ─►
     (launch,      (skips the rest         (reschedule-mode
-     no wait)      unless opted in)        sensor on the job)
+     no wait)      when turned off)        sensor on the job)
 
         ─► trigger_evaluation ─► wait_for_evaluation_launch
            (launch, SAME         (reschedule-mode sensor on the
@@ -74,7 +74,7 @@ for any of it. Neither sensor is deferrable, so no triggerer is needed:
 `deferrable` is not passed, and the provider's default is off unless the
 environment sets `[operators] default_deferrable`.
 
-Run slot: with `run_evaluation` true a run of this DAG stays running until the
+Run slot: with `run_evaluation` true (the default) a run stays running until the
 generation job ends (the first sensor waits for it, hours) and then until the
 evaluation's launch is over (the second sensor). The second wait follows from
 the code, it was not measured: at most the launcher's twelve minutes and one
@@ -356,7 +356,7 @@ network_tag_experiments = ([
 ] if network_tags else [])
 
 # -----------------------------------------------------------------------------
-# Opt-in evaluation (run_evaluation). Nothing below is used unless the gate
+# Chained evaluation (run_evaluation). Nothing below is used unless the gate
 # lets the run through.
 # -----------------------------------------------------------------------------
 # The generation job's id: `start_sdfb` does not wait, so its XCom holds it.
@@ -748,10 +748,10 @@ default_dag_params = {
         ),
     "run_evaluation":
         Param(
-            default=False,
+            default=True,
             type="boolean",
-            description="Opt-in, off by default. False: the DAG only launches "
-            "generation, as before. True: after the generation job reaches "
+            description="On by default. False: the DAG launches generation "
+            "and nothing else. True: after the generation job reaches "
             "DONE this DAG launches the evaluator as a second, CPU-only "
             "Dataflow job from the same template. It evaluates the launched "
             "table and, with generate_fk_relationships true, the rest of "
@@ -794,12 +794,12 @@ default_dag_params = {
         ),
     "evaluation_max_workers":
         Param(
-            default=4,
+            default=8,
             type="integer",
             minimum=1,
             description="Only with run_evaluation. Upper bound on the number "
             "of workers the evaluation job may use (Dataflow maxWorkers). "
-            "Default 4.",
+            "Default 8.",
         ),
     "source_dataset":
         Param(
@@ -840,7 +840,7 @@ default_dag_params = {
 
 
 def _run_evaluation_enabled(params, **_):
-  """Gate for the opt-in evaluation: False skips every task after it."""
+  """Gate for the chained evaluation: False skips every task after it."""
   return bool(params["run_evaluation"])
 
 
@@ -1191,7 +1191,7 @@ with models.DAG(
   )
   # yapf: enable
 
-  # Opt-in chaining (run_evaluation, default False): with it off the gate
+  # Chained evaluation (run_evaluation, default True): with it off the gate
   # skips every task below and the DAG behaves exactly as before. The launch
   # above does not wait, so its XCom holds the job id the sensor waits on.
   run_evaluation_gate = ShortCircuitOperator(
