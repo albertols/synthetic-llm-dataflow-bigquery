@@ -22,6 +22,7 @@ import type {
   ChunkMeta,
   Comparison,
   DlqSummary,
+  EvaluationAdjustments,
   EvaluationDetail,
   EvaluationFilter,
   EvaluationSummary,
@@ -141,6 +142,9 @@ export const api = {
     getJson<EvaluationDetail>(`/evaluations/${encodeURIComponent(id)}`, options, signal),
   profiles: (id: string, query: ProfileQuery = {}, signal?: AbortSignal) =>
     getJson<ProfileRow[]>(`/evaluations/${encodeURIComponent(id)}/profiles`, query, signal),
+  /** ADR 0038: each generated table joined to its `validation_runs` row, with the generator's verdict on its key. */
+  adjustments: (id: string, signal?: AbortSignal) =>
+    getJson<EvaluationAdjustments>(`/evaluations/${encodeURIComponent(id)}/adjustments`, undefined, signal),
   compare: (ids: readonly string[], signal?: AbortSignal) => getJson<Comparison>("/compare", { ids }, signal),
   trend: (query: TrendQuery, signal?: AbortSignal) => getJson<TrendPoint[]>("/trend", query, signal),
   runs: (filter: RunFilter = {}, signal?: AbortSignal) => getJson<ValidationRun[]>("/runs", filter, signal),
@@ -172,6 +176,7 @@ export const queryKeys = {
   evaluations: (filter: EvaluationFilter) => ["api", "evaluations", filter] as const,
   evaluation: (id: string, profiles: "all" | "none") => ["api", "evaluation", id, profiles] as const,
   profiles: (id: string, query: ProfileQuery) => ["api", "profiles", id, query] as const,
+  adjustments: (id: string) => ["api", "adjustments", id] as const,
   compare: (ids: readonly string[]) => ["api", "compare", [...ids]] as const,
   trend: (query: TrendQuery) => ["api", "trend", query] as const,
   runs: (filter: RunFilter) => ["api", "runs", filter] as const,
@@ -224,6 +229,20 @@ export function useProfiles(id: string | undefined, query: ProfileQuery = {}, en
     queryKey: queryKeys.profiles(id ?? "", query),
     queryFn: ({ signal }) => api.profiles(id!, query, signal),
     enabled: !!id && enabled,
+  });
+}
+
+/**
+ * The launch's model adjustments (ADR 0038), read from `validation_runs`. Its own request: when it
+ * fails, the evaluation still renders and the adjusted reading is simply absent (the caller says
+ * so). Not retried: a 4xx / 5xx here is an answer, and the page waits for it before its first paint.
+ */
+export function useEvaluationAdjustments(id: string | undefined) {
+  return useQuery({
+    queryKey: queryKeys.adjustments(id ?? ""),
+    queryFn: ({ signal }) => api.adjustments(id!, signal),
+    enabled: !!id,
+    retry: false,
   });
 }
 

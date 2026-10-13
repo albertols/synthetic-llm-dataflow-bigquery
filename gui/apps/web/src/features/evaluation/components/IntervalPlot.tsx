@@ -2,8 +2,11 @@
  * IntervalPlot — a forest plot: one row per estimate, a dot for the point
  * value and a whisker for its 95 % interval, on one shared axis with the
  * reference and threshold lines drawn through every row. Log or linear.
- * An open upper bound (m_H = 0) is drawn as an arrow to the edge. Every
- * number is also in the row's text and in the "View data" table.
+ * An open upper bound (m_H = 0) is drawn as an arrow to the edge. A row may
+ * also carry a reference and a tolerance band of its own (a tick and a shaded
+ * bar): the adjusted-keys strip compares each table's synthetic share with
+ * that table's source share. Every number is also in the row's text and in
+ * the "View data" table.
  */
 import { ChevronRight } from "lucide-react";
 import type { ReactNode } from "react";
@@ -26,6 +29,12 @@ export interface IntervalRow {
   downgradedFrom?: "warn" | "fail" | null;
   /** Text next to the status (e.g. "3.0× · ci_low 0.03"). */
   detail: string;
+  /** A reference of this row alone, drawn as a tick (the shared `lines` cross every row). */
+  ref?: number | null;
+  /** A tolerance band of this row alone, drawn as a shaded bar (e.g. `ref` ± a tolerance). */
+  band?: { lo: number; hi: number } | null;
+  /** Replaces the status pill, for a reading that is not one of the evaluator's statuses. */
+  mark?: ReactNode;
 }
 
 export interface RefLine {
@@ -116,7 +125,24 @@ export function IntervalPlot({
             </div>
             <div aria-hidden="true" className="relative h-6">
               <span className="absolute inset-x-0 top-1/2 h-px bg-chart-grid" />
+              {row.band ? (
+                <span
+                  data-slot="interval-band"
+                  className="absolute top-1/2 h-3 -translate-y-1/2 rounded-sm bg-text-3/25"
+                  style={{
+                    left: `${position(scale, row.band.lo)}%`,
+                    width: `${Math.max(position(scale, row.band.hi) - position(scale, row.band.lo), 0.5)}%`,
+                  }}
+                />
+              ) : null}
               <Lines scale={scale} lines={lines} />
+              {row.ref !== null && row.ref !== undefined && Number.isFinite(row.ref) ? (
+                <span
+                  data-slot="interval-ref"
+                  className="absolute inset-y-0.5 w-0.5 -translate-x-1/2 bg-text-1"
+                  style={{ left: `${position(scale, row.ref)}%` }}
+                />
+              ) : null}
               {from !== null && to !== null ? (
                 <span
                   className="absolute top-1/2 h-0.5 -translate-y-1/2 bg-text-1"
@@ -134,7 +160,7 @@ export function IntervalPlot({
               ) : null}
             </div>
             <div className="col-span-2 flex min-w-0 items-center gap-2 sm:col-span-1">
-              <StatusPill status={row.status} size="sm" />
+              {row.mark ?? <StatusPill status={row.status} size="sm" />}
               {row.downgradedFrom ? <NoiseDowngrade from={row.downgradedFrom} /> : null}
               <span className="truncate font-mono text-[11px] text-text-2">{row.detail}</span>
             </div>

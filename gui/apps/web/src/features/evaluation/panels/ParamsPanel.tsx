@@ -3,16 +3,42 @@
  * evaluator ran — the typed registry columns first (what the list filters
  * on), then the two JSON snapshots verbatim.
  */
+import type { ReactNode } from "react";
+
 import type { EvaluationRecord } from "@contracts/api";
 
+import { InfoHint } from "@/components/InfoHint";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { formatCount, formatDateTime, MISSING } from "@/lib/format";
 
 import { JsonView } from "../components/JsonView";
 import { fmtSig } from "../lib/format";
 
-export function ParamsPanel({ evaluation }: { evaluation: EvaluationRecord }) {
-  const typed: [string, string][] = [
+/**
+ * `model_adjusted` as the registry holds it. ADR 0038: NULL means the evaluator did not read the
+ * launch log, not that nothing was adjusted — so when `validation_runs` shows tables whose gate
+ * left out `pk.duplicate`, the cell says so next to the registry's own "—".
+ */
+function modelAdjusted(evaluation: EvaluationRecord, adjustedTables: number): ReactNode {
+  if (evaluation.model_adjusted !== null) return String(evaluation.model_adjusted);
+  if (!adjustedTables) return MISSING;
+  return (
+    <span data-testid="model-adjusted-inferred" className="inline-flex flex-wrap items-center gap-0.5">
+      {MISSING} (validation_runs says adjusted on {adjustedTables} {adjustedTables === 1 ? "table" : "tables"})
+      <InfoHint concept="eval:model-adjusted" />
+    </span>
+  );
+}
+
+export function ParamsPanel({
+  evaluation,
+  adjustedTables = 0,
+}: {
+  evaluation: EvaluationRecord;
+  /** Tables whose `validation_runs` row excludes `pk.duplicate` (lib/adjustment.ts `adjustedTableCount`). */
+  adjustedTables?: number;
+}) {
+  const typed: [string, ReactNode][] = [
     ["engine", evaluation.engine ?? MISSING],
     ["llm_model_uri", evaluation.llm_model_uri ?? MISSING],
     ["embedder_id", evaluation.embedder_id ?? MISSING],
@@ -31,7 +57,7 @@ export function ParamsPanel({ evaluation }: { evaluation: EvaluationRecord }) {
       "relationship_model",
       `${evaluation.relationship_model ?? MISSING} (${evaluation.relationship_model_sha ?? "no sha"})`,
     ],
-    ["model_adjusted", evaluation.model_adjusted === null ? MISSING : String(evaluation.model_adjusted)],
+    ["model_adjusted", modelAdjusted(evaluation, adjustedTables)],
     ["generation_job", `${evaluation.generation_job_name ?? MISSING} · ${evaluation.generation_job_id ?? MISSING}`],
     [
       "generation window",
