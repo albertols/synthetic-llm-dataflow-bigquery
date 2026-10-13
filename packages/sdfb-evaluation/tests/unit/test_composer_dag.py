@@ -1030,6 +1030,14 @@ _GENERATION_MARKERS = {
     "SDFB_RAG_CHUNKS_TABLE", "SDFB_SOURCE_STATS_TABLE",
     "SDFB_VALIDATION_RUNS_TABLE", "WRITE_DISPOSITION"
 }
+# Four more that a deployment's copy of the DAG may carry: its import workflow
+# then fills the defaults of `num_rows`, `uniqueness_mode`,
+# `pool_seed_strategy` and `initial_workers`, which the committed DAG writes
+# out. They are generation defaults; the chained evaluation still adds none.
+_GENERATION_DEFAULT_MARKERS = {
+    "NUM_ROWS_DEFAULT", "UNIQUENESS_MODE_DEFAULT", "POOL_SEED_STRATEGY_DEFAULT",
+    "INITIAL_WORKERS_DEFAULT"
+}
 _HOUSE_VARIABLES = {
     "PROJECT_ID", "REGION", "DATAFLOW_SUBNET", "SA_DATAFLOW",
     "DATAFLOW_NETWORK_TAGS"
@@ -1338,9 +1346,27 @@ def test_the_evaluation_dataset_defaults_to_the_validation_runs_dataset(
   assert scope[default.id] == dataset
 
 
+def _unexpected_generation_markers(markers: set[str]) -> set[str]:
+  """The markers the generation DAG must not carry, and the ones it lacks."""
+  allowed = _GENERATION_MARKERS | _GENERATION_DEFAULT_MARKERS
+  return (markers - allowed) | (_GENERATION_MARKERS - markers)
+
+
 def test_generation_dag_needs_no_new_marker_and_no_new_variable():
-  assert _markers(GENERATION_DAG) == _GENERATION_MARKERS
+  assert not _unexpected_generation_markers(_markers(GENERATION_DAG))
   assert _variables(_tree(GENERATION_DAG)) == _HOUSE_VARIABLES
+
+
+def test_only_the_four_generation_defaults_may_join_the_markers():
+  assert not _unexpected_generation_markers(_GENERATION_MARKERS)
+  assert not _unexpected_generation_markers(_GENERATION_MARKERS
+                                            | _GENERATION_DEFAULT_MARKERS)
+  assert _unexpected_generation_markers(_GENERATION_MARKERS
+                                        | {"EVALUATION_IMAGE"}) == {
+                                            "EVALUATION_IMAGE"
+                                        }
+  assert _unexpected_generation_markers(_GENERATION_MARKERS -
+                                        {"ENGINE"}) == {"ENGINE"}
 
 
 def _as_imported(path: Path, **values: str) -> str:
