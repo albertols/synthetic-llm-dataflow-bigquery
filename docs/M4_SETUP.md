@@ -71,6 +71,12 @@ a private mirror instead, point uv at it for your shell only — e.g.
 `export UV_DEFAULT_INDEX=https://<your-mirror>/simple` — rather than editing
 `pyproject.toml`.
 
+A machine that resolves again keeps the versions its own `uv.lock` holds
+wherever they are still allowed, so its environment can differ from the
+committed lock. To install exactly the committed lock, restore it
+(`git checkout -- uv.lock`) and run `uv sync --frozen --group dev`, then
+`uv run --frozen …`.
+
 If you ever see `ModuleNotFoundError: No module named 'sdfb_core'` after a sync, it means the workspace members weren't installed (e.g. someone removed `sdfb-tests` from the root `dev` group). Quick fix: `uv sync --all-packages --group dev`.
 
 Optional extras for M4 work:

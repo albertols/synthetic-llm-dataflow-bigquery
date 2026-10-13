@@ -33,6 +33,13 @@ dependencies = [
 [project.scripts]
 sdfb-eval = "sdfb_evaluation.cli.main:main"
 
+[tool.uv]
+# pyarrow comes in with Apache Beam, which accepts every release from 14.0.1.
+# Its first release with Python 3.14 wheels is 22.0.0. Without this floor a
+# machine that resolves again (through a private mirror, say) can settle on an
+# older pyarrow and then has to compile it. The locked version is unchanged.
+constraint-dependencies = ["pyarrow>=22"]
+
 [dependency-groups]
 dev = ["pytest>=8.0", "pytest-timeout>=2.3", "hypothesis>=6.100", "mypy>=1.11", "types-PyYAML", "types-requests", "jinja2>=3.1"]
 

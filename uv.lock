@@ -15,6 +15,7 @@ members = [
     "sdfb-tests",
     "synthetic-dataflow-bigquery",
 ]
+constraints = [{ name = "pyarrow", specifier = ">=22" }]
 
 [[package]]
 name = "aiofiles"

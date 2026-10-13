@@ -2,6 +2,9 @@ version = 1
 revision = 3
 requires-python = "==3.14.*"
 
+[manifest]
+constraints = [{ name = "pyarrow", specifier = ">=22" }]
+
 [[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
