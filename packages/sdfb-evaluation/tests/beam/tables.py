@@ -135,7 +135,7 @@ def _arrow_cell(field: Mapping[str, Any], value: Any) -> Any:
 
 def arrow_rows(fields: Sequence[Mapping[str, Any]],
                rows: Sequence[Mapping[str, Any]]) -> list[dict]:
-  """`rows` (client types) as Beam 2.74's DIRECT_READ with
+  """`rows` (client types) as Beam 2.76's DIRECT_READ with
   `use_native_datetime=True` yields them: one Arrow record batch in the
   Storage Read API's types, each cell turned back into Python by
   `.as_py()` (`_CustomBigQueryStorageStreamSource.read_arrow`)."""
