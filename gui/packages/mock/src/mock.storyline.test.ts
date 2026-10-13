@@ -27,8 +27,12 @@ import {
 } from "@synthetic-platform/stats";
 
 import {
+  adjustmentVerdict,
   canonicalTimestamp,
   dlqRuleById,
+  isEvaluatorJobName,
+  joinModelAdjustments,
+  knobs,
   LIFT_COUNT_KEYS,
   isCanonicalTimestamp,
   parseEdge,
@@ -36,11 +40,16 @@ import {
 } from "@synthetic-platform/contracts";
 
 import {
+  ADJUSTED_EVALUATIONS,
+  ADJUSTED_LAUNCH,
+  ADJUSTED_MODEL,
+  ADJUSTED_RELATIONSHIP_MODEL,
   catalogueVersionOf,
   createMockDataset,
   EDGES,
   edgeLabel,
   MOCK_RELATIONSHIP_MODEL,
+  STORYLINE,
   type MockDataset,
 } from "./index";
 
@@ -77,8 +86,9 @@ function profile(
 }
 
 describe("the storyline", { timeout: 60_000 }, () => {
-  it("has 40 evaluations over 8 weeks, RUNNING then FINAL", () => {
-    expect(latest.size).toBe(40);
+  it("has 40 evaluations over 8 weeks, RUNNING then FINAL (plus the two of the adjusted-keys launch)", () => {
+    expect(STORYLINE).toHaveLength(40);
+    expect(latest.size).toBe(STORYLINE.length + ADJUSTED_EVALUATIONS.length);
     const dates = [...latest.values()].map((r) => r.evaluated_at).sort();
     expect(dates[0]!.slice(0, 10)).toBe("2026-08-03");
     expect(dates.at(-1)!.slice(0, 10)).toBe("2026-09-27");
@@ -307,12 +317,12 @@ describe("metrics recompute from the profiles with packages/stats", { timeout: 6
 });
 
 describe("the mock mirrors what the pipeline writes", { timeout: 60_000 }, () => {
-  it("every relational model has a documented edge with an INFO orphan metric and a source baseline", () => {
+  it("every thelook evaluation has a documented edge with an INFO orphan metric and a source baseline", () => {
     const documented = EDGES.filter((e) => !e.enforced);
     expect(documented.length).toBeGreaterThan(0);
     const modelEdges = MOCK_RELATIONSHIP_MODEL.tables.flatMap((t) => t.fk);
     expect(modelEdges.filter((e) => e.role === "documented" && !e.enforced)).toHaveLength(documented.length);
-    for (const row of finals().filter((r) => r.relationship_model)) {
+    for (const row of finals().filter((r) => r.relationship_model === MOCK_RELATIONSHIP_MODEL.model)) {
       for (const edge of documented) {
         const label = edgeLabel(edge);
         const rows = metricsOf(row.evaluation_id).filter((m) => m.edge === label);
@@ -484,13 +494,20 @@ describe("the mock mirrors what the pipeline writes", { timeout: 60_000 }, () =>
   });
 
   it("per-table run ids are <base>-NN-<table> in generation order; one table keeps the base", () => {
-    for (const row of [...latest.values()]) {
+    const adjusted = new Set<string>(ADJUSTED_EVALUATIONS);
+    for (const row of [...latest.values()].filter((r) => !adjusted.has(r.evaluation_id))) {
       const base = row.base_run_id!;
       if (row.relationship_model)
         expect(row.run_ids).toEqual([`${base}-00-users`, `${base}-01-orders`, `${base}-02-order_items`]);
       else expect(row.run_ids).toEqual([base]);
       for (const t of row.tables) if (t.role !== "external") expect(row.run_ids).toContain(t.run_id);
     }
+    // The adjusted-keys launch: seven tables in generation order, under the chained evaluation.
+    const chained = latest.get(ADJUSTED_EVALUATIONS[0])!;
+    expect(chained.run_ids).toEqual(
+      ADJUSTED_LAUNCH.map((t, i) => `${chained.base_run_id!}-${String(i).padStart(2, "0")}-${t.name}`),
+    );
+    expect(chained.tables.map((t) => t.run_id)).toEqual(chained.run_ids);
     const runIds = new Set(data.validationRuns.map((r) => r.run_id));
     for (const row of [...latest.values()]) for (const id of row.run_ids) expect(runIds.has(id), id).toBe(true);
   });
@@ -536,5 +553,177 @@ describe("the mock mirrors what the pipeline writes", { timeout: 60_000 }, () =>
     const evaluated = [...latest.values()].map((r) => r.evaluated_at);
     expect(evaluated.every((t) => !t.endsWith("000Z"))).toBe(true);
     expect(canonicalTimestamp(evaluated[0]!)).toBe(evaluated[0]);
+  });
+});
+
+describe("the adjusted-keys launch (ADR 0038)", { timeout: 60_000 }, () => {
+  const [CHAINED, MISWIRED] = ADJUSTED_EVALUATIONS;
+  const launchRuns = () =>
+    data.validationRuns
+      .filter((r) => r.run_id.startsWith(`${latest.get(CHAINED)!.base_run_id!}-`))
+      .map((r) => ({ ...r, dlq_by_rule_map: JSON.parse(r.dlq_by_rule!) as Record<string, number> }));
+  const pkRow = (evaluation: string, table: string) =>
+    metricsOf(evaluation).find((m) => m.metric_id === "table.pk_duplicate_rate" && m.table_name === table)!;
+  const short = (fqn: string | null) => fqn!.split(".").at(-1)!;
+
+  it("is one seven-table launch of an invented, aliased model, evaluated twice (RUNNING then FINAL)", () => {
+    for (const id of ADJUSTED_EVALUATIONS) {
+      const row = latest.get(id)!;
+      expect(data.registry.filter((r) => r.evaluation_id === id).map((r) => r.event)).toEqual(["RUNNING", "FINAL"]);
+      expect([row.relationship_model, row.relationship_model_sha]).toEqual([
+        ADJUSTED_MODEL,
+        ADJUSTED_RELATIONSHIP_MODEL.sha12,
+      ]);
+      expect(row.tables.map((t) => t.name)).toEqual(ADJUSTED_LAUNCH.map((t) => t.name));
+      // The registry did not read the launch log: whether the model was adjusted is unknown there.
+      expect(row.model_adjusted).toBeNull();
+    }
+    expect(ADJUSTED_LAUNCH.map((t) => t.name)).toEqual([
+      "B_TABLE",
+      "C_TABLE",
+      "D_TABLE",
+      "E_TABLE",
+      "G_TABLE",
+      "A_TABLE",
+      "F_TABLE",
+    ]);
+    // Aliases only: no table or column of this model is a real name.
+    for (const table of ADJUSTED_RELATIONSHIP_MODEL.tables) {
+      expect(table.name).toMatch(/^[A-G]_TABLE$/);
+      for (const column of [...table.pk, ...table.fk.flatMap((fk) => [...fk.cols, ...fk.ref_cols])])
+        expect(column).toMatch(/^COL_\d{3}$/);
+    }
+    expect(launchRuns()).toHaveLength(ADJUSTED_LAUNCH.length);
+  });
+
+  it("the generator's rows give every verdict but unknown; the mis-wired evaluation gives that one", () => {
+    const verdicts = Object.fromEntries(launchRuns().map((r) => [short(r.landing_table), adjustmentVerdict(r)]));
+    expect(verdicts).toEqual({
+      B_TABLE: "not_adjusted",
+      E_TABLE: "faithful",
+      F_TABLE: "under",
+      C_TABLE: "under",
+      A_TABLE: "under",
+      D_TABLE: "over",
+      G_TABLE: "unmeasured",
+    });
+    const chained = joinModelAdjustments(latest.get(CHAINED)!, launchRuns());
+    expect(chained.map((a) => [a.table, a.verdict])).toEqual(ADJUSTED_LAUNCH.map((t) => [t.name, verdicts[t.name]]));
+    expect(chained.every((a) => a.joined_by === "run_id")).toBe(true);
+    const miswired = joinModelAdjustments(latest.get(MISWIRED)!, launchRuns());
+    expect(miswired.map((a) => a.verdict)).toEqual(["not_adjusted", ...Array<string>(6).fill("unknown")]);
+    expect(new Set([...chained, ...miswired].map((a) => a.verdict)).size).toBe(6);
+  });
+
+  it("derives the generator's shares, deltas and gate from the recorded counts, by the pipeline's formulas", () => {
+    const tolerance = Number(knobs.knobs.find((k) => k.id === "repeat_share_tolerance")!.value);
+    expect(tolerance).toBe(0.05);
+    for (const run of launchRuns()) {
+      const t = ADJUSTED_LAUNCH.find((x) => x.name === short(run.landing_table))!;
+      const where = t.name;
+      const pkDuplicate = t.rows - t.distinctKeys;
+      expect(run.valid_count, where).toBe(t.rows);
+      expect(run.excluded_blocker_rules, where).toBe(t.adjusted ? "pk.duplicate" : "");
+      expect(run.dlq_by_rule_map, where).toEqual(t.adjusted ? { "pk.duplicate": pkDuplicate } : {});
+      // An excluded rule leaves both sides of the gate's ratio: the adjusted tables PASS.
+      expect([run.blocker_count, run.observed_blocker_ratio, run.status], where).toEqual([0, 0, "PASSED"]);
+      expect(run.source_repeat_share, where).toBe(t.sourceRepeatShare);
+      if (t.sourceRepeatShare === null) {
+        expect([run.landing_repeat_share, run.repeat_share_delta, run.repeat_share_within_tolerance], where).toEqual([
+          null,
+          null,
+          null,
+        ]);
+        continue;
+      }
+      expect(run.landing_repeat_share!, where).toBeCloseTo(pkDuplicate / t.rows, 12);
+      expect(run.repeat_share_delta!, where).toBeCloseTo(pkDuplicate / t.rows - t.sourceRepeatShare, 12);
+      expect(run.repeat_share_within_tolerance, where).toBe(Math.abs(run.repeat_share_delta!) <= tolerance);
+    }
+    // The five tables of the recorded launch, to four decimals: landing share and delta.
+    const recorded = Object.fromEntries(
+      launchRuns()
+        .filter((r) => r.landing_repeat_share !== null)
+        .map((r) => [
+          short(r.landing_table),
+          [r.landing_repeat_share!.toFixed(4), r.repeat_share_delta!.toFixed(4), r.repeat_share_within_tolerance],
+        ]),
+    );
+    expect(recorded).toMatchObject({
+      E_TABLE: ["0.5026", "-0.0001", true],
+      F_TABLE: ["0.5361", "-0.1276", false],
+      C_TABLE: ["0.4197", "-0.2420", false],
+      A_TABLE: ["0.0000", "-0.5087", false],
+    });
+  });
+
+  it("the evaluator's PK rows carry their counts, and agree with the generator's landing share", () => {
+    for (const id of ADJUSTED_EVALUATIONS) {
+      for (const t of ADJUSTED_LAUNCH) {
+        const row = pkRow(id, t.name);
+        const where = `${id} ${t.name}`;
+        // _key_duplicates: rows on a repeated key over the rows, with the counts in detail.
+        expect(row.value!, where).toBeCloseTo(t.duplicateRows / t.rows, 12);
+        expect(row.n_synthetic, where).toBe(t.rows);
+        expect(row.detail, where).toMatchObject({
+          duplicate_rows: t.duplicateRows,
+          distinct_keys: t.distinctKeys,
+          null_key_rows: 0,
+          key_columns: t.pk,
+        });
+        // Zero tolerance against the DECLARED key: any repeat fails, adjusted or not.
+        expect(row.status, where).toBe(t.duplicateRows > 0 ? "fail" : "pass");
+        // Every repeated key holds at least two rows; the singletons are the rest.
+        const repeatedKeys = t.distinctKeys - (t.rows - t.duplicateRows);
+        expect(repeatedKeys, where).toBeGreaterThanOrEqual(0);
+        expect(t.duplicateRows, where).toBeGreaterThanOrEqual(2 * repeatedKeys);
+        const identity = metricsOf(id).find(
+          (m) => m.metric_id === "table.identity_duplicate_rate" && m.table_name === t.name,
+        )!;
+        expect([identity.status, (identity.detail as { reason: string }).reason], where).toEqual([
+          "not_evaluated",
+          "no identity columns declared in the relationship model",
+        ]);
+      }
+    }
+    // The cross-check the run view performs: 1 − distinct keys ÷ rows = the generator's landing share.
+    for (const run of launchRuns().filter((r) => r.landing_repeat_share !== null)) {
+      const detail = pkRow(CHAINED, short(run.landing_table)).detail as { distinct_keys: number };
+      const rows = pkRow(CHAINED, short(run.landing_table)).n_synthetic!;
+      expect(Math.abs(1 - detail.distinct_keys / rows - run.landing_repeat_share!)).toBeLessThan(1e-6);
+    }
+    // What the evaluation page shows without the generator's half: five FAILs and two passes.
+    const statuses = Object.fromEntries(ADJUSTED_LAUNCH.map((t) => [t.name, pkRow(CHAINED, t.name).status]));
+    expect(statuses).toEqual({
+      B_TABLE: "pass",
+      C_TABLE: "fail",
+      D_TABLE: "fail",
+      E_TABLE: "fail",
+      G_TABLE: "fail",
+      A_TABLE: "pass",
+      F_TABLE: "fail",
+    });
+    // Referential integrity is a separate question: every edge is enforced and has no orphan.
+    const orphans = metricsOf(CHAINED).filter((m) => m.metric_id === "relationship.orphan_rate");
+    expect(orphans).toHaveLength(6);
+    expect(orphans.every((m) => m.value === 0 && m.status === "pass")).toBe(true);
+  });
+
+  it("the mis-wired evaluation names an evaluator job as its generation job", () => {
+    const chained = latest.get(CHAINED)!;
+    const miswired = latest.get(MISWIRED)!;
+    expect(isEvaluatorJobName(chained.generation_job_name)).toBe(false);
+    expect(isEvaluatorJobName(miswired.generation_job_name)).toBe(true);
+    expect(miswired.generation_job_id).toBe(chained.evaluation_job_id);
+    expect([miswired.generation_started_at, miswired.generation_finished_at]).toEqual([
+      chained.evaluated_at,
+      chained.finished_at,
+    ]);
+    expect(miswired.base_run_id).toBeNull();
+    expect(miswired.tables.map((t) => t.run_id === null)).toEqual([false, true, true, true, true, true, true]);
+    expect(new Set(miswired.tables.map((t) => t.scope_mode))).toEqual(new Set(["manual"]));
+    // The launch's rows were written before that "generation" window opened.
+    for (const run of launchRuns()) expect(run.created_at < miswired.generation_started_at!).toBe(true);
+    expect(miswired.status).toBe("SUCCEEDED_WITH_WARNINGS");
   });
 });

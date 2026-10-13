@@ -26,14 +26,11 @@ import {
   Random,
   seedFrom,
   sha256Hex,
-  tableFamilyScores,
-  tvd,
-  tvdNullExpectation,
-  w1FromBins,
   type FamilyScores,
 } from "@synthetic-platform/stats";
 
-import { fanoutCounts, foldedNewcombeCi, sum, TableEvaluator, wilsonCi, type TableContext } from "./evaluate";
+import { ADJUSTED_EVALUATIONS, buildAdjustedLaunch } from "./adjusted";
+import { edgeMetrics, familyRows, TableEvaluator, tableRollups, type TableContext } from "./evaluate";
 import {
   baseRunId,
   dataflowJobId,
@@ -107,93 +104,26 @@ export interface MockDataset {
   sourceSamples: Record<string, Row[]>;
 }
 
-function familyRows(ev: TableEvaluator, table: string, scores: FamilyScores, level: "table" | "model") {
-  const prefix = level === "table" ? "table" : "model";
-  for (const family of ["fidelity", "privacy", "integrity", "diversity", "overall"] as const) {
-    const id = `${prefix}.${family}_score` as const;
-    const row = ev.metric(id, { value: scores[family], nSource: null, nSynthetic: null, method: "exact" });
-    row.table_name = table;
-  }
-}
-
+/** One thelook edge's relationship rows (the producers are `edgeMetrics`, shared with adjusted.ts). */
 function relationship(ev: TableEvaluator, edge: EdgeDef, spec: EvalSpec, rng: Random) {
-  const label = edgeLabel(edge);
   const parent = TABLES[edge.parent]!;
-  const parentsSource = parent.sourceRows;
-  const parentsSynthetic = edge.external ? parent.sourceRows : rowsFor(spec, parent);
-  const hs = fanoutCounts(rng, edge.fanout, parentsSource);
-  const shares = edge.fanout.map((s, i) => s * (1 + spec.quality.drift * (i - 2) * 0.5));
-  const hy = fanoutCounts(rng, shares, parentsSynthetic);
-  // The evaluator publishes no fan-out histogram: the comparison is in the edge's metrics.
-  const mean = (h: number[]) => h.reduce((acc, c, i) => acc + c * i, 0) / Math.max(sum(h), 1);
-  const children = hy.reduce((acc, c, i) => acc + c * i, 0);
-  const sourceChildren = sum(hs.map((c, i) => c * i));
-  // Enforced edges orphan only when the external key pool lags (quality.orphanShare); the
-  // documented edge copies user_id from the order, so it has none — while the source,
-  // with deleted users, has a few: the INFO comparison the catalogue describes.
-  const orphans = edge.external ? rng.binomial(children, spec.quality.orphanShare) : 0;
-  const sourceOrphans = edge.enforced ? 0 : rng.binomial(sourceChildren, 0.0021);
-  // A documented edge (enforced: false) is context, not a verdict: the scorer writes its orphan
-  // rate as INFO, unscored and out of the roll-ups (Ruling R42).
-  ev.metric("relationship.orphan_rate", {
-    edge: label,
-    value: orphans / Math.max(children, 1),
-    sourceValue: sourceOrphans / Math.max(sourceChildren, 1),
-    nSource: sourceChildren,
-    nSynthetic: children,
-    detail: { orphans, enforced: edge.enforced, role: edgeRole(edge) },
-    enforced: edge.enforced,
-  });
-  ev.metric("relationship.orphan_rate_source", {
-    edge: label,
-    value: sourceOrphans / Math.max(sourceChildren, 1),
-    nSource: sourceChildren,
-    detail: { orphans: sourceOrphans, enforced: edge.enforced, role: edgeRole(edge) },
-  });
-  ev.metric("relationship.fanout_tvd", {
-    edge: label,
-    enforced: edge.enforced,
-    value: tvd(hs, hy),
-    noiseFloor: tvdNullExpectation(hs, parentsSource, parentsSynthetic),
-    nSource: parentsSource,
-    nSynthetic: parentsSynthetic,
-  });
-  ev.metric("relationship.fanout_w1", {
-    edge: label,
-    value: w1FromBins([0.5, 1.5, 2.5, 3.5], hs, hy),
-    nSource: parentsSource,
-    nSynthetic: parentsSynthetic,
-  });
-  ev.metric("relationship.fanout_mean_ratio", {
-    edge: label,
-    value: mean(hy) / mean(hs),
-    sourceValue: mean(hs),
-    syntheticValue: mean(hy),
-    nSource: parentsSource,
-    nSynthetic: parentsSynthetic,
-  });
-  ev.metric("relationship.zero_child_share_delta", {
-    edge: label,
-    value: Math.abs(hy[0]! / parentsSynthetic - hs[0]! / parentsSource),
-    ...foldedNewcombeCi(hy[0]!, parentsSynthetic, hs[0]!, parentsSource),
-    nSource: parentsSource,
-    nSynthetic: parentsSynthetic,
-  });
-  ev.metric("relationship.cardinality_adherence", {
-    edge: label,
-    value: 1 - orphans / Math.max(children, 1),
-    ...(children > 0 ? wilsonCi(children - orphans, children) : {}),
-    nSynthetic: children,
-  });
-  const covered = (h: number[]) => 1 - h[0]! / Math.max(sum(h), 1);
-  ev.metric("relationship.parent_coverage", {
-    edge: label,
-    value: covered(hy) / covered(hs),
-    sourceValue: covered(hs),
-    syntheticValue: covered(hy),
-    nSource: parentsSource,
-    nSynthetic: parentsSynthetic,
-  });
+  edgeMetrics(
+    ev,
+    {
+      label: edgeLabel(edge),
+      enforced: edge.enforced,
+      role: edgeRole(edge),
+      external: edge.external,
+      fanout: edge.fanout,
+      drift: spec.quality.drift,
+      // Enforced edges orphan only when the external key pool lags; the documented edge copies
+      // user_id from the order, so it has none.
+      orphanShare: spec.quality.orphanShare,
+      parentsSource: parent.sourceRows,
+      parentsSynthetic: edge.external ? parent.sourceRows : rowsFor(spec, parent),
+    },
+    rng,
+  );
 }
 
 interface Samples {
@@ -538,27 +468,7 @@ export function createMockDataset(seed = 20260928): MockDataset {
       if (spec.relational)
         for (const edge of EDGES.filter((e) => e.child === table.name)) relationship(ev, edge, spec, ctx.rng);
 
-      // Roll-ups (Ruling R11) and the SDMetrics-style shape/trend scores.
-      // The evaluator's roll-up (aggregate_scores): score: none measured rows score null (R26).
-      const scores = tableFamilyScores(ev.result.metrics);
-      const columnFidelity = ev.result.metrics.filter(
-        (m) => m.family === "fidelity" && m.level === "column" && m.score !== null,
-      );
-      const byColumn = new Map<string, number[]>();
-      for (const m of columnFidelity)
-        byColumn.set(m.column_name ?? "", [...(byColumn.get(m.column_name ?? "") ?? []), m.score!]);
-      const meanOf = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
-      ev.metric("table.column_shape_score", {
-        value: meanOf([...byColumn.values()].map((xs) => meanOf(xs)!)),
-        nSource: null,
-        nSynthetic: null,
-      });
-      ev.metric("table.pair_trend_score", {
-        value: meanOf(ev.result.metrics.filter((m) => m.level === "pair" && m.score !== null).map((m) => m.score!)),
-        nSource: null,
-        nSynthetic: null,
-      });
-      familyRows(ev, table.name, scores, "table");
+      const scores = tableRollups(ev);
       tableScores.set(table.name, scores);
       entry.table_score = scores.overall;
       evaluatedRows.push(...ev.result.metrics);
@@ -631,10 +541,20 @@ export function createMockDataset(seed = 20260928): MockDataset {
     registry.push(final);
   }
 
-  const { validationRuns, dlq, fanoutStats } = buildRuns(STORYLINE, seed);
+  // The adjusted-keys launch (ADR 0038) and its two evaluations: recorded counts replayed under
+  // aliased table names, next to the storyline rather than inside it (adjusted.ts).
+  const adjusted = buildAdjustedLaunch(seed, registryBase);
+  registry.push(...adjusted.registry);
+  metrics.push(...adjusted.metrics);
+  profiles.push(...adjusted.profiles);
+  flags.push(...adjusted.flags);
+
+  const runs = buildRuns(STORYLINE, seed);
+  const validationRuns = [...runs.validationRuns, ...adjusted.validationRuns];
+  const { dlq, fanoutStats } = runs;
   let rag: RagSet[] | null = null;
   return {
-    generatedWith: { seed, evaluations: STORYLINE.length },
+    generatedWith: { seed, evaluations: STORYLINE.length + ADJUSTED_EVALUATIONS.length },
     registry: canonicalize(registry, "evaluation_data_history"),
     metrics: canonicalize(metrics, "evaluation_metrics"),
     profiles: canonicalize(profiles, "evaluation_profiles"),
