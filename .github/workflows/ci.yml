@@ -150,7 +150,7 @@ jobs:
         run: echo "Test job complete. See above for pass/fail and counts."
 
   evaluation:
-    # sdfb-evaluation is a standalone uv project (own lock, Python 3.11); it
+    # sdfb-evaluation is a standalone uv project (own lock, Python 3.14); it
     # must install and pass alone — none of sdfb-core/beam/tests present (ADR 0041).
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -161,7 +161,7 @@ jobs:
           version: latest
           enable-cache: true
           cache-dependency-glob: packages/sdfb-evaluation/uv.lock
-          python-version: "3.11"
+          python-version: "3.14"
       - name: Sync (frozen)
         run: uv sync --project packages/sdfb-evaluation --frozen
       - name: Stands alone

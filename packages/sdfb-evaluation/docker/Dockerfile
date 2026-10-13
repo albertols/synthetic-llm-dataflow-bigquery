@@ -31,9 +31,9 @@
 # Here the template's entry is the evaluator itself (run_evaluation.py below),
 # not the shared image's dispatcher.
 #
-# Python 3.11 and Beam 2.74.0 must match packages/sdfb-evaluation/pyproject.toml
+# Python 3.14 and Beam 2.76.0 must match packages/sdfb-evaluation/pyproject.toml
 # and uv.lock; the unit test tests/unit/test_launch_surfaces.py checks both.
-FROM apache/beam_python3.11_sdk:2.74.0
+FROM apache/beam_python3.14_sdk:2.76.0
 
 COPY --from=ghcr.io/astral-sh/uv:0.11.15 /uv /uvx /bin/
 
@@ -45,7 +45,7 @@ RUN uv sync --frozen --no-dev --no-install-project --python /usr/local/bin/pytho
 COPY packages/sdfb-evaluation/src ./src
 RUN uv sync --frozen --no-dev --python /usr/local/bin/python
 
-COPY --from=gcr.io/dataflow-templates-base/python311-template-launcher-base /opt/google/dataflow/python_template_launcher /opt/google/dataflow/python_template_launcher
+COPY --from=gcr.io/dataflow-templates-base/python314-template-launcher-base /opt/google/dataflow/python_template_launcher /opt/google/dataflow/python_template_launcher
 
 # Two execution contexts import sdfb_evaluation, both from /template/.venv:
 #   - LAUNCHER (the flex entry): honors PYTHONPATH, so the venv
@@ -57,9 +57,9 @@ COPY --from=gcr.io/dataflow-templates-base/python311-template-launcher-base /opt
 #     site.addsitedir() on our venv, activating the dependencies and the
 #     editable sdfb_evaluation finder. Same mechanism as the generator's GPU
 #     image (docker/Dockerfile at the repository root).
-ENV PYTHONPATH="/template/.venv/lib/python3.11/site-packages:/template/src"
+ENV PYTHONPATH="/template/.venv/lib/python3.14/site-packages:/template/src"
 RUN SITE="$(python -c 'import site; print(site.getsitepackages()[0])')" \
-    && printf "import site; site.addsitedir('/template/.venv/lib/python3.11/site-packages')\n" \
+    && printf "import site; site.addsitedir('/template/.venv/lib/python3.14/site-packages')\n" \
         > "${SITE}/zz_sdfb_bridge.pth" \
     && echo "Wrote worker bridge .pth -> ${SITE}/zz_sdfb_bridge.pth"
 
