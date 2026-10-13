@@ -249,9 +249,12 @@ def tvd_null_expectation(p: Sequence[float], n: int, m: int) -> float:
   floor for `column.tvd`/`column.dow_tvd`/etc. even when both samples come
   from the identical distribution `p`.
   """
-  return 0.5 * sum(
-      math.sqrt(2.0 * p_i * (1.0 - p_i) * (1.0 / n + 1.0 / m) / math.pi)
-      for p_i in p)
+  # Added left to right, not with the builtin sum(): CPython 3.12 made the
+  # sum() of floats compensated, which moves this floor's last bit.
+  total = 0.0
+  for p_i in p:
+    total += math.sqrt(2.0 * p_i * (1.0 - p_i) * (1.0 / n + 1.0 / m) / math.pi)
+  return 0.5 * total
 
 
 def jsd_null_expectation_bits(k: int, n: int, m: int) -> float:

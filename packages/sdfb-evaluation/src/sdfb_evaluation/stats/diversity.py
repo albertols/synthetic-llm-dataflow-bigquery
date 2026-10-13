@@ -400,7 +400,12 @@ def chao_shen_bits(counts: Sequence[int]) -> float | None:
   coverage = _chao_shen_coverage(f1, n)
   if coverage is None:
     return None
-  total_nats = sum(chao_shen_term(c, n, coverage) for c in positive)
+  # Added left to right, not with the builtin sum(): CPython 3.12 made the
+  # sum() of floats compensated, which moves this total's last bit. The
+  # pipeline's combiners add the same terms one by one.
+  total_nats = 0.0
+  for c in positive:
+    total_nats += chao_shen_term(c, n, coverage)
   return total_nats / math.log(2.0)
 
 

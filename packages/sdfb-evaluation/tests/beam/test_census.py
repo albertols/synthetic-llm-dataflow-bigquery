@@ -1616,3 +1616,29 @@ def test_exact_mode_rows_are_unchanged_by_the_sampled_mode_rule():
   for mv in _pure(table, rows).metrics:
     assert mv.method.value == "exact" and mv.sample_rate is None
     assert "sample_rates" not in mv.detail
+
+
+def test_baseline_diversity_sums_as_python_3_11_did(monkeypatch):
+  """The reference side's `sum(c * ln(c))` behind the entropy and distinct
+  baselines. CPython 3.12 made the builtin `sum()` of floats compensated,
+  which moved its last bit; the counts are added left to right, as 3.11
+  added them. `summarize` rounds what it returns, so the accumulator it is
+  handed is what is pinned."""
+  handed = []
+  monkeypatch.setattr(census, "summarize", handed.append)
+
+  class _Of:
+
+    def __init__(self, **fields):
+      self.__dict__.update(fields)
+
+  r_counts = {"v0": 9, "v1": 10, "v2": 6, "v3": 2}
+  view = _Of(
+      ref=_Of(r_nonnull=27, r_counts=r_counts),
+      col=_Of(sampled=False),
+      c=_Of(n_src_r=27.0, clc_src_r=67.5, k_src_r=4.0))
+  census._baseline_diversity(view)  # pylint: disable=protected-access
+  assert len(handed) == 1
+  accumulator = handed[0]
+  assert accumulator.n_syn_m == 27 and accumulator.k_syn_m == 4
+  assert accumulator.clc_syn_m.hex() == "0x1.b780751325eb3p+5"

@@ -69,8 +69,24 @@ class ExactIPIndex:
     raise NotImplementedError
 
 
+def _dot(a: list[float], b: list[float]) -> float:
+  # A plain left-to-right sum, not the builtin: CPython 3.12 made float
+  # sum() compensated, which moves the last bits and, between two vectors
+  # that score alike, the order. The TS mirror in gui/packages/stats sums
+  # this way and must match.
+  total = 0.0
+  for x, y in zip(a, b, strict=False):
+    total += x * y
+  return total
+
+
 def _normalize(vec: list[float]) -> list[float]:
-  norm = math.sqrt(sum(v * v for v in vec))
+  # A plain left-to-right sum, not the builtin: float sum() is compensated
+  # since CPython 3.12, and the TS mirror in gui/packages/stats must match.
+  total = 0.0
+  for v in vec:
+    total += v * v
+  norm = math.sqrt(total)
   if norm == 0.0:
     return list(vec)
   return [v / norm for v in vec]
@@ -89,9 +105,7 @@ class _PyExactIPIndex(ExactIPIndex):
     if not self._vectors or k <= 0:
       return []
     q = _normalize(query)
-    scored = [(sum(a * b
-                   for a, b in zip(vec, q, strict=False)), idx)
-              for idx, vec in enumerate(self._vectors)]
+    scored = [(_dot(vec, q), idx) for idx, vec in enumerate(self._vectors)]
     # Sort by descending score, then ascending index (stable tie-break).
     scored.sort(key=lambda t: (-t[0], t[1]))
     return [idx for _, idx in scored[:k]]
