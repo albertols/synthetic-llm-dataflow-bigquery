@@ -7,13 +7,15 @@
  *   (never edited by hand).
  * - `timestamps`: the canonical wire timestamp (six fraction digits, UTC).
  * - `relational`: the relationship-model / DLQ-rule types and `parseEdge` / `formatEdge` / `findEdge`.
+ * - `adjustments`: ADR 0038 model adjustments — the verdict of a `validation_runs` row and its
+ *   join to an evaluation's tables.
  * - `api`: the BFF's request/response contract; `payloads`: profile payload shapes;
  *   `sourceStats`: the profiler entry; `knobs`, `knobs.schema`: the knob file; `vectors`:
  *   the binary chunk envelope.
  *
  * The web app does NOT import this barrel (it would pull classic zod into the shell):
  * it imports types from `@contracts/<module>` and values only from dependency-free
- * modules (`vectors`, `concept`, `relational`, `timestamps`, `generated/catalogue`, `generated/knobs`,
+ * modules (`vectors`, `concept`, `relational`, `adjustments`, `timestamps`, `generated/catalogue`, `generated/knobs`,
  * `generated/relationships`, `generated/dlqRules`).
  */
 export * from "./concept";
@@ -25,6 +27,7 @@ export * from "./knobs";
 export * from "./knobs.schema";
 export * from "./vectors";
 export * from "./relational";
+export * from "./adjustments";
 export * from "./timestamps";
 export * from "../generated/schemas";
 export { catalogue, catalogueById, catalogueFamilies, catalogueLevels, catalogueVersion } from "../generated/catalogue";
