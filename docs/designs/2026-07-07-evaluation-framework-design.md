@@ -1587,9 +1587,9 @@ session; every other read table keeps the fast read.
 The source and synthetic sides are read by `ReadFromBigQuery` with
 `DIRECT_READ`, the [BigQuery Storage Read API][bq-storage-read]. Opening a
 read session needs `bigquery.readsessions.create` **on the project of the
-table being read**: Beam 2.74 asks with that project as the session's
+table being read**: Beam asks with that project as the session's
 parent (`_CustomBigQueryStorageSource.split`, read in the installed
-package). A project may refuse it. A deployment may not grant
+package; the same code in 2.74.0 and 2.76.0). A project may refuse it. A deployment may not grant
 `roles/bigquery.readSessionUser`, and a public project is expected to
 refuse: the caller holds no role there (an inference from the parent
 project Beam uses, not something observed). A read-only parent's source
@@ -1789,8 +1789,8 @@ each has a cap, and above it the transform shuffles instead:
 | A parent's key set (relational) | 10 million keys, 80 MB | `CoGroupByKey` |
 | The panel, encoded once per worker | the plan's R and H | — |
 
-Beam 2.74 keeps no side-input cache by default, so every bundle would
-re-read them. The evaluator sets `max_cache_memory_usage_mb` to the sum of
+Beam keeps no side-input cache by default (`max_cache_memory_usage_mb` is
+0 in 2.76.0, as it was in 2.74.0), so every bundle would re-read them. The evaluator sets `max_cache_memory_usage_mb` to the sum of
 the side inputs a worker may hold at once, with 25 % headroom and at least
 512 MB. The Gower search charges 64 MB per chunk. On Dataflow the
 experiment `upload_graph` is always set, because a graph this wide is
@@ -1852,8 +1852,9 @@ runs on `FnApiRunner`, and `--runner PrismRunner` is refused as a usage
 error (R92, R94). The behaviour was reproduced with a short pipeline that
 holds no evaluator code (the reproducer is not committed). The upstream
 report on the same subject is [apache/beam#36563][beam-36563], "Prism's
-handling of side inputs could fail sometime", now closed; this package
-pins Beam 2.74.0 and has not been re-tested on a later release. What the driver saw fail before the pipeline
+handling of side inputs could fail sometime", now closed; it was seen on
+Beam 2.74.0, and Prism has not been tried again on the 2.76.0 this package
+pins now, so the refusal stays. What the driver saw fail before the pipeline
 started is passed to the Guard as a constant, not a side input, so no
 runner can publish a graded row for such a table.
 
@@ -2530,9 +2531,10 @@ the DAG re-triggering itself. The README lists them.
 
 ## 9. Packaging and the DSG unit
 
-The package is a standalone uv project (D1): Python 3.11, Apache Beam
-2.74.0 with the same pre-release pin the generator needs, numpy, scipy,
-scikit-learn, PyYAML and the BigQuery client. Its lock holds no pandas
+The package is a standalone uv project (D1): Python 3.14 and Apache Beam
+2.76.0, both held equal to the generator's because the shared image runs
+the evaluator on the generator's environment (ADR 0041, amendment of
+2026-10-13), numpy, scipy, scikit-learn, PyYAML and the BigQuery client. Its lock holds no pandas
 and no synthetic-data metrics library; scipy and scikit-learn double as
 test oracles (§10). CI has a separate job that installs the package from
 its own lock, checks that no generator module is importable, type-checks
@@ -2792,7 +2794,7 @@ list, and two BigQuery reference pages in `schemas/__init__.py`.
 | [Dataflow: troubleshoot Flex Templates][flex-troubleshoot] | the launch's time limit, §5.1, ADR 0041 | Read on 2026-10-11 with `curl -sL` and a text search. On the page: "By default, the Flex Template launch process has a timeout of 12 mins. This launch process includes pulling the template container image and executing the code to construct the job graph. If the launch doesn't complete within this 12 minute window, the job fails with the error "Timeout in polling result file"", and among the causes "The program that creates the graph takes too long to finish" and "Code running in the launcher VM takes too long to finish" |
 | [BigQuery: use cached query results][bq-cached-results] | why a re-launch may plan faster than a first launch, ADR 0041 | Read on 2026-10-11 with `curl -sL`. On the page: "If you run the exact same query again, BigQuery returns the results from the cached table, if it exists", "cached in temporary tables for approximately 24 hours", "maintained per-user, per-project", not cached "If any of the referenced tables or logical views have changed since the results were previously cached", and "the job statistics property `statistics.query.cacheHit` returns as true". The page does not mention time travel. Whether the launches in question were served from it is not confirmed |
 | [Dataflow: security and permissions][dataflow-security] | the worker account's access to the temp location, §4.9 | Read on 2026-10-11 with `curl -sL`. On the page: "Ensure that your user-managed service account has read and write access to the staging and temporary locations specified in the Dataflow job" |
-| [Beam 2.74.0 `apiclient.py`][beam-apiclient] | `pipeline.pb` is staged for every Dataflow job, §4.9 | Read on 2026-10-11 at the release tag and in the evaluator's environment (the same lines): `create_job_description` stages `pipeline.pb` under the staging location unconditionally (lines 834 to 849); the `upload_graph` branch (line 755) adds `dataflow_graph.json` |
+| [Beam 2.74.0 `apiclient.py`][beam-apiclient] | `pipeline.pb` is staged for every Dataflow job, §4.9 | Read on 2026-10-11 at the release tag and in the evaluator's environment (the same lines): `create_job_description` stages `pipeline.pb` under the staging location unconditionally (lines 834 to 849); the `upload_graph` branch (line 755) adds `dataflow_graph.json`. Read again on 2026-10-13 in Beam 2.76.0, the release the package pins now: the same statements, at lines 851 to 866 and line 772 |
 | [Cloud Storage: soft delete][gcs-soft-delete] | a deleted panel object stays recoverable, §4.9 | Read on 2026-10-12 with `curl -sL`. On the page: "The soft delete feature preserves objects and buckets that get deleted or overwritten by retaining them in a soft-deleted state for a specified period of time", "Soft delete is enabled by default for all buckets that support it, with a default retention duration of 7 days", and the caution that for a bucket of temporary data it "can result in significantly increased storage costs" |
 | [apache/beam#36563][beam-36563] | Prism and side inputs, §5.4 | Fetched; the issue title matches and the issue is closed |
 | [SDMetrics documentation][sdmetrics] | the origin of several metric names, §4.3 | Fetched; title matches |

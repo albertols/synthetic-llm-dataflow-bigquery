@@ -20,6 +20,8 @@ Less-naive read: both roles can share one image because `/opt/apache/beam/boot` 
 - `ENTRYPOINT` is a dispatch script (`docker/entrypoint.sh`) that inspects the appended args: FnAPI `*_endpoint`/`--id` flags present → exec `/opt/apache/beam/boot` (worker); otherwise → exec `/opt/google/dataflow/python_template_launcher` (Flex Template launcher).
 - Both binaries are present at their canonical paths, pulled from official Google base images (`apache/beam_python3.11_sdk:2.73.0` and `gcr.io/dataflow-templates-base/python311-template-launcher-base`) via multi-stage `COPY --from`.
 
+> **Note (2026-10-13):** the two base images named above are the ones of the day this was decided. The decision does not depend on their versions. The pins live in `docker/Dockerfile` (`BEAM_SDK_IMAGE`, `LAUNCHER_IMAGE`) and follow `.python-version`: `apache/beam_python3.14_sdk:2.76.0` and `python314-template-launcher-base` since [ADR 0040](0040-dsg-donation-golden-source-sync.md), A6. The same image also carries the evaluator, whose own pins are held equal to these ([ADR 0041](0041-evaluation-standalone-package.md), amendment of 2026-10-13).
+
 ## Consequences
 
 - **Enables**: one registry tag per release, no chained-build CI dependency, single cache layer. Workers and launcher share the exact same Python deps and source — zero drift.

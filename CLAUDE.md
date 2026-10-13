@@ -59,7 +59,7 @@ packages/sdfb-beam/    imports sdfb-core; adds apache-beam[gcp], pandera, pandas
                        Optional extras: [gpu] (vllm+torch), [embedding] (faiss+transformers),
                                         [library] (sdgx — B.2 candidate).
 packages/sdfb-tests/   imports both; pytest + hypothesis + DirectRunner fixtures.
-packages/sdfb-evaluation/  STANDALONE (own lock, Python 3.11, excluded from the uv workspace, ADR 0041):
+packages/sdfb-evaluation/  STANDALONE (own lock, same Python 3.14 and Beam pin as the workspace, excluded from it, ADR 0041):
                        imports none of the three above. A separate CPU job that scores landed
                        tables against the source -> `synthetic_data_quality.evaluation_*`.
 ```

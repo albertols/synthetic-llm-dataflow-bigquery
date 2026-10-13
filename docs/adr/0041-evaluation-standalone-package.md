@@ -1,6 +1,6 @@
 # ADR 0041 — Evaluation is a standalone package and a separate job
 
-**Status:** ACCEPTED (2026-10-05) — **built and reviewed on a laptop; not yet run on Google Cloud.** The statistics, planning, Beam transforms and the composed pipeline are tested on invented data with an in-process Beam runner and fake BigQuery clients. The `sdfb-eval` command line has run on invented data only. The scoping SQL (`APPENDS`, time travel, snapshot clones) has been generated and unit-tested as text and never executed by BigQuery. The CPU image has never been built, the flex template never launched, and the Composer DAG never parsed by Airflow. The acceptance gate still open is the first run on GCP (criteria 5-13 of the design's §11). **Amended 2026-10-06:** the evaluator has no image, template or DAG import of its own any more; see [the amendment](#amendment-2026-10-06-one-image-one-template) at the end.
+**Status:** ACCEPTED (2026-10-05) — **built and reviewed on a laptop; not yet run on Google Cloud.** The statistics, planning, Beam transforms and the composed pipeline are tested on invented data with an in-process Beam runner and fake BigQuery clients. The `sdfb-eval` command line has run on invented data only. The scoping SQL (`APPENDS`, time travel, snapshot clones) has been generated and unit-tested as text and never executed by BigQuery. The CPU image has never been built, the flex template never launched, and the Composer DAG never parsed by Airflow. The acceptance gate still open is the first run on GCP (criteria 5-13 of the design's §11). **Amended 2026-10-06:** the evaluator has no image, template or DAG import of its own any more; see [the amendment](#amendment-2026-10-06-one-image-one-template) at the end. **Amended 2026-10-13:** Python 3.14 and Beam 2.76, moved with the shared image and no longer on its own; see [the second amendment](#amendment-2026-10-13-python-314-and-beam-276-with-the-shared-image).
 **Design:** [`2026-07-07-evaluation-framework-design.md`](../designs/2026-07-07-evaluation-framework-design.md) · section [§11 of `DESIGN.md`](../DESIGN.md#11-evaluation-sdfb-evaluation)
 **Package:** [`packages/sdfb-evaluation/`](../../packages/sdfb-evaluation/README.md) (evaluator `0.1.0`, metric catalogue `1.0.0`)
 **Relies on:** [ADR 0001](0001-no-managed-gcp-services.md) (no managed GCP services) · [ADR 0009](0009-single-flex-template-image.md) (dispatch entrypoint) · [ADR 0022](0022-stats-driven-generation.md) (the literal policy) · [ADR 0032](0032-relationships-as-config.md) (relationship model) · [ADR 0040](0040-dsg-donation-golden-source-sync.md) (the DSG manifest)
@@ -67,7 +67,7 @@ has its own `pyproject.toml`, `uv.lock` and Python 3.11 pin. A fourth member
 would break `docker/Dockerfile` (it copies three member project files, then
 syncs every package) and the DSG unit, which ships the root project file and
 lock ([ADR 0040](0040-dsg-donation-golden-source-sync.md)). A later bump of
-Python or Beam touches this package alone. A CI job installs it from its own
+Python or Beam touches this package alone. *(Amended 2026-10-13, see [the second amendment](#amendment-2026-10-13-python-314-and-beam-276-with-the-shared-image).)* A CI job installs it from its own
 lock and asserts that no generator module is importable.
 
 **D2 — Parity by two-sided golden files, never by import.** The few pieces
@@ -757,6 +757,150 @@ panel gives the metrics of one evaluated from an embedded panel (on a
 laptop the written rows are identical). `docs/RUN_PLAYBOOK.md` ("What a
 cold, full-size launch must show") lists the lines to read.
 
+## Amendment (2026-10-13): Python 3.14 and Beam 2.76, with the shared image
+
+**Status of the amendment:** resolved, type-checked and tested on a laptop
+(macOS). The image has not been rebuilt on the new base and no job has run
+on it. Everything below about a worker describes what the files are written
+to do.
+
+**Claim:** the evaluator's interpreter and its Beam version are the shared
+image's. They move when the generator's move, in one change, and three
+tests refuse a tree where they differ.
+
+**Why.** D1 says "a later bump of Python or Beam touches this package
+alone". That was written for an evaluator with an image of its own. Since
+the [amendment of 2026-10-06](#amendment-2026-10-06-one-image-one-template)
+the deployed evaluator has no environment: its source runs on what
+`uv sync` installs from the root lock, inside the generator's image. Two
+things follow.
+
+- The interpreter is the image's. It pickles the graph on the launcher and
+  unpickles it on the workers, for both jobs.
+- Beam is the root lock's, and the evaluator declares an exact
+  `apache-beam[gcp]==` pin, so the root lock can satisfy it only at the same
+  version.
+
+The generator moved to Python 3.14 and Beam 2.76.0, the baseline of the
+Dataflow Solution Guides
+([ADR 0040](0040-dsg-donation-golden-source-sync.md), A6). The evaluator
+moves with it: `.python-version`, `requires-python` (`>=3.14,<3.15`), the
+mypy target, `apache-beam[gcp]==2.76.0`, its own lock, the package's own
+`docker/Dockerfile` (base image, launcher base, bridge path) and its CI job.
+That one sentence of D1 no longer holds. The rest of D1 does: its own
+project file and lock, not a workspace member, importing none of the
+generator.
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+
+  PV[("📄 root<br/>.python-version")]:::store
+  RL[("📄 root uv.lock<br/>Beam 2.76.0")]:::store
+  IMG[("📄 the one image<br/>docker/Dockerfile")]:::store
+  EV[("📄 evaluator<br/>.python-version")]:::store
+  EP[("📄 evaluator pyproject<br/>Beam ==2.76.0")]:::store
+  ED[("📄 evaluator<br/>Dockerfile, uv.lock")]:::store
+  G1["🛡️ python-version<br/>gate"]:::cpu
+  G2["🛡️ shared-image<br/>tests"]:::cpu
+  G3["🛡️ launch-surface<br/>tests"]:::cpu
+
+  PV --> G1
+  IMG --> G1
+  PV --> G2
+  RL --> G2
+  IMG --> G2
+  EV --> G2
+  EP --> G2
+  EV --> G3
+  EP --> G3
+  ED --> G3
+```
+
+*Three tests hold the evaluator's pins to the generator's, so neither can
+move alone; an arrow is a file a test reads. Implemented in
+`packages/sdfb-tests/tests/unit/scripts/test_dsg_python_version.py`
+(every pin in the generator's files against the root `.python-version`),
+`packages/sdfb-tests/tests/unit/docker/test_shared_image.py` (the two
+`.python-version` files are equal, the image's paths name that version, and
+the root lock holds every dependency the evaluator declares, inside its
+range) and `packages/sdfb-evaluation/tests/unit/test_launch_surfaces.py`
+(the package's own Dockerfile against its own pin and lock).*
+
+**What moved in the evaluator's lock.** Beam 2.74.0 to 2.76.0, and what
+Beam itself changed underneath: `google-apitools` 0.5.31 to 0.5.35,
+`google-cloud-dataflow-client` added (Beam's Dataflow client is now that
+library, no longer a generated one), and `envoy-data-plane` with its
+pre-release `betterproto` gone
+([Beam 2.76.0 release notes](https://beam.apache.org/blog/beam-2.76.0/)),
+so the `betterproto==2.0.0b6` constraint is gone from the project file too.
+numpy, scipy, scikit-learn, PyYAML and the BigQuery client keep their
+versions. Every package of both locks that a linux x86_64 CPython 3.14
+installs has a wheel for it recorded in the lock (read from the locks; not
+installed on linux here).
+
+**What the evaluator relies on in Beam, read again in 2.76.0.** Several
+mechanisms of this ADR rest on how Beam behaves inside, and the code says
+so where it does. Each was read in the installed 2.76.0 package and
+compared with 2.74.0.
+
+| What the evaluator relies on | In Beam 2.76.0 |
+| :-- | :-- |
+| The load and copy job-id outputs of `WriteToBigQuery` with `FILE_LOADS`: the FINAL row waits for them (D7) | As before: a load pair is yielded when the job is submitted and awaited in `finish_bundle`; a copy pair is yielded after its wait. New, and only when a table loads through temporary tables: the load takes the destination table's partitioning (one more `tables.get` on it), and the first copy job of an append is awaited in `finish_bundle` like the others |
+| `DIRECT_READ`: the read session's parent is the read table's project; Arrow with native `DATETIME` (the note of 2026-10-10) | The storage source is the same code in both releases |
+| `max_cache_memory_usage_mb` defaults to 0, so the evaluator sizes it | Still 0 |
+| `pipeline.pb` is staged for every Dataflow job (accepted channel 4, the note of 2026-10-11) | The same statements in [`create_job_description`](https://github.com/apache/beam/blob/v2.76.0/sdks/python/apache_beam/runners/dataflow/internal/apiclient.py#L851-L866) |
+| The three upload lines the launch relays from Beam's Dataflow client logger | Same logger name, same text |
+| The public result of a submitted pipeline (`state`, `wait_until_finish`, `job_id`, `has_job`) | Unchanged. The evaluator reads the Dataflow job resource over REST itself, so Beam's change of client library does not reach it |
+| Prism is refused for a local run | Not tried again on 2.76.0; the refusal stays |
+
+Two changes the release notes call breaking were checked against the code.
+[`DoFn.process` returning a `str`, `bytes` or `dict` now raises](https://github.com/apache/beam/issues/18712)
+(2.76.0), checked once per `DoFn` whose `process` uses `return`: every
+`process` of the evaluator and of the generator is a generator function,
+which Beam does not check, except one that returns nothing, which passes.
+[Dataclass field type hints are honoured in type inference](https://github.com/apache/beam/pull/38797)
+([2.75.0](https://beam.apache.org/blog/beam-2.75.0/)): both test suites
+build and run their pipelines unchanged, and no launch passes the opt-out
+`--exclude_infer_dataclass_field_type`.
+
+**What Python 3.14 changes that a macOS laptop cannot show.**
+
+- On Linux the default `multiprocessing` start method is now `forkserver`
+  ([What's new in Python 3.14](https://docs.python.org/3.14/whatsnew/3.14.html#whatsnew314-multiprocessing-start-method)).
+  Neither package starts a Python child process: no `multiprocessing`, no
+  process pool, no `os.fork` in the evaluator, the generator, the DAGs or
+  the image's entry. Parallel work is threads (the planning scans, the pool
+  builds), and the one child process, the generator's vLLM server, is
+  started with `subprocess`, which does not depend on the start method.
+- Since Python 3.12 the builtin `sum()` adds floats with a compensated sum
+  ([What's new in Python 3.12](https://docs.python.org/3.12/whatsnew/3.12.html#other-language-changes)).
+  A value computed with it can differ in its last bits from the value a
+  3.11 interpreter computed, and one does: the Chao-Shen entropy
+  (`stats/diversity.py::chao_shen_bits`) of the same counts differs in its
+  last bits between the two interpreters. No threshold is that fine, and the GUI's golden files (the scorer and the compare verdicts
+  among them) are the same on 3.14 apart from their `python` stamp. But
+  `sdfb-eval compare` calls two values equal only when they are identical,
+  so the same data evaluated on the 3.11 image and on the 3.14 image can
+  read `≈`, or a direction for a metric that carries no noise floor, where
+  two evaluations on one image read `=`.
+
+*Not verified until a build and a launch:* that the image builds on
+`apache/beam_python3.14_sdk:2.76.0` and its build-time import of the
+evaluator passes; that a launcher and its workers start on it; and
+everything the earlier notes of this ADR already leave to a first run.
+
+**What it costs.**
+
+- A bump of Python or Beam is now one change over two locks, two project
+  files, two Dockerfiles and two CI jobs. The three tests above fail until
+  all of them agree.
+- The evaluator's own lock and the root lock still resolve separately, so
+  the versions the evaluator's tests run on are not all the ones the shared
+  image runs (numpy and scikit-learn differ today). The shared-image tests
+  check the ranges, not equality. This was so before the bump.
+
 ## Sources
 
 [Lin, Lucas & Shmueli 2013](https://doi.org/10.1287/isre.2013.0480) (p-values at scale) ·
@@ -776,5 +920,8 @@ cold, full-size launch must show") lists the lines to read.
 [Dataflow security and permissions](https://docs.cloud.google.com/dataflow/docs/concepts/security-and-permissions),
 [Cloud Storage soft delete](https://docs.cloud.google.com/storage/docs/soft-delete),
 [Beam 2.74.0 `apiclient.py`](https://github.com/apache/beam/blob/v2.74.0/sdks/python/apache_beam/runners/dataflow/internal/apiclient.py) (the note of 2026-10-11) ·
+[Beam 2.75.0](https://beam.apache.org/blog/beam-2.75.0/) and [2.76.0](https://beam.apache.org/blog/beam-2.76.0/) release notes,
+[Beam 2.76.0 `apiclient.py`](https://github.com/apache/beam/blob/v2.76.0/sdks/python/apache_beam/runners/dataflow/internal/apiclient.py),
+[What's new in Python 3.12](https://docs.python.org/3.12/whatsnew/3.12.html) and [3.14](https://docs.python.org/3.14/whatsnew/3.14.html) (the amendment of 2026-10-13) ·
 [uv workspaces](https://docs.astral.sh/uv/concepts/projects/workspaces/) ·
 [apache/beam#36563](https://github.com/apache/beam/issues/36563). The full list, each fetched and checked, is the design document's §14.
