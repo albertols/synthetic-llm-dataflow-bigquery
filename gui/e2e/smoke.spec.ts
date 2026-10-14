@@ -59,7 +59,7 @@ async function routeStamp(page: Page): Promise<{ routeId: string; search: Record
 
 const isMobile = (projectName: string) => projectName === "mobile";
 
-/** The brand and theme menu; below 640 px its choices and the GitHub links live in the "More" menu. */
+/** The brand and theme menu; below 1180 px its choices and the GitHub links live in the "More" menu. */
 async function switchTheme(page: Page, projectName: string, to: "light" | "dark") {
   await page
     .getByRole("button", { name: isMobile(projectName) ? "More: brand, theme and links" : "Brand and theme" })

@@ -56,7 +56,7 @@ async function mountAllSections(page: Page) {
   await page.waitForTimeout(1500);
 }
 
-/** The brand and theme menu; below 640 px its choices live in the header's "More" menu. */
+/** The brand and theme menu; below 1180 px its choices live in the header's "More" menu. */
 async function switchTheme(page: Page, projectName: string, to: "light" | "dark") {
   if (projectName === "mobile") {
     await page.evaluate(() => window.scrollTo(0, 0));
