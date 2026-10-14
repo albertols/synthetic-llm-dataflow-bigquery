@@ -703,10 +703,8 @@ def _rag() -> list[dict[str, Any]]:
   hashing = embedding.HashingEmbedder()
   bge = embedding.BgeEmbedder("/unused")
   return [
-      _const_knob(
-          "max_row_doc_rows",
-          chunking,
-          "MAX_ROW_DOC_ROWS",
+      _cli_knob(
+          "rag_row_docs_limit",
           "rag",
           "Population",
           "Row documents embedded",
