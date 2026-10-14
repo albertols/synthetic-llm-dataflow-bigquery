@@ -1,0 +1,15 @@
+{
+  "name": "@synthetic-platform/stats",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "description": "Pure TypeScript maths shared by the web app and the mock: noise floors, distances, entropy, binned CDFs, scoring, and exact ports of the hashing embedder, GReaT serialization and retrieval.",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

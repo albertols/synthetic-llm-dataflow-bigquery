@@ -1,0 +1,33 @@
+{
+  "generator": "gui/packages/contracts/gen.mjs",
+  "note": "sha256 of every input; contracts:check fails when an input changed without a re-sync.",
+  "inputs": {
+    "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_data_history.schema.json": "169040e575d648305754ea094868f76125e7ae565792a0ab3caddce49a307272",
+    "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_metrics.schema.json": "d447c144f2dafc85b7cc9bdd321d1008bcb9388bc5f989749ebe73f0321aadac",
+    "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_profiles.schema.json": "74dddf3533e705e4c48d78a7913b3e650cc753661df2451e303c498a425ffe9f",
+    "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_row_flags.schema.json": "b0856371bcf15ef4d9b313e020ca71f84dd30421907b66812b220a75a598bc8d",
+    "config/bq_schema/synthetic_data_quality/dlq.schema.json": "bd91c9c7c54bb5671767d7ee8ceab4f7f2e7cae7c40518899bdc5d91f8f11f72",
+    "config/bq_schema/synthetic_data_quality/fk_fanout_stats.schema.json": "faa5264c2d223ec4f769ce56d039999a88ccdec4c875196790709e35c9f08c70",
+    "config/bq_schema/synthetic_data_quality/validation_runs.schema.json": "03d4571c29aea5e49f4e03c71cf1242e804ae42605d651db41ac1d68a7cdc36d",
+    "config/bq_schema/synthetic_rag/freetext_pools.schema.json": "86a12014279460293f4a0ab6da5d36c7e312bef1e4b64dab49f5f2d9ea31a8fa",
+    "config/bq_schema/synthetic_rag/rag_chunks.schema.json": "2c2bcc99d0ae79e01217f0f04631fd1e01f5421764172474ac4560691a96b1a8",
+    "config/bq_schema/synthetic_rag/source_table_stats.schema.json": "9ad24ef739e151fc54353d41f8fd1772fb077c0860c40b03cc08e451c23b5864",
+    "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/views.sql": "a66589e18f037ecdd397b91b3500dfb893fc2ba37befc1d5a9cf18b0281ef29c",
+    "packages/sdfb-evaluation/src/sdfb_evaluation/catalogue/metrics.yaml": "5fdbb6913a669a7f01f4be579a7bba9161d4eacfb63dfd7353e63d8ca9c89642",
+    "gui/packages/contracts/generated/knobs.json": "b8d27363794815e994fe745666e668d7a10197ea9e280bbb403583764ac5435b",
+    "gui/packages/contracts/generated/relationships.json": "140edb0476b2e6d293cbae8904d6b17b0867986db5e9f956b58d2cdd810e8903",
+    "gui/packages/contracts/generated/dlq_rules.json": "ecbed0487377b3e674e9627150e5c2b5ca8f05ffd64fd4a62f337836ef3db211",
+    "gui/packages/contracts/generated/golden/compare.json": "8cb397653527cf8e69e9ab107c9c5f0989912b82f67f9126a7cf635bd519904d",
+    "gui/packages/contracts/generated/golden/great_serialize.json": "f8f80eab3936eb4eaa0aebdb009673820bc09706f2d59d2126dc111a7e26fded",
+    "gui/packages/contracts/generated/golden/hashing_embedder.json": "a1b5dc3b342bb457ba6c99338e1c002fb8bdfa4d78a280549f95c27a2d8376e8",
+    "gui/packages/contracts/generated/golden/retrieval.json": "6e1cfa588aaa264ab7e3d8d9893a037ae09c1b085a7a023aacd37d02de8bc630",
+    "gui/packages/contracts/generated/golden/scoring.json": "e005e5426b705be7b25b676c712d040efed6eef0b8164ee21844c0fbcfc92f2f"
+  },
+  "outputs": [
+    "schemas.ts",
+    "catalogue.ts",
+    "knobs.ts",
+    "relationships.ts",
+    "dlqRules.ts"
+  ]
+}

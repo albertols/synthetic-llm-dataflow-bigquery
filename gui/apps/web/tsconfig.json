@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "allowImportingTsExtensions": true,
+    "types": ["vite/client", "node"],
+    "paths": {
+      "@/*": ["./src/*"],
+      "@contracts/generated/*": ["../../packages/contracts/generated/*"],
+      "@contracts/*": ["../../packages/contracts/src/*"]
+    }
+  },
+  "include": ["src", "vite.config.ts", "vite-plugins", "../../packages/contracts/src/concepts"]
+}

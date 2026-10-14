@@ -9,7 +9,7 @@ description: Subagent that composes the Beam DAG from existing DoFns and IO tran
 
 - Author `packages/sdfb-beam/src/sdfb_beam/pipeline.py` — the main DAG.
 - Wire DDL load + reference read + generation + Mode A validation + landing/DLQ writes.
-- Compose side inputs, tagged outputs, and combiners (whylogs merge, reference digest).
+- Compose side inputs, tagged outputs, and combiners (reference digest).
 - CLI flags via a `PipelineOptions` subclass; `--engine`, `--model_uri`, `--reference_rows`, `--num_rows`, etc.
 
 ## NOT in scope
@@ -30,7 +30,6 @@ description: Subagent that composes the Beam DAG from existing DoFns and IO tran
 
 1. The pipeline runs end-to-end on DirectRunner with `FakeModelClient` against a fixture `_ddl.json` (no GPU, no GCP).
 2. DLQ table is populated when synthetic records intentionally violate constraints.
-3. whylogs profile is written to GCS at job end (skip in DirectRunner local mode).
-4. `validation_runs` row is inserted with `reference_digest`, counts, and overall status.
-5. No reference to Vertex AI, Dataplex, Looker, OpenLineage anywhere in the pipeline code.
-6. `pytest -m integration` passes locally on the laptop.
+3. `validation_runs` row is inserted with `reference_digest`, counts, and overall status.
+4. No reference to Vertex AI, Dataplex, Looker, OpenLineage anywhere in the pipeline code.
+5. `pytest -m integration` passes locally on the laptop.

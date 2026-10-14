@@ -27,7 +27,7 @@ Companion to [`docs/RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md) §2. All runs are trigger
 | R3' | b2_library | `qwen3_4b_instruct_2507` | t4 | `vllm_dtype=float16` | B.2 path (sdgx fit + LLM freetext patch) + `pk.duplicate` rule live. |
 | R4' | b1_rag | `gemma4_e4b` (it) | l4 | — (`vllm_dtype=auto` → bf16) | Fidelity profile: bf16 on L4; the Turing guard must **NOT** fire. |
 
-**Pass criteria (all four):** the 8 checks in RUN_PLAYBOOK §2 — milestones `model_client_setup_start/done`, `model_pull_*`, `vllm_spawn`, `vllm_ready` present; zero `freetext_llm_fallback`; `copy_ratio < 0.3` on non-constant STRING columns with `source_distinct > 100`; unique salted `run_id`; `pk.duplicate` ≈ 0; `b1_embed_done rows=10000`; Dataflow job state checked directly; `valid_count == num_rows`.
+**Pass criteria (all four):** the 8 checks in RUN_PLAYBOOK §2 — milestones `model_client_setup_start/done`, `model_pull_*`, `vllm_spawn`, `vllm_ready` present; zero `freetext_llm_fallback`; `copy_ratio < 0.3` on non-constant STRING columns with `source_distinct > 100`; unique salted `run_id`; `pk.duplicate` ≈ 0; `b1_embed_done rows=1024` (`rag_row_docs_limit`) of `rows_total=10000`; Dataflow job state checked directly; `valid_count == num_rows`.
 
 ---
 

@@ -33,12 +33,12 @@ Why uv-first:
 
 ```bash
 which git python3 gcloud   # all three should resolve
-python3 --version          # any: uv installs the pinned 3.11 (.python-version)
+python3 --version          # any: uv installs the pinned 3.14 (.python-version)
 ```
 
 Install missing tools:
 - `git` — should be there on macOS.
-- `python3` — `brew install python@3.11` if missing; `uv sync` provisions the pinned 3.11 for the workspace either way.
+- `python3` — `brew install python@3.14` if missing; `uv sync` provisions the pinned 3.14 for the workspace either way.
 - `gcloud` — https://cloud.google.com/sdk/docs/install-sdk
 
 ### 1. Clone (or pull)
@@ -70,6 +70,12 @@ Packages resolve from PyPI (`uv.lock` pins `files.pythonhosted.org`). To use
 a private mirror instead, point uv at it for your shell only — e.g.
 `export UV_DEFAULT_INDEX=https://<your-mirror>/simple` — rather than editing
 `pyproject.toml`.
+
+A machine that resolves again keeps the versions its own `uv.lock` holds
+wherever they are still allowed, so its environment can differ from the
+committed lock. To install exactly the committed lock, restore it
+(`git checkout -- uv.lock`) and run `uv sync --frozen --group dev`, then
+`uv run --frozen …`.
 
 If you ever see `ModuleNotFoundError: No module named 'sdfb_core'` after a sync, it means the workspace members weren't installed (e.g. someone removed `sdfb-tests` from the root `dev` group). Quick fix: `uv sync --all-packages --group dev`.
 
@@ -191,7 +197,7 @@ When you need information on a concern, go here — don't restate it elsewhere.
 packages/sdfb-core/               pure-Python contracts + ABC + codegen (laptop-installable)
 packages/sdfb-beam/               Beam pipeline + DoFns + DDL extractor + handlers + CLI
 packages/sdfb-tests/              unit + integration tests
-docker/                           Dockerfile + .dockerignore + flex_template_metadata.json
+docker/                           Dockerfile + .dockerignore + flex_entry.py (the template's entry) + flex_template_metadata.json
 scripts/                          extract_ddl, hello_synthetic_mlx, e2e/, release/, doc/
 config/                           thresholds.yml + models.yml
 composer/                         synthetic_beam_bigquery.py (Airflow DAG template)

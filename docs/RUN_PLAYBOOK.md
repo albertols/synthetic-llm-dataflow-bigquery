@@ -124,7 +124,7 @@ derived). `batch_size=1000` for 1M/10M rows; the DAG's `16` default is sized
 for smokes. Params not listed = DAG defaults, which already carry the current
 posture: `source_stats=sample`, `freetext_expansion=identifiers`,
 `prompt_constraints=on`, `build_pool_layer=true`, `build_rag_layer=true`,
-`uniqueness_mode=exact`, `pool_seed_strategy=centroid`.
+`rag_row_docs_limit=1024`, `uniqueness_mode=exact`, `pool_seed_strategy=centroid`.
 
 **Universal pass criteria — every vLLM run:**
 
@@ -133,7 +133,7 @@ posture: `source_stats=sample`, `freetext_expansion=identifiers`,
 3. `copy_ratio < 0.3` on every non-constant STRING column with `source_distinct > 100` (probe step 3).
 4. `validation_runs.run_id` unique per Dataflow job (salted suffix visible).
 5. `pk.duplicate` present in `dlq_by_rule` if and only if PK collisions occurred; PASSED requires ~0.
-6. `b1_embed_done rows=` equals `reference_rows_limit` (10000), not the full source count.
+6. `b1_embed_done rows=` equals `rag_row_docs_limit` (1024 by default, §6e) and `rows_total=` equals `reference_rows_limit` (10000), not the full source count. A warm digest logs `b1_chunks_reused rows=` instead.
 7. Check the Dataflow job state directly (`gcloud dataflow jobs describe <job_id>` or the Dataflow console) — the Composer DAG launches the job with `wait_until_finished=False`, so a strict-mode worker crash fails the Dataflow job itself while the Airflow task still shows success. Airflow green is not proof of a healthy run.
 8. `validation_runs.valid_count` must equal `num_rows` requested. A shortfall — even on a `PASSED` row, since the BLOCKER gate only checks a *ratio* — means whole batches were lost to `engine_failure` and never replaced; PASSED is not proof the run actually produced the row count it was asked for.
 
@@ -256,9 +256,41 @@ child is the one number certainly wrong.
   and re-provisioned VMs for the child — ≈ 4 min per job. `R7`/`R7m`
   now carry `initial_workers=4` + `autoscaling=fixed`; an explicit Beam
   `--autoscaling_algorithm` always wins.
+- **Launcher VM — `launcher_machine_type` (default `e2-standard-8`).**
+  The generation launch has the same 12 minutes as an evaluation launch
+  (§5a), and on Dataflow's default launcher VM the image pull takes most of
+  them. The five-table launch of 2026-10-12 (1 M root rows, 83.4 M
+  projected) named no launcher machine and was shut down 12 min 25 s after
+  it was accepted, with `Timeout in polling result file` and no job
+  submitted:
+
+  | at | step | took |
+  |---|---|---|
+  | 0:00 | the VM starts, up to the pull's first line | 54 s |
+  | 0:54 | image pull: every layer downloaded after 65 s, the rest is extraction | 7 min 24 s |
+  | 8:18 | launcher start and Python imports, up to `build_info` | 19 s |
+  | 8:38 | preflight of the five tables, one after another (21 to 29 s each), and the two reports | 2 min 10 s |
+  | 10:48 | graph | 31 s |
+  | 11:19 | pipeline run, cut off before Beam's first upload line | 66 s |
+
+  The param sets `environment.launcherMachineType`. On `e2-standard-8` the
+  chained evaluation launch of 2026-10-10 printed its first Python line
+  3 min 57 s after it was accepted (the figure in
+  [ADR 0041, note of 2026-10-11](adr/0041-evaluation-standalone-package.md)),
+  against 8 min 38 s here. Not yet run on a generation launch, and how long
+  the generator's `pipeline run` needs in all is not known: it never
+  finished. The preflight is the small part at this size, but it scans
+  each source in full (the reference sample ordered by a row fingerprint,
+  the driving edge's fan-out, the declared PK), so it grows with the
+  source. To read a launch's log: `build_info` is the launcher's first
+  Python line, each `Extracting DDL for <source table>` starts a table's
+  preflight, and `Relational pipeline launched` is printed when the graph
+  is built, **before** the job is submitted — Beam's `Starting GCS upload`
+  has to follow it.
 - **SDK-container topology — `sdk_containers=single|multi` (ADR 0034).**
-  `single` (default) is the pin described in the next bullet. `multi`
-  lifts it: Runner v2 starts one SDK process per vCPU, so the generate
+  `single` is the pin described in the next bullet. `multi` (the
+  Composer DAG's default since 2026-10-11; the personal-GCP tiers keep
+  `single`) lifts it: Runner v2 starts one SDK process per vCPU, so the generate
   stages — pure-Python DoFns that shared ONE interpreter per worker on
   the R6 pair (8 harness threads, ~1 of 8 vCPUs busy, ~10.5k rows/s
   fleet-wide) — get eight interpreters per worker. The vLLM client makes
@@ -509,6 +541,211 @@ source-derived values, and the sensitive-content gate
 (`scripts/dsg/precheck.py`) rejects any `**/evidence/**` path. Releases
 publish the aggregate report only.
 
+### 5a. Evaluate a run
+
+After a generation job lands, the statistical evaluator scores its tables against the source ([ADR 0041](adr/0041-evaluation-standalone-package.md), [`packages/sdfb-evaluation/README.md`](../packages/sdfb-evaluation/README.md)). **Not yet run on Google Cloud**; commands are as built and tested on invented data. Prerequisites (tables, IAM, image): [`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md) "Evaluator".
+
+**Do it soon: time travel is the deadline.** The evaluator recovers the job's rows and pins the source as it was when the job started, both through BigQuery time travel. Once the generation job's write window is older than the landing table's time-travel window (less a one-hour margin), that table's scope is `expired` and it is not evaluated (design §3.2). Separately, within the source's own window the source is pinned as of the job's create time; outside it, or when the create time is unknown, the source is read as it is now and the plan says so (design §3.3). Evaluate the same day, and before anything else writes to the landing tables.
+
+```bash
+cd packages/sdfb-evaluation
+# 1. plan: nothing runs, no registry row; prints scope, panel, bytes, predicted shuffle
+uv run sdfb-eval plan --dry_run --project <PROJECT> --region <REGION> --job_id <JOB_ID>
+# 2. run (local, in-process Beam; --runner DirectRunner is the default spelling)
+uv run sdfb-eval run --project <PROJECT> --region <REGION> --job_id <JOB_ID>
+# 3. read it
+uv run sdfb-eval report --project <PROJECT> --evaluation_id <ID>
+```
+
+Exit codes of `run`: 0 finished and no gate tripped; 1 the optional `--fail_on` gate tripped; 2 a usage error, nothing started; 3 the evaluation failed. Evaluation never fails the generation run.
+
+**From Composer or the template, with nothing extra deployed.** One image and one template serve both jobs ([ADR 0041, amendment](adr/0041-evaluation-standalone-package.md#amendment-2026-10-06-one-image-one-template)); the template parameter `sdfb_job=evaluation` selects the evaluator. None of the three paths has been run yet.
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  A["⚪ generation DAG<br/>run_evaluation = true"]:::data --> W["⚙️ waits for its job"]:::cpu --> J["🔀 evaluation job<br/>CPU workers"]:::beam
+  B["⚪ standalone DAG<br/>job id or a list"]:::data --> J
+  C["⚪ gcloud<br/>sdfb_job=evaluation"]:::data --> J
+```
+
+| Path | Do this | Use it when |
+| :-- | :-- | :-- |
+| The generation DAG | trigger it: `run_evaluation` is true by default (false launches generation alone); set `source_dataset` to the dataset of the source tables when it is not that of `table_fqn` (optionally `evaluation_mode`, `evaluation_machine_type`, `evaluation_max_workers`, `evaluation_output_dataset`) | you want the run evaluated as soon as it lands: the launched table's enabled component in the relationship model, or that table alone. The task `trigger_evaluation` submits the job and does not wait: read the result from the registry. It reads no job log. Of the three roles that read a job it needs only `roles/dataflow.viewer`, for the generation window (without it the run still works, with a warning and no window) |
+| The standalone DAG `sdfb_evaluation_framework` (optional import) | trigger it with the defaults the import filled (`seed_table`, `landing_dataset`, `source_dataset`, `validation_runs_table`) and, when known, `generation_job_id` (its identity: the Dataflow job's window, no log); `seed_table` alone when the job id is unknown; `generation_job_id` alone with `seed_table` emptied for the full lookup (needs the roles that read a job's log); `run_id` or `tables` as before (a typed one beats the default seed); `generation_job_ids` for several jobs (one run and one Dataflow job per id, one after another; the seed is not handed to them, each is the full lookup of its own job) | the run already landed and you want it evaluated on its own (to re-run it, or the generation DAG ran without `run_evaluation`), or you want the launch to wait for the job and close the registry row if the job dies. It evaluates by the same seed path as the chain, reads no job log, and takes `launcher_machine_type` for the launcher VM |
+| The template, by hand | `gcloud dataflow flex-template run … --template-file-gcs-location gs://<templates>/synthetic/sdfb-<VERSION>-template.json --parameters sdfb_job=evaluation,generation_job_id=<JOB_ID>,disk_size_gb=200 --worker-machine-type e2-standard-8` | no Composer at hand |
+
+The launch has 12 minutes in all, the image pull included ("By default, the Flex Template launch process has a timeout of 12 mins", Google's troubleshooting page, "Polling timeout errors"); the pull of the multi-GB image took almost eight on a cold launcher, and planning runs on the launcher before the job exists. Both evaluation launches therefore take a launcher machine type (`evaluation_launcher_machine_type` in the generation DAG, `launcher_machine_type` in the standalone one, default `e2-standard-8`; REST field `environment.launcherMachineType`); a larger one pulls faster, but whether it is enough is known only from a launch (the planning lines in the console log show where the time goes). The public REST description has no field for the limit itself, so it cannot be set from a DAG. With `run_evaluation` true the generation DAG's run stays running until the generation job ends and then until the evaluation's launch is over (the task `wait_for_evaluation_launch`; how long that can take is in "A RUNNING row that never closes", below), and the DAG has `max_active_runs=1`: launches of that DAG then run one generation at a time, and every later trigger queues behind the waiting run. `max_active_runs` is the knob; raising it lets several generation jobs run at once (GPU quota). A chained evaluation does not look the launch up: it is given the generation job's id as the launch's identity (the evaluator reads the Dataflow job resource for its window, never its log or BigQuery job labels, plus one query on the generator's `validation_runs` table for this launch's rows), the launched table (`seed_table`, the last part of `table_fqn`), the generation's landing dataset and `source_dataset`, and evaluates what the launch generated: the table's enabled component in the model at `relationships_uri`, parents first, or the table alone when no model names it, the folder holds no model file (it says so in the plan's warnings), or `generate_fk_relationships` is false. It reads each landing table whole (`scope=manual`): with the DAG's `write_disposition` overwrite that is exactly this launch's rows, with append it includes the rows of earlier launches (the row count then differs from what this launch wrote, so the run reads `PARTIAL`; the metrics are still computed). It passes the generation's `reference_rows_limit` and `validation_runs_table` (the nearest-neighbour metrics also need the source table to hold at least twice `reference_rows_limit` rows, since the sample and its holdout must be the same size): the evaluator rebuilds the generator's reference sample and verifies it against the digest on this launch's `validation_runs` row, which is what lets the nearest-neighbour metrics (`row.dcr_train_holdout_share`, `row.dcr_p5_ratio`, `row.nndr_p5_ratio`, `row.density`, `row.coverage`) and the panel-based match rates and lifts (`row.memorization_lift` and `row.exposure_lift` among them) be evaluated. Without the table, or when the job's window cannot be read, those metrics are `not_evaluated` with the reason on the row; every other metric is unaffected. A table it cannot read is skipped by planning with a warning while the others are evaluated; only a target with no readable table fails. A landing table named differently from its source is not found: the evaluation looks for the source's name in the landing dataset. Its registry row carries the generation job's id and window, so a chained run is listed in `evaluation_latest_per_job`; that read needs `roles/dataflow.viewer` (without it: a warning and no window). The window also pins the source as of the job's create time, within the source's time-travel window, like any evaluation by job id. What stays lost: the launch's log, so a model the launch adjusted (ADR 0038) is not seen and the table list is the seed's, not the launch's own record. The service account needs read on the `validation_runs` table. For an evaluation by `--job_id` the evaluator follows the launch's relationships, three outcomes for the URI the job's record names: a model on record (`relationships_loaded` in the generation launcher log) and no readable files raises; no model on record (log read) and only sample models there evaluates without relationships and says so in the plan's warnings; the log unread does the same and the warning says it is unknown whether a model was loaded. An explicit `--relationships_uri` that resolves to nothing always raises. If you expect a model, check that log line first.
+
+**How the job reads, and what the launch log says about it.** The launch prints one timed line per step (`evaluation <id>: <step> <seconds>s`): the target check, the launch lookup, the relationship models, the planner's own lines, the `RUNNING` row, the prepare statements, the read path, then the four steps of the submission (`free text pools`, `pipeline options`, `graph`, `pipeline run`) and their sum, `submission`; while the pipeline is handed over, Beam's own `Starting GCS upload` / `Completed GCS upload … in N seconds` lines are relayed after `pipeline run:`. Planning scans the tables at once, up to eight: the per-table lines (`planning statistics`, `scope verification`, `reference panel`) keep their shape and their seconds now overlap, so they no longer add up; `planning <id> (all tables): scans <s>s` is the wall time of the whole phase. On Dataflow the reference panel is not in the job graph: the launch writes it as objects under `<temp_location>/sdfb-evaluation/<evaluation_id>/panel/` while it builds the graph, and `evaluation <id>: panel staging: <n> objects, <size>, <s>s (<w>s in the writes)` says what it wrote: `<s>` is everything staging took (pickling, hashing, writing), `<w>` the part spent writing to Cloud Storage, both inside `graph`'s seconds; nothing has to be set. The temp location is the one Beam settles on: `--temp_location`, or the staging location when none or an invalid one (a bucket with no path) is given. The `read path` step asks BigQuery for one read session per project of the tables the job will read. Where a project refuses, the job pages that project's tables instead of using the Storage Read API and the launch says so in one `WARNING` (§7's milestone dictionary has its row); nothing has to be set. Paging is slower and bounded by a per-project quota, so for large tables trigger the launch with `mode` = `sampled`.
+
+**What a cold, full-size launch must show.** A chained evaluation is the first reader of tables that have just landed, so its planning scans are never served from an earlier run, and a launch has 12 minutes. The first chained evaluation of a full-size run (2026-10-10: five tables, 212.6 M landed rows) did not fit: planning took 5 min 20 s one table after another, and the launcher was shut down 84 s into `pipeline run`, before the first upload ([ADR 0041, note of 2026-10-11](adr/0041-evaluation-standalone-package.md) has the figure). Since then the scans run at once and the panel is staged beside the graph. Neither has run on a launcher yet; this is what the next launch's console has to show, and what to conclude when it does not:
+
+| In the launch log | Must show | If it does not |
+| :-- | :-- | :-- |
+| `planning <id> (all tables): scans <s>s` | close to the slowest single table's `planning statistics` + `reference panel`, not to their sum over the tables | one of two things, and the per-table lines say which. BigQuery did not serve the scans side by side (slots): every table's `planning statistics` is longer than it was alone. Or the launcher is the limit: each `reference panel` read also turns its rows (twice `reference_rows_limit` a table) into Python objects, in the one launcher process, so those lines stretch while the statistics do not (an inference from the code, not measured). Either way the phase fits only if the sum does |
+| `evaluation <id>: panel staging: <n> objects, <size>, <s>s (<w>s in the writes)` | per evaluated table its panel hashes and its privacy inputs, plus its R rows and its H rows when it has a panel, and one object for the census (21 objects for five tables with panels); seconds, not minutes | an error naming an object instead: the launcher cannot create objects under the temp location, and the registry row reads `FAILED` with that reason. Slow rather than failing: a large `<w>` is the bucket (21 uploads, one after another); a large `<s>` with a small `<w>` is the launcher pickling and hashing the panel |
+| `evaluation <id>: graph <s>s` | close to the 75 s of the launch that did not fit, a little under: the panel's hashes, views and privacy inputs are still computed on the launcher while the graph is built (on a laptop the step went from 29 s to 23 s at 10,000 reference rows) | far above it: read `panel staging`'s seconds, the writes are inside this step |
+| `evaluation <id>: pipeline run <s>s` | below the 221 s it was estimated to need; by how much is not known. The three steps timed on a laptop (serialise, rebuild, serialise again: 55 s there, 10 s with the panel staged) account for about 130–140 s of that estimate at the launcher's pace (an inference: the laptop's seconds times the ratio of the two `graph` steps), and staging removes most of them. The rest of the estimate was never measured. **A `pipeline run` near 100 s is consistent with the change working** | what is not consistent with it: a pipeline file of tens of megabytes. Look at `pipeline.pb` under the staging location (a few MB with the panel staged) and at the seconds of its `Completed GCS upload to …` line; Beam's lines carry no size |
+| `pipeline run: Starting GCS upload to …` | present, minutes before the 12th | the launcher died inside `pipeline run` again |
+| the launch itself | the job accepted with minutes to spare | — |
+| the workers' log | one `staged panel object … verified` line per object and no `StagedObjectError` | a worker cannot read under the temp location, or an object was removed while the job ran: the job fails naming the object, never evaluates an empty panel |
+| the registry | a table's metrics equal to those of a standalone run of the same generation job (same tables, mode and knobs: the same `evaluation_key`) | report it: staged and embedded panels give identical rows on a laptop |
+
+Before the first one: the four tables exist (`sdfb-eval schemas --apply`) and the service account the launch uses has the evaluator's roles ([`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md) "Evaluator"; preflight step 13; of the three roles that read a job a chained launch needs only `roles/dataflow.viewer`, for the generation window). What closes the `RUNNING` row when a launch or its job dies, and what to do when nothing does: [A RUNNING row that never closes](#a-running-row-that-never-closes), at the end of this section.
+
+How to read a row (each metric row is one unit, not a pass/fail verdict on the data):
+
+| Field | Read it as |
+| :-- | :-- |
+| `value` against `baseline_value` | The baseline is `metric(R, source)`: what a perfect copier of the reference sample would score. A generator is fine when it is near the baseline, not near zero |
+| noise floor / interval | A `WARN` or `FAIL` that sampling noise explains is reported `PASS`; compare a delta between runs only beyond both rows' noise (`sdfb-eval compare` marks `≈` inside it) |
+| lifts (`row.memorization_lift`, `row.exposure_lift`, value lifts) | Synthetic matches to the reference sample over matches to the equally sized holdout; 1 is chance. Status reads the confidence **lower bound** of the lift |
+| `row.dcr_train_holdout_share` | 0.5 is chance; a copy fraction f moves it by f/2. It cannot see one heavy copied cluster; the exact-copy metrics own that |
+| status of the run | `SUCCEEDED`, `PARTIAL` (a table or block not evaluated) and so on describe the evaluation, not the data |
+
+Latest result per generation job, for a script:
+
+```sql
+SELECT evaluation_id, status
+FROM `<PROJECT>.synthetic_data_quality.evaluation_latest_per_job`
+WHERE generation_job_id = '<JOB_ID>'
+```
+
+The privacy metrics are risk indicators, not guarantees. The same step inside the end-to-end validation report is Step 3.6 of [the prompt](../.github/prompts/end_to_end_validation_report_generation.prompt.md).
+
+#### A RUNNING row that never closes
+
+The registry is append-only events. The launcher writes `RUNNING` minutes into the launch, after the image pull and planning and before it submits the pipeline (the Dataflow job is queued meanwhile); the job writes its own `FINAL` row. When the launcher or the job dies, someone else has to write the terminal row, and where nobody does, `RUNNING` stays the evaluation's last event.
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  L["⚙️ launcher<br/>plans and submits"]:::cpu --> R[("🗄️ RUNNING row")]:::store
+  R --> J["🔀 evaluation job<br/>runs"]:::beam
+  J -- "finishes" --> F[("🗄️ FINAL row<br/>from the job")]:::store
+  R -- "the launcher dies,<br/>either DAG" --> T["⚪ the waiting task fails<br/>after its retries"]:::data
+  J -- "dies, standalone DAG<br/>waits for its end" --> T
+  T --> C{"🛡️ failure callback<br/>reads the job's state"}:::cpu
+  C -- "ended, not done" --> X[("🗄️ FINAL FAILED<br/>appended")]:::store
+  C -- "no job id, queued,<br/>running, done, unread" --> O["∅ RUNNING stays<br/>the last event"]:::data
+  J -- "dies, chained DAG waited<br/>for the launch only" --> O
+  O --> M["⚙️ manual close<br/>below"]:::cpu --> X
+```
+
+_A `RUNNING` row is closed by its job, or by the failure callback of the task that was waiting when the launcher or the job died. A death no task was waiting for leaves it open until someone closes it by hand._
+
+Both DAGs carry the same callback, `_close_running_row`, on the task that waits, with one statement typed in each file. In the standalone DAG that is the launch task itself, `start_evaluation`, which waits for the job's end. In the generation DAG it is a sensor after the launch, `wait_for_evaluation_launch`, which waits only until the job runs (`JOB_STATE_RUNNING`, or `JOB_STATE_DONE` between two pokes). The chained launch task, `trigger_evaluation`, cannot carry it: it returns as soon as the job is queued, minutes before the launcher writes `RUNNING`, so it never sees a launcher die.
+
+The callback writes `FINAL FAILED` only when XCom holds the launched job's id and that job is in a terminal state other than done (`JOB_STATE_FAILED`, `JOB_STATE_CANCELLED`, `JOB_STATE_UPDATED`, `JOB_STATE_DRAINED`). Without the id the job's state was never read; a job that is running or done writes its own row; a job still queued when the chained sensor times out (after an hour) may yet run: in each case it writes nothing, so the launch that died never gets two terminal rows and never a `FAILED` over a job that may have succeeded.
+
+**It does not run at once.** A failed task is first retried, and the failure callback runs after the task's last retry. Neither DAG sets retries, so the environment decides: Cloud Composer's default is two retries, five minutes apart, for any failed task ([ADR 0041](adr/0041-evaluation-standalone-package.md), note of 2026-10-11, has the source). Under that default the row is closed about ten minutes after the chained sensor first sees the dead job; meanwhile the task shows as up for retry and the row still says `RUNNING`. That is the fix working, not failing. It is kept on purpose: a transient error in one poke then does not end the watch. A sensor that ends on its timeout is not retried. The same default launches a failed `trigger_evaluation` again.
+
+What the chained sensor does on each read of the job (one a minute):
+
+| The job's state | The sensor |
+| :-- | :-- |
+| `JOB_STATE_RUNNING`, `JOB_STATE_DONE` | succeeds: the launch is over |
+| `JOB_STATE_FAILED`, `JOB_STATE_CANCELLED`, `JOB_STATE_UPDATED`, `JOB_STATE_DRAINED` | raises: retried while tries remain, then failed, and the callback closes the row |
+| queued, pending, cancelling, draining, stopped, or a state the provider does not know | waits for the next read, until its one-hour timeout; then failed with no retry, and the callback writes nothing (the job has not ended) |
+
+What a chained DAG run then looks like:
+
+| What happens | The DAG run |
+| :-- | :-- |
+| the launch call fails | `trigger_evaluation` failed (after its retries), the sensor upstream-failed, the run failed; no callback |
+| the launcher dies after `RUNNING` was written | the launch green within seconds, the sensor waiting up to the launcher's twelve minutes, then up for retry, then failed; the row closed; the run failed |
+| the job dies within a minute of starting | either a read saw it running (the sensor green, the run green, the row open) or none did (the sensor failed, the row closed, the run failed) |
+| the job dies later | the run green long before; the row open; Stale after 24 hours |
+| the job finishes between two reads | done is expected: green |
+
+What the chained wait costs: the DAG run holds the DAG's one run slot until the evaluation's launch is over, which is at most the launcher's twelve minutes and one read, plus the task's retries when the launcher died (above), and one hour for a job that stays queued; a dead evaluation launch now marks the DAG run failed, where before the run was green while its evaluation was dead; and a job that dies on the workers after it started is still not closed by the chain. Waiting for the job's end instead would close that one too, but the next generation launch would queue behind the whole evaluation (`max_active_runs=1`); it is not built.
+
+**A close that writes nothing.** The statement is one insert, and the BigQuery job succeeds whether or not it matched a row, so the chained callback logs the count: `closed 1 RUNNING row(s) as FAILED…`, or a warning, `evaluation registry not updated: the close statement matched no open RUNNING row…` (the standalone DAG's callback logs nothing after its insert). Zero is usually right: the launcher wrote its own `FAILED` row before it ended, or it died before it wrote `RUNNING`. Two ways it is wrong, both rare:
+
+- **(a) The run was cleared.** The statement only takes rows recorded since the DAG run's start, and Airflow resets that start when a finished run is cleared. If the sensor failed with the job still alive (its timeout, or an error in a read), you clear it to keep watching, and the launcher then dies, the `RUNNING` row is older than the new start and is not matched.
+- **(b) The row had not landed.** The callback runs once, at the first read after the job ended, and the launcher's `RUNNING` row is a BigQuery load job: one submitted seconds before the launcher was killed can land after the callback ran.
+
+In both the row stays `RUNNING`; close it by hand (below).
+
+**Rows the statement can close by mistake.** It finds a row by generation job, trigger and the run's start, not by its own id. So two evaluations of one generation job inside one DAG run that is still running can close each other's row: a launch task that was retried (the environment's retries make that the normal path for a launch task that failed after its call was accepted) or cleared while the run is still running; a standalone evaluation of the same generation job started with `trigger` = `chained` during the chained launch; two overlapping standalone runs on one target. If the later launch dies while the earlier evaluation still runs, that one's row is closed too, and its job's own `FINAL` row then follows the `FAILED` one. Clearing the tail of a finished run is not such a case (its start is reset, so the earlier row is not matched), which is the other side of (a).
+
+| Path | What died | Who writes the terminal row | The GUI shows |
+| :-- | :-- | :-- | :-- |
+| any | nothing: the job finished | the job, its own `FINAL` row | the row's status |
+| `sdfb-eval run` by hand | planning, the prepare statements or the submission raised, or the job the command waited for ended failed or cancelled | the command, `FAILED` | Failed |
+| standalone DAG | the launch, or the job (the launch task waits for it) | `_close_running_row`, `FAILED` | Failed |
+| generation DAG, chained | the launch call: `trigger_evaluation` fails | normally nobody needs to: no launcher ran, so there is no `RUNNING` row. (If the task failed after its call was accepted, a launcher did run; its row is then closed by nobody) | normally nothing: no evaluation was recorded |
+| generation DAG, chained | the launcher, for example when its 12-minute limit ends it after `RUNNING` was written: the job ends failed, which fails `wait_for_evaluation_launch` after its retries | its `_close_running_row`, `FAILED` | Running until the callback has run, then Failed |
+| generation DAG, chained | the job, after a read saw it running: the sensor has succeeded and nothing waits for the job's end. A Dataflow job reports running when it starts, before any worker is up, so a job that dies while its workers start is on this row | nobody | Running, then Stale |
+| either DAG | the launcher or the job, and XCom holds no job id or the job's state cannot be read; or the chained sensor timed out on a job still queued; or a standalone launch targeted by `tables` only | nobody: the callback logs one warning | Running, then Stale |
+| the template by hand, or a command that was stopped | the job, after the command returned or stopped watching | nobody | Running, then Stale |
+
+The GUI ([`gui/`](../gui/README.md)) reads the registry and writes nothing. It shows a `RUNNING` last event as **Running** for 24 hours after the event was recorded and as **Stale** after that: every table an evaluation prepares for its reads expires 24 hours after it was created, so by then the evaluation is not expected to be running: the launch or the job most likely ended without recording a result. That is an inference from the event's age, which is why step 2 below has you check for a running job before closing a row. Stale is a display state only; the row's status is still `RUNNING` until a `FINAL` row is appended.
+
+Not verified, because nothing here has been parsed or run by Airflow. The chained close rests on two things, both read and neither run ([ADR 0041](adr/0041-evaluation-standalone-package.md), note of 2026-10-11, has the links). One: the status sensor raises when the job it watches ends in a state it was not told to expect. That is the provider's source; if an installed provider only waited, the sensor would fail at its one-hour timeout and the callback would close the row then. Two: while the launcher runs, the job is not yet running, so the sensor does not succeed early. Google's page of job statuses says so: "Queued: either a FlexRS job is queued or a Flex Template job is being launched". Its limits: that page lists the console's statuses, and no page names the state a launch that timed out ends in (the troubleshooting page says only that "the job fails"). That one you can check today, on a job whose launcher timed out:
+
+```bash
+gcloud dataflow jobs describe <JOB_ID> --region <REGION> --format='value(currentState)'
+```
+
+It should print `JOB_STATE_FAILED`. If it prints a state outside the four the callback closes, the sensor would end on its timeout for such a launch and the callback would write nothing. Also unverified: the environment's retries, and that a sensor in reschedule mode has its failure callback called as written. A callback runs as the Composer environment's own identity, not the Dataflow service account: it needs to read the Dataflow job and to run the insert on the registry table, which is what the standalone DAG's callback needs too.
+
+**1. List the open evaluations.** Every evaluation whose last event is `RUNNING`, oldest first:
+
+```sql
+SELECT evaluation_id, recorded_at, `trigger`, generation_job_id, evaluation_job_id,
+       TIMESTAMP_DIFF(CURRENT_TIMESTAMP(), recorded_at, HOUR) AS hours_open
+FROM `<PROJECT>.<QUALITY_DATASET>.evaluation_latest`
+WHERE event = 'RUNNING'
+ORDER BY recorded_at;
+```
+
+**2. Check before you close.** Make sure no job of that evaluation is running (the Dataflow console, or `gcloud dataflow jobs list --region <REGION> --status active`; launched by either DAG, an evaluation job is named `sdfb-evaluation-v<VERSION>-<timestamp>`). Then read what the close would copy. It must return one row per id you mean to close, and none for an id that already has a `FINAL` event:
+
+```sql
+SELECT running.evaluation_id, running.recorded_at, running.trigger, running.generation_job_id
+FROM `<PROJECT>.<QUALITY_DATASET>.evaluation_data_history` AS running
+WHERE running.evaluation_id IN ('eval-20260914T050000Z-0a1b2c3d')
+  AND running.event = 'RUNNING'
+  AND NOT EXISTS (
+    SELECT 1 FROM `<PROJECT>.<QUALITY_DATASET>.evaluation_data_history` AS closed
+    WHERE closed.evaluation_id = running.evaluation_id AND closed.event = 'FINAL')
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY running.evaluation_id ORDER BY running.recorded_at DESC) = 1;
+```
+
+**3. Close by hand.** The same rows, appended as `FINAL FAILED`. The statement copies the `RUNNING` row, so every required field is kept; an id that already has a `FINAL` event is skipped, so running it twice adds nothing. It needs write access to the registry table.
+
+```sql
+INSERT INTO `<PROJECT>.<QUALITY_DATASET>.evaluation_data_history`
+SELECT * REPLACE (
+  'FINAL' AS event,
+  'FAILED' AS status,
+  'closed by hand: the launch ended without a result (launcher time limit)' AS status_reason,
+  CURRENT_TIMESTAMP() AS recorded_at,
+  CURRENT_TIMESTAMP() AS finished_at)
+FROM `<PROJECT>.<QUALITY_DATASET>.evaluation_data_history` AS running
+WHERE running.evaluation_id IN ('eval-20260914T050000Z-0a1b2c3d')
+  AND running.event = 'RUNNING'
+  AND NOT EXISTS (
+    SELECT 1 FROM `<PROJECT>.<QUALITY_DATASET>.evaluation_data_history` AS closed
+    WHERE closed.evaluation_id = running.evaluation_id AND closed.event = 'FINAL')
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY running.evaluation_id ORDER BY running.recorded_at DESC) = 1;
+```
+
+The id above is invented; put your own, several if you like, and say in `status_reason` why and that it was closed by hand. This is the callbacks' statement (`_CLOSE_RUNNING_SQL` in both DAG files) with the row named by its id instead of found by launch target, trigger and run start. **In this shape it has not been run against BigQuery**: step 2 uses the same `FROM`, `WHERE` and `QUALIFY`, so what it lists is what the insert copies. Afterwards `evaluation_latest` shows the evaluation as `FAILED` with your reason, and so does the GUI on a reload once its server's five-minute cache has passed.
+
+**4. What the dead launch left in the bucket.** A Dataflow launch that died during or after its `graph` step has staged its reference panel, or part of it: source rows, as objects under `<temp_location>/sdfb-evaluation/<evaluation_id>/panel/`, with the id you just closed. No job will read them. Remove them, or leave them to the bucket's lifecycle rule ([`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md), "Temp and staging locations: where the reference panel is"). A launch that died while planning, before `graph`, staged nothing.
+
 ---
 
 ## 6. Stores, flags, and experiment hygiene
@@ -587,6 +824,39 @@ change — a warm store hit would replay pools built with the OLD prompts and
 mask the edit. Exclude `COL_047`/`COL_048` (binary-character columns, known
 special case) from every comparison.
 
+### 6e. `--rag_row_docs_limit` (B.1 row documents)
+
+How many reference rows B.1 embeds as row documents: the first N of the
+fingerprint-ordered sample, one value for the population branch that writes
+`rag_chunks` and the engine that embeds or reads the same prefix back
+([ADR 0019](adr/0019-rag-population-scoped-to-consumers.md)). Default
+**1024**, the constant `MAX_ROW_DOC_ROWS` it replaces; a launch at the
+default behaves as before. CLI `--rag_row_docs_limit`, flex template and
+generation DAG param `rag_row_docs_limit`. An integer >= 1 (empty = the
+default); a value above the reference sample is clamped to the sample and
+logged once per table (`rag_row_docs_clamped`).
+
+```mermaid
+flowchart LR
+  L["launcher<br/>N = min(rag_row_docs_limit, sample rows)"] --> Q{"rag_chunks holds<br/>digest + embedder?"}
+  Q -- no --> F["full: row docs for rows[:N]<br/>+ value chunks"]
+  Q -- yes --> C{"all of rows[:N]<br/>present?"}
+  C -- yes --> S["skip<br/>rag_population_skipped"]
+  C -- no --> T["topup: only the missing rows<br/>no value chunks<br/>rag_population_topup"]
+```
+
+| Store state for (digest, embedder) | Launch with `--build_rag_layer` | Workers read |
+| :-- | :-- | :-- |
+| empty | `full`: rows[:N] + the distinct free-text values | this job: whatever the store holds when a worker sets up, else they embed rows[:N] themselves (a cold digest); later launches: the store |
+| written with a limit >= N | `skip` | rows[:N] by `row_digest` from the store |
+| written with a limit < N | `topup`: the missing rows of rows[:N] only | this job: as on a cold digest; later launches: the store |
+
+The store is keyed by digest and embedder, not by the limit, so the limit is
+checked by content: every row of the prefix must be present or the engine
+re-embeds (all-or-nothing, never a mix). Raising N costs one embed of the
+extra rows and N x 384 floats of worker memory per engine; it does not
+change the value chunks (they come from the whole sample).
+
 ---
 
 ## 7. Milestone log dictionary — reading worker logs
@@ -604,11 +874,17 @@ Store / pool lifecycle:
 | `freetext_pool_store_error` | store unreachable; run degraded to building (not fatal) |
 | `freetext_pool_store_absent` (WARNING) | no `--freetext_pools_table` passed — this run rebuilds pools per worker process |
 | `pool_build_skipped` | driver found this digest+model already populated |
+| `rag_population_skipped` | the `rag_chunks` row docs already cover `rows[:rag_row_docs_limit]` for this digest + embedder |
+| `rag_population_topup rows_missing=` | the store was written with a smaller `rag_row_docs_limit`: only the missing row docs are populated (§6e) |
+| `rag_row_docs_clamped requested= sample_rows=` | a non-default `rag_row_docs_limit` above the reference sample was clamped to it |
 | `pool_branch_setup_done` / `pool_branch_emitted` | the build branch ran |
 | `freetext_pool_built target=` | per-column pool landed; compare targets across stats tiers for the exact-distinct lift |
 | `freetext_pools_warm columns=` | every pool came from the persisted store / process cache — the designed warm path (ADR 0020/0033), not idle hardware |
 | `engine_shared holders=N` | this generate DoFn reused the process's engine (ADR 0034 D2): N holders share one build — 4 builds per table on the R7 single run instead of 32 |
 | `source_values_arrow_fallback error=` / `source_values_storage_api_disabled` | the Storage Read API attempt failed (`PermissionDenied` = grant `roles/bigquery.readSessionUser`); REST paging serves the process. A following `*_source_filter_error` means the fetch itself failed — the ADR 0023 filters are INACTIVE, treat the run's pools as tainted |
+| `the BigQuery Storage Read API refused a read session on project …` (WARNING, an **evaluation** launch's console and its registry row's `warnings`) | the evaluator's probe was refused (a 403) by the project(s) named: their read tables are paged through `tabledata.list` instead of `DIRECT_READ`, the rest keep the fast read. The line lists each paged table side with its rows and the table's logical bytes; dividing them by the quota it quotes (3.7 GB of row data per minute, 7.5 GB in the US and EU multi-regions, for the project that contains the table) gives an estimate of the read time, not a bound: the bytes count every column where only the plan's are paged (an overestimate, most of all for a read-only parent, read by its key columns), and the quota is shared with every other reader of that project. Where the refusing project is yours, `roles/bigquery.readSessionUser` on it for the account the job runs as restores the fast read; otherwise, or when the tables are too large to page, launch with `mode=sampled`. In the job's worker log `paged read of <table>: …` lines give the row count, the ranges and the pages, and two WARNINGs name a table whose metadata says nothing (`carries no row count`: the count is `tabledata.list`'s own; `carries no modification time`: a rewrite with as many rows would not be noticed). `TableChangedError` means the table's metadata and its rows disagreed, or something wrote to it while it was paged: evaluate again once nothing does (§5a, [`DEPLOYMENT_PREREQUISITES.md`](DEPLOYMENT_PREREQUISITES.md) "Evaluator") |
+| `planning <id> (all tables): scans <s>s` (an **evaluation** launch's console) | the wall time of planning's concurrent phase: every table's planning SELECTs, row-count check and panel, up to eight tables at once. The per-table lines before it overlap in time. Expect the slowest table's own seconds, not the sum (ADR 0041, note of 2026-10-11). `planning <id> <table>: its scan failed too (…)` (WARNING) is a second table's failure when the error raised is another table's: its statements were billed as well |
+| `evaluation <id>: panel staging: <n> objects, <size>, <s>s (<w>s in the writes)` (an **evaluation** launch on Dataflow) | the reference panel was written under `<temp_location>/sdfb-evaluation/<evaluation_id>/panel/` instead of being embedded in the job graph: `<s>` seconds in all, `<w>` of them writing to storage. The workers read the objects and check each one's sha256 (`staged panel object … verified` in the worker log). A `StagedObjectError` names the object that could not be written (launch: `FAILED` row) or read, verified or unpickled (worker: the job fails). A launch that fails or is killed after this line leaves the objects there with no job: the path follows from the `evaluation_id` of its `RUNNING` row |
 | `vllm_spawn_lock_acquired` / `vllm_spawn_lock_wait` / `vllm_server_kept_alive` | `sdk_containers=multi` (ADR 0034 D6): exactly one process per worker acquires the spawn window; waiters bind to its server via the reuse probe; the server outlives the client that spawned it |
 | `sdk_container_topology topology=` | launcher: `single` (one SDK process per worker) or `multi` (one per vCPU) — decides the cross-process vLLM mode and the CPU population embed |
 | `llm_route_unused` (WARNING) | this setup has NO LLM-derived pool at all (every column expandable / typed / binary) — GPU workers idle; plan a CPU-only rerun (ADR 0027/0033) |

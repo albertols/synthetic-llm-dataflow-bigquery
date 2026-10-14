@@ -289,6 +289,12 @@ which is D9's evidence. Launcher/boot variance accounts for the rest
   parent and child stages. Expected wall time for that cold run:
   ≈ 44–46 min (56.9 − 12.5 population/ignition − ≈ 4 autoscaler dip,
   ± launcher variance).
+  *Amended 2026-10-11:* `multi` is no longer opt-in on Composer. The
+  owner made it the default of the generation DAG's `sdk_containers`
+  param (`composer/synthetic_beam_bigquery.py`); `single` stays
+  selectable there and stays the value of the personal-GCP tiers
+  (`public_cloud/deploy/gcp/tiers.yaml`). The checks listed above for
+  the next multi cold start are not re-verified by this amendment.
 - Original acceptance list (kept for the record; status in the table above):
   `CombineByPk` absent from `dominant_stages`; `engine_shared` present
   and `dofn_setup_done` ≤ 4 per table; `initial_workers=4` → no harness

@@ -15,7 +15,8 @@ Whenever you delete a file, rename a symbol, retire an image tag, or move conten
    grep -rn "<removed-name>" \
        --include='*.md' --include='*.yaml' --include='*.yml' \
        --include='*.py' --include='*.toml' --include='*.sh' --include='*.json' \
-       --exclude-dir=.venv --exclude-dir=.git --exclude-dir=__pycache__
+       --exclude-dir=.venv --exclude-dir=.git --exclude-dir=__pycache__ \
+       --exclude-dir=adr --exclude-dir=releases
    ```
 
 2. **Update every match** in the same commit as the deletion / rename. Don't leave "I'll fix it later" — drift compounds.
@@ -24,7 +25,7 @@ Whenever you delete a file, rename a symbol, retire an image tag, or move conten
 
 4. **Maintenance**: entries that have been clean for ≥ 1 month can be removed from `.github/drift-check.txt`. The goal is to catch fresh drift, not maintain a memorial.
 
-5. **Historical references in ADRs are OK** — `docs/adr/` is excluded from the CI grep by design, because past decisions legitimately mention what was removed and why.
+5. **Historical references in ADRs and release reports are OK** — `docs/adr/` and `docs/releases/` are excluded from the CI grep by design, because past decisions and release reports legitimately mention what was removed and why. A quote in a record is never reworded to satisfy the grep.
 
 ## Why this skill exists
 

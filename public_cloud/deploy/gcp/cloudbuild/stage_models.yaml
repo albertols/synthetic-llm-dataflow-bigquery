@@ -17,7 +17,7 @@
 # Weights never touch a laptop. Submit via 05_stage_models.sh.
 steps:
   - id: download-and-validate
-    name: python:3.11-slim
+    name: python:3.14-slim
     secretEnv: ["KAGGLE_USERNAME", "KAGGLE_KEY"]
     script: |
       #!/usr/bin/env bash

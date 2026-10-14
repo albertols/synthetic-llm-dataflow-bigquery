@@ -197,7 +197,7 @@ def test_build_image_cloudbuild_yaml_builds_mainline_dockerfile_unmodified():
   assert cfg["images"] == ["${_IMAGE_URI}"]
   # The Dockerfile defaults already target public registries.
   dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
-  assert 'ARG BEAM_SDK_IMAGE="apache/beam_python3.11_sdk:2.74.0"' in dockerfile
+  assert 'ARG BEAM_SDK_IMAGE="apache/beam_python3.14_sdk:2.76.0"' in dockerfile
 
 
 def test_build_and_template_scripts_dry_run():

@@ -48,8 +48,8 @@ version: `albertols:sync/synthetic-llm-dataflow-bigquery-v0.5.1`.
    uv run python scripts/doc/sync_design_refs.py         # Design: docstring lines vs docs/DESIGN.md
    uv run pytest -m "not gpu and not gcp" -q
    uv run ruff check . && uv run mypy packages/sdfb-core/src
-   uv run yapf --diff -r --style yapf packages scripts dsg composer public_cloud
-   uv run pylint --rcfile dsg/pylintrc packages scripts dsg composer public_cloud
+   uv run yapf --diff -r --style yapf packages scripts dsg composer public_cloud docker
+   uv run pylint --rcfile dsg/pylintrc packages scripts dsg composer public_cloud docker
    ```
    Check the CI run for REF is green: `gh run list --branch master --limit 3`.
 2. **Dry run** (stages, installs and gates, but does not commit):

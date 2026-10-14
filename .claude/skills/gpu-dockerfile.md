@@ -11,7 +11,7 @@ description: Recipe for the L4 GPU Dataflow custom container — Beam SDK base +
 
 Dataflow runs the **same image ENTRYPOINT** in two different ways and *appends* args — it does **not** override the entrypoint. So the ENTRYPOINT is a dispatch script (`docker/entrypoint.sh`) that picks the binary from the appended args:
 
-- **Flex Template launch** → no FnAPI flags → execs `/opt/google/dataflow/python_template_launcher`. The launcher reads `FLEX_TEMPLATE_PYTHON_PY_FILE` (set to `sdfb_beam.cli.run_pipeline`) and submits the job.
+- **Flex Template launch** → no FnAPI flags → execs `/opt/google/dataflow/python_template_launcher`. The launcher reads `FLEX_TEMPLATE_PYTHON_PY_FILE`, the dispatcher `docker/flex_entry.py`: it calls `sdfb_beam.cli.run_pipeline.main` unless the launch passes `sdfb_job=evaluation`, which runs the evaluator the image also carries (ADR 0041's amendment). The Dockerfile takes the evaluator's source through a stage that tolerates its absence; never `COPY packages/sdfb-evaluation/…` directly, the DSG copy has no such directory.
 - **Dataflow workers** → Dataflow appends the Beam FnAPI boot flags (`--id`, `--logging_endpoint`, `--control_endpoint`, `--artifact_endpoint`, `--provision_endpoint`) → the script execs `/opt/apache/beam/boot`. (Letting the launcher binary receive these is what crash-looped `sdk-0-0` with `flag provided but not defined: -logging_endpoint`.)
 
 Both binaries are copied into the final image via multi-stage `COPY --from`. See [ADR 0009](../../docs/adr/0009-single-flex-template-image.md) for the rationale.
@@ -35,7 +35,7 @@ The worker image is pulled from **Artifact Registry** via the worker service acc
 
 `g2-standard-8` = 1×L4 (24 GB VRAM), 8 vCPU, 32 GB RAM. Upgrade to `g2-standard-24` if NVIDIA MPS is needed for multi-process GPU sharing.
 
-**Base images are public**: Beam SDK `apache/beam_python3.11_sdk:2.74.0` on Docker Hub (→ `apache-beam[gcp]==2.74.0` pin — Runner v2 needs the boot binary and the wheel at the same version, so bump them in lockstep) and the launcher binary from `gcr.io/dataflow-templates-base/python311-template-launcher-base`. Both are `ARG`s (`BEAM_SDK_IMAGE`, `LAUNCHER_IMAGE`) so a mirror can be swapped in with `--build-arg`. No system CUDA base: vLLM/torch wheels bundle the CUDA runtime and Dataflow's `install-nvidia-driver` mounts the driver at `/usr/local/nvidia/`. uv is bootstrapped from PyPI and `uv sync --frozen` installs from `uv.lock`. Private-IP workers need **Private Google Access** on the subnet (GCS, BigQuery, Artifact Registry); if `enable_secure_boot` blocks the unsigned driver module, drop Secure Boot for the GPU job.
+**Base images are public**: Beam SDK `apache/beam_python3.14_sdk:2.76.0` on Docker Hub (→ `apache-beam[gcp]==2.76.0` pin — Runner v2 needs the boot binary and the wheel at the same version, so bump them in lockstep) and the launcher binary from `gcr.io/dataflow-templates-base/python314-template-launcher-base`. Both are `ARG`s (`BEAM_SDK_IMAGE`, `LAUNCHER_IMAGE`) so a mirror can be swapped in with `--build-arg`. No system CUDA base: vLLM/torch wheels bundle the CUDA runtime and Dataflow's `install-nvidia-driver` mounts the driver at `/usr/local/nvidia/`. uv is bootstrapped from PyPI and `uv sync --frozen` installs from `uv.lock`. Private-IP workers need **Private Google Access** on the subnet (GCS, BigQuery, Artifact Registry); if `enable_secure_boot` blocks the unsigned driver module, drop Secure Boot for the GPU job.
 
 ## Model warm-pull
 

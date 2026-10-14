@@ -1,6 +1,6 @@
 # ADR 0040 — Donated to the Dataflow Solution Guides; this repository stays the golden source
 
-**Status:** ACCEPTED (2026-09-14) — **amended 2026-09-19** after the first DSG review ([Amendment](#amendment-2026-09-19--the-first-dsg-review-pr-289): what ships, headers, provenance, publishing onto a PR under review). Laptop-proven: the sync, precheck and Terraform gates are green. The acceptance gates still outstanding are DSG CI on the first sync PR and a live Dataflow run of the DSG launch scripts.
+**Status:** ACCEPTED (2026-09-14) — **amended 2026-09-19** after the first DSG review ([Amendment](#amendment-2026-09-19--the-first-dsg-review-pr-289): what ships, headers, provenance, publishing onto a PR under review) · **amended 2026-09-26** after the merge ([Amendment](#amendment-2026-09-26--aligned-with-the-dsg-baseline): Python 3.14, Beam 2.76). Laptop-proven: the sync, precheck and Terraform gates are green. The acceptance gates still outstanding are DSG CI on the first sync PR and a live Dataflow run of the DSG launch scripts.
 **Target:** [GoogleCloudPlatform/dataflow-solution-guides](https://github.com/GoogleCloudPlatform/dataflow-solution-guides) (the DSG)
 **Runbook:** [`.claude/skills/dsg-sync/SKILL.md`](../../.claude/skills/dsg-sync/SKILL.md) · `/dsg-sync <ref>`
 **Relies on:** [ADR 0009](0009-single-flex-template-image.md) (one image, two entrypoints) · [ADR 0032](0032-relationships-as-config.md) (relationship models as config)
@@ -195,6 +195,31 @@ this stack cannot reach yet: `whylogs-sketching`, the compiled backend of the
 profiler, publishes wheels up to CPython 3.12
 ([PyPI](https://pypi.org/project/whylogs-sketching/#files), checked
 2026-09-19).
+
+## Amendment (2026-09-26) — aligned with the DSG baseline
+
+PR #289 merged on 2026-09-25 with the guide marked beta. The maintainer's
+[comment](https://github.com/GoogleCloudPlatform/dataflow-solution-guides/pull/289#issuecomment-5837875462)
+names the baseline the rest of the repository runs: Python 3.14, Beam 2.76,
+Cloud Foundation Fabric v58. Fabric was already at `v58.0.0`.
+
+**A6 — Python 3.14 and Beam 2.76 (supersedes A5's choice of 3.11).** A5's
+blocker was not a real dependency: `whylogs` was declared in `sdfb-beam` but
+no module imports it (the profiler DoFn it was meant for was never built).
+Dropping it removes `whylogs-sketching`, and every other locked package
+publishes a CPython 3.14 wheel for linux x86_64. `ml_ai_python` already runs
+vLLM and torch on 3.14 with Beam 2.76 on L4 workers. Beam 2.76 also drops
+`envoy-data-plane`, so the `betterproto==2.0.0b6` pre-release constraint
+goes with it. A5's single-source rule is unchanged: `.python-version` now
+says 3.14, and the `python-version` gate holds every other pin to it. The
+Beam SDK image and the `apache-beam` wheel move together
+(`apache/beam_python3.14_sdk:2.76.0`, `apache-beam[gcp]==2.76.0`), as do the
+launcher base (`python314-template-launcher-base`) and the model-staging
+Cloud Build image. F-string fields keep their single quotes: 3.14 accepts
+reused quotes ([PEP 701](https://peps.python.org/pep-0701/)), but yapf 0.43,
+the latest release and the DSG's pin, cannot parse them. Laptop gates are green on
+3.14. Dataflow acceptance is a corp end-to-end run on the rebuilt image
+before the next sync.
 
 ## Alternatives considered
 

@@ -640,8 +640,8 @@ Reaffirming CLAUDE.md's hard constraints as they apply here:
     here re-backfills the table under the new version automatically.
 - **Phase B/C — deferred until Phase A's E2E baseline** (not "out of scope",
   scheduled after Phase A; spec §4c/§4d; WS3 gates the comparison — Phase C
-  ships only after Phase A's `validation_data_history` metrics establish the
-  baseline it must beat):
+  ships only after Phase A's evaluation metrics (the `evaluation_*`
+  tables, ADR 0041) establish the baseline it must beat):
   - **Phase B** (spec §4c): new `chunk_kind`s written by the population
     stage — `column_profile` (one chunk per column: name, type, inferred
     kind, cardinality, top values) and `table_summary` (one chunk per

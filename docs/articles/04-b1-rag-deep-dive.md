@@ -356,6 +356,10 @@ two keyed groups per table — two embedders at once, not one per SDK
 process. The hatched bars are
 the ADR's estimates; the solid ones are measured.
 
+> *Later note (2026-10-14):* the row-document count is now the launch knob
+> `rag_row_docs_limit`, default 1,024 (the constant above); writer and
+> reader still slice the same prefix with that one value.
+
 🔬 **In the code.** `rag/serialize.py::serialize_row`,
 `rag/chunking.py::compute_row_digest`, `::compute_chunk_id`,
 `::chunk_free_text_value`, `::distinct_free_text_values`.

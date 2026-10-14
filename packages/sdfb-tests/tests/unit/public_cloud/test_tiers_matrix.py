@@ -12,15 +12,21 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 """Drift guard: every tiers.yaml parameter must exist in the mainline Flex
-Template metadata, and all required template params must be provided.
+Template metadata, and every flag the generator requires must be provided.
 Catches the 'template gained a param, personal layer did not' bug class
-(vllm_max_model_len, 2026-07-14)."""
+(vllm_max_model_len, 2026-07-14).
+
+The template declares every parameter optional (it serves the generator and
+the evaluator), so "required" is read from the generator's own argument
+parser, which is what refuses a launch without them."""
 from __future__ import annotations
 
 import importlib.util
 import itertools
 import json
 from pathlib import Path
+
+from sdfb_tests.launch_surface import generator_required
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
 GCP_DIR = REPO_ROOT / "public_cloud" / "deploy" / "gcp"
@@ -37,7 +43,6 @@ TABLES = ["citibike", "hacker_news"]
 
 meta = json.loads(METADATA.read_text())
 TEMPLATE_PARAMS = {p["name"] for p in meta["parameters"]}
-REQUIRED = {p["name"] for p in meta["parameters"] if not p.get("isOptional")}
 RUNTIME_ADDED = {"run_id"}  # run_e2e.sh generates and appends run_id
 
 
@@ -49,7 +54,9 @@ def test_every_tier_param_exists_in_template_metadata():
 
 
 def test_every_required_template_param_is_provided():
+  required = generator_required()
+  assert RUNTIME_ADDED < required <= TEMPLATE_PARAMS
   for tier, table in itertools.product(TIERS, TABLES):
     params, _ = rt.render(GCP_DIR / "tiers.yaml", tier, table, VARS)
-    missing = REQUIRED - set(params) - RUNTIME_ADDED
-    assert not missing, f"{tier}/{table}: required template params missing: {missing}"
+    missing = required - set(params) - RUNTIME_ADDED
+    assert not missing, f"{tier}/{table}: required generator flags missing: {missing}"
