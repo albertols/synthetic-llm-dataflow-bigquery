@@ -25,6 +25,8 @@
       "--link": "#6fc8e8",
       "--focus-ring": "#2fbfad",
       "--status-good-text": "#2fc28c",
+      "--cpu-text": "#2fc28c",
+      "--gpu-text": "#b391ec",
       "--chart-surface": "#0f1d1d",
       "--nav-bg": "#0f1d1d"
     },

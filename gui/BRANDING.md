@@ -163,14 +163,14 @@ committed one, the test fixture and any local pack) in both modes, the
 `tokens.css` values with the pack's overrides on top, and holds them to WCAG
 2.2 AA where the tables below hold `beam-dataflow`:
 
-| Check                                                                                                         | Minimum |
-| :------------------------------------------------------------------------------------------------------------ | ------: |
-| `--text-1/2/3` on the page, `--surface-1/2/3`                                                                 | 4.5 : 1 |
-| accent text, links, CPU / GPU / Beam text, status text on the page, `--surface-1/2`                           | 4.5 : 1 |
-| accent text on `--accent-soft`, links on `--info-soft`, status text on its own 14 % tint, over the same three | 4.5 : 1 |
-| `--accent-fg` on `--accent` (button labels)                                                                   | 4.5 : 1 |
-| the top bar's ink on the bar, and on its `--surface-3`; its link on `--info-soft`                             | 4.5 : 1 |
-| `--control-border` on the page and `--surface-1/2`; `--focus-ring` there, on `--surface-3` and on the bar     |   3 : 1 |
+| Check                                                                                                                            | Minimum |
+| :------------------------------------------------------------------------------------------------------------------------------- | ------: |
+| `--text-1/2/3` on the page, `--surface-1/2/3`                                                                                    | 4.5 : 1 |
+| accent text, links, CPU / GPU / Beam text, status text on the page, `--surface-1/2`                                              | 4.5 : 1 |
+| accent text on `--accent-soft`, links on `--info-soft`, status, CPU, GPU and Beam text on its own 14 % tint, over the same three | 4.5 : 1 |
+| `--accent-fg` on `--accent` (button labels)                                                                                      | 4.5 : 1 |
+| the top bar's ink on the bar, and on its `--surface-3`; its link on `--info-soft`                                                | 4.5 : 1 |
+| `--control-border` on the page and `--surface-1/2`; `--focus-ring` there, on `--surface-3` and on the bar                        |   3 : 1 |
 
 The ratios are computed, not typed into a table: a local pack needs no row in
 this public file. The chart slots stay as validated below; on a pack's chart

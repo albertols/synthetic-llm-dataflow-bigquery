@@ -10,7 +10,8 @@
  *                     the surfaces they sit on; accent and link text on their tints;
  *                     the label on an accent button; the bar's ink on the bar
  *   UI   ≥ 3 : 1      input boundaries and the focus ring (WCAG 1.4.11, 2.4.13)
- *   tint ≥ 4.5 : 1    status text on its own 14 % tint (the darkest pill/callout tint)
+ *   tint ≥ 4.5 : 1    status, CPU, GPU and Beam text on its own 14 % tint (the
+ *                     strongest pill and callout tint)
  */
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -108,7 +109,12 @@ function checksFor(pack: BrandPack, mode: Mode): Check[] {
     );
     add(`--link on ${surface}`, c(page, "--link"), bg, 4.5);
     add(`--link on --info-soft over ${surface}`, c(page, "--link"), over(t(page, "--info-soft"), bg), 4.5);
-    for (const ink of ["--cpu-text", "--gpu-text", "--beam-text"]) add(`${ink} on ${surface}`, c(page, ink), bg, 4.5);
+    for (const tone of ["cpu", "gpu", "beam"]) {
+      const ink = c(page, `--${tone}-text`);
+      add(`--${tone}-text on ${surface}`, ink, bg, 4.5);
+      const hue: Tint = { rgb: rgbOf(c(page, `--${tone}`)), alpha: PILL_TINT };
+      add(`--${tone}-text on its 14 % tint over ${surface}`, ink, over(hue, bg), 4.5);
+    }
     add(`--control-border on ${surface}`, c(page, "--control-border"), bg, 3);
     for (const status of STATUS) {
       const ink = c(page, `--status-${status}-text`);
@@ -149,7 +155,7 @@ describe("brand packs meet WCAG 2.2 AA (computed)", () => {
   const cases = PACKS.flatMap((pack) => MODES.map((mode) => [pack.id, mode, pack] as const));
   it.each(cases)("%s %s", (_id, mode, pack) => {
     const list = checksFor(pack, mode);
-    expect(list.length).toBe(85);
+    expect(list.length).toBe(94);
     const failures = list
       .filter(({ fg, bg, min }) => contrast(fg, bg) < min)
       .map(({ label, fg, bg, min }) => `${label}: ${contrast(fg, bg).toFixed(2)} < ${min}`);
