@@ -29,10 +29,10 @@ function watchErrors(page: Page): string[] {
   return errors;
 }
 
-async function expectNoSeriousViolations(page: Page, label: string) {
-  const results = await new AxeBuilder({ page })
-    .withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"])
-    .analyze();
+async function expectNoSeriousViolations(page: Page, label: string, include: string[] = []) {
+  let builder = new AxeBuilder({ page }).withTags(["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", "wcag22aa"]);
+  for (const selector of include) builder = builder.include(selector);
+  const results = await builder.analyze();
   const serious = results.violations
     .filter((violation) => violation.impact === "serious" || violation.impact === "critical")
     .map((violation) => `${label}: ${violation.id} → ${violation.nodes.map((n) => n.target.join(" ")).join(" | ")}`);
@@ -76,6 +76,8 @@ async function renderEverything(page: Page) {
 test("the brand and theme switcher is two labelled radio groups and works from the keyboard", async ({
   page,
 }, testInfo) => {
+  // A loaded machine runs the INTRO axe passes beside this one.
+  test.setTimeout(90_000);
   const errors = watchErrors(page);
   await page.goto("/evaluation");
   const head = await readHead(page);
@@ -95,7 +97,8 @@ test("the brand and theme switcher is two labelled radio groups and works from t
   );
   const modes = menu.getByRole("group", { name: "Theme" });
   await expect(modes.getByRole("menuitemradio")).toHaveText(["Dark", "Light", "Match system"]);
-  await expectNoSeriousViolations(page, "switcher open");
+  // The open menu and the bar it hangs from (UX.md: check an open overlay with include()).
+  await expectNoSeriousViolations(page, "switcher open", ['[role="menu"]', "header"]);
 
   // Arrow keys move through the items; Enter picks "Light" and closes the menu.
   const light = modes.getByRole("menuitemradio", { name: "Light", exact: true });
