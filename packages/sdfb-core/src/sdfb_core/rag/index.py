@@ -22,8 +22,9 @@ threaded search is forced for bit-stable ordering.)
 
 Index cardinality is small by design: at most the 10k-row reference sample
 (never the full source table; see `sdfb_beam.rag.population`), and in the
-B.1 engine's in-worker index at most `_MAX_EMBED_ROWS` (1024) of that
-sample — which is why flat/exact stays comfortably inside its sweet spot.
+B.1 engine's in-worker index at most `rag_row_docs_limit` (default
+`MAX_ROW_DOC_ROWS`, 1024) of that sample — which is why flat/exact stays
+comfortably inside its sweet spot.
 
 `faiss` is imported lazily. When it is not installed (bare laptop / contract
 tests), a pure-Python exact inner-product fallback is used — same results,

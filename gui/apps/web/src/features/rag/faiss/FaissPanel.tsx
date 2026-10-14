@@ -1,8 +1,9 @@
 /**
  * The index, as the code builds it: `IndexFlatIP` over L2-normalised vectors
  * (inner product ≡ cosine), n × d × 4 bytes, rebuilt in RAM by every engine
- * build and never persisted; the row index holds only the first 1,024
- * fingerprint-ordered reference rows (MAX_ROW_DOC_ROWS). The norms are
+ * build and never persisted; the row index holds only the first
+ * `--rag_row_docs_limit` fingerprint-ordered reference rows (default 1,024,
+ * MAX_ROW_DOC_ROWS). The norms are
  * checked live on the loaded vectors.
  */
 import { ArrowRight, Database, MemoryStick, Search, Trash2 } from "lucide-react";
@@ -24,7 +25,7 @@ export function FaissPanel({ model }: { model: RagModel }) {
   const { set, cloud } = model;
   if (!set) return null;
   const dim = set.dim ?? cloud?.dim ?? 384;
-  const n = Math.min(set.row_docs, MAX_ROW_DOC_ROWS);
+  const n = set.row_docs;
   const capBytes = MAX_ROW_DOC_ROWS * dim * BYTES_PER_FLOAT;
   const norms = cloud ? normRange(cloud.rows) : null;
   const excludedRows = Math.max(REFERENCE_ROWS_LIMIT - MAX_ROW_DOC_ROWS, 0);
@@ -62,10 +63,10 @@ export function FaissPanel({ model }: { model: RagModel }) {
             concept="rag:row-doc-cap"
             value={n}
             format={(v) => formatCount(v)}
-            footnote={`vectors × ${dim} dims (cap ${formatCount(MAX_ROW_DOC_ROWS)})`}
+            footnote={`vectors × ${dim} dims (default cap ${formatCount(MAX_ROW_DOC_ROWS)})`}
           />
           <StatTile
-            label="Memory at the cap"
+            label="Memory at the default cap"
             concept="rag:faiss-memory"
             value={capBytes}
             format={(v) => `${formatNumber(v / 2 ** 20, 2)} MiB`}
@@ -152,10 +153,10 @@ export function FaissPanel({ model }: { model: RagModel }) {
                       safety net
                     </Badge>
                   </th>
-                  <td className="py-2 pr-3">The first {formatCount(MAX_ROW_DOC_ROWS)} row documents</td>
+                  <td className="py-2 pr-3">The first rag_row_docs_limit row documents</td>
                   <td className="py-2">
                     {TOP_K} exemplar rows: a fallback seed source (rung 3) that cannot fire as the engine is wired — the
-                    same 1,024-row prefix already fed the column path.
+                    same row-document prefix already fed the column path.
                   </td>
                 </tr>
               </tbody>
@@ -165,14 +166,17 @@ export function FaissPanel({ model }: { model: RagModel }) {
 
         <div className="grid content-start gap-3 rounded-lg border border-border bg-surface-1 p-4">
           <div className="flex items-center gap-1">
-            <h3 className="text-sm font-semibold text-text-1">Why 1,024 row documents</h3>
+            <h3 className="text-sm font-semibold text-text-1">
+              Why {formatCount(MAX_ROW_DOC_ROWS)} row documents by default
+            </h3>
             <InfoHint concept="rag:row-doc-cap" />
           </div>
           <SampleStrip share={share} />
           <p className="text-sm text-text-2">
             The only reader of row vectors reads exactly the first {formatCount(MAX_ROW_DOC_ROWS)} rows of the
-            fingerprint-ordered reference sample, all-or-nothing, so the writer embeds exactly those (one constant for
-            both, ADR 0019). A fingerprint-ordered prefix is a uniform sample of the sample.
+            fingerprint-ordered reference sample (the default of <span className="font-mono">--rag_row_docs_limit</span>
+            ), all-or-nothing, so the writer embeds exactly those (one launch value for both, ADR 0019). A
+            fingerprint-ordered prefix is a uniform sample of the sample.
           </p>
           <ul className="grid gap-1 text-xs text-text-2">
             <li>
@@ -193,7 +197,7 @@ export function FaissPanel({ model }: { model: RagModel }) {
             </li>
           </ul>
           <p className="text-xs text-text-3">
-            <SourceLink path="packages/sdfb-core/src/sdfb_core/rag/chunking.py" line={52}>
+            <SourceLink path="packages/sdfb-core/src/sdfb_core/rag/chunking.py" line={53}>
               chunking.py — MAX_ROW_DOC_ROWS
             </SourceLink>
           </p>

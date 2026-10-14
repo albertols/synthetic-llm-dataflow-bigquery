@@ -576,6 +576,18 @@ default_dag_params = {
             "id+version). Ignored when the build left "
             "SDFB_RAG_CHUNKS_TABLE empty.",
         ),
+    "rag_row_docs_limit":
+        Param(
+            default="1024",
+            type="string",
+            description="B.1 RAG: how many reference rows (the first N of the "
+            "fingerprint-ordered sample) are embedded as row documents "
+            "— the in-worker exemplar index and the rag_chunks row_doc "
+            "prefix. A positive integer, clamped to the reference "
+            "sample (10000 rows). A chunk store written with a smaller "
+            "value is topped up with the missing rows when "
+            "build_rag_layer is true. Default 1024.",
+        ),
     "build_pool_layer":
         Param(
             default="true",
@@ -1143,6 +1155,7 @@ with models.DAG(
                   "pool_seed_strategy": "{{ params.pool_seed_strategy }}",
                   "reference_table": "{{ params.table_fqn }}",
                   "reference_rows_limit": "10000",
+                  "rag_row_docs_limit": "{{ params.rag_row_docs_limit }}",
                   "landing_table": "{{SDFB_LANDING_TABLE}}",
                   "dlq_table": "{{SDFB_DLQ_TABLE}}",
                   "num_rows": "{{ params.num_rows }}",

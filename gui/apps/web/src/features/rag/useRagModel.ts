@@ -26,8 +26,8 @@ function knobNumber(id: string, fallback: number): number {
 
 /** `rag_top_k` (engine.py `_DEFAULT_TOP_K`). */
 export const TOP_K = knobNumber("rag_top_k", 8);
-/** `MAX_ROW_DOC_ROWS` (rag/chunking.py). */
-export const MAX_ROW_DOC_ROWS = knobNumber("max_row_doc_rows", 1024);
+/** `--rag_row_docs_limit`'s default (`MAX_ROW_DOC_ROWS`, rag/chunking.py). */
+export const MAX_ROW_DOC_ROWS = knobNumber("rag_row_docs_limit", 1024);
 /** `MAX_FREE_TEXT_VALUES_PER_COLUMN` (rag/chunking.py). */
 export const MAX_VALUES_PER_COLUMN = knobNumber("max_free_text_values_per_column", 1024);
 /** `FREE_TEXT_POOL_MAX` (generation_plan.py). */

@@ -62,8 +62,8 @@ function PoolReuseCard() {
           <Output
             label="Row documents embedded"
             value={formatPercent(outputs.rowDocShare, 1)}
-            concept="knob:max_row_doc_rows"
-            note={`${formatCount(CONSTANTS.rowDocCap)} of n = ${formatCount(outputs.nEff)} rows; top-${CONSTANTS.topK} seeds per prompt`}
+            concept="knob:rag_row_docs_limit"
+            note={`${formatCount(Math.min(inputs.rowDocs, outputs.nEff))} of n = ${formatCount(outputs.nEff)} rows; top-${CONSTANTS.topK} seeds per prompt`}
           />
         </dl>
         <Callout tone="info" title="Memorization and diversity">

@@ -190,7 +190,7 @@ export const STAGES: readonly Stage[] = [
     phase: "generate",
     summary: "Rows become text chunks and unit vectors; an exact index retrieves exemplars.",
     quote: {
-      text: "FAISS `IndexFlatIP` (exact inner product over L2-normalized vectors = cosine; deterministic, single-threaded search) holds ≤1,024 vectors per worker.",
+      text: "FAISS `IndexFlatIP` (exact inner product over L2-normalized vectors = cosine; deterministic, single-threaded search) holds ≤1,024 vectors per worker (`--rag_row_docs_limit`, default 1,024).",
       source: "README.md",
       anchor: "generation-engines",
     },

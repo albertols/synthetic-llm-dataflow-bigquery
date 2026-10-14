@@ -16,6 +16,7 @@ describe("scenario ↔ URL", () => {
       N: 2_000_000,
       M: 5_000_000,
       n: 50_000,
+      rd: 2_048,
       p: 0.0001,
       q: 0.99,
       tier: "sample",
@@ -32,10 +33,12 @@ describe("scenario ↔ URL", () => {
     expect(state.custom).toBe(true);
     expect(paramsFromState(state)).toEqual(params);
     const inputs = inputsFrom(state);
+    expect(state.settings.rag_row_docs_limit).toBe(2_048);
     expect(inputs).toMatchObject({
       N: 2_000_000,
       M: 5_000_000,
       n: 50_000,
+      rowDocs: 2_048,
       tier: "sample",
       uniqueness: "streaming",
       env: "prd",

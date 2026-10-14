@@ -332,14 +332,14 @@ export function specFor(id: string, settings: Record<string, KnobValue>, inputs:
         }),
       };
     }
-    case "max_row_doc_rows":
+    case "rag_row_docs_limit":
       return {
         title: "Share of the reference sample embedded as row documents",
-        description: `${formatCount(CONSTANTS.rowDocCap)} of n rows (fingerprint order): ${pctFormat(Math.min(1, CONSTANTS.rowDocCap / n))} at n = ${compact(n)}.`,
+        description: `${formatCount(inputs.rowDocs)} of n rows (fingerprint order): ${pctFormat(Math.min(1, inputs.rowDocs / n))} at n = ${compact(n)}.`,
         build: () => ({
           data: logSpace(1_000, 1_000_000, 31).map((x) => ({
             n: Math.round(x),
-            share: Math.min(1, CONSTANTS.rowDocCap / x),
+            share: Math.min(1, inputs.rowDocs / x),
           })),
           option: lineOption({
             x: "n",

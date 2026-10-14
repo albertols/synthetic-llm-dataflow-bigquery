@@ -113,7 +113,10 @@ def test_values_are_imported_from_code_not_retyped(knobs):
   from sdfb_core.stats import source_stats
 
   by_id = _by_id(knobs)
-  assert by_id["max_row_doc_rows"]["value"] == chunking.MAX_ROW_DOC_ROWS
+  assert by_id["rag_row_docs_limit"]["value"] == chunking.MAX_ROW_DOC_ROWS
+  assert by_id["rag_row_docs_limit"]["settable_via"] == [
+      "cli", "composer", "flex"
+  ]
   assert (by_id["max_free_text_values_per_column"]["value"] ==
           chunking.MAX_FREE_TEXT_VALUES_PER_COLUMN)
   assert by_id["free_text_pool_max"][

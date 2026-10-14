@@ -36,7 +36,7 @@ export function knobChoices(id: KnobId): string[] {
 /** The values the stage labels print, each read from its contract. */
 export const facts = {
   referenceRows: knobNumber("reference_rows_limit"),
-  rowDocs: knobNumber("max_row_doc_rows"),
+  rowDocs: knobNumber("rag_row_docs_limit"),
   embedDim: knobNumber("hashing_embedder_dim"),
   topK: knobNumber("rag_top_k"),
   poolMax: knobNumber("free_text_pool_max"),

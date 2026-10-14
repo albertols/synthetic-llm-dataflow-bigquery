@@ -84,7 +84,7 @@ function knobNumber(id: KnobId): number {
 }
 const fmt = (v: number) => v.toLocaleString("en-US");
 const POOL_CAP = knobNumber("free_text_pool_max");
-const ROW_DOCS = knobNumber("max_row_doc_rows");
+const ROW_DOCS = knobNumber("rag_row_docs_limit");
 const TOP_K = knobNumber("rag_top_k");
 const N_DEFAULT = knobNumber("reference_rows_limit");
 const MARGIN = knobNumber("fk_key_sample_margin");
@@ -416,12 +416,12 @@ export const knobGuides: Readonly<Record<KnobId, KnobGuide>> = {
     tip: "The Composer DAG defaults it to true.",
   },
   // --------------------------------------------------------------------- RAG
-  max_row_doc_rows: {
+  rag_row_docs_limit: {
     purpose:
       "How many fingerprint-ordered reference rows are embedded as row documents: exactly the rows the engine reads back.",
-    up: "More rows in the in-worker index; population cost grows, and rows past the engine's read contract would be unreadable.",
+    up: "More rows in the in-worker index and more population cost; a value above the reference sample is clamped to it.",
     down: "A smaller index that covers fewer of the sample's modes.",
-    tip: "The engine's _MAX_EMBED_ROWS aliases it: one write/read contract.",
+    tip: "One value for writer and reader. A chunk store written with a smaller value is topped up with the missing rows.",
   },
   max_free_text_values_per_column: {
     purpose: "Distinct (column, value) chunks embedded per free-text column; a near-unique column stays bounded here.",
@@ -1005,7 +1005,7 @@ const configConcepts: Concept[] = [
       P.pydantic,
       P.pandera,
       P.beamDlq,
-      code("sdfb_beam/pipeline.py", "packages/sdfb-beam/src/sdfb_beam/pipeline.py", 362),
+      code("sdfb_beam/pipeline.py", "packages/sdfb-beam/src/sdfb_beam/pipeline.py", 375),
     ],
   },
   {

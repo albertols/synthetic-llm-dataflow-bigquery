@@ -93,7 +93,6 @@ export function ScenarioCalculator({ onOpenKnob }: { onOpenKnob: (id: string) =>
                 {(
                   [
                     ["free_text_pool_max", CONSTANTS.poolCap],
-                    ["max_row_doc_rows", CONSTANTS.rowDocCap],
                     ["rag_top_k", CONSTANTS.topK],
                   ] as const
                 ).map(([id, value]) => (
