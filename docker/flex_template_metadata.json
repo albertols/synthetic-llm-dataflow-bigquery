@@ -27,6 +27,15 @@
       "isOptional": true
     },
     {
+      "name": "rag_row_docs_limit",
+      "label": "RAG row documents",
+      "helpText": "B.1 RAG: how many reference rows (the first N of the fingerprint-ordered sample) are embedded as row documents for the in-worker exemplar index and the rag_chunks row_doc prefix. Default 1024; a positive integer, clamped to reference_rows_limit's sample. A rag_chunks store written with a smaller value is topped up with the missing rows.",
+      "isOptional": true,
+      "regexes": [
+        "^([1-9][0-9]*)?$"
+      ]
+    },
+    {
       "name": "landing_table",
       "label": "Landing table FQN",
       "helpText": "Destination BigQuery table for valid synthetic rows. project.dataset.table. Required for generation.",

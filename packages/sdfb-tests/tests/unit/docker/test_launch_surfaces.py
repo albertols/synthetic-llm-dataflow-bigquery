@@ -279,6 +279,30 @@ def test_flex_template_driven_uniqueness_mode_matches_cli_modes():
   assert not re.fullmatch(regex, "verbose")
 
 
+def test_rag_row_docs_limit_is_settable_from_every_launch_surface():
+  """`--rag_row_docs_limit` (B.1 row documents): the template accepts what
+    the CLI accepts, and the DAG declares it with the CLI's default and
+    forwards it to the generation launch. Property checks only: the
+    deployed copy of the DAG differs from this file's bytes."""
+  from sdfb_beam.cli.run_pipeline import parse_rag_row_docs_limit
+  from sdfb_core.rag.chunking import MAX_ROW_DOC_ROWS
+
+  param = _metadata_param("rag_row_docs_limit")
+  assert param["isOptional"] is True
+  (regex,) = param["regexes"]
+  for ok in ("", "1", "1024", "10000"):
+    assert re.fullmatch(regex, ok), ok
+    assert parse_rag_row_docs_limit(ok) >= 1
+  for bad in ("0", "-1", "1.5", "many"):
+    assert not re.fullmatch(regex, bad), bad
+  dag_param = _composer_params()["rag_row_docs_limit"]
+  assert _param_keyword(dag_param, "type") == "string"
+  assert _param_keyword(dag_param, "default") == str(MAX_ROW_DOC_ROWS)
+  assert len(_param_keyword(dag_param, "description")) > 30
+  assert (_composer_forwarded()["rag_row_docs_limit"] ==
+          "{{ params.rag_row_docs_limit }}")
+
+
 def test_flex_template_exposes_thresholds_uri():
   param = _metadata_param("thresholds_uri")
   assert param["isOptional"] is True
