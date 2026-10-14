@@ -1,11 +1,12 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-brand="beam-dataflow" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="dark light" />
     <meta name="theme-color" content="#0b0d12" />
-    <!-- Before any stylesheet: stamps the stored theme so a light-theme reader sees no dark flash. -->
+    <!-- Before any stylesheet: stamps the stored brand and theme, so no reader sees the default flash.
+         The build writes the brand list and the packs' tokens just above it (vite-plugins/brandPacks.ts). -->
     <script src="/theme-init.js"></script>
     <meta
       name="description"

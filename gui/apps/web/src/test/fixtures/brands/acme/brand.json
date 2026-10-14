@@ -1,0 +1,71 @@
+{
+  "$comment": "A fictitious brand pack for the brand-pack tests: a teal bar over slate surfaces. Never shipped: the build reads src/brands/ only.",
+  "id": "acme",
+  "name": "Acme Analytics",
+  "default": true,
+  "logo": { "light": "acme-on-dark.svg", "dark": "acme-on-dark.svg" },
+  "themeColor": { "dark": "#0f1d1d", "light": "#0f3b3a" },
+  "tokens": {
+    "dark": {
+      "--bg": "#0a1414",
+      "--surface-1": "#0f1d1d",
+      "--surface-2": "#142626",
+      "--surface-3": "#1b3030",
+      "--border": "#233a3a",
+      "--border-strong": "#345050",
+      "--control-border": "#7a9090",
+      "--text-1": "#eef6f5",
+      "--text-2": "#bfd2d0",
+      "--text-3": "#97aeab",
+      "--accent": "#2fbfad",
+      "--accent-hover": "#4fd0c0",
+      "--accent-fg": "#0a1414",
+      "--accent-text": "#4fd0c0",
+      "--accent-soft": "rgb(47 191 173 / 0.14)",
+      "--link": "#6fc8e8",
+      "--focus-ring": "#2fbfad",
+      "--status-good-text": "#2fc28c",
+      "--chart-surface": "#0f1d1d",
+      "--nav-bg": "#0f1d1d"
+    },
+    "light": {
+      "--bg": "#f3f6f6",
+      "--surface-1": "#ffffff",
+      "--surface-2": "#ffffff",
+      "--surface-3": "#e8eeee",
+      "--border": "#d7e0e0",
+      "--border-strong": "#b9c6c6",
+      "--control-border": "#6b7b7b",
+      "--text-1": "#0f1d1d",
+      "--text-2": "#34474a",
+      "--text-3": "#4e6366",
+      "--accent": "#0f766e",
+      "--accent-hover": "#12857c",
+      "--accent-fg": "#ffffff",
+      "--accent-text": "#0f6b63",
+      "--accent-soft": "rgb(15 118 110 / 0.1)",
+      "--link": "#0b6a8a",
+      "--info-soft": "rgb(11 106 138 / 0.1)",
+      "--focus-ring": "#0f766e",
+      "--chart-surface": "#ffffff",
+      "--nav-bg": "#0f3b3a"
+    }
+  },
+  "nav": {
+    "light": {
+      "--text-1": "#ffffff",
+      "--text-2": "#d2e4e2",
+      "--text-3": "#a8c4c1",
+      "--surface-3": "#1d4f4d",
+      "--border": "#1d4f4d",
+      "--border-strong": "#2c6461",
+      "--accent": "#5fd3c4",
+      "--accent-text": "#5fd3c4",
+      "--accent-fg": "#0f3b3a",
+      "--link": "#8fe3d8",
+      "--info-soft": "rgb(95 211 196 / 0.18)",
+      "--focus-ring": "#5fd3c4",
+      "--status-serious-text": "#ffab8a"
+    }
+  }
+}

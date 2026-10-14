@@ -16,6 +16,7 @@ const BUILD_INPUTS = [
   "apps/web/public",
   "apps/web/index.html",
   "apps/web/vite.config.ts",
+  "apps/web/vite-plugins",
   "apps/web/package.json",
   "packages/contracts/src",
   "packages/contracts/generated",

@@ -3,6 +3,7 @@
   "compilerOptions": {
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "jsx": "react-jsx",
+    "allowImportingTsExtensions": true,
     "types": ["vite/client", "node"],
     "paths": {
       "@/*": ["./src/*"],
@@ -10,5 +11,5 @@
       "@contracts/*": ["../../packages/contracts/src/*"]
     }
   },
-  "include": ["src", "vite.config.ts", "../../packages/contracts/src/concepts"]
+  "include": ["src", "vite.config.ts", "vite-plugins", "../../packages/contracts/src/concepts"]
 }

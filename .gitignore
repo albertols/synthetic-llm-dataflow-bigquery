@@ -81,3 +81,5 @@ gui/**/dist/
 gui/**/.vite/
 gui/playwright-report/
 gui/test-results/
+# A deployment's own brand packs (gui/BRANDING.md, "Brand packs") stay on that machine.
+gui/apps/web/src/brands/local/

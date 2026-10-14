@@ -5,6 +5,8 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
+import { brandPacksPlugin } from "./vite-plugins/brandPacks.ts";
+
 const TAB_CHUNK = /\/src\/features\/(intro|evaluation|rag|config)\//;
 
 /**
@@ -22,7 +24,8 @@ const E2E_PORT = port("GUI_E2E_PORT", 4173);
 const SERVER_PORT = port("GUI_SERVER_PORT", 8787);
 
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  // brandPacksPlugin: the brand packs found on this machine go into index.html (gui/BRANDING.md, "Brand packs").
+  plugins: [react(), tailwindcss(), brandPacksPlugin()],
   resolve: {
     // Most specific first: "@contracts/generated/*" must not fall into "@contracts/*".
     alias: [

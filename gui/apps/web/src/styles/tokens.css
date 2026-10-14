@@ -1,10 +1,14 @@
 /*
  * Design tokens — the only place colours are typed.
  *
- * Dark is the default theme; light is kept for accessibility (a toggle in the
- * top nav, or "system"). ThemeProvider stamps data-theme="dark" | "light" on
- * <html>; tokens.css never reads prefers-color-scheme itself, so the stamp
- * always wins.
+ * Dark is the default theme; light is kept for accessibility (the brand and
+ * theme menu in the top nav, or "system"). ThemeProvider stamps
+ * data-theme="dark" | "light" on <html>; tokens.css never reads
+ * prefers-color-scheme itself, so the stamp always wins.
+ *
+ * These values are the committed "beam-dataflow" brand. Another brand pack
+ * overrides some of them per mode under :root[data-brand="<id>"]
+ * (gui/BRANDING.md, "Brand packs"); chart slots and status hues are shared.
  *
  * Contrast (WCAG 2.2) and the chart palette checks are recorded once, in
  * gui/BRANDING.md; styles/branding.contrast.test.ts recomputes every ratio in
@@ -159,6 +163,12 @@
 }
 
 :root {
+  /*
+   * The top bar's own colour: none, so the bar shows the page colour through
+   * its blur. A brand pack may paint it (gui/BRANDING.md, "Brand packs").
+   */
+  --nav-bg: transparent;
+
   /* Type and shape — theme independent. */
   --font-ui: "Inter Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   --font-code: "JetBrains Mono Variable", ui-monospace, "SFMono-Regular", Menlo, monospace;

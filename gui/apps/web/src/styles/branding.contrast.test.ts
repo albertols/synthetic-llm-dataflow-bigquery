@@ -10,6 +10,8 @@ import { dirname, join } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
+import { blockColours, blockTints, contrast, over, themeBlock, type Rgb, type Theme } from "./contrast";
+
 /** The gui/ directory: the nearest ancestor of the working directory holding apps/web/src/styles/tokens.css. */
 function guiRoot(): string {
   let dir = process.cwd();
@@ -25,49 +27,11 @@ const GUI = guiRoot();
 const TOKENS = readFileSync(join(GUI, "apps/web/src/styles/tokens.css"), "utf8");
 const BRANDING = readFileSync(join(GUI, "BRANDING.md"), "utf8");
 
-type Theme = "dark" | "light";
-
 /** `--name: #hex;` pairs of one theme block. */
-function themeTokens(theme: Theme): Map<string, string> {
-  const start =
-    theme === "dark" ? TOKENS.indexOf(':root[data-theme="dark"] {') : TOKENS.indexOf(':root[data-theme="light"] {');
-  const block = TOKENS.slice(start, TOKENS.indexOf("\n}", start));
-  return new Map([...block.matchAll(/(--[\w-]+):\s*(#[0-9a-f]{6})\b/gi)].map((m) => [m[1]!, m[2]!.toLowerCase()]));
-}
-
-type Rgb = [number, number, number];
-
-const rgbOf = (hex: string): Rgb => [1, 3, 5].map((i) => parseInt(hex.slice(i, i + 2), 16)) as Rgb;
-
-function luminance(color: string | Rgb): number {
-  const [r, g, b] = (typeof color === "string" ? rgbOf(color) : color).map((channel) => {
-    const v = channel / 255;
-    return v <= 0.03928 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
-  });
-  return 0.2126 * r! + 0.7152 * g! + 0.0722 * b!;
-}
-
-function contrast(a: string | Rgb, b: string | Rgb): number {
-  const [hi, lo] = [luminance(a), luminance(b)].sort((x, y) => y - x);
-  return (hi! + 0.05) / (lo! + 0.05);
-}
+const themeTokens = (theme: Theme): Map<string, string> => blockColours(themeBlock(TOKENS, theme));
 
 /** `--name: rgb(r g b / a);` tints of one theme block. */
-function themeTints(theme: Theme): Map<string, { rgb: Rgb; alpha: number }> {
-  const start =
-    theme === "dark" ? TOKENS.indexOf(':root[data-theme="dark"] {') : TOKENS.indexOf(':root[data-theme="light"] {');
-  const block = TOKENS.slice(start, TOKENS.indexOf("\n}", start));
-  return new Map(
-    [...block.matchAll(/(--[\w-]+):\s*rgb\((\d+) (\d+) (\d+) \/ ([\d.]+)\)/g)].map((m) => [
-      m[1]!,
-      { rgb: [Number(m[2]), Number(m[3]), Number(m[4])] as Rgb, alpha: Number(m[5]) },
-    ]),
-  );
-}
-
-/** A tint composited over a surface (source-over, per channel), rounded to the 8-bit pixel the screen shows. */
-const over = (tint: { rgb: Rgb; alpha: number }, surface: string): Rgb =>
-  tint.rgb.map((c, i) => Math.round(c * tint.alpha + rgbOf(surface)[i]! * (1 - tint.alpha))) as Rgb;
+const themeTints = (theme: Theme) => blockTints(themeBlock(TOKENS, theme));
 
 /** Rows of the markdown table under `heading`, as trimmed cells. */
 function tableRows(heading: string): string[][] {

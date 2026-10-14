@@ -1,5 +1,5 @@
 import { Link } from "@tanstack/react-router";
-import { Ellipsis, Gauge, Moon, Orbit, SlidersHorizontal, Sparkles, Sun, type LucideIcon } from "lucide-react";
+import { Ellipsis, Gauge, Orbit, SlidersHorizontal, Sparkles, type LucideIcon } from "lucide-react";
 
 import { DataSourceBadge } from "@/components/DataSourceBadge";
 import { GITHUB_LINKS, GithubLinks, GithubMark } from "@/components/GithubLinks";
@@ -8,14 +8,16 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Tooltip } from "@/components/ui/tooltip";
 import { cn } from "@/lib/cn";
 import { useDataSource } from "@/lib/dataSource";
-import { useTheme } from "@/lib/theme";
 
+import { AppearanceItems, AppearanceMenu } from "./Appearance";
+import { BrandLockup } from "./BrandLockup";
+import { BUILT_WITH, BuiltWith } from "./BuiltWith";
 import { ProductMark } from "./ProductMark";
 
 type TabLink = { to: "/" | "/evaluation" | "/rag" | "/config"; label: string; icon: LucideIcon; exact: boolean };
@@ -28,43 +30,18 @@ export const TABS: readonly TabLink[] = [
   { to: "/config", label: "Config", icon: SlidersHorizontal, exact: false },
 ];
 
-function useThemeSwitch() {
-  const { resolved, setPreference } = useTheme();
-  const next = resolved === "dark" ? "light" : "dark";
-  return {
-    label: `Switch to ${next} theme`,
-    Icon: resolved === "dark" ? Sun : Moon,
-    toggle: () => setPreference(next),
-  };
-}
-
-function ThemeToggle() {
-  const { label, Icon, toggle } = useThemeSwitch();
-  return (
-    <Tooltip content={label}>
-      <Button variant="ghost" size="icon" aria-label={label} onClick={toggle}>
-        <Icon aria-hidden="true" />
-      </Button>
-    </Tooltip>
-  );
-}
-
-/** Below 640 px the theme switch and the GitHub links fold into one menu so the header stays one row. */
+/** Below 640 px the brand and theme choices, the GitHub links and the "built with" links fold into one menu so the header stays one row. */
 function CompactMenu() {
-  const { label, Icon, toggle } = useThemeSwitch();
   return (
     // Non-modal: a modal menu aria-hides the page behind it, which axe reports as aria-hidden-focus.
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="icon" aria-label="More: theme and GitHub links">
+        <Button variant="ghost" size="icon" aria-label="More: brand, theme and links">
           <Ellipsis aria-hidden="true" />
         </Button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent>
-        <DropdownMenuItem onSelect={toggle}>
-          <Icon aria-hidden="true" />
-          {label}
-        </DropdownMenuItem>
+      <DropdownMenuContent className="max-h-(--radix-dropdown-menu-content-available-height) overflow-y-auto">
+        <AppearanceItems />
         <DropdownMenuSeparator />
         {GITHUB_LINKS.map((link) => (
           <DropdownMenuItem key={link.href} asChild>
@@ -72,6 +49,23 @@ function CompactMenu() {
               <GithubMark className="size-4 text-text-3" />
               <span>
                 {link.name}
+                <span className="sr-only"> (opens in a new tab)</span>
+              </span>
+            </a>
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>Built with</DropdownMenuLabel>
+        {BUILT_WITH.map((item) => (
+          <DropdownMenuItem key={item.href} asChild>
+            <a href={item.href} target="_blank" rel="noopener noreferrer">
+              {item.mark ? (
+                <img src={item.mark} alt="" width={12} height={16} className="h-4 w-4 object-contain" />
+              ) : (
+                <span aria-hidden="true" className="w-4" />
+              )}
+              <span>
+                {item.name}
                 <span className="sr-only"> (opens in a new tab)</span>
               </span>
             </a>
@@ -85,7 +79,13 @@ function CompactMenu() {
 export function TopNav() {
   const source = useDataSource();
   return (
-    <header className="sticky top-0 z-40 border-b border-border bg-bg/85 backdrop-blur-md supports-[backdrop-filter]:bg-bg/70">
+    // data-app-header: a brand pack's top-bar tokens are scoped to it (gui/BRANDING.md, "Brand packs").
+    <header
+      data-app-header=""
+      className="sticky top-0 z-40 border-b border-border bg-bg/85 backdrop-blur-md supports-[backdrop-filter]:bg-bg/70"
+    >
+      {/* --nav-bg: transparent unless a brand pack paints the bar; then it covers the blurred page colour. */}
+      <div aria-hidden="true" className="pointer-events-none absolute inset-0 -z-10 bg-(--nav-bg)" />
       <div className="mx-auto flex max-w-[1440px] flex-wrap items-center gap-x-3 px-4 md:h-14 md:flex-nowrap md:px-6">
         <Link
           to="/"
@@ -95,6 +95,7 @@ export function TopNav() {
           <ProductMark />
           <span className="text-[15px] font-semibold tracking-tight">Synthetic Platform</span>
         </Link>
+        <BrandLockup />
 
         <nav
           aria-label="Tabs"
@@ -126,9 +127,10 @@ export function TopNav() {
         </nav>
 
         <div className="ml-auto flex items-center gap-1">
+          <BuiltWith className="mr-1 hidden border-r border-border pr-2 sm:flex" />
           <DataSourceBadge source={source} />
           <div className="hidden items-center gap-1 sm:flex">
-            <ThemeToggle />
+            <AppearanceMenu />
             <GithubLinks />
           </div>
           <div className="sm:hidden">

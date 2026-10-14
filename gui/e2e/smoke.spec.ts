@@ -59,15 +59,12 @@ async function routeStamp(page: Page): Promise<{ routeId: string; search: Record
 
 const isMobile = (projectName: string) => projectName === "mobile";
 
-/** Below 640 px the theme switch and GitHub links live in the "More" menu. */
+/** The brand and theme menu; below 640 px its choices and the GitHub links live in the "More" menu. */
 async function switchTheme(page: Page, projectName: string, to: "light" | "dark") {
-  const name = `Switch to ${to} theme`;
-  if (isMobile(projectName)) {
-    await page.getByRole("button", { name: "More: theme and GitHub links" }).click();
-    await page.getByRole("menuitem", { name }).click();
-  } else {
-    await page.getByRole("button", { name }).click();
-  }
+  await page
+    .getByRole("button", { name: isMobile(projectName) ? "More: brand, theme and links" : "Brand and theme" })
+    .click();
+  await page.getByRole("menuitemradio", { name: to === "light" ? "Light" : "Dark", exact: true }).click();
 }
 
 function tabLink(page: Page, name: string) {
@@ -148,7 +145,7 @@ test("the shell shows the data source and both GitHub links", async ({ page }, t
   // In the mobile menu the anchors are menu items (role="menuitem"), still real links with an href.
   const mobile = isMobile(testInfo.project.name);
   if (mobile) {
-    await page.getByRole("button", { name: "More: theme and GitHub links" }).click();
+    await page.getByRole("button", { name: "More: brand, theme and links" }).click();
     await expect(page.getByRole("menu")).toBeVisible();
     await expectNoSeriousViolations(page, "mobile menu");
   }

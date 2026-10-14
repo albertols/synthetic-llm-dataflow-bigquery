@@ -19,20 +19,63 @@ import {
 
 import type { Facets } from "@contracts/api";
 
+import beamMark from "@/assets/marks/beam-logo-3-color-nameless.svg";
+import bigQueryIcon from "@/assets/marks/BigQuery-512-color.svg";
+import dataAnalyticsIcon from "@/assets/marks/DataAnalytics-512-color.svg";
+import vllmLogo from "@/assets/marks/vLLM-Logo.svg";
 import { formatCount, formatFixed } from "@/lib/format";
+import { BEAM_URL } from "@/lib/links";
 
 import { facts, referenceDkw } from "./contractValues";
 import type { IntroTarget } from "./targets";
 
 export type StageKind = "store" | "launcher" | "cpu" | "gpu" | "beam" | "evaluation";
 
-export const KIND_META: Record<StageKind, { label: string; short: string; color: string; text: string }> = {
-  store: { label: "BigQuery table", short: "BigQuery", color: "var(--brand-blue)", text: "text-link" },
-  launcher: { label: "Launcher · CPU", short: "Launcher", color: "var(--cpu)", text: "text-cpu-text" },
-  cpu: { label: "Worker · CPU", short: "CPU", color: "var(--cpu)", text: "text-cpu-text" },
-  gpu: { label: "Worker · GPU", short: "GPU", color: "var(--gpu)", text: "text-gpu-text" },
-  beam: { label: "Beam transform", short: "Beam", color: "var(--accent)", text: "text-accent-text" },
-  evaluation: { label: "Beam · evaluation job", short: "Beam", color: "var(--accent)", text: "text-accent-text" },
+/**
+ * The official mark of what runs a stage, shown unmodified to identify it
+ * (gui/ATTRIBUTION.md): `alt` is empty where the label already names it, and
+ * `href` is set for the Apache Beam logo, which the ASF lets a site show only
+ * as a link to the project.
+ */
+export type KindMark = { src: string; alt: string; href?: string; linkLabel?: string };
+
+const BEAM: KindMark = { src: beamMark, alt: "", href: BEAM_URL, linkLabel: "Apache Beam" };
+
+export const KIND_META: Record<
+  StageKind,
+  { label: string; short: string; color: string; text: string; mark: KindMark | null }
+> = {
+  store: {
+    label: "BigQuery table",
+    short: "BigQuery",
+    color: "var(--brand-blue)",
+    text: "text-link",
+    mark: { src: bigQueryIcon, alt: "" },
+  },
+  // Dataflow takes Google's Data Analytics category icon (Google Cloud product icons guide, May 2026).
+  launcher: {
+    label: "Launcher · CPU",
+    short: "Launcher",
+    color: "var(--cpu)",
+    text: "text-cpu-text",
+    mark: { src: dataAnalyticsIcon, alt: "Dataflow" },
+  },
+  cpu: { label: "Worker · CPU", short: "CPU", color: "var(--cpu)", text: "text-cpu-text", mark: null },
+  gpu: {
+    label: "Worker · GPU",
+    short: "GPU",
+    color: "var(--gpu)",
+    text: "text-gpu-text",
+    mark: { src: vllmLogo, alt: "vLLM" },
+  },
+  beam: { label: "Beam transform", short: "Beam", color: "var(--accent)", text: "text-accent-text", mark: BEAM },
+  evaluation: {
+    label: "Beam · evaluation job",
+    short: "Beam",
+    color: "var(--accent)",
+    text: "text-accent-text",
+    mark: BEAM,
+  },
 };
 
 export type PhaseId = "read" | "generate" | "guard" | "evaluate";

@@ -1,0 +1,6 @@
+{
+  "$comment": "The generic brand for Apache Beam and Dataflow users: its tokens are styles/tokens.css, unchanged, so it overrides none. gui/BRANDING.md describes the pack format.",
+  "id": "beam-dataflow",
+  "name": "Beam · Dataflow",
+  "themeColor": { "dark": "#0b0d12", "light": "#f4f5f7" }
+}

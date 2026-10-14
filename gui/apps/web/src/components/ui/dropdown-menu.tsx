@@ -1,3 +1,4 @@
+import { Check } from "lucide-react";
 import { DropdownMenu as MenuPrimitive } from "radix-ui";
 import type { ComponentPropsWithRef } from "react";
 
@@ -9,6 +10,8 @@ import { floatingSurface } from "./popover";
 export const DropdownMenu = MenuPrimitive.Root;
 export const DropdownMenuTrigger = MenuPrimitive.Trigger;
 export const DropdownMenuGroup = MenuPrimitive.Group;
+/** A labelled set of exclusive choices (`role="group"`); give it `aria-labelledby` or `aria-label`. */
+export const DropdownMenuRadioGroup = MenuPrimitive.RadioGroup;
 
 export function DropdownMenuContent({
   className,
@@ -39,6 +42,31 @@ export function DropdownMenuItem({ className, ...props }: ComponentPropsWithRef<
       )}
       {...props}
     />
+  );
+}
+
+/** One choice of a radio group: `role="menuitemradio"` with `aria-checked`, a tick when chosen. */
+export function DropdownMenuRadioItem({
+  className,
+  children,
+  ...props
+}: ComponentPropsWithRef<typeof MenuPrimitive.RadioItem>) {
+  return (
+    <MenuPrimitive.RadioItem
+      className={cn(
+        "relative flex cursor-pointer items-center gap-2 rounded-sm py-2 pr-2 pl-8 text-sm text-text-1 outline-none select-none",
+        "data-[disabled]:pointer-events-none data-[disabled]:opacity-50 data-[highlighted]:bg-surface-3 [&_svg]:size-4 [&_svg]:text-text-3",
+        className,
+      )}
+      {...props}
+    >
+      <span className="absolute left-2 inline-flex size-4 items-center justify-center">
+        <MenuPrimitive.ItemIndicator>
+          <Check className="text-accent-text!" aria-hidden="true" />
+        </MenuPrimitive.ItemIndicator>
+      </span>
+      {children}
+    </MenuPrimitive.RadioItem>
   );
 }
 
