@@ -11,7 +11,7 @@
  * it runs down the left edge of a vertical list.
  */
 import { animate, m, useMotionValue, useTransform } from "motion/react";
-import { ArrowRight, ChevronLeft, ChevronRight, Pause, Play, RotateCcw } from "lucide-react";
+import { ArrowRight, ChevronLeft, ChevronRight, Pause, Play, RotateCcw, type LucideIcon } from "lucide-react";
 import { useEffect, useId, useState } from "react";
 
 import type { Facets } from "@contracts/api";
@@ -23,7 +23,7 @@ import { cn } from "@/lib/cn";
 import { repoBlobUrl } from "@/lib/links";
 import { useReducedMotion } from "@/lib/motion";
 
-import { JOBS, KIND_META, PHASES, STAGES, type Stage, type StageContext } from "../content/stages";
+import { JOBS, KIND_META, PHASES, STAGES, type KindMark, type Stage, type StageContext } from "../content/stages";
 import { TargetLink, targetTabName } from "../content/targets";
 import { ExternalAnchor, InlineCode } from "./primitives";
 
@@ -386,7 +386,7 @@ function StageCard({
             </span>
           </div>
           <p className={cn("flex min-w-0 items-center gap-1.5 text-[11px] font-medium", kind.text)}>
-            <Icon className="size-3.5 shrink-0" aria-hidden="true" />
+            <StageMark mark={kind.mark} fallback={Icon} />
             <span className="truncate xl:hidden">{kind.label}</span>
             <span className="hidden truncate xl:inline">{kind.short}</span>
           </p>
@@ -416,6 +416,40 @@ function StageCard({
         </div>
       </div>
     </li>
+  );
+}
+
+/**
+ * What runs a stage, as its official mark (gui/ATTRIBUTION.md), or the stage's
+ * own icon where no mark applies. The Apache Beam logo is a link to the
+ * project (the ASF's terms for showing it); its 24 px hit area overlaps the
+ * card's link like the (i) does, so it sits above it.
+ */
+function StageMark({
+  mark,
+  fallback: Fallback,
+  size = "sm",
+}: {
+  mark: KindMark | null;
+  fallback?: LucideIcon;
+  size?: "sm" | "md";
+}) {
+  const box = size === "sm" ? "size-3.5" : "size-4";
+  if (!mark) return Fallback ? <Fallback className={cn(box, "shrink-0")} aria-hidden="true" /> : null;
+  const image = (
+    <img src={mark.src} alt={mark.alt} className={cn(box, "shrink-0 object-contain")} width={16} height={16} />
+  );
+  if (!mark.href) return image;
+  return (
+    <a
+      href={mark.href}
+      target="_blank"
+      rel="noopener noreferrer"
+      aria-label={`${mark.linkLabel ?? mark.alt} (opens in a new tab)`}
+      className={cn("relative z-10 inline-flex shrink-0 rounded-sm", size === "sm" ? "-m-[5px] p-[5px]" : "-m-1 p-1")}
+    >
+      {image}
+    </a>
   );
 }
 
@@ -457,7 +491,11 @@ function StageDetail({ stage, index, context }: { stage: Stage; index: number; c
         </div>
         <div className="flex flex-col items-start gap-3 md:items-end md:justify-between">
           <span className={cn("inline-flex items-center gap-1.5 text-xs font-medium", kind.text)}>
-            <span aria-hidden="true" className="size-2 rounded-full" style={{ background: kind.color }} />
+            {kind.mark ? (
+              <StageMark mark={kind.mark} size="md" />
+            ) : (
+              <span aria-hidden="true" className="size-2 rounded-full" style={{ background: kind.color }} />
+            )}
             {kind.label}
           </span>
           <Button asChild variant="primary" size="sm">

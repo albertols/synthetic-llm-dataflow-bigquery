@@ -7,11 +7,12 @@ import { createRoot } from "react-dom/client";
 
 import { ErrorBoundary } from "./app/ErrorBoundary";
 import { ThemeProvider } from "./app/ThemeProvider";
-import { applyTheme, readStoredPreference, resolveTheme } from "./lib/theme";
+import { readBrandHead, readStoredBrand, resolveBrand } from "./lib/brand";
+import { applyAppearance, readStoredPreference, resolveTheme } from "./lib/theme";
 import { createAppRouter } from "./router";
 
-// Stamp the stored theme before the first paint of the app.
-applyTheme(resolveTheme(readStoredPreference()));
+// Stamp the stored brand and theme before the first paint of the app (theme-init.js did it before any CSS).
+applyAppearance(resolveBrand(readStoredBrand(), readBrandHead()), resolveTheme(readStoredPreference()));
 
 const queryClient = new QueryClient({
   defaultOptions: {

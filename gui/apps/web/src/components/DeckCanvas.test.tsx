@@ -35,7 +35,18 @@ vi.mock("@deck.gl/react", () => ({
 
 function themed(theme: ResolvedTheme, children: ReactNode) {
   return (
-    <ThemeContext value={{ preference: theme, resolved: theme, setPreference: () => {} }}>{children}</ThemeContext>
+    <ThemeContext
+      value={{
+        preference: theme,
+        resolved: theme,
+        setPreference: () => {},
+        brand: "beam-dataflow",
+        brands: [],
+        setBrand: () => {},
+      }}
+    >
+      {children}
+    </ThemeContext>
   );
 }
 

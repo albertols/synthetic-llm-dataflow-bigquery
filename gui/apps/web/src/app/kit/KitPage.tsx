@@ -585,7 +585,7 @@ export function KitPage() {
       <PageHeader
         eyebrow="Foundation"
         title="Design system"
-        description="Tokens, components and frames every tab builds on. Dark by default; the sun/moon button switches to the light theme kept for accessibility."
+        description="Tokens, components and frames every tab builds on. Dark by default; the palette menu in the top bar switches to the light theme kept for accessibility, and between brands."
         actions={
           <Badge variant="outline">
             <Palette aria-hidden="true" />

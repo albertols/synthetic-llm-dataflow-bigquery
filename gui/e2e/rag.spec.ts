@@ -56,14 +56,13 @@ async function mountAllSections(page: Page) {
   await page.waitForTimeout(1500);
 }
 
-/** Below 640 px the theme switch lives in the header's "More" menu. */
+/** The brand and theme menu; below 1180 px its choices live in the header's "More" menu. */
 async function switchTheme(page: Page, projectName: string, to: "light" | "dark") {
-  const name = `Switch to ${to} theme`;
   if (projectName === "mobile") {
     await page.evaluate(() => window.scrollTo(0, 0));
-    await page.getByRole("button", { name: "More: theme and GitHub links" }).click();
-    await page.getByRole("menuitem", { name }).click();
-  } else await page.getByRole("button", { name }).click();
+    await page.getByRole("button", { name: "More: brand, theme and links" }).click();
+  } else await page.getByRole("button", { name: "Brand and theme" }).click();
+  await page.getByRole("menuitemradio", { name: to === "light" ? "Light" : "Dark", exact: true }).click();
 }
 
 async function pickOption(page: Page, label: string, option: string) {

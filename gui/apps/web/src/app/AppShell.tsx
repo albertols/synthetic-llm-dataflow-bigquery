@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { Toaster } from "@/components/ui/toast";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { loadConcepts } from "@/lib/concepts";
+import { useTheme } from "@/lib/theme";
 
 import { TopNav } from "./TopNav";
 
@@ -55,6 +56,7 @@ function useRouteStamp() {
 export function AppShell() {
   usePrefetchConcepts();
   const route = useRouteStamp();
+  const { brand } = useTheme();
   return (
     <TooltipProvider>
       <a
@@ -72,7 +74,8 @@ export function AppShell() {
           data-route-search={route.search}
           className="mx-auto w-full max-w-[1440px] flex-1 px-4 py-6 outline-none md:px-6 md:py-8"
         >
-          <Outlet />
+          {/* A new brand redraws the page: canvas renderers read tokens once, and re-read them on a mode change only. */}
+          <Outlet key={brand} />
         </main>
         <footer className="border-t border-border">
           <div className="mx-auto flex max-w-[1440px] flex-col gap-1 px-4 py-4 text-xs text-text-3 md:flex-row md:items-center md:justify-between md:px-6">

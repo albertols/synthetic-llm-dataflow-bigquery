@@ -50,7 +50,7 @@ flowchart TB
   classDef shell fill:#eb6834,color:#0b0d12,stroke:#b44f26
   classDef lazy  fill:#2a78d6,color:#fff,stroke:#1d5599
 
-  MAIN["main.tsx<br/>theme stamp · QueryClient · ErrorBoundary"]:::shell
+  MAIN["main.tsx<br/>brand and theme stamp · QueryClient · ErrorBoundary"]:::shell
   ROUTER["router.tsx<br/>code-based routes"]:::shell
   SHELL["app/AppShell<br/>TopNav · skip link · announcer · toasts"]:::shell
   ROUTES["features/&lt;tab&gt;/route.tsx<br/>search validator + lazy component"]:::shell
@@ -120,7 +120,7 @@ title and the navigation announcement).
 | `@/components/GithubLinks`, `DataSourceBadge` | top-nav pieces                                                                                                                                                                                      |                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `@/components/ui/*`                           | button, card, badge, tabs, popover, hover-card, dialog, sheet, select, combobox, slider, switch, table, skeleton, toast, tooltip, separator, scroll-area, toggle-group                              | Radix primitives styled with tokens (shadcn-style, local)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `@/lib/format`                                | `formatNumber`, `formatFixed`, `formatCompact`, `formatPercent`, `formatCount`, `formatBytes`, `formatDuration`, `formatDate(Time)`, `formatMetricValue(value, valueKind)`, `formatCell`, `MISSING` | en-US; never prints `NaN`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `@/lib/theme`                                 | `useTheme()`, `readToken("--chart-1")`                                                                                                                                                              | Canvas renderers read tokens here                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `@/lib/theme`                                 | `useTheme()` (mode and brand), `readToken("--chart-1")`                                                                                                                                             | Canvas renderers read tokens here                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `@/lib/color`                                 | `hexToRgb`, `tokenRgba("--chart-2")`                                                                                                                                                                | deck.gl colours from tokens                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | `@/lib/motion`                                | `useReducedMotion()`, `prefersReducedMotion()`                                                                                                                                                      | Wrap Motion code in `<MotionConfig reducedMotion="user">`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `@/lib/useInViewOnce`                         | `const [ref, seen] = useInViewOnce<HTMLDivElement>(margin?)`                                                                                                                                        | True once the element comes within `margin` (600 px) of the viewport, then stays true; heavy lazy pieces (mermaid, chart grids) wait for it                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -209,21 +209,21 @@ route; each heavy library arrives the first time a view needs it. Dashed
 arrows are dynamic imports._
 
 Measured with `npm run build && npm run size` (size-limit, gzip) on
-2026-09-29, on the tree of the commit that added this table (its parent is
-`16b4294`). **This table is the only place the sizes are typed**; re-run the
+2026-10-14, on the tree of the commit that added brand packs (its parent is
+`38c3f88`). **This table is the only place the sizes are typed**; re-run the
 command to refresh them.
 
 | Budget                                                                                       |  Limit |  Measured |
 | :------------------------------------------------------------------------------------------- | -----: | --------: |
-| App shell: `index.html`'s closure (entry chunk, the shared chunks it imports, global CSS)    | 200 kB | 187.42 kB |
-| Tab INTRO: the closure of its lazy page chunks (`src/features/intro/`), minus the shell      | 350 kB | 112.17 kB |
-| Tab EVALUATION (same rule)                                                                   | 350 kB | 135.51 kB |
-| Tab RAG (same rule)                                                                          | 350 kB |  80.06 kB |
-| Tab CONFIG (same rule)                                                                       | 350 kB | 106.98 kB |
-| Lazy ECharts: `EChartCanvas`'s closure beyond the shell                                      | 300 kB |  270.8 kB |
+| App shell: `index.html`'s closure (entry chunk, the shared chunks it imports, global CSS)    | 200 kB | 190.28 kB |
+| Tab INTRO: the closure of its lazy page chunks (`src/features/intro/`), minus the shell      | 350 kB | 114.92 kB |
+| Tab EVALUATION (same rule)                                                                   | 350 kB | 146.07 kB |
+| Tab RAG (same rule)                                                                          | 350 kB |  80.42 kB |
+| Tab CONFIG (same rule)                                                                       | 350 kB | 110.66 kB |
+| Lazy ECharts: `EChartCanvas`'s closure beyond the shell                                      | 300 kB | 270.79 kB |
 | Lazy KaTeX: `KatexRender`'s closure (JS + CSS)                                               |  90 kB |  80.56 kB |
 | Lazy deck.gl React binding: the `DeckCanvas` chunk                                           |  80 kB |  44.27 kB |
-| Lazy deck.gl core + layers: the shared chunks holding `@deck.gl/core` / `layers` / `luma.gl` | 200 kB | 169.34 kB |
+| Lazy deck.gl core + layers: the shared chunks holding `@deck.gl/core` / `layers` / `luma.gl` | 200 kB | 169.35 kB |
 
 Relative to its limit, the shell is the fullest budget, and every visitor
 downloads it: a new eager import in `main.tsx`, `router.tsx`, a route module
@@ -323,13 +323,15 @@ writes `NEEDS_FOUNDATION: …` in its report instead of editing the file.
     "gui/.size-limit.mjs",
     "gui/Dockerfile",
     "gui/apps/web/{index.html,vite.config.ts,package.json,tsconfig.json}",
+    "gui/apps/web/vite-plugins/**",
     "gui/apps/web/src/{main.tsx,router.tsx}",
-    "gui/apps/web/src/{app,components,lib,styles,test}/**",
+    "gui/apps/web/src/{app,assets,brands,components,lib,styles,test}/**",
     "gui/apps/web/public/**",
     "gui/apps/server/**",
     "gui/packages/**",
     "gui/scripts/**",
     "gui/e2e/smoke.spec.ts",
+    "gui/e2e/brand.spec.ts",
     "gui/*.md",
     "gui/docs/**",
     "scripts/gui/**",
@@ -740,16 +742,16 @@ The BFF sets `x-content-type-options`, `referrer-policy` and
 `x-frame-options: DENY`, but no CSP. What a policy has to allow, from what the
 build does today — roll it out as `Content-Security-Policy-Report-Only` first:
 
-| Directive         | Value                    | Why                                                                                                                                                                              |
-| :---------------- | :----------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `default-src`     | `'self'`                 | everything is served by the BFF; no CDN, no external API                                                                                                                         |
-| `script-src`      | `'self'`                 | Vite chunks and `public/theme-init.js` (the pre-paint theme stamp is a file, not inline, so it needs no hash); no `eval` or `new Function` in the built chunks                   |
-| `worker-src`      | `'self'`                 | RAG's UMAP/PCA worker is a same-origin module (`new Worker(new URL("./projection.worker.ts", import.meta.url))`), not a `blob:`                                                  |
-| `style-src`       | `'self' 'unsafe-inline'` | KaTeX output carries `style="…"` attributes and mermaid writes a `<style>` element into every SVG, both inserted as HTML strings; ECharts and React set styles through the CSSOM |
-| `font-src`        | `'self'`                 | Inter / JetBrains Mono / KaTeX woff2 files, always served as files: `build.assetsInlineLimit` never inlines a font as a `data:` URI (see the budgets above)                      |
-| `img-src`         | `'self' data:`           | repo figures under `/assets/`, inline SVG icons, ECharts `getDataURL` exports                                                                                                    |
-| `connect-src`     | `'self'`                 | `fetch("/api/…")` only                                                                                                                                                           |
-| `frame-ancestors` | `'none'`                 | the same as `x-frame-options: DENY`                                                                                                                                              |
+| Directive         | Value                    | Why                                                                                                                                                                                                                                                                   |
+| :---------------- | :----------------------- | :-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `default-src`     | `'self'`                 | everything is served by the BFF; no CDN, no external API                                                                                                                                                                                                              |
+| `script-src`      | `'self'`                 | Vite chunks and `public/theme-init.js` (the pre-paint brand and theme stamp is a file, not inline, so it needs no hash); the `#brand-packs` block in `index.html` is `application/json` data, never run; no `eval` or `new Function` in the built chunks              |
+| `worker-src`      | `'self'`                 | RAG's UMAP/PCA worker is a same-origin module (`new Worker(new URL("./projection.worker.ts", import.meta.url))`), not a `blob:`                                                                                                                                       |
+| `style-src`       | `'self' 'unsafe-inline'` | KaTeX output carries `style="…"` attributes and mermaid writes a `<style>` element into every SVG, both inserted as HTML strings; ECharts and React set styles through the CSSOM; a build with a brand pack writes the packs' tokens as one `<style>` in `index.html` |
+| `font-src`        | `'self'`                 | Inter / JetBrains Mono / KaTeX woff2 files, always served as files: `build.assetsInlineLimit` never inlines a font as a `data:` URI (see the budgets above)                                                                                                           |
+| `img-src`         | `'self' data:`           | repo figures under `/assets/`, the official marks (files), inline SVG icons, a brand pack's logos (`data:` URIs in `index.html`), ECharts `getDataURL` exports                                                                                                        |
+| `connect-src`     | `'self'`                 | `fetch("/api/…")` only                                                                                                                                                                                                                                                |
+| `frame-ancestors` | `'none'`                 | the same as `x-frame-options: DENY`                                                                                                                                                                                                                                   |
 
 mermaid runs with `securityLevel: "strict"` (labels sanitised, click handlers
 off) and KaTeX with `trust: false`, so neither needs `'unsafe-eval'`; tightening

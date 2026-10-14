@@ -2,6 +2,9 @@
 
 export const REPO_URL = "https://github.com/albertols/synthetic-llm-dataflow-bigquery";
 export const DSG_URL = "https://github.com/GoogleCloudPlatform/dataflow-solution-guides";
+/** The project sites a "built with" mark links to (ATTRIBUTION.md: the ASF lets its logos be used as a link to the project). */
+export const BEAM_URL = "https://beam.apache.org/";
+export const DATAFLOW_URL = "https://cloud.google.com/dataflow";
 /** The ref code links point at; the GUI documents the default branch. */
 export const REPO_REF = "master";
 

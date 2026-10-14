@@ -13,7 +13,7 @@
  * - ECharts is a lazy chunk (`echarts/core` + the registered charts and
  *   components in EChartCanvas.tsx); the frame shows a skeleton meanwhile.
  * - Colours, text and grid come from the design tokens (echartsTheme.ts) and
- *   follow the theme toggle. Categorical series take `--chart-1..8` in order.
+ *   follow the theme switch. Categorical series take `--chart-1..8` in order.
  * - When `option.dataset` is absent, `data` is passed as `dataset.source`, so
  *   series can `encode` columns by name.
  * - "View data" swaps the chart for DataTableFallback (the WCAG twin).

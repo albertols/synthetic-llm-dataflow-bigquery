@@ -123,10 +123,15 @@ describe("guardrails: runs whose gate excluded a rule (ADR 0038)", () => {
     expect(within(table).getAllByRole("row")).toHaveLength(6);
 
     // The card's title, every column header but the first, and every pill carry their (i).
+    // The concept batch is lazy: until it lands each (i) is an aria-hidden placeholder, so wait for the first one.
     const adjustedHint = { name: "About: Adjusted model (ADR 0038)" };
     expect(
-      within(card.querySelector<HTMLElement>('[data-slot="card-title"]') ?? card).getAllByRole("button", adjustedHint)
-        .length,
+      (
+        await within(card.querySelector<HTMLElement>('[data-slot="card-title"]') ?? card).findAllByRole(
+          "button",
+          adjustedHint,
+        )
+      ).length,
     ).toBeGreaterThan(0);
     const headers = within(table).getAllByRole("columnheader");
     expect(headers.map((h) => h.textContent?.trim())).toEqual([

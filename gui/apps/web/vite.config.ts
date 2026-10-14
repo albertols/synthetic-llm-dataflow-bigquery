@@ -5,6 +5,8 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
+import { brandPacksPlugin } from "./vite-plugins/brandPacks.ts";
+
 const TAB_CHUNK = /\/src\/features\/(intro|evaluation|rag|config)\//;
 
 /**
@@ -22,7 +24,8 @@ const E2E_PORT = port("GUI_E2E_PORT", 4173);
 const SERVER_PORT = port("GUI_SERVER_PORT", 8787);
 
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  // brandPacksPlugin: the brand packs found on this machine go into index.html (gui/BRANDING.md, "Brand packs").
+  plugins: [react(), tailwindcss(), brandPacksPlugin()],
   resolve: {
     // Most specific first: "@contracts/generated/*" must not fall into "@contracts/*".
     alias: [
@@ -50,8 +53,11 @@ export default defineConfig({
     sourcemap: true,
     // Never inline a font as a data: URI: @font-face files load only when their unicode-range
     // is on the page, but an inlined one is in the CSS for everyone (a 2.7 kB Cyrillic subset
-    // sat in the shell CSS this way).
-    assetsInlineLimit: (file) => (/\.woff2?$/.test(file) ? false : undefined),
+    // sat in the shell CSS this way). Nor an official mark (src/assets/marks): inlined, the
+    // Beam logo alone put 4 kB in the shell; as files they are served byte for byte as their
+    // owners publish them (ATTRIBUTION.md), and cached.
+    assetsInlineLimit: (file) =>
+      /\.woff2?$/.test(file) || /[\\/]assets[\\/]marks[\\/]/.test(file) ? false : undefined,
     chunkSizeWarningLimit: 1500,
     rolldownOptions: {
       output: {

@@ -44,14 +44,12 @@ async function routeStamp(page: Page): Promise<{ routeId: string; search: Record
   };
 }
 
+/** The brand and theme menu; below 1180 px its choices live in the header's "More" menu. */
 async function switchTheme(page: Page, projectName: string, to: "light" | "dark") {
-  const name = `Switch to ${to} theme`;
-  if (isMobile(projectName)) {
-    await page.getByRole("button", { name: "More: theme and GitHub links" }).click();
-    await page.getByRole("menuitem", { name }).click();
-  } else {
-    await page.getByRole("button", { name }).click();
-  }
+  await page
+    .getByRole("button", { name: isMobile(projectName) ? "More: brand, theme and links" : "Brand and theme" })
+    .click();
+  await page.getByRole("menuitemradio", { name: to === "light" ? "Light" : "Dark", exact: true }).click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", to);
 }
 

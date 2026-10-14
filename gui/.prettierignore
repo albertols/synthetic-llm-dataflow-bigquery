@@ -6,3 +6,4 @@ test-results
 package-lock.json
 apps/web/public/assets
 packages/contracts/generated
+apps/web/src/brands/local
