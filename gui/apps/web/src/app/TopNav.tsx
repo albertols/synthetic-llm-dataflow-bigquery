@@ -30,7 +30,11 @@ export const TABS: readonly TabLink[] = [
   { to: "/config", label: "Config", icon: SlidersHorizontal, exact: false },
 ];
 
-/** Below 640 px the brand and theme choices, the GitHub links and the "built with" links fold into one menu so the header stays one row. */
+/**
+ * Below 1280 px the brand and theme choices, the GitHub links and the "built
+ * with" links fold into one menu, so the tabs keep their room and a phone's
+ * header stays one row.
+ */
 function CompactMenu() {
   return (
     // Non-modal: a modal menu aria-hides the page behind it, which axe reports as aria-hidden-focus.
@@ -127,13 +131,13 @@ export function TopNav() {
         </nav>
 
         <div className="ml-auto flex items-center gap-1">
-          <BuiltWith className="mr-1 hidden border-r border-border pr-2 sm:flex" />
+          <BuiltWith className="mr-1 hidden border-r border-border pr-2 xl:flex" />
           <DataSourceBadge source={source} />
-          <div className="hidden items-center gap-1 sm:flex">
+          <div className="hidden items-center gap-1 xl:flex">
             <AppearanceMenu />
             <GithubLinks />
           </div>
-          <div className="sm:hidden">
+          <div className="xl:hidden">
             <CompactMenu />
           </div>
         </div>

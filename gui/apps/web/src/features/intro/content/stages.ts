@@ -68,12 +68,13 @@ export const KIND_META: Record<
     text: "text-gpu-text",
     mark: { src: vllmLogo, alt: "vLLM" },
   },
-  beam: { label: "Beam transform", short: "Beam", color: "var(--accent)", text: "text-accent-text", mark: BEAM },
+  // Beam keeps Beam orange in every brand: the brand's accent is not Beam's colour.
+  beam: { label: "Beam transform", short: "Beam", color: "var(--beam)", text: "text-beam-text", mark: BEAM },
   evaluation: {
     label: "Beam · evaluation job",
     short: "Beam",
-    color: "var(--accent)",
-    text: "text-accent-text",
+    color: "var(--beam)",
+    text: "text-beam-text",
     mark: BEAM,
   },
 };

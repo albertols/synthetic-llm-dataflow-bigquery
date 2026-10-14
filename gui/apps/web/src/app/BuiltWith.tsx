@@ -24,12 +24,12 @@ export const BUILT_WITH = [
 const linkClass =
   "inline-flex h-9 items-center gap-1.5 rounded-md px-2 text-xs font-medium text-text-2 transition-colors hover:bg-surface-3 hover:text-text-1";
 
-/** The "built with" group of the top bar. Below 1280 px the Beam logo stands without its name. */
+/** The "built with" group of the top bar, from 1280 px (below, the "More" menu lists the same links). */
 export function BuiltWith({ className }: { className?: string }) {
   const [beam, dataflow] = BUILT_WITH;
   return (
     <div role="group" aria-label="Built with" className={cn("flex items-center", className)}>
-      <span aria-hidden="true" className="hidden pr-1 pl-2 text-[11px] text-text-3 xl:inline">
+      <span aria-hidden="true" className="pr-1 pl-2 text-[11px] text-text-3">
         Built with
       </span>
       <Tooltip content={beam.tip}>
@@ -41,9 +41,7 @@ export function BuiltWith({ className }: { className?: string }) {
           className={linkClass}
         >
           <img src={beam.mark} alt="" width={15} height={20} className="h-5 w-auto" />
-          <span aria-hidden="true" className="hidden xl:inline">
-            {beam.short}
-          </span>
+          <span aria-hidden="true">{beam.short}</span>
         </a>
       </Tooltip>
       <span aria-hidden="true" className="text-text-3">

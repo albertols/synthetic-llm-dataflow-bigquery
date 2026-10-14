@@ -50,6 +50,8 @@
   --gpu: #7a3fd1; /* purple: GPU work */
   --gpu-text: #a37ae6;
   --slate: #6b7280;
+  --beam: #eb6834; /* Apache Beam's stages in diagrams, in every brand (the accent is the brand's) */
+  --beam-text: #f07a4a;
   --focus-ring: #eb6834;
 
   /* Status: always paired with an icon and a label (StatusPill). */
@@ -123,6 +125,8 @@
   --gpu: #7a3fd1;
   --gpu-text: #6a33bd;
   --slate: #6b7280;
+  --beam: #eb6834;
+  --beam-text: #9c3d18;
   --focus-ring: #c4501f;
 
   --status-good: #1baf7a;

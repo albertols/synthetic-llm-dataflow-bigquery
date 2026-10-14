@@ -37,6 +37,8 @@
   --color-gpu: var(--gpu);
   --color-gpu-text: var(--gpu-text);
   --color-slate: var(--slate);
+  --color-beam: var(--beam);
+  --color-beam-text: var(--beam-text);
   --color-focus-ring: var(--focus-ring);
   --color-status-good: var(--status-good);
   --color-status-good-text: var(--status-good-text);

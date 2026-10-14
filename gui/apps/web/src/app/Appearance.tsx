@@ -61,7 +61,7 @@ export function AppearanceItems() {
   );
 }
 
-/** The brand and theme switcher in the top bar (640 px and up; below, the "More" menu carries the same items). */
+/** The brand and theme switcher in the top bar (1280 px and up; below, the "More" menu carries the same items). */
 export function AppearanceMenu() {
   return (
     // Non-modal: a modal menu aria-hides the page behind it, which axe reports as aria-hidden-focus.

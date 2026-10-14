@@ -47,6 +47,7 @@ export const PAGE_TOKENS = [
   "--focus-ring",
   "--cpu-text",
   "--gpu-text",
+  "--beam-text",
   "--status-good-text",
   "--status-warn-text",
   "--status-serious-text",

@@ -6,7 +6,7 @@
  * (src/brands/local/), each in both modes: tokens.css's values with the
  * pack's overrides on top, and its top-bar tokens inside the bar.
  *
- *   text ≥ 4.5 : 1    ink, accent text, links, CPU/GPU labels and status text on
+ *   text ≥ 4.5 : 1    ink, accent text, links, CPU/GPU/Beam labels and status text on
  *                     the surfaces they sit on; accent and link text on their tints;
  *                     the label on an accent button; the bar's ink on the bar
  *   UI   ≥ 3 : 1      input boundaries and the focus ring (WCAG 1.4.11, 2.4.13)
@@ -108,7 +108,7 @@ function checksFor(pack: BrandPack, mode: Mode): Check[] {
     );
     add(`--link on ${surface}`, c(page, "--link"), bg, 4.5);
     add(`--link on --info-soft over ${surface}`, c(page, "--link"), over(t(page, "--info-soft"), bg), 4.5);
-    for (const ink of ["--cpu-text", "--gpu-text"]) add(`${ink} on ${surface}`, c(page, ink), bg, 4.5);
+    for (const ink of ["--cpu-text", "--gpu-text", "--beam-text"]) add(`${ink} on ${surface}`, c(page, ink), bg, 4.5);
     add(`--control-border on ${surface}`, c(page, "--control-border"), bg, 3);
     for (const status of STATUS) {
       const ink = c(page, `--status-${status}-text`);
@@ -149,7 +149,7 @@ describe("brand packs meet WCAG 2.2 AA (computed)", () => {
   const cases = PACKS.flatMap((pack) => MODES.map((mode) => [pack.id, mode, pack] as const));
   it.each(cases)("%s %s", (_id, mode, pack) => {
     const list = checksFor(pack, mode);
-    expect(list.length).toBe(82);
+    expect(list.length).toBe(85);
     const failures = list
       .filter(({ fg, bg, min }) => contrast(fg, bg) < min)
       .map(({ label, fg, bg, min }) => `${label}: ${contrast(fg, bg).toFixed(2)} < ${min}`);
