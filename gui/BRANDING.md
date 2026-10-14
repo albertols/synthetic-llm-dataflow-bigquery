@@ -175,7 +175,10 @@ committed one, the test fixture and any local pack) in both modes, the
 The ratios are computed, not typed into a table: a local pack needs no row in
 this public file. The chart slots stay as validated below; on a pack's chart
 surface a slot may fall under 3 : 1 as some do in light mode, and the "View
-data" table is the relief channel there too.
+data" table is the relief channel there too. `e2e/brand.spec.ts` then runs
+axe on INTRO and EVALUATION in every brand and mode the build carries (and the
+other specs run it in the build's default brand), which also sees layered
+backgrounds this table cannot list, such as a pill inside a selected row.
 
 ### Third-party marks only identify
 
