@@ -264,13 +264,16 @@ export function injectBrandHead(html: string, registry: BrandRegistry): string {
     `<script type="application/json" id="${BRAND_HEAD_ID}">${json}</script>`,
     ...(css ? [`<style id="brand-tokens">\n${css}\n</style>`] : []),
   ];
-  return html
-    .replace(
-      /<html\b([^>]*)>/,
-      (_tag, attrs: string) => `<html${attrs.replace(/\sdata-brand="[^"]*"/, "")} data-brand="${registry.default}">`,
-    )
-    .replace(/(<meta name="theme-color" content=")[^"]*(")/, `$1${chosen.themeColor.dark}$2`)
-    .replace(THEME_INIT, `${blocks.join("\n    ")}\n    ${THEME_INIT}`);
+  return (
+    html
+      .replace(
+        /<html\b([^>]*)>/,
+        (_tag, attrs: string) => `<html${attrs.replace(/\sdata-brand="[^"]*"/, "")} data-brand="${registry.default}">`,
+      )
+      .replace(/(<meta name="theme-color" content=")[^"]*(")/, `$1${chosen.themeColor.dark}$2`)
+      // A function, so no `$` in a pack's name or tokens reads as a replacement pattern.
+      .replace(THEME_INIT, () => `${blocks.join("\n    ")}\n    ${THEME_INIT}`)
+  );
 }
 
 /**

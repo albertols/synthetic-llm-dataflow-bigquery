@@ -237,14 +237,18 @@ describe("index.html", () => {
     expect(JSON.stringify(head)).not.toContain(WEB);
   });
 
-  it("escapes a name that would close the JSON block", () => {
-    const dir = acmeVariant((p) => {
-      p.name = "Acme </script>";
-    });
-    const html = injectBrandHead(INDEX_HTML, brandRegistry([...discoverBrandPacks([COMMITTED]), readBrandPack(dir)]));
-    expect(html).not.toContain("Acme </script>");
-    expect(headOf(html).packs.map((p) => p.name)).toContain("Acme </script>");
-  });
+  it.each(["Acme </script>", "Acme $& $1 $'"])(
+    "writes the name %s as it is, and nothing that closes the block",
+    (name) => {
+      const dir = acmeVariant((p) => {
+        p.name = name;
+      });
+      const html = injectBrandHead(INDEX_HTML, brandRegistry([...discoverBrandPacks([COMMITTED]), readBrandPack(dir)]));
+      expect(html).not.toContain("Acme </script>");
+      expect(html.match(/<script src="\/theme-init\.js"><\/script>/g)).toHaveLength(1);
+      expect(headOf(html).packs.map((p) => p.name)).toContain(name);
+    },
+  );
 
   it("refuses a page without theme-init.js", () => {
     expect(() => injectBrandHead("<html><head></head></html>", brandRegistry(discoverBrandPacks([COMMITTED])))).toThrow(
