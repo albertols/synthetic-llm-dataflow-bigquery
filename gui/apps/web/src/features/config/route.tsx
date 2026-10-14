@@ -11,7 +11,7 @@
  *   digest    reference digest to compare across tiers
  *   snapshot  one snapshot key (digest|tier|profiler_version|run_id)
  *   column    source-stats column whose detail is open
- *   N M n p q tier uniq env K D s sdk warm filter
+ *   N M n rd p q tier uniq env K D s sdk warm filter
  *             scenario inputs that differ from the preset (model/state.tsx),
  *             so a deep link reproduces the calculator
  */
@@ -41,6 +41,7 @@ export const searchSchema = searchParams({
   N: optionalNumber,
   M: optionalNumber,
   n: optionalNumber,
+  rd: optionalNumber,
   p: optionalNumber,
   q: optionalNumber,
   tier: optionalString,

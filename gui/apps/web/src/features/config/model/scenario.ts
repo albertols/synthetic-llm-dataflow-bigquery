@@ -32,6 +32,8 @@ export interface ScenarioInputs {
   M: number;
   /** Reference sample rows (`--reference_rows_limit`). */
   n: number;
+  /** Row documents B.1 embeds (`--rag_row_docs_limit`); the engine clamps it to the sample. */
+  rowDocs: number;
   /** Share of the rarest category that must survive. */
   p: number;
   /** Deepest quantile whose tail matters. */
@@ -69,7 +71,7 @@ export interface ScenarioPreset {
 /** Code constants the calculator reads (knobs.json, never retyped). */
 export const CONSTANTS = {
   poolCap: knobNumber("free_text_pool_max"),
-  rowDocCap: knobNumber("max_row_doc_rows"),
+  rowDocCap: knobNumber("rag_row_docs_limit"),
   valueChunkCap: knobNumber("max_free_text_values_per_column"),
   topK: knobNumber("rag_top_k"),
   literalMaxDistinct: knobNumber("top_values_max_distinct"),
@@ -99,6 +101,7 @@ const BASE: ScenarioInputs = {
   N: 1_000_000,
   M: 90_000_000,
   n: CONSTANTS.defaultN,
+  rowDocs: CONSTANTS.rowDocCap,
   p: 0.001,
   q: 0.999,
   tier: "sample",
@@ -396,7 +399,7 @@ export function computeScenario(inputs: ScenarioInputs): ScenarioOutputs {
     tailPoints: tailPoints(nEff, q),
     rowsForTail: rowsForTail(q),
     poolReuse: poolReuse(M, target),
-    rowDocShare: nEff > 0 ? Math.min(1, CONSTANTS.rowDocCap / nEff) : 0,
+    rowDocShare: nEff > 0 ? Math.min(1, inputs.rowDocs / nEff) : 0,
     valueChunks: Math.min(Math.round(distinctSample), CONSTANTS.valueChunkCap),
     distinctSample,
     distinctExact,

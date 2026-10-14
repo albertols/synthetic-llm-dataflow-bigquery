@@ -5,7 +5,7 @@
  * so turning a dial re-computes every output on the page.
  *
  * The scenario round-trips through the URL: the active preset (`scenario`)
- * plus every input that differs from it (`N`, `M`, `n`, `p`, `q`, `tier`,
+ * plus every input that differs from it (`N`, `M`, `n`, `rd`, `p`, `q`, `tier`,
  * `uniq`, `env`, `K`, `D`, `s`, `sdk`, `warm`, `filter`), so a deep link
  * reproduces the calculator exactly.
  */
@@ -16,6 +16,7 @@ import type { KnobValue } from "@contracts/knobs";
 import { asText, defaultSettings, getKnob } from "./knobs";
 import {
   computeScenario,
+  CONSTANTS,
   presetById,
   recommend,
   type Recommendation,
@@ -37,6 +38,7 @@ export type ScenarioParams = {
   N?: number;
   M?: number;
   n?: number;
+  rd?: number;
   p?: number;
   q?: number;
   tier?: string;
@@ -55,6 +57,7 @@ export const SCENARIO_PARAM_KEYS = [
   "N",
   "M",
   "n",
+  "rd",
   "p",
   "q",
   "tier",
@@ -89,6 +92,7 @@ function fromPreset(presetId: string | undefined): State {
     settings: {
       ...defaultSettings(),
       reference_rows_limit: preset.inputs.n,
+      rag_row_docs_limit: preset.inputs.rowDocs,
       num_rows: preset.inputs.M,
       source_stats: preset.inputs.tier,
       uniqueness_mode: preset.inputs.uniqueness,
@@ -107,6 +111,7 @@ export function stateFromParams(params: ScenarioParams): State {
   const settings = { ...state.settings };
   const data = { ...state.data };
   if (positive(params.n)) settings.reference_rows_limit = Math.round(params.n);
+  if (positive(params.rd)) settings.rag_row_docs_limit = Math.round(params.rd);
   if (positive(params.M)) settings.num_rows = Math.round(params.M);
   if (params.tier && TIERS.includes(params.tier as StatsTier)) settings.source_stats = params.tier;
   if (params.uniq && MODES.includes(params.uniq as UniquenessMode)) settings.uniqueness_mode = params.uniq;
@@ -135,6 +140,7 @@ export function paramsFromState(state: Pick<State, "presetId" | "settings" | "da
     N: diff(now.N, base.N),
     M: diff(now.M, base.M),
     n: diff(now.n, base.n),
+    rd: diff(now.rowDocs, base.rowDocs),
     p: diff(now.p, base.p),
     q: diff(now.q, base.q),
     tier: diff(now.tier, base.tier),
@@ -160,6 +166,7 @@ export function inputsFrom(state: Pick<State, "settings" | "data">): ScenarioInp
   return {
     ...data,
     n: num("reference_rows_limit", 10_000),
+    rowDocs: num("rag_row_docs_limit", CONSTANTS.rowDocCap),
     M: num("num_rows", 0),
     tier: TIERS.includes(tier) ? tier : "sample",
     uniqueness: MODES.includes(mode) ? mode : "exact",

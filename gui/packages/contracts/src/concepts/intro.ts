@@ -184,7 +184,7 @@ export const concepts = defineConcepts([
       tip: "On L2-normalized vectors the inner product is the cosine, so an exact inner-product search is an exact cosine search.",
     },
     pitfalls:
-      "The index is rebuilt per engine build and capped at max_row_doc_rows vectors; it is a deterministic in-memory index, not a vector database.",
+      "The index is rebuilt per engine build and capped at rag_row_docs_limit vectors; it is a deterministic in-memory index, not a vector database.",
     diagram: "intro:cosine",
     links: [
       { label: "Borisov et al. 2022 — GReaT", url: "https://arxiv.org/abs/2210.06280", kind: "paper" },

@@ -132,7 +132,7 @@ describe("pipeline stages", () => {
     const value = (id: string) => knobs.knobs.find((k) => k.id === id)!.value as number;
     const chips = (id: string) => STAGES.find((s) => s.id === id)!.chips({});
     expect(chips("reference")).toContain(`${formatCount(value("reference_rows_limit"))} rows`);
-    expect(chips("rag")).toContain(`${formatCount(value("max_row_doc_rows"))} chunks`);
+    expect(chips("rag")).toContain(`${formatCount(value("rag_row_docs_limit"))} chunks`);
     expect(chips("rag")).toContain(`${value("hashing_embedder_dim")}-d vectors`);
     expect(chips("rag")).toContain(`IndexFlatIP · top-${value("rag_top_k")}`);
     expect(chips("generate")).toContain(`pool ≤ ${formatCount(value("free_text_pool_max"))}`);

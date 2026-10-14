@@ -74,6 +74,7 @@ const DIAL_STEPS: Readonly<Record<string, readonly number[]>> = {
   similarity: Array.from({ length: 21 }, (_, i) => Math.round(i * 5) / 100),
   batch_size: [4, 8, 16, 32, 64, 128, 256, 512, 1_024, 10_000, 100_000],
   fk_candidate_cap: [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1_024],
+  rag_row_docs_limit: [128, 256, 512, 1_024, 2_048, 4_096, 10_000],
 };
 
 /** `env` has no argparse choices; its tiers are the ones config/thresholds.yml defines ratios for. */
@@ -186,4 +187,11 @@ export function defaultSettings(): Record<string, KnobValue> {
 }
 
 /** Knobs that feed the scenario calculator (turning them re-computes it). */
-export const SCENARIO_KNOBS = ["reference_rows_limit", "num_rows", "source_stats", "uniqueness_mode", "env"] as const;
+export const SCENARIO_KNOBS = [
+  "reference_rows_limit",
+  "rag_row_docs_limit",
+  "num_rows",
+  "source_stats",
+  "uniqueness_mode",
+  "env",
+] as const;

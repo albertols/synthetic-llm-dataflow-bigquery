@@ -96,6 +96,12 @@ describe("the 90M / 1M / 10k preset", () => {
     expect(out.rowDocShare).toBeCloseTo(1_024 / 10_000, 12);
   });
 
+  it("reads the row-document share from rag_row_docs_limit, capped at the whole sample", () => {
+    expect(CONSTANTS.rowDocCap).toBe(1_024);
+    expect(computeScenario({ ...preset90m, rowDocs: 4_096 }).rowDocShare).toBeCloseTo(4_096 / 10_000, 12);
+    expect(computeScenario({ ...preset90m, rowDocs: 50_000 }).rowDocShare).toBe(1);
+  });
+
   it("truncates the sparse column's distinct count in the sample-tier statistics", () => {
     expect(out.distinctSample).toBeCloseTo(470.2, 0);
     expect(out.distinctExact).toBe(4_022);

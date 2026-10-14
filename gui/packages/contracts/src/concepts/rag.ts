@@ -186,7 +186,7 @@ export const concepts = defineConcepts([
     id: "rag:chunk-kinds",
     title: "Chunk kinds: row documents and value chunks",
     purpose:
-      "rag_chunks holds two kinds: a row_doc is one reference row as a GReaT sentence (the first 1,024 rows only), and a free_text_col chunk is one distinct value of one free-text column (at most 1,024 per column). The row vectors form the row index; one column's value vectors form the column index that picks the seeds.",
+      "rag_chunks holds two kinds: a row_doc is one reference row as a GReaT sentence (the first rag_row_docs_limit rows only, 1,024 by default), and a free_text_col chunk is one distinct value of one free-text column (at most 1,024 per column). The row vectors form the row index; one column's value vectors form the column index that picks the seeds.",
     interpretation: {
       tip: "Pick a column's values as the space to see exactly what the seed strategies choose from.",
     },
@@ -346,14 +346,14 @@ export const concepts = defineConcepts([
   },
   {
     id: "rag:row-doc-cap",
-    title: "MAX_ROW_DOC_ROWS = 1,024",
+    title: "rag_row_docs_limit (default 1,024)",
     purpose:
-      "Only the first 1,024 rows of the fingerprint-ordered reference sample become row documents, because the only reader of row vectors reads exactly those, all-or-nothing. One constant is shared by the writer and the reader.",
+      "Only the first rag_row_docs_limit rows (1,024 by default) of the fingerprint-ordered reference sample become row documents, because the only reader of row vectors reads exactly those, all-or-nothing. One launch value is shared by the writer and the reader.",
     interpretation: {
       tip: "The prefix of a fingerprint-ordered sample is a uniform sample: right for a centroid, weak for a rare mode.",
     },
     pitfalls:
-      "Rows past 1,024 are not row documents, but their free-text values are still value chunks (distinct, up to 1,024 per column).",
+      "Rows past the limit are not row documents, but their free-text values are still value chunks (distinct, up to 1,024 per column).",
     links: [
       CHUNKING,
       adr("ADR 0019 — population scoped to its consumers", "0019-rag-population-scoped-to-consumers.md"),
@@ -462,7 +462,7 @@ export const concepts = defineConcepts([
     id: "rag:seed-ladder",
     title: "Where seed candidates come from",
     purpose:
-      "A fixed fallback order: persisted value vectors, then the column's values in the first 1,024 rows embedded locally, then the row exemplars, then the first observed examples. Which rung fires depends on which DoFn ladders: the pool branch has no chunk store, so it uses rung 2.",
+      "A fixed fallback order: persisted value vectors, then the column's values in the first rag_row_docs_limit rows embedded locally, then the row exemplars, then the first observed examples. Which rung fires depends on which DoFn ladders: the pool branch has no chunk store, so it uses rung 2.",
     interpretation: {
       tip: "Rung 3 cannot fire as the engine is wired: the same 1,024-row prefix already fed rung 2.",
     },
