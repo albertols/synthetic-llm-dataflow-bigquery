@@ -27,9 +27,9 @@ records where they came from.
 ### Official marks
 
 Files in `apps/web/src/assets/marks/`, byte-identical to their source (the
-names are the sources' own). `src/assets/marks/marks.test.ts` recomputes each
-SHA-256 below and fails on a changed or unlisted file. All retrieved
-2026-10-14.
+names are the sources' own), and served as files, never inlined
+(`vite.config.ts`). `src/assets/marks/marks.test.ts` recomputes each SHA-256
+below and fails on a changed or unlisted file. All retrieved 2026-10-14.
 
 | File                             | SHA-256                                                            | Shown                                                                                    | Source                                                                                                                                                                                                                                      |
 | :------------------------------- | :----------------------------------------------------------------- | :--------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |

@@ -53,8 +53,11 @@ export default defineConfig({
     sourcemap: true,
     // Never inline a font as a data: URI: @font-face files load only when their unicode-range
     // is on the page, but an inlined one is in the CSS for everyone (a 2.7 kB Cyrillic subset
-    // sat in the shell CSS this way).
-    assetsInlineLimit: (file) => (/\.woff2?$/.test(file) ? false : undefined),
+    // sat in the shell CSS this way). Nor an official mark (src/assets/marks): inlined, the
+    // Beam logo alone put 4 kB in the shell; as files they are served byte for byte as their
+    // owners publish them (ATTRIBUTION.md), and cached.
+    assetsInlineLimit: (file) =>
+      /\.woff2?$/.test(file) || /[\\/]assets[\\/]marks[\\/]/.test(file) ? false : undefined,
     chunkSizeWarningLimit: 1500,
     rolldownOptions: {
       output: {

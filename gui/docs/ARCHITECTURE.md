@@ -209,21 +209,21 @@ route; each heavy library arrives the first time a view needs it. Dashed
 arrows are dynamic imports._
 
 Measured with `npm run build && npm run size` (size-limit, gzip) on
-2026-09-29, on the tree of the commit that added this table (its parent is
-`16b4294`). **This table is the only place the sizes are typed**; re-run the
+2026-10-14, on the tree of the commit that added brand packs (its parent is
+`38c3f88`). **This table is the only place the sizes are typed**; re-run the
 command to refresh them.
 
 | Budget                                                                                       |  Limit |  Measured |
 | :------------------------------------------------------------------------------------------- | -----: | --------: |
-| App shell: `index.html`'s closure (entry chunk, the shared chunks it imports, global CSS)    | 200 kB | 187.42 kB |
-| Tab INTRO: the closure of its lazy page chunks (`src/features/intro/`), minus the shell      | 350 kB | 112.17 kB |
-| Tab EVALUATION (same rule)                                                                   | 350 kB | 135.51 kB |
-| Tab RAG (same rule)                                                                          | 350 kB |  80.06 kB |
-| Tab CONFIG (same rule)                                                                       | 350 kB | 106.98 kB |
-| Lazy ECharts: `EChartCanvas`'s closure beyond the shell                                      | 300 kB |  270.8 kB |
+| App shell: `index.html`'s closure (entry chunk, the shared chunks it imports, global CSS)    | 200 kB | 190.28 kB |
+| Tab INTRO: the closure of its lazy page chunks (`src/features/intro/`), minus the shell      | 350 kB | 114.92 kB |
+| Tab EVALUATION (same rule)                                                                   | 350 kB | 146.07 kB |
+| Tab RAG (same rule)                                                                          | 350 kB |  80.42 kB |
+| Tab CONFIG (same rule)                                                                       | 350 kB | 110.66 kB |
+| Lazy ECharts: `EChartCanvas`'s closure beyond the shell                                      | 300 kB | 270.79 kB |
 | Lazy KaTeX: `KatexRender`'s closure (JS + CSS)                                               |  90 kB |  80.56 kB |
 | Lazy deck.gl React binding: the `DeckCanvas` chunk                                           |  80 kB |  44.27 kB |
-| Lazy deck.gl core + layers: the shared chunks holding `@deck.gl/core` / `layers` / `luma.gl` | 200 kB | 169.34 kB |
+| Lazy deck.gl core + layers: the shared chunks holding `@deck.gl/core` / `layers` / `luma.gl` | 200 kB | 169.35 kB |
 
 Relative to its limit, the shell is the fullest budget, and every visitor
 downloads it: a new eager import in `main.tsx`, `router.tsx`, a route module
@@ -749,7 +749,7 @@ build does today — roll it out as `Content-Security-Policy-Report-Only` first:
 | `worker-src`      | `'self'`                 | RAG's UMAP/PCA worker is a same-origin module (`new Worker(new URL("./projection.worker.ts", import.meta.url))`), not a `blob:`                                                                                                                                       |
 | `style-src`       | `'self' 'unsafe-inline'` | KaTeX output carries `style="…"` attributes and mermaid writes a `<style>` element into every SVG, both inserted as HTML strings; ECharts and React set styles through the CSSOM; a build with a brand pack writes the packs' tokens as one `<style>` in `index.html` |
 | `font-src`        | `'self'`                 | Inter / JetBrains Mono / KaTeX woff2 files, always served as files: `build.assetsInlineLimit` never inlines a font as a `data:` URI (see the budgets above)                                                                                                           |
-| `img-src`         | `'self' data:`           | repo figures under `/assets/`, inline SVG icons, the official marks and a brand pack's logos (`data:` URIs), ECharts `getDataURL` exports                                                                                                                             |
+| `img-src`         | `'self' data:`           | repo figures under `/assets/`, the official marks (files), inline SVG icons, a brand pack's logos (`data:` URIs in `index.html`), ECharts `getDataURL` exports                                                                                                        |
 | `connect-src`     | `'self'`                 | `fetch("/api/…")` only                                                                                                                                                                                                                                                |
 | `frame-ancestors` | `'none'`                 | the same as `x-frame-options: DENY`                                                                                                                                                                                                                                   |
 
