@@ -33,10 +33,10 @@ REFs:
   - docs/DEPLOYMENT_PREREQUISITES.md
   - docs/MODEL_LAYOUT.md
 
-Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §6 Throughput;
-§8 Configuration
-(ADR 0022, 0023, 0024, 0027, 0028, 0029, 0030, 0031, 0032, 0034, 0035, 0036,
-0037, 0038, 0039).
+Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
+§6 Throughput; §8 Configuration
+(ADR 0019, 0022, 0023, 0024, 0027, 0028, 0029, 0030, 0031, 0032, 0034, 0035,
+0036, 0037, 0038, 0039).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.

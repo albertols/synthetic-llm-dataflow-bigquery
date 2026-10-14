@@ -124,7 +124,7 @@ derived). `batch_size=1000` for 1M/10M rows; the DAG's `16` default is sized
 for smokes. Params not listed = DAG defaults, which already carry the current
 posture: `source_stats=sample`, `freetext_expansion=identifiers`,
 `prompt_constraints=on`, `build_pool_layer=true`, `build_rag_layer=true`,
-`uniqueness_mode=exact`, `pool_seed_strategy=centroid`.
+`rag_row_docs_limit=1024`, `uniqueness_mode=exact`, `pool_seed_strategy=centroid`.
 
 **Universal pass criteria — every vLLM run:**
 
@@ -133,7 +133,7 @@ posture: `source_stats=sample`, `freetext_expansion=identifiers`,
 3. `copy_ratio < 0.3` on every non-constant STRING column with `source_distinct > 100` (probe step 3).
 4. `validation_runs.run_id` unique per Dataflow job (salted suffix visible).
 5. `pk.duplicate` present in `dlq_by_rule` if and only if PK collisions occurred; PASSED requires ~0.
-6. `b1_embed_done rows=` equals `reference_rows_limit` (10000), not the full source count.
+6. `b1_embed_done rows=` equals `rag_row_docs_limit` (1024 by default, §6e) and `rows_total=` equals `reference_rows_limit` (10000), not the full source count. A warm digest logs `b1_chunks_reused rows=` instead.
 7. Check the Dataflow job state directly (`gcloud dataflow jobs describe <job_id>` or the Dataflow console) — the Composer DAG launches the job with `wait_until_finished=False`, so a strict-mode worker crash fails the Dataflow job itself while the Airflow task still shows success. Airflow green is not proof of a healthy run.
 8. `validation_runs.valid_count` must equal `num_rows` requested. A shortfall — even on a `PASSED` row, since the BLOCKER gate only checks a *ratio* — means whole batches were lost to `engine_failure` and never replaced; PASSED is not proof the run actually produced the row count it was asked for.
 
@@ -824,6 +824,39 @@ change — a warm store hit would replay pools built with the OLD prompts and
 mask the edit. Exclude `COL_047`/`COL_048` (binary-character columns, known
 special case) from every comparison.
 
+### 6e. `--rag_row_docs_limit` (B.1 row documents)
+
+How many reference rows B.1 embeds as row documents: the first N of the
+fingerprint-ordered sample, one value for the population branch that writes
+`rag_chunks` and the engine that embeds or reads the same prefix back
+([ADR 0019](adr/0019-rag-population-scoped-to-consumers.md)). Default
+**1024**, the constant `MAX_ROW_DOC_ROWS` it replaces; a launch at the
+default behaves as before. CLI `--rag_row_docs_limit`, flex template and
+generation DAG param `rag_row_docs_limit`. An integer >= 1 (empty = the
+default); a value above the reference sample is clamped to the sample and
+logged once per table (`rag_row_docs_clamped`).
+
+```mermaid
+flowchart LR
+  L["launcher<br/>N = min(rag_row_docs_limit, sample rows)"] --> Q{"rag_chunks holds<br/>digest + embedder?"}
+  Q -- no --> F["full: row docs for rows[:N]<br/>+ value chunks"]
+  Q -- yes --> C{"all of rows[:N]<br/>present?"}
+  C -- yes --> S["skip<br/>rag_population_skipped"]
+  C -- no --> T["topup: only the missing rows<br/>no value chunks<br/>rag_population_topup"]
+```
+
+| Store state for (digest, embedder) | Launch with `--build_rag_layer` | Workers read |
+| :-- | :-- | :-- |
+| empty | `full`: rows[:N] + the distinct free-text values | this job: whatever the store holds when a worker sets up, else they embed rows[:N] themselves (a cold digest); later launches: the store |
+| written with a limit >= N | `skip` | rows[:N] by `row_digest` from the store |
+| written with a limit < N | `topup`: the missing rows of rows[:N] only | this job: as on a cold digest; later launches: the store |
+
+The store is keyed by digest and embedder, not by the limit, so the limit is
+checked by content: every row of the prefix must be present or the engine
+re-embeds (all-or-nothing, never a mix). Raising N costs one embed of the
+extra rows and N x 384 floats of worker memory per engine; it does not
+change the value chunks (they come from the whole sample).
+
 ---
 
 ## 7. Milestone log dictionary — reading worker logs
@@ -841,6 +874,9 @@ Store / pool lifecycle:
 | `freetext_pool_store_error` | store unreachable; run degraded to building (not fatal) |
 | `freetext_pool_store_absent` (WARNING) | no `--freetext_pools_table` passed — this run rebuilds pools per worker process |
 | `pool_build_skipped` | driver found this digest+model already populated |
+| `rag_population_skipped` | the `rag_chunks` row docs already cover `rows[:rag_row_docs_limit]` for this digest + embedder |
+| `rag_population_topup rows_missing=` | the store was written with a smaller `rag_row_docs_limit`: only the missing row docs are populated (§6e) |
+| `rag_row_docs_clamped requested= sample_rows=` | a non-default `rag_row_docs_limit` above the reference sample was clamped to it |
 | `pool_branch_setup_done` / `pool_branch_emitted` | the build branch ran |
 | `freetext_pool_built target=` | per-column pool landed; compare targets across stats tiers for the exact-distinct lift |
 | `freetext_pools_warm columns=` | every pool came from the persisted store / process cache — the designed warm path (ADR 0020/0033), not idle hardware |

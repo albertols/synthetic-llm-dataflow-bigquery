@@ -100,10 +100,39 @@ flowchart TB
   than `apache_beam.ml.rag` ([ADR 0017](adr/0017-custom-rag-layer-over-beam-ml-rag.md)): it needs deterministic search and a
   persisted chunk text that is byte-identical to what was embedded. The
   embedding population is scoped to the columns that consume it ([ADR 0019](adr/0019-rag-population-scoped-to-consumers.md)).
+  How many reference rows become row documents is the launch knob
+  `rag_row_docs_limit` (default 1,024, the former constant
+  `MAX_ROW_DOC_ROWS`); the writer and the reader slice the same prefix with
+  it (diagram below).
 - **`b2_library`** wraps an open-source tabular synthesizer fitted once per
   worker; the model only fills free-text columns.
 - Each run logs one `generation_plan` line naming the strategy chosen for every
   column, so the synthesis is auditable from worker logs.
+
+**Row documents: one value, two sides.** The launcher resolves
+`--rag_row_docs_limit` once per table, clamped to the reference sample, and
+both the `rag_chunks` population and the engine's in-worker index use
+`rows[:N]`. The store is keyed by reference digest and embedder, not by N, so
+the launcher checks it by content:
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  K["⚙️ launcher<br/>N = min(rag_row_docs_limit, n)"]:::cpu
+  ST[("rag_chunks<br/>digest + embedder")]:::data
+  K -->|"no chunk: full<br/>rows[:N] + value chunks"| ST
+  K -->|"rows[:N] all present: skip"| ST
+  K -->|"some missing: topup<br/>only those rows"| ST
+  ST -->|"rows[:N] by row_digest,<br/>all or nothing"| E["⚙️ b1_rag setup<br/>index of N vectors"]:::cpu
+  K -->|"GenerationContext.rag_row_docs_limit"| E
+```
+
+A store written with a larger N serves a smaller one exactly; one written
+with a smaller N is topped up, never mixed with local vectors. The default
+(N = 1,024) reproduces the constant's behaviour. Flag modes and the milestones
+each one logs: [`RUN_PLAYBOOK.md` §6e](RUN_PLAYBOOK.md#6e---rag_row_docs_limit-b1-row-documents).
 
 Code: [`sdfb_core/engines/base.py`](../packages/sdfb-core/src/sdfb_core/engines/base.py),
 [`engines/b1_rag/`](../packages/sdfb-core/src/sdfb_core/engines/b1_rag),
@@ -458,6 +487,7 @@ edge keeps the table and stops drawing keys through that edge.*
 | Model URI, vLLM server flags, licence | [`config/models.yml`](../config/models.yml) | `VLLMModelClient` (§3) |
 | Severity budgets per environment | [`config/thresholds.yml`](../config/thresholds.yml) | thresholds gate (§7) |
 | Column constraints | the table's DDL contract | constraint router (§5) |
+| B.1 row documents, `rag_row_docs_limit` (default 1,024) | launch flag / DAG param | launcher (store check), population branch, `b1_rag` setup (§2) |
 | GPU type, machine family, dtype | the Terraform module's `gpu` variable | launch scripts and the Flex Template job |
 
 ## 9. ADR reference map

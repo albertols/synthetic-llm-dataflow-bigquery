@@ -22,9 +22,6 @@ place that used to assume 1024::
         └─> GenerationContext ──> B1RagEngine (embed | read rows[:N])
 
 The default (`MAX_ROW_DOC_ROWS`, 1024) must reproduce today's behaviour.
-
-Design: docs/DESIGN.md §2 Engines
-(ADR 0019).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
