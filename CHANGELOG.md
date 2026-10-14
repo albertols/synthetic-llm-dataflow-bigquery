@@ -9,6 +9,20 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ## [Unreleased]
 
 ### 🚀 Added
+
+### 🔧 Changed
+
+### ⚡ Performance
+
+### 🐛 Fixed
+
+### 🗑️ Removed
+
+### 📗 Docs
+
+## [v0.6.0] — 2026-10-14
+
+### 🚀 Added
 - **The evaluator reads its tables without `bigquery.readsessions.create`.** A launch in a deployment whose worker account lacks `roles/bigquery.readSessionUser` failed on every read (`DIRECT_READ` opens a Storage Read API session on the read table's project). The launch now asks for one read session per project of the planned read tables, after the prepare statements and before the graph: a read table is paged if and only if its project refused (a 403), through the BigQuery client's `tabledata.list` by row ranges, with `bigquery.tables.get` and `bigquery.tables.getData` and no read session; every other read table keeps `DIRECT_READ`; any other answer fails the launch. One `WARNING` names each refusing project and the table sides it pages, with their rows and bytes, and the registry row keeps it. No parameter, no DAG change, no template change. A table that changes while it is paged fails the job instead of being read wrong, and a table is read as empty only when `tabledata.list` itself counts no row; a throttled page waits by the error's reason. Paging is slower (BigQuery's `tabledata.list` quota, charged to the project that contains the table): `--mode sampled` is the lever for large tables ([ADR 0041, note of 2026-10-10](docs/adr/0041-evaluation-standalone-package.md), design §5.2). Not yet run against BigQuery.
 - The evaluation launch times what is inside its submission: `free text pools`, `pipeline options`, `graph` and `pipeline run`, then their sum `submission`, and a `read path` line before them; Beam's own `Starting GCS upload` / `Completed GCS upload` lines are relayed while the pipeline is handed to its runner.
 - The standalone evaluation DAG (`composer/evaluation_framework.py`) evaluates a landed run on its own by the chain's seed path, reading no job log: params `seed_table`, `source_dataset`, `landing_dataset`, `scope`, `reference_rows_limit` and `validation_runs_table` (defaults from three markers the generation DAG already uses), with `generation_job_id` as the launch's identity when known; four shapes of trigger, each rendered into a legal launch (a typed `run_id` or `tables` beats the default seed); a list of jobs (`generation_job_ids`) stays the full lookup of each job, the seed is not handed to the runs it starts. Its tasks no longer pass `deferrable`: the sensor waits in reschedule mode and the launch keeps `wait_until_finished`. Both evaluation launches take a launcher machine type (`launcher_machine_type`, `evaluation_launcher_machine_type`; default `e2-standard-8`; REST `environment.launcherMachineType`), because a Flex Template launch has 12 minutes in all, the image pull included, and the public REST description has no field for the limit itself ([ADR 0041](docs/adr/0041-evaluation-standalone-package.md), note of 2026-10-09).
