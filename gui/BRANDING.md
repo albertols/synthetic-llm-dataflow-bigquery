@@ -2,7 +2,8 @@
 
 **Claim: a dark, near-black console with Beam-orange and GCP-blue accents,
 every colour a measured token, and no one else's marks in the product
-identity.**
+identity. A deployment may bring its own brand as a pack that changes the
+surfaces, ink and accents, never the product's name, mark or chart palette.**
 
 ## Name and mark
 
@@ -16,14 +17,178 @@ identity.**
   attribution (shown in the footer). The mascot is available at
   `/assets/beam-firefly-mascot.png` for pages that identify Beam; it never
   stands for this product.
-- Google Cloud product icons appear only inside the repo's diagrams, per
-  Google's icon terms; see `ATTRIBUTION.md`.
+- The **Apache Beam logo** appears, unaltered, only as a link to
+  <https://beam.apache.org/> (the ASF's terms for its logos): in the top bar's
+  "Built with" links and on the Beam stages of the INTRO pipeline strip.
+- Google Cloud product icons appear only inside diagrams, per Google's icon
+  library: the repo's draw.io figures and the INTRO pipeline strip (BigQuery
+  stages; the Data Analytics icon, Dataflow's, on the launcher stage). The top
+  bar names **Dataflow** in text. The vLLM logo marks the GPU stage. Files,
+  sources and terms: `ATTRIBUTION.md`.
 - The CONFIG "amp" is an **original neutral dark console with text-labelled
   knobs** and Beam-orange accents. It does not reproduce Orange Amps' trade
   dress: no pictogram-only legends, no orange tolex, no crest, wordmark or
   slogan.
 
+## Brands and modes
+
+The appearance is two independent choices, stored per browser: a **brand**
+(the build's packs) and a **mode** (dark, light, or the system's). `<html>`
+carries both, `data-brand` and `data-theme`; `tokens.css` holds the committed
+brand, `beam-dataflow`, and each other pack overrides a set of its tokens per
+mode. The top bar's palette button (the "More" menu below 1180 px) lists both
+as labelled radio groups.
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  C[("📄 src/brands/beam-dataflow<br/>committed")]:::store
+  L[("📄 src/brands/local/ID<br/>git-ignored")]:::store
+  P["⚙️ brandPacks plugin<br/>checks · picks the default"]:::cpu
+  H[("📄 index.html<br/>brand list · pack tokens")]:::store
+  S["⚪ localStorage<br/>brand · theme"]:::data
+  I["⚙️ theme-init.js<br/>before the first paint"]:::cpu
+  R["⚪ html<br/>data-brand · data-theme"]:::data
+
+  C --> P
+  L --> P
+  P -->|"build"| H
+  H --> I
+  S --> I
+  I --> R
+```
+
+_The build finds the packs, checks them and writes the brand list and the
+packs' tokens into `index.html`; `public/theme-init.js` reads that list and the
+stored choices and stamps `<html>` before any paint, so no reader sees the
+default flash. With no local pack, the build carries `beam-dataflow` alone and
+writes no token overrides._
+
+### The default brand
+
+```mermaid
+flowchart TD
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  A{"VITE_DEFAULT_BRAND<br/>set at build time?"}:::data
+  B["⚙️ that pack<br/>unknown id fails the build"]:::cpu
+  C{"packs saying<br/>default: true"}:::data
+  D["⚙️ that pack"]:::cpu
+  E["⚙️ the build fails"]:::cpu
+  F["⚙️ beam-dataflow"]:::cpu
+
+  A -->|"yes"| B
+  A -->|"no"| C
+  C -->|"one"| D
+  C -->|"two or more"| E
+  C -->|"none"| F
+```
+
+_One panel per way the default is set. A reader's stored brand still wins over
+the default; a stored brand the build no longer carries (its pack removed)
+falls back to the default, in `theme-init.js` and in the app alike
+(`src/lib/theme.test.ts` runs both)._
+
+### Brand packs
+
+A pack is a folder named after its id, holding `brand.json` and its logo
+files. The committed packs live in `apps/web/src/brands/<id>/`; a
+deployment's own pack goes in **`apps/web/src/brands/local/<id>/`**, which git
+ignores, so a deployment's brand never reaches the repository.
+
+| Key          | Required | What                                                                                                                                      |
+| :----------- | :------- | :---------------------------------------------------------------------------------------------------------------------------------------- |
+| `id`         | yes      | lower-case letters, digits, hyphens; the folder's name; the value of `data-brand`                                                         |
+| `name`       | yes      | what the menu lists and the top bar prints beside the logo (at most 40 characters)                                                        |
+| `default`    | no       | `true`: the build's default brand (see above)                                                                                             |
+| `themeColor` | yes      | `{ "dark": "#rrggbb", "light": "#rrggbb" }`, the browser's `theme-color` per mode                                                         |
+| `logo`       | no       | `{ "light": file, "dark": file, "plate"?: "#rrggbb", "wordmark"?: true }`: SVG, PNG or WebP in the folder, ≤ 64 KiB, inlined by the build |
+| `tokens`     | no       | `{ "dark": { "--token": colour }, "light": { … } }`: the page's tokens this brand overrides                                               |
+| `nav`        | no       | the same shape, re-scoped inside the top bar (`[data-app-header]`)                                                                        |
+
+Colours are `#rrggbb` or `rgb(r g b / a)`. A pack may override the surfaces,
+ink, accent, link, focus ring, the text colours that must keep their contrast
+on its surfaces (CPU, GPU, Beam and status text), the chart frame (surface,
+grid, axis, diverging midpoint) and `--nav-bg`, which paints the top bar (it
+is transparent in `beam-dataflow`, so the bar shows the page through its
+blur). The lists are `PAGE_TOKENS` and `NAV_TOKENS` in
+`apps/web/src/brands/types.ts`; anything else is refused. The chart slots, the
+sequential and diverging ramps and the status hues are shared by every brand:
+they are validated once, below. Beam's stages keep Beam orange (`--beam`) in
+every brand. A logo is shown beside the product name, after a divider, never
+inside the product's link or name; `plate` puts a backing colour behind a mark
+drawn for a light background, and `wordmark: true` drops the name text for a
+logo that spells it. A pack's `$comment` key is ignored.
+
+A fictitious example, the test fixture
+`apps/web/src/test/fixtures/brands/acme/brand.json` (trimmed):
+
+```json
+{
+  "id": "acme",
+  "name": "Acme Analytics",
+  "default": true,
+  "logo": { "light": "acme-on-dark.svg", "dark": "acme-on-dark.svg" },
+  "themeColor": { "dark": "#0f1d1d", "light": "#0f3b3a" },
+  "tokens": {
+    "light": { "--bg": "#f3f6f6", "--accent": "#0f766e", "--accent-fg": "#ffffff", "--nav-bg": "#0f3b3a" },
+    "dark": { "--bg": "#0a1414", "--accent": "#2fbfad", "--accent-fg": "#0a1414", "--nav-bg": "#0f1d1d" }
+  },
+  "nav": { "light": { "--text-1": "#ffffff", "--text-2": "#d2e4e2", "--focus-ring": "#5fd3c4" } }
+}
+```
+
+To add a deployment's brand:
+
+1. Create `apps/web/src/brands/local/<id>/` with `brand.json` and the logo
+   files, and a note of where the logos came from and on what terms.
+2. Run `npm test`. `src/brands/brandPacks.test.ts` and
+   `src/brands/brandContrast.test.ts` read every pack on the machine; a pack
+   that is malformed, or a colour that misses a ratio below, fails there with
+   the token and the ratio.
+3. Make it the default with `"default": true`, or at build time:
+   `VITE_DEFAULT_BRAND=<id> npm run build` (the environment or an
+   `apps/web/.env` file; it wins over the pack's own `default`).
+4. Build and serve as usual (`npm run build && npm start`, or the
+   `Dockerfile`, whose build context then carries the pack).
+
+### Contrast for every pack
+
+`src/brands/brandContrast.test.ts` computes, for every pack present (the
+committed one, the test fixture and any local pack) in both modes, the
+`tokens.css` values with the pack's overrides on top, and holds them to WCAG
+2.2 AA where the tables below hold `beam-dataflow`:
+
+| Check                                                                                                         | Minimum |
+| :------------------------------------------------------------------------------------------------------------ | ------: |
+| `--text-1/2/3` on the page, `--surface-1/2/3`                                                                 | 4.5 : 1 |
+| accent text, links, CPU / GPU / Beam text, status text on the page, `--surface-1/2`                           | 4.5 : 1 |
+| accent text on `--accent-soft`, links on `--info-soft`, status text on its own 14 % tint, over the same three | 4.5 : 1 |
+| `--accent-fg` on `--accent` (button labels)                                                                   | 4.5 : 1 |
+| the top bar's ink on the bar, and on its `--surface-3`; its link on `--info-soft`                             | 4.5 : 1 |
+| `--control-border` on the page and `--surface-1/2`; `--focus-ring` there, on `--surface-3` and on the bar     |   3 : 1 |
+
+The ratios are computed, not typed into a table: a local pack needs no row in
+this public file. The chart slots stay as validated below; on a pack's chart
+surface a slot may fall under 3 : 1 as some do in light mode, and the "View
+data" table is the relief channel there too.
+
+### Third-party marks only identify
+
+The Apache Beam logo, the Dataflow name, the Google Cloud icons, the vLLM logo
+and a pack's logo each identify their own owner and nothing else: shown
+unaltered (no recolouring, cropping or distortion), apart from the product's
+mark and name, and only where their owners' terms allow (`ATTRIBUTION.md`
+quotes them).
+
 ## Palette (tokens: `apps/web/src/styles/tokens.css`)
+
+These are the committed brand's tokens, `beam-dataflow`, the default for any
+Apache Beam or Dataflow user.
 
 Brand hues: Beam orange `#eb6834`, GCP blue `#2a78d6`, aqua `#1baf7a`
 (CPU, healthy), purple `#7a3fd1` (GPU), slate `#6b7280`.

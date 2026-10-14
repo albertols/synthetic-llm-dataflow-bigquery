@@ -282,12 +282,15 @@ tables' verdicts read `Adjusted?`.
 
 ## Theme
 
-Dark by default; the sun/moon button switches to light (kept for
-accessibility), stored per browser. Colours live only in
-`src/styles/tokens.css`; components use the Tailwind token utilities
+Two choices, stored per browser, in the top bar's palette menu (the "More"
+menu below 1180 px): the **brand** (the build's packs, `gui/BRANDING.md`
+§ Brands and modes) and the **mode**, dark by default, light (kept for
+accessibility) or the system's. Colours live only in `src/styles/tokens.css`
+and the packs' overrides; components use the Tailwind token utilities
 (`bg-surface-1`, `text-text-2`, `border-border`, `text-status-good-text` …).
 Canvas renderers read tokens with `readToken()` and re-read them when
-`useTheme().resolved` changes.
+`useTheme().resolved` changes; a brand change remounts the page under the top
+bar, so they read the new brand's tokens from scratch.
 
 ## Writing
 

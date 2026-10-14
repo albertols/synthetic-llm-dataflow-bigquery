@@ -31,7 +31,7 @@ export const TABS: readonly TabLink[] = [
 ];
 
 /**
- * Below 1280 px the brand and theme choices, the GitHub links and the "built
+ * Below 1180 px the brand and theme choices, the GitHub links and the "built
  * with" links fold into one menu, so the tabs keep their room and a phone's
  * header stays one row.
  */
@@ -131,13 +131,13 @@ export function TopNav() {
         </nav>
 
         <div className="ml-auto flex items-center gap-1">
-          <BuiltWith className="mr-1 hidden border-r border-border pr-2 xl:flex" />
+          <BuiltWith className="mr-1 hidden border-r border-border pr-2 min-[1180px]:flex" />
           <DataSourceBadge source={source} />
-          <div className="hidden items-center gap-1 xl:flex">
+          <div className="hidden items-center gap-1 min-[1180px]:flex">
             <AppearanceMenu />
             <GithubLinks />
           </div>
-          <div className="xl:hidden">
+          <div className="min-[1180px]:hidden">
             <CompactMenu />
           </div>
         </div>

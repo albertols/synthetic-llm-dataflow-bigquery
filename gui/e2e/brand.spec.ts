@@ -194,7 +194,7 @@ test("every brand, in both modes, passes axe on INTRO and EVALUATION and never s
   expect(errors).toEqual([]);
 });
 
-test("screenshots of each brand (set GUI_SHOTS_DIR to capture)", async ({ page }, testInfo) => {
+test("screenshots of each brand (set GUI_SHOTS_DIR to capture)", async ({ page, browser }, testInfo) => {
   const dir = process.env.GUI_SHOTS_DIR;
   test.skip(!dir, "GUI_SHOTS_DIR not set");
   test.setTimeout(240_000);
@@ -229,11 +229,25 @@ test("screenshots of each brand (set GUI_SHOTS_DIR to capture)", async ({ page }
       }
     }
   if (!mobile) {
-    // The default brand's EVALUATION landing, light, 1200 px wide.
+    // The default brand's EVALUATION landing, light, 1200 px wide: at a 1200 px viewport, and the
+    // 1440 px layout drawn 1200 px wide (device scale 1200/1440), whose top bar shows everything.
     await page.setViewportSize({ width: 1200, height: 760 });
     await openAs(page, "/evaluation", head.default, "light");
     await page.waitForLoadState("networkidle");
     await page.waitForTimeout(800);
     await page.screenshot({ path: `${dir}/brand-${head.default}-light-evaluation-1200.png` });
+    const scaled = await browser.newContext({
+      baseURL: testInfo.project.use.baseURL,
+      viewport: { width: 1440, height: 900 },
+      deviceScaleFactor: 1200 / 1440,
+      reducedMotion: "reduce",
+    });
+    const wide = await scaled.newPage();
+    await wide.goto("/evaluation");
+    await openAs(wide, "/evaluation", head.default, "light");
+    await wide.waitForLoadState("networkidle");
+    await wide.waitForTimeout(800);
+    await wide.screenshot({ path: `${dir}/brand-${head.default}-light-evaluation-1440-at-1200.png` });
+    await scaled.close();
   }
 });

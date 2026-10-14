@@ -21,6 +21,7 @@ provenance is in [`docs/assets/README.md`](docs/assets/README.md)._
 - [Quickstart: live mode (BigQuery)](#quickstart-live-mode-bigquery)
 - [Environment variables](#environment-variables)
 - [The four tabs](#the-four-tabs)
+- [Brand packs](#brand-packs)
 - [Developer loop](#developer-loop)
 - [Future Cloud Run deployment](#future-cloud-run-deployment)
 - [Documentation](#documentation)
@@ -180,6 +181,7 @@ Read by the tooling, not the server:
 
 | Variable                             | Read by                              | What it does                                                                                                 |
 | :----------------------------------- | :----------------------------------- | :----------------------------------------------------------------------------------------------------------- |
+| `VITE_DEFAULT_BRAND`                 | the web build (`brandPacksPlugin`)   | the id of the default brand pack; wins over a pack's `"default": true`; an unknown id fails the build        |
 | `GUI_E2E_PORT`                       | `playwright.config.ts`, Vite preview | the port of the BFF Playwright starts (default `4173`)                                                       |
 | `GUI_E2E_SKIP_BUILD`                 | `playwright.config.ts`               | `1` serves the existing `apps/web/dist`; `0` always rebuilds; unset rebuilds only a stale build              |
 | `GUI_SHOTS_DIR` / `GUI_SHOTS_SUFFIX` | the `screenshots of …` e2e tests     | set the directory to capture screenshots into; the suffix is appended by the smoke and CONFIG tests          |
@@ -236,6 +238,24 @@ Every view also works at 390 px, where tables scroll inside their own frame:
 
 `/kit` shows the design system (tokens, components, chart and 3-D frames) live,
 in both themes.
+
+## Brand packs
+
+Brand and mode are two choices in the top bar's palette menu: the committed
+**Beam · Dataflow** brand (the palette in [`BRANDING.md`](BRANDING.md)) or a
+deployment's own, each in dark, light or the system's mode. The Apache Beam
+logo and the Dataflow name sit in the top bar in every brand, as links to
+their projects.
+
+A deployment adds its brand as a pack: a folder
+`apps/web/src/brands/local/<id>/` (git-ignored) holding `brand.json` (name,
+logos, browser colour and token overrides per mode) and its logo files. The
+build picks it up; `"default": true` in the pack, or
+`VITE_DEFAULT_BRAND=<id> npm run build`, makes it the default, and a reader's
+own choice still wins. `npm test` checks every pack on the machine against
+WCAG 2.2 AA, so a local pack needs no table in this public repository. The
+format, the default rules and the checks:
+[`BRANDING.md` § Brands and modes](BRANDING.md#brands-and-modes).
 
 ## Developer loop
 
@@ -325,7 +345,8 @@ The deployment modes are drawn in
   metric, the mock world.
 - [`docs/UX.md`](docs/UX.md) — layout, InfoHint, chart, 3-D, motion and
   accessibility rules.
-- [`BRANDING.md`](BRANDING.md) — name, mark, palette with measured contrast.
+- [`BRANDING.md`](BRANDING.md) — name, mark, brands and modes, brand packs,
+  palette with measured contrast.
 - [`ATTRIBUTION.md`](ATTRIBUTION.md) — third-party marks, figures and fonts.
 - [`docs/assets/README.md`](docs/assets/README.md) — how each screenshot was
   made.
