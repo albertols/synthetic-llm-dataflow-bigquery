@@ -50,7 +50,7 @@ flowchart TB
   classDef shell fill:#eb6834,color:#0b0d12,stroke:#b44f26
   classDef lazy  fill:#2a78d6,color:#fff,stroke:#1d5599
 
-  MAIN["main.tsx<br/>theme stamp · QueryClient · ErrorBoundary"]:::shell
+  MAIN["main.tsx<br/>brand and theme stamp · QueryClient · ErrorBoundary"]:::shell
   ROUTER["router.tsx<br/>code-based routes"]:::shell
   SHELL["app/AppShell<br/>TopNav · skip link · announcer · toasts"]:::shell
   ROUTES["features/&lt;tab&gt;/route.tsx<br/>search validator + lazy component"]:::shell
