@@ -150,7 +150,8 @@ def test_row_doc_digests_reads_the_row_doc_prefix_of_one_vector_space():
   client = _FakeBqClient([{"row_digest": "r0"}, {"row_digest": "r1"}])
   store = BigQueryChunkStore(_TABLE, client=client)
   assert store.row_doc_digests("dig", "e", "v1") == {"r0", "r1"}
-  ((sql, params),) = client.queries
+  assert len(client.queries) == 1
+  sql, params = client.queries[0]
   assert "SELECT DISTINCT row_digest" in sql and _TABLE in sql
   assert params == {
       "reference_digest": "dig",

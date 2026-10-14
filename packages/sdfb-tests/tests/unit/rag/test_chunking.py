@@ -102,6 +102,7 @@ def test_scope_constants_match_engine_read_contract():
 
   assert MAX_ROW_DOC_ROWS == 1024
   # The engine reads `ctx.rag_row_docs_limit`, whose default is this.
+  # pylint: disable-next=unsubscriptable-object  # pydantic's model_fields is a dict
   assert GenerationContext.model_fields[
       "rag_row_docs_limit"].default == MAX_ROW_DOC_ROWS
   assert MAX_FREE_TEXT_VALUES_PER_COLUMN == 1024

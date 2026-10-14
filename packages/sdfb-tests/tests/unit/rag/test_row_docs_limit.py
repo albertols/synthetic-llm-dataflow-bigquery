@@ -35,6 +35,7 @@ import logging
 
 import apache_beam as beam
 import pytest
+from apache_beam.options.pipeline_options import PipelineOptions
 from apache_beam.testing.test_pipeline import TestPipeline
 from pydantic import ValidationError
 from sdfb_beam.cli.run_pipeline import (
@@ -43,10 +44,16 @@ from sdfb_beam.cli.run_pipeline import (
     plan_rag_population,
     resolve_launch_row_docs_limit,
 )
-from sdfb_beam.pipeline import PipelineConfig, _population_branch
+from sdfb_beam.io.local_sinks import WriteToJsonLines
+from sdfb_beam.pipeline import (
+    PipelineConfig,
+    _population_branch,
+    build_pipeline,
+)
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationContext
 from sdfb_core.engines.b1_rag import B1RagEngine
+from sdfb_core.engines.generation_plan import clear_generation_plan_log
 from sdfb_core.rag import InMemoryChunkStore
 from sdfb_core.rag.chunking import (
     CHUNK_KIND_FREE_TEXT_COL,
@@ -148,6 +155,7 @@ def _ctx(**kw) -> GenerationContext:
 
 def test_the_default_is_the_old_constant():
   assert MAX_ROW_DOC_ROWS == 1024
+  # pylint: disable-next=unsubscriptable-object  # pydantic's model_fields is a dict
   assert GenerationContext.model_fields[
       "rag_row_docs_limit"].default == MAX_ROW_DOC_ROWS
   assert PipelineConfig.__dataclass_fields__[
@@ -376,11 +384,6 @@ def test_a_topup_writes_only_the_missing_rows_and_no_values():
 
 def test_the_knob_reaches_the_worker_engine(tmp_path, customers_schema,
                                             customers_reference, caplog):
-  from apache_beam.options.pipeline_options import PipelineOptions
-  from sdfb_beam.io.local_sinks import WriteToJsonLines
-  from sdfb_beam.pipeline import build_pipeline
-  from sdfb_core.engines.generation_plan import clear_generation_plan_log
-
   config = PipelineConfig(
       table_schema=customers_schema,
       engine_name="b1_rag",
