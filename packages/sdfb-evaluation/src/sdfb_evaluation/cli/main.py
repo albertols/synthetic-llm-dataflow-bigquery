@@ -87,6 +87,9 @@ Dataflow flex template and Composer pass every parameter as
 is Beam's to read.)
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §11 Evaluation (sdfb-evaluation)
+(ADR 0041).
 """
 
 from __future__ import annotations

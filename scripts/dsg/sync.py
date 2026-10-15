@@ -306,11 +306,18 @@ def stage_tree(export_root: Path, manifest: Manifest, staging: Path, *,
   # The guides carry one holder on every source file. Only that line differs
   # from the source, so a traceback names the same line in both trees.
   for rel in _walk(staging):
+    path = staging / rel
     if headers.in_scope(rel):
-      path = staging / rel
       text = path.read_text(encoding="utf-8")
       path.write_text(
           headers.retitle(text, headers.DSG_HOLDER), encoding="utf-8")
+    # The header quoted elsewhere: a SQL file's `--` block, a test fixture
+    # that embeds a licensed file's text. Other bytes are kept as they are.
+    raw = path.read_bytes()
+    if headers.HOLDER.encode() in raw:
+      path.write_bytes(
+          headers.retitle_copies(raw.decode("utf-8"),
+                                 headers.DSG_HOLDER).encode("utf-8"))
 
 
 def requirements_banner(manifest: Manifest, sha: str) -> str:
@@ -607,7 +614,8 @@ def render_pr_body(template: str,
     cloud_status = (
         "> [!IMPORTANT]\n> **Not yet run in Google Cloud** for this sync. "
         "The gates above are local and CI-equivalent; a live Dataflow run "
-        "of `scripts/04_run_dataflow.sh` is pending.")
+        "of `scripts/04_run_dataflow.sh` and `scripts/06_run_evaluation.sh` "
+        "is pending.")
   values = {
       "ref": ref,
       "sha": sha,

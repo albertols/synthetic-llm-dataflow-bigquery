@@ -42,6 +42,7 @@ DSG_HOLDER = "Google LLC"
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _FIRST = re.compile(r"^#  Copyright (\d{4}) (.+)$")
+_COPY = re.compile(r"(Copyright \d{4} )" + re.escape(HOLDER))
 # Lines a tool reads only on line 1: a shebang, a Dockerfile parser directive.
 _LEAD = re.compile(r"^(#!|# syntax=|# escape=)")
 _DOCSTRING = ('"""', "'''", 'r"""', "r'''")
@@ -129,6 +130,16 @@ def retitle(text: str, holder: str) -> str:
   ending = "\n" if lines[start].endswith("\n") else ""
   lines[start] = f"#  Copyright {first.group(1)} {holder}{ending}"
   return "".join(lines)
+
+
+def retitle_copies(text: str, holder: str) -> str:
+  """`text` with every `Copyright <year> <HOLDER>` naming `holder` instead.
+
+  For the header where `retitle` does not look: a `--` comment block (SQL),
+  or a test fixture that embeds a licensed file's text. Any other mention of
+  the holder is kept, and the sync's headers gate still reports it.
+  """
+  return _COPY.sub(lambda match: match.group(1) + holder, text)
 
 
 def _list_files(root: Path) -> list[str]:

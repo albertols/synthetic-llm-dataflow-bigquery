@@ -219,6 +219,9 @@ every DDL statement, so nothing is created and each such table is
 planned as scope `unknown` with that reason — unplanned.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0038).
 """
 
 from __future__ import annotations

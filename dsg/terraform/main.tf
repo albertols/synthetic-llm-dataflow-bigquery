@@ -63,6 +63,26 @@ locals {
   }
   gpu          = local.gpu_profiles[var.gpu]
   machine_type = coalesce(var.machine_type, local.gpu.machine_type)
+
+  # The launcher and the workers of both jobs run as this account. What the
+  # evaluation (scripts/06_run_evaluation.sh) needs is already here:
+  # dataflow.developer holds every permission of dataflow.viewer (reading the
+  # generation job's window), bigquery.dataEditor reads the sources and the
+  # landing tables, writes the evaluation tables and creates snapshots, and
+  # readSessionUser gives the Storage Read API. Not granted:
+  # bigquery.tables.deleteSnapshot (dataOwner and above), which an expiring
+  # source pin needs; the evaluation then reads the sources unpinned, with a
+  # warning, and these sources are snapshots no job writes.
+  dataflow_sa_roles = [
+    "roles/dataflow.worker",
+    "roles/dataflow.developer",
+    "roles/bigquery.dataEditor",
+    "roles/bigquery.jobUser",
+    "roles/bigquery.readSessionUser",
+    "roles/storage.objectAdmin",
+    "roles/monitoring.metricWriter",
+    "roles/logging.logWriter",
+  ]
 }
 
 data "google_project" "project" {
@@ -123,16 +143,7 @@ module "dataflow_sa" {
   project_id = var.project_id
   name       = var.service_account_name
   iam_project_roles = {
-    (var.project_id) = [
-      "roles/dataflow.worker",
-      "roles/dataflow.developer",
-      "roles/bigquery.dataEditor",
-      "roles/bigquery.jobUser",
-      "roles/bigquery.readSessionUser",
-      "roles/storage.objectAdmin",
-      "roles/monitoring.metricWriter",
-      "roles/logging.logWriter",
-    ]
+    (var.project_id) = local.dataflow_sa_roles
   }
 }
 

@@ -221,6 +221,9 @@ DeLong, DeLong & Clarke-Pearson (1988); Woo et al. (2009); Snoke et al.
 for systematic PPS sampling.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0026).
 """
 
 from __future__ import annotations

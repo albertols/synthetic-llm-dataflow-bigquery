@@ -20,6 +20,9 @@ Includes a parity block pinning `shape_of`/`collapse` outputs identical to
 import: `test_independence.py` forbids reaching outside this package).
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0026).
 """
 
 from __future__ import annotations
