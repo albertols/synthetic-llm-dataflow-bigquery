@@ -25,17 +25,26 @@ laptop dependency) — same trade-off the file's other referencers accept.
 The DAG is read with ``ast``, never line-matched, so reformatting it
 (yapf, wrapped string literals) cannot break or fake these contracts.
 
-One template serves two jobs (ADR 0041, amendment of 2026-10-06): the
-metadata is the union of the generator's parameters, the selector
-``sdfb_job`` and the evaluator's parameters, and every parameter is
-optional in it, because a launch for one job cannot be made to supply the
-other's::
+One template serves two jobs (ADR 0041, amendment of 2026-10-06), and
+``docker/flex_template_metadata.json`` is the one file that declares its
+parameters (the evaluator's own metadata was removed, note of 2026-10-15).
+Every parameter is optional in it, because a launch for one job cannot be
+made to supply the other's::
 
     docker/flex_template_metadata.json
-      = run_pipeline's flags (minus the undeclared ones)
+      = run_pipeline's flags (minus the undeclared ones; the names both
+        jobs use appear once, and say what each job does with them)
       + the selector, sdfb_job
-      + packages/sdfb-evaluation/deploy/flex_template_metadata.json
-        (the three names both jobs use appear once)
+      + Beam's own disk_size_gb
+      + the parameters whose help text starts "Evaluation only"
+
+This suite holds the generator's half of that equation. The evaluator's
+suite (``packages/sdfb-evaluation/tests/unit/test_launch_surfaces.py``)
+holds the other half against its own CLI: every parameter marked
+"Evaluation only" is a flag of ``sdfb-eval run``, and every flag a launch
+can supply is declared. Neither suite imports the other's package; the
+help-text marker, which the metadata's description states, is the
+contract between them, so together they leave no parameter unowned.
 
 What a generation launch must supply is therefore the CLI's to say
 (``sdfb_tests.launch_surface.generator_required``), and the DAG's launch is
@@ -56,16 +65,12 @@ import json
 import re
 from pathlib import Path
 
-import pytest
 from sdfb_tests.launch_surface import generator_flags, generator_required
 
 _REPO_ROOT = Path(__file__).parents[5]
 _METADATA = _REPO_ROOT / "docker" / "flex_template_metadata.json"
 _COMPOSER_DAG = _REPO_ROOT / "composer" / "synthetic_beam_bigquery.py"
 _FLEX_ENTRY = _REPO_ROOT / "docker" / "flex_entry.py"
-_EVALUATOR_METADATA = (
-    _REPO_ROOT / "packages" / "sdfb-evaluation" / "deploy" /
-    "flex_template_metadata.json")
 
 # Flags the generator's CLI accepts and the template never declared: they
 # stay reachable only from a direct launch (ADR 0024 §3c precedent).
@@ -76,6 +81,9 @@ _SHARED = frozenset({
     "validation_runs_table"
 })
 _SELECTOR = "sdfb_job"
+# How a parameter only the evaluation job reads begins its help text. The
+# evaluator's suite checks each such parameter against `sdfb-eval run`.
+_EVALUATION_ONLY = "Evaluation only"
 # Beam's own option, declared so a launch may pass it: both entries hand
 # what they do not parse to Beam. The evaluation job runs on this same
 # multi-GB image and its entry pins no boot disk (`run_pipeline` pins its
@@ -311,41 +319,54 @@ def test_flex_template_exposes_thresholds_uri():
 # --------------------------------------------------------------------------
 # one template, two jobs
 # --------------------------------------------------------------------------
-def _parameters(path: Path = _METADATA) -> dict[str, dict]:
-  parameters = json.loads(path.read_text(encoding="utf-8"))["parameters"]
+def _parameters() -> dict[str, dict]:
+  parameters = json.loads(_METADATA.read_text(encoding="utf-8"))["parameters"]
   by_name = {p["name"]: p for p in parameters}
   assert len(by_name) == len(parameters), "a parameter is declared twice"
   return by_name
 
 
-def _evaluator_parameters() -> dict[str, dict]:
-  if not _EVALUATOR_METADATA.is_file():
-    pytest.skip("packages/sdfb-evaluation is not part of this tree")
-  return _parameters(_EVALUATOR_METADATA)
+def _evaluation_only(template: dict[str, dict]) -> set[str]:
+  return {
+      name for name, parameter in template.items()
+      if parameter["helpText"].startswith(_EVALUATION_ONLY)
+  }
 
 
-def test_the_template_is_the_generator_the_selector_and_the_evaluator():
+def test_the_template_is_the_generator_the_selector_the_disk_and_the_rest():
+  """Every parameter is a generator flag, the selector, Beam's disk, or
+    marked as the evaluation's alone; the evaluator's suite checks the
+    marked ones against its own CLI."""
+  template = _parameters()
   generator = generator_flags() - _UNDECLARED
-  evaluator = set(_evaluator_parameters()) - {_SELECTOR}
-  assert generator & evaluator == _SHARED
-  assert evaluator >= _BEAM_PASSTHROUGH and not generator & _BEAM_PASSTHROUGH
-  assert set(_parameters()) == generator | {_SELECTOR} | evaluator
+  marked = _evaluation_only(template)
+  assert not generator & ({_SELECTOR} | _BEAM_PASSTHROUGH | marked)
+  assert set(template) == generator | {_SELECTOR} | _BEAM_PASSTHROUGH | marked
   assert generator_flags() >= _UNDECLARED, "an undeclared flag is gone"
+  description = json.loads(_METADATA.read_text(encoding="utf-8"))["description"]
+  assert f"'{_EVALUATION_ONLY}'" in description
 
 
-@pytest.mark.parametrize(
-    "path", [_METADATA, _EVALUATOR_METADATA], ids=["shared", "evaluator"])
-def test_no_template_parameter_has_a_name_the_launcher_owns(path: Path):
+def test_the_generator_flags_the_evaluation_also_reads_are_the_shared_ones():
+  """A generator flag the evaluation job also reads says what it means
+    for it ("Evaluation: ..."); those are exactly the shared names."""
+  template = _parameters()
+  also_read = {
+      name for name in generator_flags() - _UNDECLARED
+      if "Evaluation:" in template[name]["helpText"]
+  }
+  assert also_read == _SHARED
+
+
+def test_no_template_parameter_has_a_name_the_launcher_owns():
   """The launcher drops such a parameter before the entry sees it, so the
     launch runs without it and fails (or worse, does not) far from here."""
-  if not path.is_file():
-    pytest.skip(f"{path.name} is not part of this tree")
-  assert not set(_parameters(path)) & _LAUNCHER_OWNED
+  assert not set(_parameters()) & _LAUNCHER_OWNED
 
 
 def test_the_evaluations_target_job_is_generation_job_id():
-  for parameters in (_parameters(), _evaluator_parameters()):
-    assert "generation_job_id" in parameters and "job_id" not in parameters
+  parameters = _parameters()
+  assert "generation_job_id" in parameters and "job_id" not in parameters
 
 
 def test_every_template_parameter_is_optional():
@@ -387,19 +408,8 @@ def test_the_generation_launch_supplies_every_flag_the_cli_requires():
   assert every <= set(_parameters()), every - set(_parameters())
 
 
-def test_evaluator_parameters_keep_their_own_regexes():
-  """What the evaluator's own template would refuse or accept, this one
-    does too: same pattern, or none where it has none."""
+def test_no_generator_flag_reads_as_the_evaluations():
   template = _parameters()
-  for name, parameter in _evaluator_parameters().items():
-    assert template[name].get("regexes") == parameter.get("regexes"), name
-
-
-def test_evaluator_only_parameters_say_so():
-  template = _parameters()
-  theirs = set(_evaluator_parameters()) - _SHARED - {_SELECTOR}
-  for name in theirs - _BEAM_PASSTHROUGH:
-    assert template[name]["helpText"].startswith("Evaluation only"), name
   for name in generator_flags() - _UNDECLARED - _SHARED:
     assert not template[name]["helpText"].startswith("Evaluation"), name
 

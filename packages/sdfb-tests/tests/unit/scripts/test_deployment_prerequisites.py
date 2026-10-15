@@ -690,20 +690,24 @@ def test_step13_template_development_pointer_is_enough(monkeypatch):
 
 
 @needs_evaluator
-def test_step13_template_evaluator_only_is_also_enough(monkeypatch):
-  name = f"sdfb-evaluation-{_mod.eval_version(_EVAL_PKG)}-template.json"
-  row, _ = _run13j(monkeypatch, name)
-  assert row.status == _mod.OK
-  assert name in row.resource and "evaluator-only" in row.resource
+def test_step13_template_asks_only_for_the_deployments_one_template(
+    monkeypatch):
+  """No evaluator-only template exists any more (ADR 0041, note of
+    2026-10-15): the names asked for are the deployment's template's
+    alone, the release's first."""
+  _, gcs = _run13j(monkeypatch, "sdfb-notes.txt")
+  assert [uri for uri in gcs.asked if uri.startswith("gs://b/synthetic/")] == [
+      f"gs://b/synthetic/{_main_template()}",
+      "gs://b/synthetic/sdfb-latest-template.json"
+  ]
 
 
 @needs_evaluator
-def test_step13_template_names_the_main_one_when_both_exist(monkeypatch):
-  evaluator = f"sdfb-evaluation-{_mod.eval_version(_EVAL_PKG)}-template.json"
-  row, _ = _run13j(monkeypatch, evaluator, _main_template())
+def test_step13_template_names_the_release_one_when_both_exist(monkeypatch):
+  row, _ = _run13j(monkeypatch, "sdfb-latest-template.json", _main_template())
   assert row.status == _mod.OK
   assert _main_template() in row.resource
-  assert "evaluator-only" not in row.resource
+  assert "development pointer" not in row.resource
 
 
 @needs_evaluator
@@ -735,9 +739,12 @@ def test_step13_template_absent_and_no_bucket(monkeypatch):
   row, gcs = _run13j(monkeypatch, "sdfb-notes.txt")
   assert row.status == _mod.SKIP
   assert "not built yet" in row.resource
-  # what to build: the deployment's one template; the other is optional
+  # what to build: the deployment's one template, and nothing else
   assert "docker/flex_template_metadata.json" in row.resource
-  assert "build_flex_template.sh" in row.resource
+  assert "gs://b/synthetic/sdfb-<version>-template.json" in row.resource
+  assert "sdfb_job=evaluation" in row.resource
+  assert "build_flex_template.sh" not in row.resource
+  assert "evaluator-only" not in row.resource
   assert gcs.listed == [("b", "synthetic/sdfb-")]
   row, _ = _run13j(
       monkeypatch, extra=("--templates-bucket", "b", "--require-evaluation"))
@@ -818,7 +825,6 @@ def test_committed_evaluator_files_match_what_step13_reads():
   assert consts["tables"] == _EVAL_TABLES
   assert set(consts["partitioning"]) == set(_EVAL_TABLES)
   assert set(consts["clustering"]) == set(_EVAL_TABLES)
-  assert _mod.eval_version(_EVAL_PKG)
   assert _mod.EVAL_TABLES == _EVAL_TABLES
   assert _mod.EVAL_VIEWS == _EVAL_VIEWS
 

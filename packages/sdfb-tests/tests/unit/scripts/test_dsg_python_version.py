@@ -37,8 +37,9 @@ _PINNED_NAMES = ("Dockerfile", ".python-version")
 
 # The evaluator is a standalone uv project with its own lock and its own
 # Python pin (decision D1), shipped as its own unit. This test covers the
-# generator's files; the evaluator's pin is checked against its Dockerfile
-# and lock inside the package (tests/unit/test_launch_surfaces.py).
+# generator's files; the evaluator's pin is checked against the one image
+# (docker/Dockerfile) and its own lock inside the package
+# (tests/unit/test_launch_surfaces.py).
 _STANDALONE_EVALUATOR = "packages/sdfb-evaluation/"
 
 
