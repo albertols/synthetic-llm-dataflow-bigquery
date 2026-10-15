@@ -8,7 +8,8 @@ description: Use when scoring a generation run's landed tables against their sou
 Decision: [ADR 0041](../../../docs/adr/0041-evaluation-standalone-package.md). Design and figures:
 [`docs/designs/2026-07-07-evaluation-framework-design.md`](../../../docs/designs/2026-07-07-evaluation-framework-design.md)
 and [`docs/DESIGN.md` §11](../../../docs/DESIGN.md#11-evaluation-sdfb-evaluation). Commands and flags:
-[`packages/sdfb-evaluation/README.md`](../../../packages/sdfb-evaluation/README.md) (the source of truth for every flag).
+[`packages/sdfb-evaluation/docs/CLI.md`](../../../packages/sdfb-evaluation/docs/CLI.md) (every flag, as `--help`
+prints it), from the package [README](../../../packages/sdfb-evaluation/README.md).
 
 **State: built and reviewed on a laptop with invented data. Nothing has run on Google Cloud**: the image is
 unbuilt with the evaluator in it, the template unlaunched for an evaluation, neither Composer DAG parsed by
