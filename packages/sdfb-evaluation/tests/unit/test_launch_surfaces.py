@@ -11,34 +11,39 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Tests for the launch surfaces (Task 28): the standalone CPU Dataflow
-image, the flex template metadata and the template build script.
+"""Tests for the launch surfaces (Task 28): the evaluator's half of the
+repository's one template and the one image it runs in.
 
-The repository's deployment uses ONE image for generation and evaluation
-(`docker/Dockerfile` at the repository root, Ruling R118); the files here
-are the surface of the evaluator as a unit of its own:
+The deployment uses ONE image and ONE template for generation and
+evaluation (ADR 0041, amendment of 2026-10-06), and one file declares the
+template's parameters (the evaluator's own image, template metadata and
+build script were removed, note of 2026-10-15):
 
-    file                                  what it is now
+    file at the repository root           what this suite checks
     ────────────────────────────────────  ──────────────────────────────────
-    docker/Dockerfile                     the standalone CPU image, for the
-                                          package copied out on its own
-    deploy/flex_template_metadata.json    the parameters of an
-                                          evaluator-only template (the
-                                          shared template declares them all)
-    deploy/build_flex_template.sh         builds that template from an
-                                          EXISTING image; it builds no image
+    docker/flex_template_metadata.json    every `sdfb-eval run` flag a
+                                          launch can supply is declared, as
+                                          the CLI parses it; every parameter
+                                          marked "Evaluation only" is one
+    docker/Dockerfile                     the Beam SDK and Python the
+                                          evaluator is pinned to; the
+                                          worker-image variable its driver
+                                          reads
 
-Static checks, plus the build script run against a recording `gcloud`:
-nothing is built and nothing reaches the network.
+The generator's half of the same metadata is checked by
+`packages/sdfb-tests/tests/unit/docker/test_launch_surfaces.py`. Neither
+suite imports the other's package: a parameter whose help text starts
+with the marker is the evaluation's alone, and every other one is the
+generator's, the selector or Beam's disk (that suite checks them). Static
+checks only: nothing is built and nothing reaches the network. A copy of
+the package without the repository around it skips this module.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
-import subprocess
 import tomllib
 from pathlib import Path
 
@@ -48,19 +53,44 @@ from apache_beam.options.pipeline_options import (
     WorkerOptions,
 )
 
+from sdfb_evaluation.cli import driver
 from sdfb_evaluation.cli.main import (
     _flag,
     _subparsers,
     parse_args,
     public_run_flags,
 )
-from sdfb_evaluation.version import EVALUATOR_VERSION
 
 PACKAGE = Path(__file__).resolve().parents[2]
-DOCKERFILE = PACKAGE / "docker" / "Dockerfile"
-METADATA = PACKAGE / "deploy" / "flex_template_metadata.json"
-BUILD_SCRIPT = PACKAGE / "deploy" / "build_flex_template.sh"
-ENTRYPOINT = PACKAGE / "docker" / "entrypoint.sh"
+REPO_ROOT = PACKAGE.parents[1]
+METADATA = REPO_ROOT / "docker" / "flex_template_metadata.json"
+DOCKERFILE = REPO_ROOT / "docker" / "Dockerfile"
+
+if not (METADATA.is_file() and DOCKERFILE.is_file()):
+  pytest.skip(
+      "the repository's docker/ is not beside this copy of the package",
+      allow_module_level=True)
+
+# The template launcher passes these to the entry itself (the template
+# declares none of them): the runner is DataflowRunner, project and region
+# are the launch's. A template parameter of the same name could contradict
+# it, in an order-dependent way (Ruling R97).
+LAUNCHER_SUPPLIED = frozenset({"--runner", "--project", "--region"})
+
+# Not a flag of the CLI: the selector the image's entry
+# (docker/flex_entry.py) reads and removes before the CLI sees the
+# arguments (Ruling R118).
+SELECTOR = "--sdfb_job"
+
+# Not flags of the CLI either: Beam's own options, which `run` hands to Beam
+# unchanged. They are declared so a launch may pass them. The worker boot
+# disk is the one an evaluation launch must pass: the image is multi-GB and
+# Dataflow's default disk overflows while a worker unpacks it.
+BEAM_PASSTHROUGH = frozenset({"--disk_size_gb"})
+
+# How a parameter only the evaluation job reads begins its help text (the
+# metadata's description says so).
+EVALUATION_ONLY = "Evaluation only"
 
 
 def _dockerfile() -> str:
@@ -71,10 +101,26 @@ def _metadata() -> dict:
   return json.loads(METADATA.read_text(encoding="utf-8"))
 
 
-def _env(name: str) -> str:
-  match = re.search(rf'^ENV {name}="?([^"\s]+)"?\s*$', _dockerfile(), re.M)
-  assert match, f"ENV {name} not found in the Dockerfile"
-  return match.group(1)
+def _parameters() -> dict[str, dict]:
+  parameters = _metadata()["parameters"]
+  by_name = {p["name"]: p for p in parameters}
+  assert len(by_name) == len(parameters), "a parameter is declared twice"
+  return by_name
+
+
+def _launch_flags() -> set[str]:
+  """The `run` flags a template launch can supply, without dashes."""
+  flags = set(public_run_flags())
+  assert flags, "no public flags: the parser changed shape"
+  assert flags >= LAUNCHER_SUPPLIED
+  return {flag[2:] for flag in flags - LAUNCHER_SUPPLIED}
+
+
+def _evaluation_parameters() -> dict[str, dict]:
+  """The parameters the evaluation job reads: its launch flags, the
+  selector and Beam's disk."""
+  names = _launch_flags() | {SELECTOR[2:]} | {f[2:] for f in BEAM_PASSTHROUGH}
+  return {n: p for n, p in _parameters().items() if n in names}
 
 
 def _locked(name: str) -> str:
@@ -84,59 +130,45 @@ def _locked(name: str) -> str:
   return versions[0]
 
 
-# The template launcher passes these to the entry itself (the generator's
-# template declares none of them): the runner is DataflowRunner, project and
-# region are the launch's. A template parameter of the same name could
-# contradict it, in an order-dependent way (Ruling R97).
-LAUNCHER_SUPPLIED = frozenset({"--runner", "--project", "--region"})
-
-# Not a flag of the CLI: the selector the shared image's entry
-# (docker/flex_entry.py at the repository root) reads and removes before
-# the CLI sees the arguments. A template built from this metadata on that
-# image selects the evaluator with it (Ruling R118).
-SELECTOR = "--sdfb_job"
-
-# Not flags of the CLI either: Beam's own options, which `run` hands to Beam
-# unchanged. They are declared so a launch may pass them. The worker boot
-# disk is the one a launch on the shared image must pass: that image is
-# multi-GB and Dataflow's default disk overflows while a worker unpacks it.
-BEAM_PASSTHROUGH = frozenset({"--disk_size_gb"})
+def test_every_flag_a_launch_can_supply_is_declared() -> None:
+  flags = _launch_flags()
+  assert SELECTOR[2:] not in flags
+  assert not {f[2:] for f in BEAM_PASSTHROUGH} & flags
+  assert flags <= set(_parameters()), sorted(flags - set(_parameters()))
 
 
-def test_metadata_mirrors_every_public_run_flag_plus_the_selector() -> None:
-  names = [p["name"] for p in _metadata()["parameters"]]
-  assert len(names) == len(set(names))
-  flags = public_run_flags()
-  assert flags, "no public flags: the parser changed shape"
-  assert set(flags) >= LAUNCHER_SUPPLIED
-  assert SELECTOR not in flags and not BEAM_PASSTHROUGH & set(flags)
-  declared = (set(flags) - LAUNCHER_SUPPLIED) | {SELECTOR} | BEAM_PASSTHROUGH
-  assert sorted(f"--{n}" for n in names) == sorted(declared)
+def test_every_parameter_marked_evaluation_only_is_a_run_flag() -> None:
+  """The evaluator's half of "no parameter is unowned": what the marker
+  gives to the evaluation, its CLI must take. Every unmarked parameter is
+  the generator's, the selector or Beam's disk, which the generator's
+  suite checks."""
+  marked = {
+      name for name, parameter in _parameters().items()
+      if parameter["helpText"].startswith(EVALUATION_ONLY)
+  }
+  assert marked, "no parameter carries the marker: it changed spelling"
+  assert marked <= _launch_flags(), sorted(marked - _launch_flags())
+  assert f"'{EVALUATION_ONLY}'" in _metadata()["description"]
+
+
+def test_a_flag_the_generator_also_takes_says_what_it_means_here() -> None:
+  """A launch flag without the marker is a name both jobs use; its help
+  text gives the evaluation's meaning beside the generation's."""
+  template = _parameters()
+  for name in sorted(_launch_flags()):
+    text = template[name]["helpText"]
+    if not text.startswith(EVALUATION_ONLY):
+      assert "Generation:" in text and "Evaluation:" in text, name
 
 
 def test_the_selector_is_optional_and_admits_the_two_jobs() -> None:
-  (selector,) = [
-      p for p in _metadata()["parameters"] if p["name"] == SELECTOR[2:]
-  ]
+  selector = _parameters()[SELECTOR[2:]]
   assert selector["isOptional"] is True
   (pattern,) = selector["regexes"]
   for value in ("evaluation", "generation", ""):
     assert re.fullmatch(pattern, value), value
   assert not re.fullmatch(pattern, "both")
   assert "evaluation" in selector["helpText"]
-
-
-def test_the_selector_is_harmless_where_the_cli_is_the_entry() -> None:
-  """On the standalone image `run_evaluation.py` is the entry and nothing
-  removes the selector: it must stay a Beam argument Beam itself drops,
-  never a usage error of this CLI."""
-  args, extras = parse_args([
-      "run", "--job_id", "J", "--project", "p", "--region", "r", "--runner",
-      "DataflowRunner", f"{SELECTOR}=evaluation"
-  ])
-  assert args.job_id == "J"
-  assert extras == [f"{SELECTOR}=evaluation"]
-  assert "sdfb_job" not in PipelineOptions(extras).get_all_options()
 
 
 def test_the_worker_disk_is_beams_own_option_and_never_empty() -> None:
@@ -160,28 +192,8 @@ def test_the_worker_disk_is_beams_own_option_and_never_empty() -> None:
   assert raised.value.code == 2
 
 
-def test_the_shared_template_declares_this_metadata_whole() -> None:
-  """The repository's one template (docker/flex_template_metadata.json)
-  carries every parameter here under the same name and pattern, so the
-  same launch body works against either template."""
-  shared = PACKAGE.parents[1] / "docker" / "flex_template_metadata.json"
-  if not shared.is_file():  # the package stands alone as its own unit
-    pytest.skip("the repository-root template metadata is not beside this "
-                "package")
-  template = {
-      p["name"]: p
-      for p in json.loads(shared.read_text(encoding="utf-8"))["parameters"]
-  }
-  for parameter in _metadata()["parameters"]:
-    name = parameter["name"]
-    assert name in template, name
-    assert template[name].get("regexes") == parameter.get("regexes"), name
-    assert template[name].get("isOptional") is True, name
-
-
 def test_metadata_leaves_launcher_supplied_flags_out() -> None:
-  parameters = _metadata()["parameters"]
-  names = {"--" + p["name"] for p in parameters}
+  names = {"--" + name for name in _parameters()}
   assert not names & LAUNCHER_SUPPLIED
 
 
@@ -197,8 +209,7 @@ def _run_choices() -> dict[str, tuple[str, ...]]:
 
 
 def _regex(name: str) -> str:
-  (parameter,) = [p for p in _metadata()["parameters"] if p["name"] == name]
-  (pattern,) = parameter["regexes"]
+  (pattern,) = _parameters()[name]["regexes"]
   return pattern
 
 
@@ -237,96 +248,35 @@ def test_boolean_regex_accepts_what_the_cli_parser_accepts(name: str) -> None:
     assert bool(re.fullmatch(pattern, value)) == accepted, (name, value)
 
 
-def test_metadata_parameters_are_well_formed() -> None:
+def test_evaluation_parameters_are_well_formed() -> None:
   metadata = _metadata()
   assert metadata["name"] and metadata["description"]
-  for parameter in metadata["parameters"]:
-    assert parameter["label"] and parameter["helpText"], parameter["name"]
-    assert re.fullmatch(r"[a-z][a-z0-9_]*", parameter["name"])
+  for name, parameter in _evaluation_parameters().items():
+    assert parameter["label"] and parameter["helpText"], name
+    assert re.fullmatch(r"[a-z][a-z0-9_]*", name)
     # A flex template passes an unset optional parameter as an empty
     # string, which the CLI reads as "not given"; no parameter is required.
-    assert parameter.get("isOptional") is True, parameter["name"]
+    assert parameter.get("isOptional") is True, name
     for pattern in parameter.get("regexes", []):
       re.compile(pattern)
 
 
 def test_metadata_has_no_launch_only_parameters() -> None:
-  names = {p["name"] for p in _metadata()["parameters"]}
-  assert not names & {"experiments", "enable_data_sampling", "fixture_dir"}
+  assert not set(_parameters()) & {
+      "experiments", "enable_data_sampling", "fixture_dir"
+  }
 
 
-def test_flex_entry_file_exists() -> None:
-  entry = Path(_env("FLEX_TEMPLATE_PYTHON_PY_FILE"))
-  assert entry.parts[:2] == ("/", "template")
-  assert (PACKAGE / Path(*entry.parts[2:])).is_file()
-  assert entry.name == "run_evaluation.py"
-
-
-def test_dockerfile_copies_only_files_the_package_has() -> None:
-  copies = re.findall(r"^COPY (?!--from)(.+) \S+$", _dockerfile(), re.M)
-  assert len(copies) >= 3
-  for line in copies:
-    for source in line.split():
-      prefix = "packages/sdfb-evaluation/"
-      assert source.startswith(prefix), source
-      assert (PACKAGE / source[len(prefix):]).exists(), source
-
-
-def test_entrypoint_is_the_dispatch_script() -> None:
-  text = _dockerfile()
-  entrypoint = re.search(r'^ENTRYPOINT \["([^"]+)"\]$', text, re.M)
-  assert entrypoint
-  copied = re.search(
-      r"^COPY (packages/sdfb-evaluation/docker/entrypoint\.sh) (\S+)$", text,
-      re.M)
-  assert copied and copied.group(2) == entrypoint.group(1)
-  assert (PACKAGE / "docker" / "entrypoint.sh").is_file()
-  assert f"chmod +x {entrypoint.group(1)}" in text
-
-
-def test_entrypoint_script_dispatches_by_the_fnapi_flags() -> None:
-  script = ENTRYPOINT.read_text(encoding="utf-8")
-  assert script.startswith("#!/bin/sh")
-  assert "exec /opt/apache/beam/boot" in script
-  assert "exec /opt/google/dataflow/python_template_launcher" in script
-  assert "ADR 0009" in script
-  result = subprocess.run(["sh", "-n", str(ENTRYPOINT)],
-                          capture_output=True,
-                          text=True,
-                          check=False)
-  assert result.returncode == 0, result.stderr
-
-
-def _discriminators(path: Path) -> set[str]:
-  return set(re.findall(r"--\w+=\*", path.read_text(encoding="utf-8")))
-
-
-def test_entrypoint_discriminator_equals_the_generators() -> None:
-  generator = PACKAGE.parents[1] / "docker" / "entrypoint.sh"
-  if not generator.is_file():  # the package stands alone as its own unit
-    pytest.skip("the repository-root entrypoint is not beside this package")
-  assert _discriminators(ENTRYPOINT) == _discriminators(generator)
-  assert len(_discriminators(ENTRYPOINT)) == 5
-
-
-def test_dockerfile_bakes_the_worker_image_and_says_how_to_build_it() -> None:
-  text = _dockerfile()
-  assert 'ARG SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG=""' in text
-  assert ("ENV SDFB_EVAL_SDK_CONTAINER_IMAGE="
-          "$SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG") in text
-  # declared after the dependency layers, so it never invalidates them
-  assert text.index('ARG SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG=""') > text.rindex(
-      "RUN uv sync")
-  # no script builds this image any more: the header says how, with the
-  # build argument that makes the workers run the same image
-  header = text[:text.index("\nFROM ")]
-  assert "docker build" in header
-  assert "--build-arg SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG=" in header
+def test_the_image_bakes_the_worker_image_variable_the_driver_reads() -> None:
+  """The driver applies this variable as the workers' image when a launch
+  gives none; the image sets it from its one build argument."""
+  variable = driver._WORKER_IMAGE_ENV  # pylint: disable=protected-access  # the name the image must set
+  assert re.search(rf"^ENV {variable}=\$\w+_ARG$", _dockerfile(), re.M)
 
 
 def test_beam_sdk_tag_equals_locked_apache_beam() -> None:
-  match = re.search(r"^FROM apache/beam_python(\d+\.\d+)_sdk:(\S+)$",
-                    _dockerfile(), re.M)
+  match = re.search(r'^ARG BEAM_SDK_IMAGE="apache/beam_python(\d+\.\d+)_sdk:'
+                    r'(\S+)"$', _dockerfile(), re.M)
   assert match
   assert match.group(2) == _locked("apache-beam")
 
@@ -337,166 +287,17 @@ def test_python_minor_matches_the_package() -> None:
       encoding="utf-8"))["project"]["requires-python"]
   assert minor in requires
   text = _dockerfile()
-  base = re.search(r"^FROM apache/beam_python(\d+\.\d+)_sdk:", text, re.M)
+  base = re.search(r'^ARG BEAM_SDK_IMAGE="apache/beam_python(\d+\.\d+)_sdk:',
+                   text, re.M)
   launcher = re.search(r"python(\d)(\d+)-template-launcher-base", text)
   assert base and launcher
   assert base.group(1) == minor
   assert f"{launcher.group(1)}.{launcher.group(2)}" == minor
-  # the venv path in PYTHONPATH and the bridge carries the same minor
-  assert f"python{minor}/site-packages" in _env("PYTHONPATH")
-
-
-def test_bridge_and_pythonpath_use_the_template_layout() -> None:
-  text = _dockerfile()
-  pythonpath = _env("PYTHONPATH").split(":")
-  minor = (PACKAGE / ".python-version").read_text(encoding="utf-8").strip()
-  site = f"/template/.venv/lib/python{minor}/site-packages"
-  assert site in pythonpath
-  assert "/template/src" in pythonpath
-  assert f"site.addsitedir('{site}')" in text
-  assert "zz_sdfb_bridge.pth" in text
+  # the venv path on the launcher's PYTHONPATH carries the same minor
+  pythonpath = re.search(r'^ENV PYTHONPATH="([^"]+)"$', text, re.M)
+  assert pythonpath and f"python{minor}/site-packages" in pythonpath.group(1)
 
 
 def test_image_never_enables_data_sampling() -> None:
-  for path in (DOCKERFILE, METADATA, BUILD_SCRIPT):
+  for path in (DOCKERFILE, METADATA):
     assert "enable_data_sampling" not in path.read_text(encoding="utf-8")
-
-
-def _script_code() -> str:
-  text = BUILD_SCRIPT.read_text(encoding="utf-8")
-  return "\n".join(
-      line for line in text.splitlines() if not line.lstrip().startswith("#"))
-
-
-def test_build_script_builds_a_template_and_no_image() -> None:
-  text = BUILD_SCRIPT.read_text(encoding="utf-8")
-  code = _script_code()
-  assert "set -euo pipefail" in code
-  for name in ("IMAGE", "PROJECT_ID", "TEMPLATES_BUCKET"):
-    assert f': "${{{name}:?' in code, name
-  for gone in ("gcloud builds submit", "docker build", "cloudbuild",
-               "REPOSITORY", "SDFB_EVAL_SDK_CONTAINER_IMAGE_ARG"):
-    assert gone not in code, gone
-  assert "gcloud dataflow flex-template build" in code
-  assert '--image "${IMAGE}"' in code
-  assert "--sdk-language PYTHON" in code
-  assert "deploy/flex_template_metadata.json" in code
-  assert "sdfb-evaluation-${VERSION}-template.json" in code
-  assert "version.py" in code
-  assert "upload_graph" not in code  # the CLI owns launch flags
-  assert "--sdk_container_image" in text  # the header says how workers run
-  result = subprocess.run(["bash", "-n", str(BUILD_SCRIPT)],
-                          capture_output=True,
-                          text=True,
-                          check=False)
-  assert result.returncode == 0, result.stderr
-
-
-def test_build_script_says_the_launch_must_select_the_evaluator() -> None:
-  """A template built on the shared image runs that image's dispatcher,
-  which runs generation unless the launch passes the selector."""
-  header = BUILD_SCRIPT.read_text(encoding="utf-8").split("set -euo")[0]
-  assert "sdfb_job=evaluation" in header
-  assert "disk_size_gb" in header
-  assert "sdfb_job=evaluation" in _script_code()  # printed after the build
-
-
-_GCLOUD_STUB = """#!/bin/sh
-printf '%s\\n' "$@" > "$(dirname "$0")/gcloud.args"
-"""
-
-
-def _run_build_script(tmp_path: Path,
-                      **env: str) -> tuple[subprocess.CompletedProcess, list]:
-  """The script as committed, with `gcloud` replaced by a recorder."""
-  stubs = tmp_path / "bin"
-  stubs.mkdir()
-  (stubs / "gcloud").write_text(_GCLOUD_STUB, encoding="utf-8")
-  (stubs / "gcloud").chmod(0o755)
-  result = subprocess.run(
-      ["bash", str(BUILD_SCRIPT)],
-      capture_output=True,
-      text=True,
-      check=False,
-      cwd=tmp_path,
-      env={
-          "PATH": os.pathsep.join([str(stubs), os.environ["PATH"]]),
-          **env
-      })
-  recorded = stubs / "gcloud.args"
-  calls = recorded.read_text(
-      encoding="utf-8").splitlines() if recorded.is_file() else []
-  return result, calls
-
-
-def test_build_script_runs_one_template_build_for_the_given_image(
-    tmp_path: Path) -> None:
-  image = "region-docker.pkg.dev/demo-project/demo-repo/sdfb-python:1.2.3"
-  result, calls = _run_build_script(
-      tmp_path,
-      IMAGE=image,
-      PROJECT_ID="demo-project",
-      TEMPLATES_BUCKET="demo-bucket")
-  assert result.returncode == 0, result.stderr
-  template = ("gs://demo-bucket/synthetic/"
-              f"sdfb-evaluation-{EVALUATOR_VERSION}-template.json")
-  # the one gcloud call of the script (the recorder keeps the last)
-  assert calls == [
-      "dataflow", "flex-template", "build", template, "--project",
-      "demo-project", "--image", image, "--sdk-language", "PYTHON",
-      "--metadata-file",
-      str(METADATA)
-  ]
-  assert f"template: {template}" in result.stdout
-  assert f"image:    {image}" in result.stdout
-  assert "sdfb_job=evaluation" in result.stdout
-
-
-def test_build_script_takes_the_version_from_the_environment(
-    tmp_path: Path) -> None:
-  result, calls = _run_build_script(
-      tmp_path,
-      IMAGE="any/image:tag",
-      PROJECT_ID="demo-project",
-      TEMPLATES_BUCKET="demo-bucket",
-      VERSION="9.9.9")
-  assert result.returncode == 0, result.stderr
-  assert calls[3] == ("gs://demo-bucket/synthetic/"
-                      "sdfb-evaluation-9.9.9-template.json")
-
-
-@pytest.mark.parametrize("missing", ["IMAGE", "PROJECT_ID", "TEMPLATES_BUCKET"])
-def test_build_script_refuses_to_start_without_an_input(tmp_path: Path,
-                                                        missing: str) -> None:
-  env = {
-      "IMAGE": "any/image:tag",
-      "PROJECT_ID": "demo-project",
-      "TEMPLATES_BUCKET": "demo-bucket"
-  }
-  del env[missing]
-  result, calls = _run_build_script(tmp_path, **env)
-  assert result.returncode != 0
-  assert missing in result.stderr
-  assert not calls  # nothing was built
-
-
-@pytest.mark.parametrize("path", [DOCKERFILE, BUILD_SCRIPT])
-def test_both_files_say_the_deployment_uses_the_one_image(path: Path) -> None:
-  # the header as prose: comment markers and line breaks folded away
-  head = " ".join(
-      path.read_text(encoding="utf-8")[:2600].replace("#", " ").split())
-  assert "one image for generation and evaluation" in head
-  assert "docker/Dockerfile at the repository root" in head
-
-
-def test_version_is_readable_by_the_build_script_pattern() -> None:
-  text = (PACKAGE / "src" / "sdfb_evaluation" /
-          "version.py").read_text(encoding="utf-8")
-  match = re.search(r'^EVALUATOR_VERSION = "([^"]+)"', text, re.M)
-  assert match and match.group(1) == EVALUATOR_VERSION
-
-
-@pytest.mark.parametrize("path", [DOCKERFILE, BUILD_SCRIPT, ENTRYPOINT])
-def test_files_carry_the_licence_header(path: Path) -> None:
-  assert "Licensed under the Apache License" in path.read_text(
-      encoding="utf-8")[:900]

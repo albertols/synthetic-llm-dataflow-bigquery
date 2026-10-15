@@ -49,14 +49,14 @@ from pathlib import Path
 import jinja2
 import pytest
 
-from sdfb_evaluation.cli.main import parse_args
+from sdfb_evaluation.cli.main import parse_args, public_run_flags
 
 PACKAGE = Path(__file__).resolve().parents[2]
 REPO_ROOT = PACKAGE.parents[1]
 EVALUATION_DAG = REPO_ROOT / "composer" / "evaluation_framework.py"
 GENERATION_DAG = REPO_ROOT / "composer" / "synthetic_beam_bigquery.py"
-METADATA = PACKAGE / "deploy" / "flex_template_metadata.json"
-# The repository's ONE template: both DAGs launch from it.
+# The repository's ONE template, and the one file that declares its
+# parameters: both DAGs launch from it.
 MAIN_METADATA = REPO_ROOT / "docker" / "flex_template_metadata.json"
 
 if not (EVALUATION_DAG.parent.is_dir() and GENERATION_DAG.is_file()):
@@ -204,6 +204,12 @@ def _main_metadata_names() -> set[str]:
   }
 
 
+def _evaluation_names() -> set[str]:
+  """What the evaluation job reads of a launch: the flags of `sdfb-eval
+  run`, the image's job selector and Beam's own boot disk."""
+  return {flag[2:] for flag in public_run_flags()} | {"sdfb_job", "disk_size_gb"}
+
+
 # --------------------------------------------------------------------------- #
 # The evaluation DAG
 # --------------------------------------------------------------------------- #
@@ -332,11 +338,17 @@ def test_the_evaluator_version_marker_is_gone_from_the_repository():
   assert marker in patterns
 
 
-def test_header_says_how_to_launch_from_an_evaluator_only_template():
+def test_header_names_the_one_template_and_its_one_parameter_file():
+  """No evaluator-only template exists (ADR 0041, note of 2026-10-15): the
+  header names the deployment's template, the selector and the one file
+  that declares the parameters, and no template build of its own."""
   docstring = ast.get_docstring(_tree(EVALUATION_DAG)) or ""
-  for said in ("flex_template", "sdfb-evaluation-", "build_flex_template.sh",
-               "sdfb_job"):
+  for said in ("flex_template", "sdfb-<PROJECT_VERSION>-template.json",
+               "sdfb_job=evaluation", "docker/flex_template_metadata.json"):
     assert said in docstring, said
+  for gone in ("build_flex_template.sh", "sdfb-evaluation-<",
+               "sdfb-evaluation/deploy", "sdfb-evaluation/docker"):
+    assert gone not in docstring, gone
 
 
 def test_evaluation_dag_is_valid_python_once_its_markers_are_substituted():
@@ -359,11 +371,11 @@ def test_launch_parameters_are_metadata_names_from_params_or_constants():
   assert isinstance(parameters, ast.Dict)
   keys = [k.value for k in parameters.keys if isinstance(k, ast.Constant)]
   assert len(keys) == len(parameters.keys), "no ** unpacking in parameters"
-  names = {p["name"] for p in json.loads(METADATA.read_text())["parameters"]}
-  assert set(keys) <= names
+  # every key is one the evaluation reads ...
+  assert set(keys) <= _evaluation_names()
   # the launcher drops a template parameter named `job_id`
   assert "generation_job_id" in keys and "job_id" not in keys
-  # ... and of the one template this DAG launches from by default
+  # ... and a parameter of the one template this DAG launches from
   assert set(keys) <= _main_metadata_names()
   assert not set(keys) & set(_NEVER_PASSED)
   declared = set(_params(tree))
@@ -1227,11 +1239,9 @@ def test_trigger_evaluation_parameters_select_the_evaluator_for_this_job():
   # the same image as generation: the same boot disk, and for the reason
   # run_pipeline pins it (the evaluator pins none)
   assert int(_value(tree, values["disk_size_gb"])) >= 100
-  # every key is a parameter of the ONE template, and of the evaluator's own
+  # every key is a parameter of the ONE template, and one the evaluation reads
   assert set(values) <= _main_metadata_names()
-  assert set(values) <= {
-      p["name"] for p in json.loads(METADATA.read_text())["parameters"]
-  }
+  assert set(values) <= _evaluation_names()
   assert not set(values) & set(_NEVER_PASSED)
   declared = set(_params(tree))
   for key, value in values.items():

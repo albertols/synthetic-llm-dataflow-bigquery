@@ -22,7 +22,7 @@ checked one by one:
     the evaluator's source arrives         the same file must build in a
     through a stage that copies            tree that has no
     `packages/` and tests for the          packages/sdfb-evaluation (the
-    directory in shell                     copy that ships has none)
+    directory in shell                     image then runs generation only)
     no BuildKit-only syntax                any builder builds it
     the entry is docker/flex_entry.py      one template, two jobs
     the evaluator's src is on PYTHONPATH   launcher and worker both import

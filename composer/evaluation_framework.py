@@ -60,14 +60,14 @@ launches from the SAME Flex Template as generation,
 `sdfb_job=evaluation`, which selects the evaluator's entry in the image.
 Nothing else is built for it.
 
-    To launch from an evaluator-only template instead (one built by
-    `packages/sdfb-evaluation/deploy/build_flex_template.sh` on the same
-    image), change ONE constant below:
+    There is no evaluator-only image or template (removed 2026-10-15, ADR
+    0041): `docker/flex_template_metadata.json` is the one file that
+    declares the template's parameters, the evaluator's among them. For the
+    same template under another name, change ONE constant below:
 
-        flex_template = "sdfb-evaluation-<version>-template.json"
+        flex_template = "sdfb-<name>-template.json"
 
-    The launch body stays as it is: that template declares the same
-    parameters, `sdfb_job` among them.
+    The launch body stays as it is.
 
 The DAG id is fixed (`sdfb_evaluation_framework`).
 
@@ -200,7 +200,7 @@ app_domain = "synthetic"
 app_name = "sdfb"
 DAG_ID = "sdfb_evaluation_framework"
 # The ONE template of the deployment, the generation DAG's own (header: how
-# to point this at an evaluator-only template instead).
+# to point this at the same template under another name).
 flex_template = f"sdfb-{project_version}-template.json"
 # Dataflow job names: lowercase, digits, hyphens only.
 _job_name_prefix = f"{app_name}-evaluation-v{project_version.replace('.', '-').lower()}"
@@ -790,9 +790,9 @@ with models.DAG(
                   "maxWorkers": "{{ params.max_workers }}",
                   "workerRegion": region,
               },
-              # Names are the flex template's (docker/flex_template_metadata.json;
-              # the evaluator's own deploy/flex_template_metadata.json declares
-              # the same ones). The launcher supplies runner, project and region
+              # Names are the flex template's (docker/flex_template_metadata.json,
+              # the one file that declares its parameters, the evaluator's
+              # among them). The launcher supplies runner, project and region
               # itself; the image carries its worker image coordinate; fail_on
               # and experiments are never passed.
               "parameters": {
