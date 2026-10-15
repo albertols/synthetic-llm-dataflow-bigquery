@@ -23,6 +23,7 @@ PR body has no unrendered placeholder (ADR 0040).
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -171,6 +172,27 @@ def test_stage_tree_ships_the_dsg_holder_on_the_same_lines(tmp_path):
     assert after[0] == "#  Copyright 2026 Google LLC"
     assert before[0] == f"#  Copyright 2026 {sync.headers.HOLDER}"
     assert after[1:] == before[1:]
+
+
+def test_stage_tree_retitles_the_header_where_it_is_quoted(tmp_path):
+  """A SQL file's `--` header and a fixture embedding a licensed file's text
+    name the guides' holder too; another mention of the source holder is
+    left for the headers gate to report."""
+  src = _source(tmp_path / "src")
+  holder = sync.headers.HOLDER
+  _write(src, "pkg/views.sql", f"--  Copyright 2026 {holder}\n--\nSELECT 1;\n")
+  embedded = sync.headers.apply("a: 1\n", "m.yaml", year=2026)
+  _write(src, "pkg/fixture.json", json.dumps({"text": embedded}) + "\n")
+  _write(src, "pkg/NOTES.md", f"Written by {holder}.\n")
+  staging = tmp_path / "staging"
+  sync.stage_tree(src, _manifest(), staging, sha="a" * 40, ref="v1.2.3")
+  sql = (staging / _PIPE / "pkg/views.sql").read_text(encoding="utf-8")
+  assert sql == "--  Copyright 2026 Google LLC\n--\nSELECT 1;\n"
+  fixture = (staging / _PIPE / "pkg/fixture.json").read_text(encoding="utf-8")
+  assert "#  Copyright 2026 Google LLC\\n#\\n" in fixture
+  assert holder not in fixture
+  notes = (staging / _PIPE / "pkg/NOTES.md").read_text(encoding="utf-8")
+  assert notes == f"Written by {holder}.\n"
 
 
 def test_headers_gate_wants_the_dsg_header_on_every_source_file(tmp_path):
