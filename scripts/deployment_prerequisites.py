@@ -76,8 +76,8 @@ in `docs/DEPLOYMENT_PREREQUISITES.md` → "Preflight checklist". Keep them in sy
                        13i a distinct temp dataset · 13j the flex template
                        an evaluation launches from (--templates-bucket): the
                        deployment's ONE template, `sdfb-<version>-template.json`
-                       (it runs generation and, with `sdfb_job=evaluation`,
-                       evaluation), or an evaluator-only one; when neither
+                       or `sdfb-latest-template.json` (it runs generation and,
+                       with `sdfb_job=evaluation`, evaluation); when neither
                        known name is there, any `sdfb-*-template.json`, named
                        in the row. Existence only · 13k the optional label
                        key (gs:// object, absolute local path, or Secret
@@ -224,9 +224,9 @@ EVAL_PACKAGE_DIR = REPO_ROOT / "packages" / "sdfb-evaluation"
 EVAL_TABLES = ("evaluation_data_history", "evaluation_metrics",
                "evaluation_profiles", "evaluation_row_flags")
 EVAL_VIEWS = ("evaluation_latest", "evaluation_latest_per_job")
-_EVAL_BUILD_SCRIPT = "packages/sdfb-evaluation/deploy/build_flex_template.sh"
 # 13j. The deployment builds ONE flex template, from docker/Dockerfile and
-# this metadata file; it runs both jobs. Objects live under this prefix.
+# this metadata file, the one that declares its parameters; it runs both
+# jobs. Objects live under this prefix.
 _TEMPLATE_METADATA = "docker/flex_template_metadata.json"
 _TEMPLATE_PREFIX = "synthetic/sdfb-"
 _TEMPLATE_SUFFIX = "-template.json"
@@ -1214,16 +1214,6 @@ def eval_constants(pkg: Path) -> dict:
   }
 
 
-def eval_version(pkg: Path) -> str | None:
-  try:
-    text = (_eval_src(pkg) / "version.py").read_text(encoding="utf-8")
-  except OSError:
-    return None
-  match = re.search(r'^EVALUATOR_VERSION\s*=\s*["\']([^"\']+)["\']', text,
-                    re.MULTILINE)
-  return match.group(1) if match else None
-
-
 def generator_version(root: Path = REPO_ROOT) -> str | None:
   """The version the template build names a release template after: the
     `version` of packages/sdfb-beam/pyproject.toml. None when unreadable."""
@@ -1269,7 +1259,7 @@ def step13_evaluation(ctx: Ctx) -> None:
   blocked = _eval_dataset(ctx, client, not_found, reason)
   _eval_registry(ctx, client, not_found, pkg, schemas, blocked)
   _eval_temp_dataset(ctx, client, not_found, reason)
-  _eval_template(ctx, pkg)
+  _eval_template(ctx)
   _eval_label_key(ctx)
 
 
@@ -1530,9 +1520,9 @@ def _eval_retention(part, want_days: int, issues: list[str],
                    f"{want_days}, fine)")
 
 
-def _template_candidates(pkg: Path) -> list[tuple[str, str]]:
-  """(object name, what it is) for the templates 13j knows by name, the
-    deployment's own first."""
+def _template_candidates() -> list[tuple[str, str]]:
+  """(object name, what it is) for the names 13j knows the deployment's
+    one template by, the release's first."""
   named = []
   version = generator_version()
   if version:
@@ -1541,23 +1531,19 @@ def _template_candidates(pkg: Path) -> list[tuple[str, str]]:
   named.append((f"sdfb-latest{_TEMPLATE_SUFFIX}",
                 "the deployment's one template, development pointer "
                 "(generation and evaluation)"))
-  evaluator = eval_version(pkg)
-  if evaluator:
-    named.append((f"sdfb-evaluation-{evaluator}{_TEMPLATE_SUFFIX}",
-                  "an evaluator-only template"))
   return named
 
 
-def _eval_template(ctx: Ctx, pkg: Path) -> None:
-  """13j — a flex template an evaluation can launch from.
+def _eval_template(ctx: Ctx) -> None:
+  """13j — the flex template an evaluation launches from.
 
     One image and one template serve generation and evaluation (ADR 0041,
-    amendment of 2026-10-06), so the object wanted is the deployment's own
-    template; an evaluator-only template is also enough. The script knows two
-    names for the first (the sdfb-beam version, and `latest`) and cannot know
-    a development build's (`sdfb-<branch>-<commit>`): when no known name is
-    there it lists the prefix and names what it found. Existence only: the
-    object does not say whether its image was built with the evaluator.
+    amendment of 2026-10-06), and there is no other: the evaluator's own
+    image and template were removed (the note of 2026-10-15). The script
+    knows two names for it (the sdfb-beam version, and `latest`) and cannot
+    know a development build's (`sdfb-<branch>-<commit>`): when no known name
+    is there it lists the prefix and names what it found. Existence only:
+    the object does not say whether its image was built with the evaluator.
     """
   a = ctx.args
   label = "Flex template for evaluation"
@@ -1574,7 +1560,7 @@ def _eval_template(ctx: Ctx, pkg: Path) -> None:
             "built before the evaluator was added to docker/Dockerfile cannot "
             "run it")
   try:
-    for name, what in _template_candidates(pkg):
+    for name, what in _template_candidates():
       uri = f"{folder}{name}"
       if client.bucket(bucket).blob(prefix_of(uri)).exists():
         ctx.add("13j", label, OK,
@@ -1598,10 +1584,10 @@ def _eval_template(ctx: Ctx, pkg: Path) -> None:
         f"build is named after its branch and commit); {caveat}")
     return
   build = (f"the deployment's template build, from {_TEMPLATE_METADATA} on "
-           "the image of docker/Dockerfile (it runs generation and "
-           "evaluation). Optional, an evaluator-only template on that image: "
-           f"`IMAGE=… PROJECT_ID=… TEMPLATES_BUCKET={bucket} "
-           f"{_EVAL_BUILD_SCRIPT}`")
+           "the image of docker/Dockerfile, into "
+           f"gs://{bucket}/synthetic/sdfb-<version>{_TEMPLATE_SUFFIX} (one "
+           "template: it runs generation and, with `sdfb_job=evaluation`, "
+           "evaluation)")
   missing = (f"{gcs_link(folder, a.project)} — no "
              f"`sdfb-*{_TEMPLATE_SUFFIX}` object")
   if a.require_evaluation:

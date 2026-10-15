@@ -143,6 +143,9 @@ ascending (a numeric or temporal column fills the grid by deciles, so its
 distance is 0), then schema order — and every pair among them.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0022).
 """
 
 from __future__ import annotations

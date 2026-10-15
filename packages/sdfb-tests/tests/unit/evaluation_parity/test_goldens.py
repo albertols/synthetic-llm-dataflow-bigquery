@@ -31,9 +31,9 @@ recomputes them from the mirrors — this module deliberately never
 imports `sdfb_evaluation`, so the two sides cannot cheat by sharing code.
 
 Skipped when the goldens file has not been generated (the standalone
-eval project is not part of every checkout's workflow); this file is
-excluded from the Dataflow Solution Guides copy (`dsg/manifest.yaml`),
-since the eval project does not ship there either.
+eval project is not part of every checkout's workflow). The Dataflow
+Solution Guides copy ships both sides (`dsg/manifest.yaml`): the goldens
+file is one of the evaluator's test fixtures.
 """
 
 from __future__ import annotations

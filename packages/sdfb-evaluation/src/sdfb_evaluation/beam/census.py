@@ -202,6 +202,9 @@ References (author-year, R22): Horvitz & Thompson (1952); Woodruff
 Pearson (1934); Dunn (1961) for Bonferroni; Sweeney (2002).
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §5 Fidelity
+(ADR 0018, 0020, 0022, 0026).
 """
 
 from __future__ import annotations

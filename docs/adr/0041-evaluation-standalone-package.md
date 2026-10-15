@@ -132,7 +132,7 @@ readable.
 and flex template (`packages/sdfb-evaluation/deploy/build_flex_template.sh`),
 launched by `sdfb-eval run`, by the template, or by a Composer DAG
 (`composer/evaluation_framework.py`) that the generation DAG may trigger,
-opt-in and off by default. *(Amended 2026-10-06, see [the amendment](#amendment-2026-10-06-one-image-one-template); on by default since the note of 2026-10-14.)* A local run executes on Beam's in-process
+opt-in and off by default. *(Amended 2026-10-06, see [the amendment](#amendment-2026-10-06-one-image-one-template); on by default since the note of 2026-10-14; the image and template named here were removed by the note of 2026-10-15.)* A local run executes on Beam's in-process
 `FnApiRunner`; `--runner DirectRunner` is the user-facing spelling. Beam 2.74's
 `DirectRunner` hands a batch pipeline to Prism, which could start a step before
 its side input was complete in this package's tests (see
@@ -278,8 +278,8 @@ the registry's events (D7) and the command line are untouched.
 **A1. One image.** `docker/Dockerfile` copies the evaluator's `src` through a
 throwaway [build stage](https://docs.docker.com/build/building/multi-stage/)
 that copies `packages/` and looks for the directory in shell, so the same file
-builds in a tree without the evaluator (the DSG copy has none; the image then
-runs generation only). There is no second `uv sync` and no second virtualenv.
+builds in a tree without the evaluator (the image then runs generation only;
+the DSG copy had none until the note of 2026-10-15). There is no second `uv sync` and no second virtualenv.
 The source is made importable the way the generator's is: last on the
 launcher's `PYTHONPATH`, and as a path line of the worker bridge `.pth`
 ([`site`](https://docs.python.org/3/library/site.html) adds such a line only
@@ -349,7 +349,9 @@ launch that waits for its job and a failure callback that closes the registry
 row. It accepts a list of generation job ids and then starts one run of itself
 per id, so the per-job path is the reviewed one. The evaluator's CPU
 `Dockerfile` stays for the package copied out as a unit of its own, and its
-build script now builds only a template from an existing image.
+build script now builds only a template from an existing image. *(Both
+removed, with the evaluator-only template metadata: see the note of
+2026-10-15 below.)*
 
 **Costs.**
 
@@ -417,7 +419,8 @@ build script now builds only a template from an existing image.
   pages. None of it was run: not the DAG, not the installed provider, not
   the environment's retries.
 - The copy that ships to the Dataflow Solution Guides has a `Dockerfile` and a
-  template metadata that mention an evaluator it does not ship.
+  template metadata that mention an evaluator it does not ship. *(Resolved by
+  the note of 2026-10-15: the copy ships the evaluator.)*
 
 **Unverified until a real build, launch and Airflow parse:** the image build
 with and without the evaluator's directory; the import check in both contexts;
@@ -772,6 +775,63 @@ and the evaluator's roles for the Dataflow service account
 launches generation alone, as before. The standalone DAG's own `max_workers`
 is unchanged. Not run on a deployment.
 
+**Note (2026-10-15): one parameter file; the evaluator's own image and
+template are gone.** A5 kept two files of the first design for the package
+copied out as a unit of its own: a CPU `Dockerfile` with its dispatch
+`entrypoint.sh` (`packages/sdfb-evaluation/docker/`), which no script built,
+and an evaluator-only template, its metadata and its build script
+(`packages/sdfb-evaluation/deploy/`), which nothing in the deployment
+launched. Both directories are removed, on the owner's decision.
+`docker/Dockerfile` is the one image and `docker/flex_template_metadata.json`
+the one file that declares the template's parameters, the evaluator's among
+them. The image's build stage that tolerates a tree without the package
+stays (A1). Preflight step 13j asks only for the deployment's template
+(`sdfb-<version>`, `sdfb-latest`, or any `sdfb-*-template.json`) and names
+its build.
+
+```mermaid
+flowchart LR
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  M[("📄 docker/<br/>flex_template_metadata.json")]:::store
+  M --> G["⚪ generator flags<br/>sdfb_job, disk_size_gb"]:::data
+  M --> E["⚪ help text starts<br/>Evaluation only"]:::data
+  G --> T1["🛡️ root suite<br/>run_pipeline's parser"]:::cpu
+  E --> T2["🛡️ evaluator suite<br/>sdfb-eval run's parser"]:::cpu
+```
+
+*One file, two halves: a parameter's help text puts it in one half, and each
+half is checked against its own job's parser, so no parameter is left
+unowned and neither suite imports the other's package. Implemented in
+`packages/sdfb-tests/tests/unit/docker/test_launch_surfaces.py` and
+`packages/sdfb-evaluation/tests/unit/test_launch_surfaces.py`.*
+
+The root suite holds that every parameter is a flag of the generator's
+parser, the selector `sdfb_job`, Beam's `disk_size_gb`, or one whose help
+text starts "Evaluation only" (the marker the metadata's description
+states), and that the generator flags the evaluation also reads are the
+shared names, each saying what it means for both jobs. The evaluator's suite
+holds that every marked parameter is a flag of `sdfb-eval run`, that every
+flag a launch can supply is declared with a pattern its parser agrees with,
+and that the image's Beam SDK tag and Python are the package's pins: the
+third gate of the [amendment of
+2026-10-13](#amendment-2026-10-13-python-314-and-beam-276-with-the-shared-image),
+which read the package's own `Dockerfile` until now. What is lost: a copy of
+the package taken alone carries no image or template; it is deployed from
+this repository's. Nothing deployed changes.
+
+The same release ships the evaluator to the Dataflow Solution Guides copy
+([ADR 0040](0040-dsg-donation-golden-source-sync.md)), as part of the one
+pipeline rather than the separate unit §9 of the design once planned: the
+manifest copies `packages/sdfb-evaluation/` (its tests too, except the one
+that reads `composer/`), the copy's step 6 (`06_run_evaluation.sh RUN_ID`)
+launches the same template with `sdfb_job=evaluation`, and its Terraform
+creates the four evaluation tables and two views from the package's own
+schema files. The GUI ([ADR 0042](0042-self-hosted-platform-gui.md)) stays
+here; `packages/sdfb-evaluation/GUI.md` points to it.
+
 ## Amendment (2026-10-13): Python 3.14 and Beam 2.76, with the shared image
 
 **Status of the amendment:** resolved, type-checked and tested on a laptop
@@ -816,7 +876,7 @@ flowchart LR
   IMG[("📄 the one image<br/>docker/Dockerfile")]:::store
   EV[("📄 evaluator<br/>.python-version")]:::store
   EP[("📄 evaluator pyproject<br/>Beam ==2.76.0")]:::store
-  ED[("📄 evaluator<br/>Dockerfile, uv.lock")]:::store
+  ED[("📄 evaluator<br/>uv.lock")]:::store
   G1["🛡️ python-version<br/>gate"]:::cpu
   G2["🛡️ shared-image<br/>tests"]:::cpu
   G3["🛡️ launch-surface<br/>tests"]:::cpu
@@ -831,6 +891,7 @@ flowchart LR
   EV --> G3
   EP --> G3
   ED --> G3
+  IMG --> G3
 ```
 
 *Three tests hold the evaluator's pins to the generator's, so neither can
@@ -841,7 +902,8 @@ move alone; an arrow is a file a test reads. Implemented in
 `.python-version` files are equal, the image's paths name that version, and
 the root lock holds every dependency the evaluator declares, inside its
 range) and `packages/sdfb-evaluation/tests/unit/test_launch_surfaces.py`
-(the package's own Dockerfile against its own pin and lock).*
+(the image's Beam SDK tag and Python against the package's own pin and lock;
+until the note of 2026-10-15 it read the package's own Dockerfile).*
 
 **What moved in the evaluator's lock.** Beam 2.74.0 to 2.76.0, and what
 Beam itself changed underneath: `google-apitools` 0.5.31 to 0.5.35,

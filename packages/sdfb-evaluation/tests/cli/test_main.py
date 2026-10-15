@@ -147,10 +147,12 @@ def test_the_top_k_size_is_a_constant_not_a_knob():
   assert "topk_profile" not in knobs.key_dict()
   with pytest.raises(TypeError):
     Knobs(topk_profile=1000)  # pylint: disable=unexpected-keyword-arg  # the removed knob
-  metadata = json.loads(
-      (Path(driver.__file__).resolve().parents[3] / "deploy" /
-       "flex_template_metadata.json").read_text(encoding="utf-8"))
-  assert "topk_profile" not in {p["name"] for p in metadata["parameters"]}
+  # the repository's one template (absent from a copy of the package alone)
+  root = Path(driver.__file__).resolve().parents[5]
+  template = root / "docker" / "flex_template_metadata.json"
+  if template.is_file():
+    metadata = json.loads(template.read_text(encoding="utf-8"))
+    assert "topk_profile" not in {p["name"] for p in metadata["parameters"]}
   assert census.TOPK_ITEMS == 50
 
 

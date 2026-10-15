@@ -567,8 +567,10 @@ measured number of its own. Regenerate with
 **Claim: evaluation is a separate CPU job, after generation, that scores each
 unit of the synthetic data against the full source and says whether the
 distance is more than sampling noise; it never gates or fails the generation
-run.** *Status: built and reviewed on a laptop with invented data; nothing has
-run on Google Cloud yet.*
+run.** *Status: built and reviewed on a laptop with invented data; launched on
+a deployment from both Composer DAGs, and no launch has completed an
+evaluation yet ([ADR 0041](adr/0041-evaluation-standalone-package.md), notes
+of 2026-10-09 to 2026-10-11).*
 
 ```mermaid
 flowchart LR
@@ -610,10 +612,14 @@ reported ([ADR 0041](adr/0041-evaluation-standalone-package.md) D5).
 | D6 | Literal values only for at most 50 distinct source values seen at least 10 times; otherwise keyed hashes |
 | D7 | The registry is append-only events; the final row is written after the metric loads |
 
-**On Dataflow it has no image or template of its own.** The generator's image
-carries the evaluator's source, which runs on the generator's environment, and
-the generator's template launches it. Neither package imports the other; the
-dispatcher is the only file that names both.
+**On Dataflow it has no image or template of its own.** The one image,
+`docker/Dockerfile`, copies the evaluator's source through a build stage that
+tolerates its absence, runs it on the generator's environment (it is not
+installed), and imports its entry modules at build time. The one template's
+entry, `docker/flex_entry.py`, dispatches on the parameter `sdfb_job`, and
+`docker/flex_template_metadata.json` declares both jobs' parameters, every
+one optional. Neither package imports the other; the dispatcher is the only
+file that names both.
 
 ```mermaid
 flowchart LR
@@ -628,13 +634,15 @@ flowchart LR
   G -. "launched table and job id,<br/>unless run_evaluation is false" .-> V
 ```
 
-*Not built, not launched.* The Composer DAG of the generator, where a
-deployment has one, chains the two unless its `run_evaluation` parameter is false (true by default)
-(the evaluation is given the launched table and the relationship model, and the
-job only as the launch's identity: it reads the Dataflow job for its window, one query on the generator's
-`validation_runs` for the digest that verifies the reference sample, and no job log);
-the standalone DAG evaluates an already-landed run on its own by the same seed path; both launches take a launcher machine type (the launch has 12 minutes in all, the image pull included);
-it and the evaluator package stay in the source repository.
+The Composer DAG of the generator, where a deployment has one, chains the two
+unless its `run_evaluation` parameter is false (true by default): the
+evaluation is given the launched table and the relationship model, and the
+job only as the launch's identity (it reads the Dataflow job for its window,
+one query on the generator's `validation_runs` for the digest that verifies
+the reference sample, and no job log). The standalone DAG evaluates an
+already-landed run on its own by the same seed path. Both launches take a
+launcher machine type, because the launch has 12 minutes in all, the image
+pull included. The DAGs stay in the source repository.
 
 Four tables in `synthetic_data_quality` (`evaluation_data_history`,
 `evaluation_metrics`, `evaluation_profiles`, `evaluation_row_flags`) and two
@@ -647,7 +655,8 @@ or `sdfb_beam`. A local run executes on Beam's in-process runner
 Full design, every figure and the primary sources:
 [`designs/2026-07-07-evaluation-framework-design.md`](designs/2026-07-07-evaluation-framework-design.md).
 How to run it: [`packages/sdfb-evaluation/README.md`](../packages/sdfb-evaluation/README.md)
-and [`RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md) "Evaluate a run".
+(the command line, Dataflow, Composer and reading results, each in its
+`docs/` page) and [`RUN_PLAYBOOK.md`](RUN_PLAYBOOK.md) "Evaluate a run".
 
 Code: [`packages/sdfb-evaluation/src/sdfb_evaluation/`](../packages/sdfb-evaluation/src/sdfb_evaluation/) (`catalogue/`, `context/`, `beam/`, `scoring/`, `cli/`, `schemas/`).
 

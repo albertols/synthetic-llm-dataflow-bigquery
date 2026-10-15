@@ -37,6 +37,9 @@ References:
   Newcombe, R. (1998), "Interval Estimation for the Difference Between
     Independent Proportions: Comparison of Eleven Methods" (the signed
     interval `noise.folded_abs_interval` folds into an unsigned one).
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0036, 0037).
 """
 
 from __future__ import annotations

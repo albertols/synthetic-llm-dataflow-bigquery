@@ -73,11 +73,12 @@ FROM ${LAUNCHER_IMAGE} AS flex_launcher
 # Stage 2 — the evaluator's source, when this tree has it (thrown away).
 #
 # `COPY packages/sdfb-evaluation/src …` would fail the build in a tree without
-# that directory, and a copy of this repository ships without it. So this
-# stage copies `packages/` (present in every tree) and looks for the directory
-# in shell: /out holds `src/` when it exists and is empty otherwise. Plain
-# multi-stage syntax, so any builder builds it. It starts from the Beam SDK
-# image because the build pulls that one anyway (no third base image).
+# that directory, and the image must still build there (it then runs
+# generation only). So this stage copies `packages/` (present in every tree)
+# and looks for the directory in shell: /out holds `src/` when it exists and
+# is empty otherwise. Plain multi-stage syntax, so any builder builds it. It
+# starts from the Beam SDK image because the build pulls that one anyway (no
+# third base image).
 # ---------------------------------------------------------------------------
 FROM ${BEAM_SDK_IMAGE} AS evaluator_source
 COPY packages /stage/packages

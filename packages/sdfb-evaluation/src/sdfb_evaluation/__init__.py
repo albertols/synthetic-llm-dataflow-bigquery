@@ -20,6 +20,9 @@ dependency of it (ADR 0041). This package imports none of `sdfb_core`,
 Python pin, and installs and runs with only the generator packages absent.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §11 Evaluation (sdfb-evaluation)
+(ADR 0041).
 """
 
 from __future__ import annotations
