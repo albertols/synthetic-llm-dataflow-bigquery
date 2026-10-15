@@ -11,14 +11,18 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ### 🚀 Added
 
 ### 🔧 Changed
+- Preflight step 13j looks only for the deployment's one template (`sdfb-<version>-template.json`, `sdfb-latest-template.json`, or any `sdfb-*-template.json`) and, when none is there, names the build that makes it: [`docker/flex_template_metadata.json`](docker/flex_template_metadata.json) on the image of `docker/Dockerfile`.
+- The launch-surface tests split the one parameter file without importing each other's package: the generator's suite holds that every parameter is a generator flag, `sdfb_job`, `disk_size_gb` or one whose help text starts "Evaluation only"; the evaluator's suite checks every such parameter and every `sdfb-eval run` flag a launch can supply against its own parser, and its Beam and Python pins against `docker/Dockerfile`.
 
 ### ⚡ Performance
 
 ### 🐛 Fixed
 
 ### 🗑️ Removed
+- `packages/sdfb-evaluation/docker/` (the evaluator's standalone CPU image and its entrypoint, which no script built) and `packages/sdfb-evaluation/deploy/` (an optional evaluator-only template: its metadata and build script). The evaluator is deployed only through the repository's one image and one template, and [`docker/flex_template_metadata.json`](docker/flex_template_metadata.json) is the one file that declares the template's parameters ([ADR 0041](docs/adr/0041-evaluation-standalone-package.md), note of 2026-10-15). Nothing deployed changes.
 
 ### 📗 Docs
+- ADR 0041, note of 2026-10-15 (one parameter file, and how the two test suites split it); the evaluation design's §8.2; `docs/DEPLOYMENT_PREREQUISITES.md` (Evaluator, step 13j); the standalone evaluation DAG's header.
 
 ## [v0.6.0] — 2026-10-14
 

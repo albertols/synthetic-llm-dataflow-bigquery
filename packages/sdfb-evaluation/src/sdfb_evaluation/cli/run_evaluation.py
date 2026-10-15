@@ -11,15 +11,15 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""The Dataflow flex-template entry (`FLEX_TEMPLATE_PYTHON_PY_FILE`).
+"""The evaluation's Dataflow flex-template entry, behind the dispatcher.
 
-The template launcher runs this file with the template's parameters as
-`--name=value` flags plus Beam's own (`--runner=DataflowRunner`,
-`--project`, `--region`, `--temp_location`, …). That is literally so in
-the package's standalone image; in the repository's one image the
-launcher's file is a dispatcher at the repository root
-(`docker/flex_entry.py`) that calls `main` here with the same flags when
-the launch passes `sdfb_job=evaluation`. It is `sdfb-eval run` with two
+The template launcher runs the image's `FLEX_TEMPLATE_PYTHON_PY_FILE`, a
+dispatcher at the repository root (`docker/flex_entry.py`), with the
+template's parameters as `--name=value` flags plus Beam's own
+(`--runner=DataflowRunner`, `--project`, `--region`, `--temp_location`,
+…). When the launch passes `sdfb_job=evaluation` the dispatcher removes
+it and calls `main` here with the rest (this package has no image or
+template of its own). It is `sdfb-eval run` with two
 differences (Ruling R88f):
 
     sdfb-eval run                      this entry

@@ -207,7 +207,8 @@ def _main_metadata_names() -> set[str]:
 def _evaluation_names() -> set[str]:
   """What the evaluation job reads of a launch: the flags of `sdfb-eval
   run`, the image's job selector and Beam's own boot disk."""
-  return {flag[2:] for flag in public_run_flags()} | {"sdfb_job", "disk_size_gb"}
+  flags = {flag[2:] for flag in public_run_flags()}
+  return flags | {"sdfb_job", "disk_size_gb"}
 
 
 # --------------------------------------------------------------------------- #

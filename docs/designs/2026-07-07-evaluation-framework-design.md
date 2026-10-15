@@ -2363,10 +2363,11 @@ What the files are written to do:
 - **The template entry** submits the job and returns. It does not wait
   and never applies `--fail_on`.
 
-The package still holds a CPU `Dockerfile`, a copy of the entrypoint
-script and its own template metadata: they are the surface of the
-package copied out as a unit of its own (§9). Its build script builds
-only an evaluator-only template from an existing image.
+The package holds no `Dockerfile`, entrypoint script, template metadata
+or template build script of its own: those were removed
+([ADR 0041](../adr/0041-evaluation-standalone-package.md), note of
+2026-10-15), and `docker/flex_template_metadata.json` is the one file
+that declares the template's parameters.
 
 Unverified until a build and a launch: the build with and without the
 evaluator's directory, the import check in both contexts, the dispatcher

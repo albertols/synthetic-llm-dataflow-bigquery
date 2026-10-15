@@ -92,6 +92,10 @@ BEAM_PASSTHROUGH = frozenset({"--disk_size_gb"})
 # metadata's description says so).
 EVALUATION_ONLY = "Evaluation only"
 
+# The image's Beam SDK base: its Python minor, then its Beam version.
+BEAM_SDK_IMAGE = re.compile(
+    r'^ARG BEAM_SDK_IMAGE="apache/beam_python(\d+\.\d+)_sdk:(\S+)"$', re.M)
+
 
 def _dockerfile() -> str:
   return DOCKERFILE.read_text(encoding="utf-8")
@@ -262,9 +266,8 @@ def test_evaluation_parameters_are_well_formed() -> None:
 
 
 def test_metadata_has_no_launch_only_parameters() -> None:
-  assert not set(_parameters()) & {
-      "experiments", "enable_data_sampling", "fixture_dir"
-  }
+  launch_only = {"experiments", "enable_data_sampling", "fixture_dir"}
+  assert not set(_parameters()) & launch_only
 
 
 def test_the_image_bakes_the_worker_image_variable_the_driver_reads() -> None:
@@ -275,8 +278,7 @@ def test_the_image_bakes_the_worker_image_variable_the_driver_reads() -> None:
 
 
 def test_beam_sdk_tag_equals_locked_apache_beam() -> None:
-  match = re.search(r'^ARG BEAM_SDK_IMAGE="apache/beam_python(\d+\.\d+)_sdk:'
-                    r'(\S+)"$', _dockerfile(), re.M)
+  match = BEAM_SDK_IMAGE.search(_dockerfile())
   assert match
   assert match.group(2) == _locked("apache-beam")
 
@@ -287,8 +289,7 @@ def test_python_minor_matches_the_package() -> None:
       encoding="utf-8"))["project"]["requires-python"]
   assert minor in requires
   text = _dockerfile()
-  base = re.search(r'^ARG BEAM_SDK_IMAGE="apache/beam_python(\d+\.\d+)_sdk:',
-                   text, re.M)
+  base = BEAM_SDK_IMAGE.search(text)
   launcher = re.search(r"python(\d)(\d+)-template-launcher-base", text)
   assert base and launcher
   assert base.group(1) == minor
