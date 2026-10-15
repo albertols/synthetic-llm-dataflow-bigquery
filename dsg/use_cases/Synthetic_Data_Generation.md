@@ -47,9 +47,10 @@ flowchart LR
    landed table with its source table: fidelity (column distributions,
    pairwise dependence, a real-versus-synthetic classifier), privacy (copies,
    memorization, distance to the closest real record against a holdout),
-   integrity (key duplicates, foreign-key orphans and fan-out) and diversity. Each metric carries a
-   baseline and a noise floor, so a `WARN` or `FAIL` marks a difference larger
-   than sampling noise; the evaluation never gates the generation. From the
+   integrity (key duplicates, foreign-key orphans and fan-out) and
+   diversity. Each metric carries a baseline and a noise floor, so a `WARN`
+   or `FAIL` marks a difference larger than sampling noise; the evaluation
+   never gates the generation. From the
    pipeline directory, run `./scripts/06_run_evaluation.sh RUN_ID` with the
    `RUN_ID` that `04_run_dataflow.sh` printed. Results land in
    `synthetic_data_quality`: `evaluation_data_history` (one row when the
