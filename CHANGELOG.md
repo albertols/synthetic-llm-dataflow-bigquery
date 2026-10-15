@@ -11,6 +11,7 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ### 🚀 Added
 
 ### 🔧 Changed
+- **The evaluator's documentation, rewritten for a first reader.** [`packages/sdfb-evaluation/README.md`](packages/sdfb-evaluation/README.md) is now a short page: what the evaluator is, how the one image and template carry and dispatch it (`docker/Dockerfile`, `docker/flex_entry.py`, `docker/flex_template_metadata.json`), and four ways to use it (on your machine, on Dataflow, from Composer, step 6 of the Dataflow Solution Guides copy), each with one diagram or command. The detail moved, re-checked against the code, into `packages/sdfb-evaluation/docs/`: `CLI.md` (every command and flag as `--help` prints it, exit codes, an offline trial), `DATAFLOW.md` (launch parameters, the read path, the launcher's 12 minutes, the reference panel under the temp location), `COMPOSER.md` (the chained and the standalone DAG) and `RESULTS.md` (tables, views, registry, baselines, noise floors, lifts, thresholds). A new `packages/sdfb-evaluation/GUI.md` describes the self-hosted GUI for evaluations, which stays in the source repository. Statements that were no longer true were dropped: the evaluator-only template and the standalone image, "never parsed by Airflow", and a chain diagram that showed `run_evaluation` false by default. `docs/DESIGN.md` §11 says the same.
 
 ### ⚡ Performance
 
