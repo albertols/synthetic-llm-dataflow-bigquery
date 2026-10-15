@@ -92,15 +92,9 @@ exclude:
   - "**/.pytest_cache/**"
   - "**/.mypy_cache/**"
   - "**/.hypothesis/**"
-  # The evaluator's standalone image and its evaluator-only template: this
-  # copy builds one image for both jobs (docker/Dockerfile) and launches the
-  # evaluation from the one template (docker/flex_template_metadata.json).
-  - packages/sdfb-evaluation/docker/**
-  - packages/sdfb-evaluation/deploy/**
-  # Evaluator tests that read what does not ship: the Composer DAGs
-  # (composer/), and the package's own docker/ and deploy/ above.
+  # The one evaluator test that reads what does not ship: the Composer DAGs
+  # (composer/).
   - packages/sdfb-evaluation/tests/unit/test_composer_dag.py
-  - packages/sdfb-evaluation/tests/unit/test_launch_surfaces.py
   # Tests of tooling that stays in the golden source (release reports, E2E
   # bundles, figure scripts, the personal-GCP layer, the Composer DAG, this
   # sync itself). The sync fails if a shipped test loads an unshipped script.
@@ -159,7 +153,8 @@ index_rows:
   - file: README.md
     anchor: "[Gaming Analytics](./use_cases/Gaming_Analytics.md)"
     marker: "[Synthetic Data Generation](./use_cases/Synthetic_Data_Generation.md)"
-    text: "| [Synthetic Data Generation](./use_cases/Synthetic_Data_Generation.md) | Batch synthetic BigQuery tables from a DDL and a reference sample, with a self-hosted LLM on GPU workers | Ready :white_check_mark: |"
+    # Matches upstream verbatim: the maintainers set the status (Beta).
+    text: "| [Synthetic Data Generation](./use_cases/Synthetic_Data_Generation.md) | Batch synthetic BigQuery tables from a DDL and a reference sample, with a self-hosted LLM on GPU workers |      Beta :factory:       |"
   - file: pipelines/README.md
     anchor: "[gaming_analytics_java](./gaming_analytics_java/)"
     marker: "[synthetic-llm-dataflow-bigquery](./synthetic-llm-dataflow-bigquery/)"

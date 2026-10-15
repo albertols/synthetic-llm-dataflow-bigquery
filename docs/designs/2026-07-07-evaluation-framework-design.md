@@ -2550,15 +2550,17 @@ evaluator declares must be in the root lock inside its range and
 installed by the extras the image names.
 
 The Dataflow Solution Guides replica is built from a manifest
-([ADR 0040](../adr/0040-dsg-donation-golden-source-sync.md)). The current
-manifest ships the generator as one unit, and the evaluator is not in it:
-`packages/sdfb-evaluation/` is not copied, and the root-side parity test
-and the catalogue-renderer test are excluded because what they read stays
-here. The evaluator is meant to ship as **its own unit**, with its own
-manifest and overlay. That unit is planned and is not in this tree. The
-package was built to make it possible: its schemas, its image entrypoint
-and its relationship-model reader are inside it, and nothing in it reaches
-outside.
+([ADR 0040](../adr/0040-dsg-donation-golden-source-sync.md)). Since
+v0.6.1 it ships the evaluator with the generator, as one pipeline, rather
+than as the separate unit this section once planned (ADR 0041, note of
+2026-10-15): `packages/sdfb-evaluation/` is copied with its catalogue,
+schemas, documentation and tests (except the one that reads `composer/`),
+the root-side parity test ships with it, and only the catalogue-renderer
+test stays here because the document it renders into does. In the copy,
+step 6 (`scripts/06_run_evaluation.sh RUN_ID`) launches the shared
+template with `sdfb_job=evaluation`, and its Terraform creates the
+evaluation tables and views from the package's schema files. The GUI
+does not ship ([ADR 0042](../adr/0042-self-hosted-platform-gui.md)).
 
 ## 10. Testing strategy
 

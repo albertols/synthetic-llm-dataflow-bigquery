@@ -37,6 +37,9 @@ with the marker is the evaluation's alone, and every other one is the
 generator's, the selector or Beam's disk (that suite checks them). Static
 checks only: nothing is built and nothing reaches the network. A copy of
 the package without the repository around it skips this module.
+
+Design: docs/DESIGN.md §11 Evaluation (sdfb-evaluation)
+(ADR 0041).
 """
 
 from __future__ import annotations

@@ -278,8 +278,8 @@ the registry's events (D7) and the command line are untouched.
 **A1. One image.** `docker/Dockerfile` copies the evaluator's `src` through a
 throwaway [build stage](https://docs.docker.com/build/building/multi-stage/)
 that copies `packages/` and looks for the directory in shell, so the same file
-builds in a tree without the evaluator (the DSG copy has none; the image then
-runs generation only). There is no second `uv sync` and no second virtualenv.
+builds in a tree without the evaluator (the image then runs generation only;
+the DSG copy had none until the note of 2026-10-15). There is no second `uv sync` and no second virtualenv.
 The source is made importable the way the generator's is: last on the
 launcher's `PYTHONPATH`, and as a path line of the worker bridge `.pth`
 ([`site`](https://docs.python.org/3/library/site.html) adds such a line only
@@ -419,7 +419,8 @@ removed, with the evaluator-only template metadata: see the note of
   pages. None of it was run: not the DAG, not the installed provider, not
   the environment's retries.
 - The copy that ships to the Dataflow Solution Guides has a `Dockerfile` and a
-  template metadata that mention an evaluator it does not ship.
+  template metadata that mention an evaluator it does not ship. *(Resolved by
+  the note of 2026-10-15: the copy ships the evaluator.)*
 
 **Unverified until a real build, launch and Airflow parse:** the image build
 with and without the evaluator's directory; the import check in both contexts;
@@ -820,6 +821,16 @@ third gate of the [amendment of
 which read the package's own `Dockerfile` until now. What is lost: a copy of
 the package taken alone carries no image or template; it is deployed from
 this repository's. Nothing deployed changes.
+
+The same release ships the evaluator to the Dataflow Solution Guides copy
+([ADR 0040](0040-dsg-donation-golden-source-sync.md)), as part of the one
+pipeline rather than the separate unit §9 of the design once planned: the
+manifest copies `packages/sdfb-evaluation/` (its tests too, except the one
+that reads `composer/`), the copy's step 6 (`06_run_evaluation.sh RUN_ID`)
+launches the same template with `sdfb_job=evaluation`, and its Terraform
+creates the four evaluation tables and two views from the package's own
+schema files. The GUI ([ADR 0042](0042-self-hosted-platform-gui.md)) stays
+here; `packages/sdfb-evaluation/GUI.md` points to it.
 
 ## Amendment (2026-10-13): Python 3.14 and Beam 2.76, with the shared image
 
