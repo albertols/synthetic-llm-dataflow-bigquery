@@ -5,8 +5,8 @@ The synthetic data generation solution guide, generated from release
 
 | Path | Content |
 | :-- | :-- |
-| `{pipeline_dir}/` | Beam pipeline (uv workspace: `sdfb-core`, `sdfb-beam`, tests), Dockerfile, Flex Template metadata, launch scripts `01`–`05`, one design document (`docs/DESIGN.md`) that maps every decision the code cites |
-| `terraform/synthetic-llm-dataflow-bigquery/` | Service accounts, Artifact Registry, bucket, `thelook_ecommerce` snapshots, landing tables with the public schemas, one table per `config/bq_schema` file, optional Flex Template job, generated `scripts/00_set_variables.sh` |
+| `{pipeline_dir}/` | Beam pipeline (uv workspace: `sdfb-core`, `sdfb-beam`, tests), the standalone evaluator (`packages/sdfb-evaluation`: its own uv project, lock and tests), Dockerfile, Flex Template metadata, launch scripts `01`–`06`, one design document (`docs/DESIGN.md`) that maps every decision the code cites |
+| `terraform/synthetic-llm-dataflow-bigquery/` | Service accounts, Artifact Registry, bucket, `thelook_ecommerce` snapshots, landing tables with the public schemas, one table per `config/bq_schema` file, the evaluator's four tables and two views from its own schema files, optional Flex Template job, generated `scripts/00_set_variables.sh` |
 | `use_cases/Synthetic_Data_Generation.md` | Solution guide page, plus one row in each repository index |
 
 ### Pipeline
@@ -18,6 +18,8 @@ bigquery-public-data.thelook_ecommerce ── terraform snapshot ──▶ synth
           ├─ BigQuery synthetic_data            (landing, FKs valid by construction)
           ├─ BigQuery synthetic_data_quality    (dlq, validation_runs, fk_fanout_stats)
           └─ BigQuery synthetic_rag             (rag_chunks, freetext_pools, source_table_stats)
+  └─ 06: same template, sdfb_job=evaluation, CPU workers: landed tables vs synthetic_source
+      └─ BigQuery synthetic_data_quality        (evaluation_* tables, evaluation_latest views)
 ```
 
 ### Security guardrails

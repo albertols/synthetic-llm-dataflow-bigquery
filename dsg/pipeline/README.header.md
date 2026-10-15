@@ -31,6 +31,9 @@ flowchart LR
   job --> land[(synthetic_data<br/>users · orders · order_items)]
   job --> dq[(synthetic_data_quality<br/>dlq · validation_runs · fk_fanout_stats)]
   job --> rag[(synthetic_rag<br/>rag_chunks · freetext_pools · source_table_stats)]
+  land --> eval[Evaluation job · same template<br/>CPU workers · step 6]
+  src --> eval
+  eval --> evq[(synthetic_data_quality<br/>evaluation_* · two views)]
 ```
 
 | Step | Command (from this directory) | What it does |
@@ -41,6 +44,7 @@ flowchart LR
 | 3 | `./scripts/03_build_flex_template.sh` | Publishes the Flex Template spec |
 | 4 | `./scripts/04_run_dataflow.sh [NUM_ROWS]` | Launches users → orders → order_items in one job with `config/relationships/gcp_public_fk_example.yaml` and prints `RUN_ID`; or `terraform apply -var launch_job=true` |
 | 5 | `./scripts/05_verify_run.sh RUN_ID` | Row counts, PK duplicates, FK orphans and the `validation_runs` verdicts |
+| 6 | `./scripts/06_run_evaluation.sh RUN_ID` | Launches the evaluator from the same template (`sdfb_job=evaluation`) on CPU workers once the generation job is done: it scores the landed tables against their sources into `synthetic_data_quality.evaluation_*`. See the [evaluator's README](packages/sdfb-evaluation/README.md) |
 
 The model repositories are public, so step 2 needs no credentials. The
 [Terraform README](../../terraform/synthetic-llm-dataflow-bigquery/README.md)
@@ -56,6 +60,8 @@ Local checks, the same ones the repository CI runs:
 uv sync --group dev                                  # or: pip install -r requirements.txt -r requirements-dev.txt
 uv run pytest packages/sdfb-tests/tests -m "not gpu and not gcp" -q
 yapf --diff -r --style yapf . && pylint --rcfile ../pylintrc .
+# the evaluator is a standalone uv project with its own lock
+uv run --project packages/sdfb-evaluation pytest packages/sdfb-evaluation/tests -q -m "not gcp"
 ```
 
 To clean up, cancel any running job and run `terraform destroy` in the

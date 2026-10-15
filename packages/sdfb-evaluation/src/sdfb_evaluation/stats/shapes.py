@@ -38,6 +38,9 @@ References:
     docs/adr/0026-measurement-first-mask-integrity.md
   scripts/e2e/freetext_crosscheck.py — shape_of, collapse, _charclasses,
     _shape_tv (the functions this module ports).
+
+Design: docs/DESIGN.md §5 Fidelity; §11 Evaluation (sdfb-evaluation)
+(ADR 0026, 0041).
 """
 
 from __future__ import annotations

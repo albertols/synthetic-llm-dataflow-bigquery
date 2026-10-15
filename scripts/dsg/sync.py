@@ -607,7 +607,8 @@ def render_pr_body(template: str,
     cloud_status = (
         "> [!IMPORTANT]\n> **Not yet run in Google Cloud** for this sync. "
         "The gates above are local and CI-equivalent; a live Dataflow run "
-        "of `scripts/04_run_dataflow.sh` is pending.")
+        "of `scripts/04_run_dataflow.sh` and `scripts/06_run_evaluation.sh` "
+        "is pending.")
   values = {
       "ref": ref,
       "sha": sha,

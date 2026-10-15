@@ -11,7 +11,11 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""sdfb-evaluation stands alone: no import of the generator packages (ADR 0041)."""
+"""sdfb-evaluation stands alone: no import of the generator packages (ADR 0041).
+
+Design: docs/DESIGN.md §11 Evaluation (sdfb-evaluation)
+(ADR 0041).
+"""
 
 from __future__ import annotations
 

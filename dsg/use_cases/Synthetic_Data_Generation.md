@@ -24,6 +24,9 @@ flowchart LR
   launcher --> workers[Dataflow GPU workers<br/>vLLM served in-worker]
   workers --> landing[(BigQuery landing tables)]
   workers --> quality[(BigQuery dead-letter + validation_runs)]
+  landing --> evaluator[Dataflow CPU workers<br/>evaluation job · same template]
+  bq --> evaluator
+  evaluator --> evaluation[(BigQuery evaluation_* tables + views)]
 ```
 
 1. **Plan.** The launcher reads the table's DDL and a relationship model
@@ -39,6 +42,26 @@ flowchart LR
 4. **Validate and audit.** Each row passes schema, uniqueness and integrity
    checks. Failures go to a dead-letter table, and every run writes a verdict
    to `validation_runs`.
+5. **Evaluate the run.** Once the generation job is done, a second Dataflow
+   job, launched from the same Flex Template on CPU workers, compares every
+   landed table with its source table: fidelity (column distributions,
+   pairwise dependence, a real-versus-synthetic classifier), privacy (copies,
+   memorization, distance to the closest real record against a holdout),
+   integrity (key duplicates, foreign-key orphans and fan-out) and diversity. Each metric carries a
+   baseline and a noise floor, so a `WARN` or `FAIL` marks a difference larger
+   than sampling noise; the evaluation never gates the generation. From the
+   pipeline directory, run `./scripts/06_run_evaluation.sh RUN_ID` with the
+   `RUN_ID` that `04_run_dataflow.sh` printed. Results land in
+   `synthetic_data_quality`: `evaluation_data_history` (one row when the
+   evaluation starts and one when it ends, with its scores),
+   `evaluation_metrics`, `evaluation_profiles` and `evaluation_row_flags`,
+   and the views `evaluation_latest` and `evaluation_latest_per_job`. The
+   [evaluator's README](../pipelines/synthetic-llm-dataflow-bigquery/packages/sdfb-evaluation/README.md)
+   explains the metrics and how to read, report and compare evaluations. A
+   self-hosted web app to browse these tables, the
+   [Synthetic Platform GUI](https://github.com/albertols/synthetic-llm-dataflow-bigquery/tree/master/gui),
+   lives in the source repository; it is written in TypeScript, so it is not
+   part of this copy.
 
 The sample deployment generates `users → orders → order_items` from the
 fictitious `bigquery-public-data.thelook_ecommerce` dataset, into tables with
@@ -58,7 +81,8 @@ tables are described in the
   stars, diamonds) is generated in one job with measured parent-to-child
   fan-out.
 - **Quality you can query.** Dead-letter rows keep their full error context;
-  per-table verdicts, duplicate and orphan counts are plain BigQuery tables.
+  per-table verdicts, duplicate and orphan counts, and every evaluation
+  metric are plain BigQuery tables.
 - **Portable.** The engines are pure Python behind one interface and the
   pipeline is Apache Beam, so it runs locally with the DirectRunner and a
   fake model client.

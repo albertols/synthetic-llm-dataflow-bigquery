@@ -39,6 +39,9 @@ module and asserts equality; the root
 recomputes them from the originals, so neither side can silently drift.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
+(ADR 0032, 0036).
 """
 
 from __future__ import annotations
