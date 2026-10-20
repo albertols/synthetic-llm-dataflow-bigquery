@@ -16,7 +16,7 @@
 Four BigQuery caches persist work across runs. Their keys were built from
 digests and model ids only, because the values that shape them were fixed
 constants. Now that a config file can change those values, each cache key
-gains a suffix — empty at the defaults, so every existing key is unchanged.
+gains a suffix — empty at the defaults, so every existing key is unchanged (ADR 0043).
 
 Design: docs/DESIGN.md §8 Configuration
 (ADR 0043).

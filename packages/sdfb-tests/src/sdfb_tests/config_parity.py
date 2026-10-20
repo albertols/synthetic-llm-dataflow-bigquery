@@ -413,14 +413,21 @@ def observe_pipelines(tmp: Path) -> dict:
   """DirectRunner output of the three parity scenarios (fixed seeds)."""
   from sdfb_beam.dofns.generate import _reset_engine_registry  # pylint: disable=import-outside-toplevel  # test-time only
   from sdfb_core.engines.b1_rag.engine import clear_free_text_pool_cache  # pylint: disable=import-outside-toplevel  # test-time only
+  from sdfb_core.engines.generation_plan import clear_generation_plan_log  # pylint: disable=import-outside-toplevel  # test-time only
   out = {}
-  for name, run in (
-      ("b1_rag", lambda d: _run_single(d, "b1_rag", 7)),
-      ("b2_library", lambda d: _run_single(d, "b2_library", 11)),
-      ("relational", lambda d: _run_relational(d, 13)),
-  ):
-    _reset_engine_registry()
-    clear_free_text_pool_cache()
-    (tmp / name).mkdir(parents=True, exist_ok=True)
-    out[name] = run(tmp / name)
+  try:
+    for name, run in (
+        ("b1_rag", lambda d: _run_single(d, "b1_rag", 7)),
+        ("b2_library", lambda d: _run_single(d, "b2_library", 11)),
+        ("relational", lambda d: _run_relational(d, 13)),
+    ):
+      _reset_engine_registry()
+      clear_free_text_pool_cache()
+      (tmp / name).mkdir(parents=True, exist_ok=True)
+      out[name] = run(tmp / name)
+  finally:
+    # The worker logs each plan (and its relationship card) once per
+    # process; leaving these runs' keys behind silences the same plan in
+    # the next test that builds the same engine/digest/table.
+    clear_generation_plan_log()
   return out
