@@ -650,6 +650,17 @@ def config_of(args: argparse.Namespace) -> GeneratorConfig:
   return resolution.config if resolution is not None else DEFAULT_CONFIG
 
 
+def resolve_embedder_identity(args: argparse.Namespace) -> tuple[str, str]:
+  """`embedder_identity` with the version salted by the chunk-shaping config.
+
+  Salted ONCE here, so the population branch and the engine's store read see
+  the same `embedder_version`; empty salt (the defaults) leaves it unchanged.
+  """
+  embedder_id, version = embedder_identity(args.embedder_uri)
+  return embedder_id, salted(version,
+                             settings_salt(config_of(args), "rag_chunks"))
+
+
 def log_config_resolution(resolution: ConfigResolution) -> None:
   """One line for the resolution, one WARNING row per flag a file overrode."""
   counts: dict[str, int] = {}
@@ -2996,7 +3007,7 @@ def _prepare_table_spec(
   logger.info("Thresholds (env=%s): blocker_failure_ratio=%.4f", thresholds.env,
               thresholds.blocker_failure_ratio)
 
-  embedder_id, embedder_version = embedder_identity(args.embedder_uri)
+  embedder_id, embedder_version = resolve_embedder_identity(args)
 
   rag_row_docs_limit = resolve_launch_row_docs_limit(args, reference_rows)
   rag_chunks_sink = None

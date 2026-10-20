@@ -1257,7 +1257,12 @@ def _population_branch(
       | f"{label_prefix}RagBatchChunks" >> beam.BatchElements(
           min_batch_size=32, max_batch_size=256)
       | f"{label_prefix}RagEmbedChunks" >> beam.ParDo(
-          EmbedChunksDoFn(config.embedder_uri, device=config.rag_embed_device)))
+          EmbedChunksDoFn(
+              config.embedder_uri,
+              device=config.rag_embed_device,
+              max_length=config.generator_config.rag.bge_max_length,
+              min_free_vram=config.generator_config.rag.embedder_min_free_vram))
+  )
   return chunks
 
 

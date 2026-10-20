@@ -315,7 +315,12 @@ class B1RagEngine(GenerationEngine):
       # "auto" = the worker's GPU when present — the bulk row-doc
       # embed runs before vLLM ignition and demotes right after
       # (ADR 0019), so the two never contend for VRAM.
-      self._embedder = BgeEmbedder(ctx.embedder_uri, device="auto")
+      rag = ctx.generator_config.rag
+      self._embedder = BgeEmbedder(
+          ctx.embedder_uri,
+          device="auto",
+          max_length=rag.bge_max_length,
+          min_free_vram=rag.embedder_min_free_vram)
     else:
       self._embedder = HashingEmbedder(dim=384)
     if ctx.reference_rows:
