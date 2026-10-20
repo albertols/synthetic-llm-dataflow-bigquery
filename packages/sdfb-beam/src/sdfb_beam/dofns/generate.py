@@ -45,6 +45,7 @@ from contextlib import nullcontext
 
 import apache_beam as beam
 from apache_beam.metrics import Metrics
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.engines import (
     GenerationConfig,
     GenerationContext,
@@ -194,7 +195,7 @@ class GenerateRecordsDoFn(beam.DoFn):
       engine_name: str,
       model_client: ModelClient,
       ctx: GenerationContext,
-      similarity: float = 0.5,
+      similarity: float = DEFAULT_CONFIG.generation.similarity,
       seed: int | None = None,
       expect_fk_side: bool = False,
       chunk_rows: int = 1000,

@@ -12,9 +12,6 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 """The generator behaves exactly as on master (spec AC-A1-1).
-
-Design: docs/DESIGN.md §8 Configuration
-(ADR 0043).
 """
 from __future__ import annotations
 
@@ -30,6 +27,10 @@ def _golden(name: str) -> dict:
 
 def test_namespaces_match_master():
   assert cp.observe_namespaces() == _golden("namespaces")
+
+
+def test_constants_golden_is_complete():
+  assert set(_golden("constants")) == set(cp.CONSTANT_SOURCES)
 
 
 @pytest.mark.slow

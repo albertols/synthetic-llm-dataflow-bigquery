@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts.description_json import DescriptionJsonError
 from sdfb_core.contracts.model_adjustment import (
     ModelAdjustment,
@@ -569,7 +570,7 @@ def _check_pk_is_a_key(
 # parent candidate tuples (`--fk_candidate_cap`). Defined HERE, not in
 # `run_pipeline`, so P4 and the launcher agree on one number without
 # preflight importing the launcher (the import runs the other way).
-DEFAULT_FK_CANDIDATE_CAP = 64
+DEFAULT_FK_CANDIDATE_CAP = DEFAULT_CONFIG.relational.fk_candidate_cap
 
 # Immutable empty defaults (a `{}` default would be shared mutable state).
 _NO_CAPS: Mapping[tuple[str, ...], int] = MappingProxyType({})

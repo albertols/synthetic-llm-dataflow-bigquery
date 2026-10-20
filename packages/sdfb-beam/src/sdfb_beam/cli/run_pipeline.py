@@ -73,6 +73,7 @@ from apache_beam.options.pipeline_options import (
     WorkerOptions,
 )
 from sdfb_core.codegen import derive_bq_load_schema
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.model_adjustment import (
     ModelAdjustment,
@@ -179,7 +180,7 @@ _DEFAULT_STATE_CACHE_MB = 512
 # times over instead of amortising it across vectorized draws (2026-07-26
 # E2E). Scale toward ~1,000 elements, but never below the historic default so
 # small runs — and their goldens — are untouched.
-DEFAULT_BATCH_SIZE = 16
+DEFAULT_BATCH_SIZE = DEFAULT_CONFIG.generation.batch_size
 _TARGET_ELEMENTS = 1_000
 
 # ADR 0036: keys per fan-out request element. A near-zero measured mean

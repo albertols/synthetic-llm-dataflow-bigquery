@@ -53,6 +53,7 @@ from typing import Any
 import apache_beam as beam
 from apache_beam.metrics import Metrics
 from apache_beam.transforms import combiners
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.model_adjustment import (
     REPEAT_SHARE_TOLERANCE,
@@ -101,8 +102,8 @@ class PipelineConfig:
   engine_name: str
   model_client: ModelClient
   num_rows: int
-  batch_size: int = 16
-  similarity: float = 0.5
+  batch_size: int = DEFAULT_CONFIG.generation.batch_size
+  similarity: float = DEFAULT_CONFIG.generation.similarity
   seed: int | None = None
   # Per-row-unique columns (PK/UUID) synthesized fresh each row; never
   # sampled from reference data. See engines/identity.py.
@@ -169,17 +170,17 @@ class PipelineConfig:
   # gated separately by the driver passing `freetext_pools_store`.
   freetext_pools_table: str = ""
   # WS5 §3 seeding experiment: centroid | kcenter | kcenter_rotate.
-  pool_seed_strategy: str = "centroid"
+  pool_seed_strategy: str = DEFAULT_CONFIG.free_text.pool_seed_strategy
   # Shape-preserving expander (2026-08-05 spec C3): off | identifiers
   # (default) | all. See GenerationContext.freetext_expansion.
-  freetext_expansion: str = "identifiers"
+  freetext_expansion: str = DEFAULT_CONFIG.free_text.freetext_expansion
   # Attach per-column llm_prompt_constraint (from column-description
   # JSON) to pool prompts (spec C5). See GenerationContext.prompt_constraints.
   prompt_constraints: bool = True
   # off | redacted | full — log each built pool prompt as a
   # freetext_pool_prompt milestone (ADR 0024 §3c). See
   # GenerationContext.prompt_debug.
-  prompt_debug: str = "off"
+  prompt_debug: str = DEFAULT_CONFIG.free_text.prompt_debug
   # Tier-2 exact per-column distinct counts (--source_stats=exact,
   # ADR 0022) — feeds free-text pool sizing. Empty = Tier 1 only.
   source_distinct: dict = field(default_factory=dict)
@@ -206,7 +207,7 @@ class PipelineConfig:
   # WS6 W3: "exact" (default, today) diverts every duplicate to the DLQ
   # behind up to three shuffle barriers; "streaming" lands rows as they
   # are generated and measures the duplicate rate instead.
-  uniqueness_mode: str = "exact"
+  uniqueness_mode: str = DEFAULT_CONFIG.guardrails.uniqueness_mode
   # RAG population embed (ADR 0034 D8, rev. 2026-09-08). The device is
   # the worker GPU on every topology ("auto"); moving it to CPU under
   # multi starved the model pull and the vLLM engine init instead
@@ -577,7 +578,7 @@ class FkEdgeSpec:
   # every `rest` column is NULLABLE in the landing schema — the engine's
   # NULL policy for a key with no candidate (design §4 ruling B).
   overlap: tuple[str, ...] = ()
-  candidate_cap: int = 64
+  candidate_cap: int = DEFAULT_CONFIG.relational.fk_candidate_cap
   nullable: bool = False
 
   @property

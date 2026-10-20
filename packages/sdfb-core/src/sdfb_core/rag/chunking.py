@@ -35,6 +35,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.rag.serialize import serialize_row
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -50,7 +51,7 @@ CHUNK_KIND_FREE_TEXT_COL = "free_text_col"
 # DEFAULT of that launch knob (`--rag_row_docs_limit`): the population
 # branch writes and the engine reads the same prefix, both sliced by the
 # one value the launcher resolves (`resolve_row_docs_limit`).
-MAX_ROW_DOC_ROWS = 1024
+MAX_ROW_DOC_ROWS = DEFAULT_CONFIG.rag.rag_row_docs_limit
 # free_text_col chunks dedupe to distinct (column, value); a pathological
 # near-unique column stays bounded here (consumers pick top-k=8 exemplars).
 MAX_FREE_TEXT_VALUES_PER_COLUMN = 1024
