@@ -1210,7 +1210,8 @@ def _population_branch(
   distinct_values: dict[str, list[str]] = {}
   if present is None:
     free_text_columns = _rag_free_text_columns(config.table_schema,
-                                               reference_rows)
+                                               reference_rows,
+                                               config.generator_config)
     distinct_values = distinct_free_text_values(reference_rows,
                                                 free_text_columns)
   row_doc_chunks = (
@@ -1267,13 +1268,15 @@ def _rag_shard_key(chunk, shards: int) -> int:
 
 
 def _rag_free_text_columns(table_schema: TableSchema,
-                           reference_rows: list[dict]) -> list[str]:
+                           reference_rows: list[dict],
+                           generator_config: GeneratorConfig) -> list[str]:
   """Columns that get `free_text_col` chunks — B.1's own FREE_TEXT
     classification, minus identifier-shaped ones (retrieval-worthy prose,
     not per-row IDs)."""
   from sdfb_core.engines.b1_rag.profile import ColumnKind, profile_columns
 
-  profiles = profile_columns(table_schema, reference_rows)
+  profiles = profile_columns(
+      table_schema, reference_rows, config=generator_config)
   return [
       p.name
       for p in profiles.values()

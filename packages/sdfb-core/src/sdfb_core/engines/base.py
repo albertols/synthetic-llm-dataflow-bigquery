@@ -336,7 +336,8 @@ class GenerationContext(BaseModel):
   rag_row_docs_limit: int = Field(default=1024, ge=1)
   # ADR 0043 — the launch's resolved generator config. Engines read their
   # promoted constants from it; the default is master's values.
-  generator_config: GeneratorConfig = Field(default_factory=lambda: DEFAULT_CONFIG)
+  generator_config: GeneratorConfig = Field(
+      default_factory=lambda: DEFAULT_CONFIG)
 
 
 class GenerationEngine(ABC):

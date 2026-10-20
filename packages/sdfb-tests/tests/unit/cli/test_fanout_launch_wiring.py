@@ -14,7 +14,7 @@
 """ADR 0036 launcher: roles -> measurement -> derived rows -> config.
 
 Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
-(ADR 0032, 0035, 0036, 0037, 0038).
+(ADR 0032, 0035, 0036, 0037, 0038, 0043).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
@@ -1659,3 +1659,47 @@ def test_a_failed_pk_measurement_is_a_preflight_stop(monkeypatch):
         stats_store=None,
         bq_client=object(),
     )
+
+
+def test_resolve_fanout_passes_config_and_salts_the_cache_key(monkeypatch):
+  """ADR 0043: the config reaches the profiler, and a non-default routing
+    setting salts the fan-out cache key (defaults leave it exactly the
+    model sha)."""
+  import sdfb_beam.cli.run_pipeline as rp
+  from sdfb_core.config.model import GeneratorConfig
+  from sdfb_core.config.salt import salted, settings_salt
+
+  monkeypatch.setattr(rp, "measure_fanout", _measure)
+  configs = []
+  real = rp.profile_columns
+
+  def spy(*args, **kw):
+    configs.append(kw.get("config"))
+    return real(*args, **kw)
+
+  monkeypatch.setattr(rp, "profile_columns", spy)
+  non_default = GeneratorConfig.model_validate(
+      {"free_text": {
+          "free_text_min_mean_len": 7
+      }})
+
+  def keys(**kw):
+    store = _Store()
+    resolve_fanout(
+        _REG,
+        "proj.synthetic_data.C_TABLE",
+        "proj.src.C_TABLE",
+        in_set_names={"B_TABLE", "C_TABLE", "A_TABLE"},
+        reference_rows=_ROWS,
+        table_schema=_SCHEMA,
+        stats_store=store,
+        bq_client=object(),
+        **kw,
+    )
+    return {k[2] for k in store.saved}
+
+  assert keys() == {_REG.sha12()}
+  assert keys(config=non_default) == {
+      salted(_REG.sha12(), settings_salt(non_default, "fk_fanout_stats"))
+  }
+  assert configs[-1] is non_default

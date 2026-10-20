@@ -82,6 +82,7 @@ from sdfb_core.config.resolve import (
     parse_config_text,
     resolve,
 )
+from sdfb_core.config.salt import salted, settings_salt
 from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.model_adjustment import (
     ModelAdjustment,
@@ -1234,6 +1235,7 @@ def resolve_fanout(
     stats_store,
     bq_client,
     effective_pk: tuple[str, ...] = (),
+    config: GeneratorConfig = DEFAULT_CONFIG,
 ) -> tuple[dict | None, dict[FkEdge, str]]:
   """``(FanoutPlan payload or None, edge roles)`` for one table (ADR
     0036). Measures (or reads the cache) for the driving edge only when
@@ -1262,8 +1264,9 @@ def resolve_fanout(
   # so P5 stood down for evidence that did not exist and P4 fell
   # through — worse than before ADR 0038 (2026-09-13).
   pk = tuple(effective_pk) or (tuple(relations.pk) if relations else ())
-  profiles = profile_columns(table_schema,
-                             reference_rows) if reference_rows else {}
+  profiles = (
+      profile_columns(table_schema, reference_rows, config=config)
+      if reference_rows else {})
   # The columns another edge fills are NOT measured as cells — the
   # same `edge_supplied_members` call P4 makes, so the measurement and
   # the check can never disagree (ADR 0037 ruling 12).
@@ -1278,7 +1281,7 @@ def resolve_fanout(
       parent_landing_fqn(driving.ref, derive_fk_parent_landing(landing_table)),
       source_table,
   )
-  sha = registry.sha12()
+  sha = salted(registry.sha12(), settings_salt(config, "fk_fanout_stats"))
   edge_label = _edge_label(driving)
   measured = _cache_read(stats_store, landing_table, source_table,
                          tuple(driving.cols), sha)
@@ -1972,6 +1975,7 @@ def _resolve_table_fanout(
         stats_store=stats_store,
         bq_client=None,
         effective_pk=effective_pk_of(registry, args.landing_table, args),
+        config=config_of(args),
     )
   except RelationshipError as exc:
     raise SystemExit(f"[preflight P2] {args.landing_table}: {exc}") from exc
@@ -2173,6 +2177,7 @@ def _load_reference_and_preflight(
       # Fix H3: a driven child is sized off its parent's DISTINCT
       # landed keys — an adjusted parent lands fewer than it has rows.
       fk_parent_distinct_keys=fk_parent_distinct_keys,
+      config=config_of(args),
       blocker_failure_ratio=thresholds.blocker_failure_ratio,
       fanout=fanout,
       edge_roles=edge_roles,

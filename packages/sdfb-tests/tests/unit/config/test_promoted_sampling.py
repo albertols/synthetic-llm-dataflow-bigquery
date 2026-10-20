@@ -11,7 +11,11 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Source-stats constants come from the config (ADR 0043)."""
+"""Source-stats constants come from the config (ADR 0043).
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0043).
+"""
 from sdfb_beam.io.exact_stats import build_exact_stats_sql
 from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
 from sdfb_core.stats import source_stats as ss

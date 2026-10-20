@@ -316,7 +316,8 @@ class B1RagEngine(GenerationEngine):
     self._record_model = derive_record_model(ctx.table_schema)
 
     # 3. profile columns (cheap O(N_ref) pass).
-    self._profiles = profile_columns(ctx.table_schema, ctx.reference_rows)
+    self._profiles = profile_columns(
+        ctx.table_schema, ctx.reference_rows, config=ctx.generator_config)
     # FK columns take the parent's landed key TUPLES (ADR 0031) —
     # drawn jointly at batch time, so the profile override here only
     # keeps them OFF the free-text/LLM path and out of the per-column

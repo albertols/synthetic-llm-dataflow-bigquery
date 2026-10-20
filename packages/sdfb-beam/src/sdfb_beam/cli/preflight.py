@@ -48,7 +48,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
-from sdfb_core.config.model import DEFAULT_CONFIG
+from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
 from sdfb_core.contracts.description_json import DescriptionJsonError
 from sdfb_core.contracts.model_adjustment import (
     ModelAdjustment,
@@ -433,15 +433,18 @@ def _constraint_vehicle(prof, field_) -> str:
           f"STRING column onto freetext_llm_pool/RAG")
 
 
-def _report_constraint_vehicles(table_schema: TableSchema,
-                                reference_rows: list[dict]) -> None:
+def _report_constraint_vehicles(
+    table_schema: TableSchema,
+    reference_rows: list[dict],
+    config: GeneratorConfig = DEFAULT_CONFIG,
+) -> None:
   """One pretty block per table: every constrained column, keyed
     TABLE.COL, with its clause, its declared ``route`` and the RESOLVED
     generation vehicle (from the real profiler over the reference
     sample) — visible at preflight, before any worker exists."""
   if not reference_rows:
     return
-  profiles = profile_columns(table_schema, reference_rows)
+  profiles = profile_columns(table_schema, reference_rows, config=config)
   name = table_schema.fqn.rsplit(".", 1)[-1]
   payload: dict[str, dict] = {}
   for col in table_schema.columns:
@@ -1355,6 +1358,7 @@ def preflight(
     candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
     on_model_conflict: str = ON_CONFLICT_ADJUST,
     fk_parent_distinct_keys: Mapping[str, int] | None = None,
+    config: GeneratorConfig = DEFAULT_CONFIG,
 ) -> PreflightResult:
   """Run P1-P5 + P4; returns the effective pk/identity columns.
 
@@ -1420,9 +1424,9 @@ def preflight(
   warnings: list[str] = []
   fqn = table_schema.fqn
   _report_prompt_constraints(table_schema, prompt_constraints_enabled)
-  _report_constraint_vehicles(table_schema, reference_rows)
+  _report_constraint_vehicles(table_schema, reference_rows, config)
   profiles = (
-      profile_columns(table_schema, reference_rows)
+      profile_columns(table_schema, reference_rows, config=config)
       if num_rows > 0 and reference_rows else {})
 
   if relations is None:
