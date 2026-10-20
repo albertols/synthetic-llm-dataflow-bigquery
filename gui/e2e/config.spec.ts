@@ -150,6 +150,12 @@ test("scenario: the 90M-from-1M-with-a-10k-seed preset and its outputs", async (
   // The preset runs the DAG's default topology (sdk_containers=multi): the R7 multi run's ramp.
   await expect(page.getByTestId("fleet-ramp")).toHaveText("1 → 2 @ +29, 4 @ +37 min");
   await expect(page.getByTestId("pk-pool-dlq")).toHaveText("89,999,488");
+  // The pool cap and top-k are config-file settings (knobs.json settable_via), not code constants.
+  await expect(page.getByText("Set in a config file", { exact: true })).toBeVisible();
+  await expect(page.getByText("Fixed by the code", { exact: true })).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: /^Pool cap: 512\s*, set in a config file; open its details$/ }),
+  ).toBeVisible();
   await expect(page.getByTestId("collision-prob")).toHaveText("100%");
   await expect(page.locator('[data-rec="exact-tier"]')).toBeVisible();
   await expect(page.getByTestId("measured-note").first()).toContainText("MEASURED");

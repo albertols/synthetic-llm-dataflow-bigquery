@@ -97,6 +97,11 @@ describe("the pipeline amp", { timeout: 30_000 }, () => {
     render(<Harness channel="free_text" />);
     const screw = screen.getByRole("button", { name: /^Pool cap: 512 values$/ });
     expect(screw).toHaveAccessibleDescription(/Set in a config file as free_text\.free_text_pool_max — no flag\./);
+    expect(
+      screen.getByText(
+        /Screws do not turn: they are set in a config file \(--config_uri\) or, for the few fixed ones, in code\./,
+      ),
+    ).toBeInTheDocument();
     screw.focus();
     await user.keyboard("{ArrowUp}{ArrowUp}{End}");
     expect(screen.getByRole("button", { name: /^Pool cap: 512 values$/ })).toBeInTheDocument();

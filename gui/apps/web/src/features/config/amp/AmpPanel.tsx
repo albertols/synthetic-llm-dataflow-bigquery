@@ -128,7 +128,8 @@ export function AmpPanel({
         </div>
         <p className="text-xs text-text-3">
           Turn a dial: focus it, then arrows, Page Up/Down, Home/End — or drag it with a mouse. Enter or a click opens
-          its sheet. Screws are code constants and do not turn.
+          its sheet. Screws do not turn: they are set in a config file (--config_uri) or, for the few fixed ones, in
+          code.
         </p>
       </div>
 
