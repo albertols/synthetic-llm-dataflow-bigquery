@@ -32,7 +32,7 @@ REFs:
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
 §6 Throughput; §8 Configuration
 (ADR 0019, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0034, 0035, 0036, 0037,
-0038).
+0038, 0043).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -53,7 +53,7 @@ from typing import Any
 import apache_beam as beam
 from apache_beam.metrics import Metrics
 from apache_beam.transforms import combiners
-from sdfb_core.config.model import DEFAULT_CONFIG
+from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
 from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.model_adjustment import (
     REPEAT_SHARE_TOLERANCE,
@@ -224,6 +224,10 @@ class PipelineConfig:
   # None = this table generates from `--num_rows` batch requests as
   # before.
   fanout: dict | None = None
+  # ADR 0043: the launch's resolved generator config, copied into the
+  # worker `GenerationContext`.
+  generator_config: GeneratorConfig = field(
+      default_factory=lambda: DEFAULT_CONFIG)
 
 
 def _default_requests(p: beam.Pipeline, config: PipelineConfig,
@@ -316,6 +320,7 @@ def build_pipeline(
       source_distinct=config.source_distinct,
       source_values_table=config.source_values_table,
       fanout=config.fanout,
+      generator_config=config.generator_config,
   )
 
   if requests is None:

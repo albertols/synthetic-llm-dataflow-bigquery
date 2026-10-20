@@ -3023,6 +3023,7 @@ def _prepare_table_spec(
 
   config = PipelineConfig(
       table_schema=table_schema,
+      generator_config=config_of(args),
       engine_name=args.engine,
       model_client=model_client,
       num_rows=num_rows,

@@ -25,7 +25,7 @@ REF: https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.bas
 Design: docs/DESIGN.md §3 Serving; §4 Relational generation; §5 Fidelity;
 §8 Configuration
 (ADR 0011, 0014, 0018, 0021, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0033,
-0036, 0037).
+0036, 0037, 0043).
 """
 
 from __future__ import annotations
@@ -37,7 +37,7 @@ from typing import NamedTuple, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from sdfb_core.config.model import DEFAULT_CONFIG
+from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
 from sdfb_core.contracts import GeneratedRecord, TableSchema
 from sdfb_core.engines.fanout import FanoutPlan, KeyDraw, joint_key_draw
 from sdfb_core.observability import log_milestone
@@ -334,6 +334,9 @@ class GenerationContext(BaseModel):
   # `sdfb_core.rag.chunking.MAX_ROW_DOC_ROWS` (a literal here keeps this
   # module free of rag imports; a test pins the two together).
   rag_row_docs_limit: int = Field(default=1024, ge=1)
+  # ADR 0043 — the launch's resolved generator config. Engines read their
+  # promoted constants from it; the default is master's values.
+  generator_config: GeneratorConfig = Field(default_factory=lambda: DEFAULT_CONFIG)
 
 
 class GenerationEngine(ABC):
