@@ -1,0 +1,560 @@
+{
+  "generated_by": "scripts/gui/export_knobs.py",
+  "guides": {
+    "reference_rows_limit": {
+      "purpose": "How many source rows the generator reads as its reference sample (n). Every profile, pool seed and validation baseline is estimated from these rows.",
+      "up": "A smaller DKW band (four times the rows per halving), better tails and rare categories. A new digest makes the run cold: every pool and chunk rebuilds, and driver memory and profiling time grow linearly.",
+      "down": "A cheaper sample query and a smaller leak surface, but rare categories and tails vanish first. Cardinality stays truncated at n either way.",
+      "tip": "Raise it when a tail or a rare category matters and expect a cold run; answer cardinality with --source_stats exact, never with a bigger sample.",
+      "formula": "\\varepsilon(n) = \\sqrt{\\frac{\\ln(2/\\alpha)}{2n}},\\quad \\varepsilon(10{,}000) \\approx 0.0136",
+      "refs": [
+        {
+          "kind": "paper",
+          "label": "Dvoretzky, Kiefer & Wolfowitz 1956 — the DKW inequality",
+          "url": "https://doi.org/10.1214/aoms/1177728174"
+        },
+        {
+          "kind": "paper",
+          "label": "Massart 1990 — the tight DKW constant",
+          "url": "https://doi.org/10.1214/aop/1176990746"
+        },
+        {
+          "kind": "doc",
+          "label": "Article 2 — the 10k sample, its knobs and their aftermath",
+          "path": "docs/articles/02-type-system-freetext-resolution.md",
+          "line": 262
+        }
+      ]
+    },
+    "source_stats": {
+      "purpose": "Which source-stats tier the profiler writes: off, sample (the reference sample, free) or exact (one aggregate scan of the live table).",
+      "up": "exact adds HLL++ distinct, deciles and top-k over the whole table, and the exact distinct count sizes the free-text pool target. One BigQuery scan of the source per run.",
+      "down": "off writes no stats rows, no JSON and no pool hints; engines still profile per worker. sample is free, but every distinct count is capped at the rows the sample saw.",
+      "tip": "A failed exact scan degrades loudly to the sample tier (milestone source_stats_exact_failed) and never kills the run.",
+      "refs": [
+        {
+          "kind": "paper",
+          "label": "Heule, Nunkesser & Hall 2013 — HyperLogLog++",
+          "url": "https://research.google.com/pubs/archive/40671.pdf"
+        },
+        {
+          "kind": "doc",
+          "label": "BigQuery approximate aggregate functions",
+          "url": "https://cloud.google.com/bigquery/docs/reference/standard-sql/approximate_aggregate_functions"
+        }
+      ]
+    },
+    "top_values_max_distinct": {
+      "purpose": "Literal source values land in the stats only for enum-like columns with at most this many distinct values. Above it a column gets shapes, entropy and lengths, never values.",
+      "up": "More columns store literal values in the stats table: the exemplar-leak surface grows.",
+      "down": "Fewer literal values; more columns are described by shape and entropy only.",
+      "tip": "It mirrors the engines' free-text category cap, so “enum-routed” means the same thing everywhere.",
+      "refs": [
+        {
+          "kind": "paper",
+          "label": "Carlini et al. 2021 — extracting training data",
+          "url": "https://arxiv.org/abs/2012.07805"
+        }
+      ]
+    },
+    "top_values_top_k": {
+      "purpose": "How many literal top values an enum-like column keeps in its stats entry.",
+      "up": "More of the head of the distribution is visible in the stats row.",
+      "down": "A smaller stats row; the tail of an enum is summarised by entropy only.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "shape_mix_top_k": {
+      "purpose": "How many character-shape masks (9 digit, A upper, a lower) a column keeps with their shares.",
+      "up": "Rarer shapes of identifier-like columns stay visible to the shape expander and the drift checks.",
+      "down": "Only the dominant shapes survive; a long-tailed format loses its minority masks.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "length_percentiles": {
+      "purpose": "The length quantiles the profiler records per string column; the p05–p95 band becomes the pool prompt's length hint.",
+      "up": "A wider band admits more of the tail's lengths into prompts.",
+      "down": "A tighter band steers prompts toward typical lengths only.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "null_pattern_max_cols": {
+      "purpose": "Tables wider than this skip the row null-pattern pass, which costs O(rows × columns).",
+      "up": "Wide tables get their joint null structure measured, at a pass whose alphabet grows with width.",
+      "down": "More tables fall back to per-column null rates only.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "null_pattern_top_k": {
+      "purpose": "How many row null patterns (which columns are null together) the __table__ entry keeps.",
+      "up": "More of the joint null structure is recorded.",
+      "down": "Only the most common patterns survive.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "engine": {
+      "purpose": "Which GenerationEngine runs, by its ENGINE_REGISTRY name: b1_rag (retrieval plus bounded LLM pools) or b2_library (the sdgx wrapper).",
+      "up": "b2_library fits a library model once per worker and keeps more joint structure; numerics interpolate through 11 deciles.",
+      "down": "b1_rag samples marginals from the whole sorted sample and seeds LLM pools by retrieval.",
+      "tip": "Both engines sit behind one interface, so the pipeline, validation and audit are identical; swap with the flag."
+    },
+    "num_rows": {
+      "purpose": "Rows to generate (M) for a root table. A driven child derives its count from its parent's landed keys times the measured fan-out (ADR 0036).",
+      "up": "More rows reuse each pool value more often and tighten identifier keyspaces; time grows linearly.",
+      "down": "Faster runs; the fidelity per row does not change, because the sample, not M, sets the error.",
+      "tip": "M never enters the sampling-error formula: it only raises the cost of being wrong.",
+      "formula": "r_{\\text{pool}} = \\frac{M}{\\min(M,\\ D,\\ 512)},\\qquad P_{\\text{collision}} \\approx 1 - e^{-M(M-1)/2K}"
+    },
+    "similarity": {
+      "purpose": "A 0–1 dial the engines interpret differently: b2 maps it to sampling temperatures, b1 only blends its temporal draws.",
+      "up": "b2: colder categorical sampling and a lower LLM temperature, output closer to the reference. b1: temporal draws anchored nearer observed instants.",
+      "down": "b2: hotter sampling, more divergence. b1: temporal draws closer to uniform over the range.",
+      "tip": "Numeric, categorical and free-text draws of b1 ignore it at the exported commit (see Docs differ).",
+      "formula": "T_{\\text{cat}} = 2(1 - s),\\qquad T_{\\text{LLM}} = 1.3 - 1.2\\,s"
+    },
+    "seed": {
+      "purpose": "An explicit base RNG seed; empty derives one per (run_id, batch_id), so runs never replay across triggers.",
+      "up": "A fixed seed replays the same draws for the same run inputs — useful for A/B runs and goldens.",
+      "down": "Empty (default) keeps every trigger's draws independent."
+    },
+    "batch_size": {
+      "purpose": "Rows per Beam element. At the default it scales with --num_rows toward about 1,000 elements, never below 16.",
+      "up": "Fewer, larger elements amortise per-element Python overhead over vectorized draws; a failed batch loses more rows.",
+      "down": "More elements, more per-element overhead: 16 rows per element made a 1M-row run pay it 62,500 times.",
+      "tip": "Pass a value only to pin it; the default already scales.",
+      "formula": "b = \\max\\left(16,\\ \\left\\lfloor M / 1000 \\right\\rfloor\\right)"
+    },
+    "temporal_max_age_years_b1": {
+      "purpose": "b1 clamps the jitter floor of generated dates to now minus this many years; fully historical columns keep their observed range.",
+      "up": "Older dates are allowed again.",
+      "down": "A tighter window pushes generated instants toward the present.",
+      "tip": "Interim policy: per-column DDL-JSON descriptions will override the constant later."
+    },
+    "temporal_max_age_years_b2": {
+      "purpose": "b2's floor for generated dates and timestamps: max(observed min, now minus this many years). A column whose whole range is older keeps it.",
+      "up": "Older dates are allowed again.",
+      "down": "A tighter window; the decile vector's sub-floor points collapse onto the floor.",
+      "tip": "Interim policy: per-column DDL-JSON descriptions will override the constant later."
+    },
+    "free_text_pool_max": {
+      "purpose": "The most distinct values a free-text pool can hold, shared by both engines' ladders and the launcher's PK-capacity preflight. A PK routed to a pool caps at it.",
+      "up": "More diversity per column, at LLM cost linear in the pool size.",
+      "down": "Cheaper pools; M rows reuse each value M/cap times.",
+      "tip": "Identifiers never come from pools: shape expansion and keyspace generation carry them.",
+      "formula": "r = \\frac{M}{\\min(M,\\ D,\\ 512)}\\ \\text{rows per value}"
+    },
+    "pool_values_per_call": {
+      "purpose": "Values requested per LLM call: one JSON-array completion.",
+      "up": "Fewer round trips per pool, longer completions per call.",
+      "down": "More round trips; each call is shorter and cheaper to retry.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "pool_parallel_choices": {
+      "purpose": "Independent completions (vLLM n=) per HTTP round trip, de-duplicated across choices. It multiplies novel yield per call about four times.",
+      "up": "More yield per round trip; more sequences in flight on the GPU.",
+      "down": "Less parallel sampling; more round trips.",
+      "tip": "Safe because pool requests are unseeded, and the prompt stays byte-identical (prefix-cache friendly).",
+      "refs": [
+        {
+          "kind": "doc",
+          "label": "vLLM automatic prefix caching",
+          "url": "https://docs.vllm.ai/en/stable/design/prefix_caching/"
+        }
+      ]
+    },
+    "pool_stagnation_window": {
+      "purpose": "Once every escalation level has run, this many consecutive low-yield attempts end a pool ladder.",
+      "up": "Ladders keep trying longer against decaying yield.",
+      "down": "Ladders stop sooner; a slow-but-productive column may end undersized.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "pool_stagnation_min_novel": {
+      "purpose": "An attempt that adds fewer novel values than this counts toward stagnation.",
+      "up": "Stricter: more attempts count as stagnant, ladders end sooner.",
+      "down": "Looser: a trickle of novel values keeps a ladder alive.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "pool_format_collapse_rounds": {
+      "purpose": "Consecutive full-yield rounds with zero in-format values that end a ladder (a structural mismatch temperature cannot fix).",
+      "up": "More wasted rounds before the shape fallback takes over.",
+      "down": "Faster exit to the shape fallback, less tolerance for a noisy first round.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "pool_build_max_workers": {
+      "purpose": "How many column ladders run in parallel on a thread pool; vLLM continuous-batches the concurrent requests.",
+      "up": "More concurrency, until the GPU's KV cache queues the extra sequences.",
+      "down": "Closer to sequential ladders: setup time grows with the number of free-text columns.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "source_domain_cap": {
+      "purpose": "The largest source-distinct set kept as a worker-side rejection filter against copies. Above it the engine degrades loudly to sample-only rejection.",
+      "up": "High-cardinality columns keep full-domain copy rejection, at tens of MB of worker memory per million strings.",
+      "down": "More columns fall back to rejecting only what the sample saw.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "free_text_unique_ratio": {
+      "purpose": "A string column whose unique share exceeds this, with a long mean length, routes to free text instead of categorical.",
+      "up": "Fewer columns reach the LLM pool.",
+      "down": "More columns reach the LLM pool, including repetitive ones.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "free_text_min_mean_len": {
+      "purpose": "The mean rendered length above which a high-unique string column is free text.",
+      "up": "Short unique strings stay categorical or shaped.",
+      "down": "Short unique strings route to the pool.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "free_text_max_categories": {
+      "purpose": "Above this distinct count a string column is high-cardinality and treated as free text even if short.",
+      "up": "More columns stay categorical (sampled from their observed values).",
+      "down": "More columns become free text or shaped identifiers.",
+      "tip": "The profiler's literal top-values cap mirrors it."
+    },
+    "freetext_expansion": {
+      "purpose": "The shape-preserving expander after pool draws: off (pool draws only), identifiers (code-like columns expand from their shape mix) or all.",
+      "up": "all also mutates digit runs inside texty draws: more distinct values, never an LLM call.",
+      "down": "off caps every free-text column's distinct count at the pool size.",
+      "tip": "The default, identifiers, is what keeps a 90M-row run from repeating 512 codes."
+    },
+    "pool_seed_strategy": {
+      "purpose": "How the 8 prompt seeds are chosen: centroid (densest region), kcenter (spans the column's modes) or kcenter_rotate (re-seeded per attempt).",
+      "up": "kcenter and kcenter_rotate widen coverage of rare modes; rotate forfeits vLLM prefix caching by design.",
+      "down": "centroid (control) keeps a byte-identical prefix and conditions on the densest region.",
+      "refs": [
+        {
+          "kind": "doc",
+          "label": "vLLM automatic prefix caching",
+          "url": "https://docs.vllm.ai/en/stable/design/prefix_caching/"
+        }
+      ]
+    },
+    "prompt_constraints": {
+      "purpose": "Attach each column's llm_prompt_constraint and measured length band to pool prompts, as a constant suffix.",
+      "up": "on: prompts follow the declared format; the shared prefix stays cacheable.",
+      "down": "off: prompts rely on exemplars alone."
+    },
+    "prompt_debug": {
+      "purpose": "Log each built pool prompt as a milestone: off, redacted (seed exemplars elided) or full.",
+      "up": "full logs verbatim prompts at WARNING: reference values reach Dataflow logs. Debug runs only.",
+      "down": "off logs nothing about prompts."
+    },
+    "pool_pattern_guidance": {
+      "purpose": "Constrain identifier-ish pool completions at decode time with a charset and length regex (vLLM structured output).",
+      "up": "true: fewer off-format values reach the post-hoc gate, at an unmeasured T4 throughput cost.",
+      "down": "empty or false (default): the post-hoc format gate alone protects pools."
+    },
+    "build_pool_layer": {
+      "purpose": "Build free-text pools in their own branch and persist them (skipped when this reference digest and model are already stored).",
+      "up": "true: pools are built once and every worker reads them (warm runs skip the LLM entirely).",
+      "down": "empty: pools are inferred inside every worker process's setup().",
+      "tip": "The Composer DAG defaults it to true."
+    },
+    "rag_row_docs_limit": {
+      "purpose": "How many fingerprint-ordered reference rows are embedded as row documents: exactly the rows the engine reads back.",
+      "up": "More rows in the in-worker index and more population cost; a value above the reference sample is clamped to it.",
+      "down": "A smaller index that covers fewer of the sample's modes.",
+      "tip": "One value for writer and reader. A chunk store written with a smaller value is topped up with the missing rows."
+    },
+    "max_free_text_values_per_column": {
+      "purpose": "Distinct (column, value) chunks embedded per free-text column; a near-unique column stays bounded here.",
+      "up": "More candidates for the top-8 exemplar pick, more embedding work.",
+      "down": "Fewer candidates; rare values are less likely to be seeds.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "rag_top_k": {
+      "purpose": "Exemplars retrieved to seed each free-text pool prompt.",
+      "up": "Longer prompts with more context; exemplar echoes become more likely.",
+      "down": "Shorter prompts, less diversity to condition on.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "bge_max_length": {
+      "purpose": "Tokens bge-small reads per chunk; longer serialized rows are truncated.",
+      "up": "Fixed by the checkpoint's position embeddings.",
+      "down": "Truncates more of each serialized row."
+    },
+    "embedder_min_free_vram": {
+      "purpose": "Free VRAM required before the embedder's auto device picks CUDA over CPU.",
+      "up": "The embedder yields the GPU more often (safer next to vLLM).",
+      "down": "More CUDA embeds, and a real OOM risk when the card is already spoken for.",
+      "tip": "cuda.is_available() answers “does a GPU exist”, never “is there room”."
+    },
+    "embedder_uri": {
+      "purpose": "gs:// path of the B.1 RAG embedder's weights; empty uses the HashingEmbedder.",
+      "up": "Setting it loads bge-small from GCS (never the Hub) for semantic retrieval.",
+      "down": "Empty: hashing vectors, no model download, lexical neighbours only."
+    },
+    "build_rag_layer": {
+      "purpose": "Populate synthetic_rag.rag_chunks from this run's reference sample (skipped when the digest is already present for this embedder).",
+      "up": "true: chunks and vectors persist, and later runs read them instead of re-embedding.",
+      "down": "empty: the engine embeds its 1,024 rows in setup on every fresh digest.",
+      "tip": "The Composer DAG defaults it to true."
+    },
+    "env": {
+      "purpose": "The threshold tier (dev, uat, prd) that selects the BLOCKER ratio a run may reach before it fails.",
+      "up": "Toward prd: a stricter gate (1 %).",
+      "down": "Toward dev: a looser gate (20 %).",
+      "formula": "\\text{FAILED} \\iff \\frac{\\text{blocker rows}}{\\text{valid} + \\text{DLQ}} > r_{\\text{env}}"
+    },
+    "uniqueness_mode": {
+      "purpose": "How duplicates are handled before landing: exact (one full-row shuffle barrier), exact_chained (the older three-barrier chain) or streaming (measure, do not remove).",
+      "up": "exact_chained: three shuffles per table, kept for A/B runs only.",
+      "down": "streaming: no barrier between generation and BigQuery; duplicate rows land and the run still fails the gate.",
+      "tip": "exact is the default and removes every duplicate behind one barrier."
+    },
+    "driven_uniqueness_mode": {
+      "purpose": "The uniqueness mode for a driven child without identity columns: its PK is unique by construction, so streaming measures without a barrier.",
+      "up": "exact adds a barrier the construction already made unnecessary.",
+      "down": "streaming (default) lands rows without the landing-path shuffle."
+    },
+    "write_disposition": {
+      "purpose": "Landing-table write mode: append (WRITE_APPEND) or overwrite (WRITE_TRUNCATE).",
+      "up": "overwrite replaces the table: the re-run after a streaming-mode failure.",
+      "down": "append adds rows; the DLQ, validation_runs and rag_chunks always append."
+    },
+    "repeat_share_tolerance": {
+      "purpose": "The absolute tolerance between the source's key-repeat share and the landed one, when a launch adjusted the model (ADR 0038).",
+      "up": "Looser verdicts on an adjusted table's copy.",
+      "down": "Tighter: per-key sampling noise (O(1/√keys)) may flag a faithful copy."
+    },
+    "generate_fk_relationships": {
+      "purpose": "Honour declared relationships: a launch expands to the table's whole FK component, parents first, and children sample landed parent keys.",
+      "up": "true (default): referential integrity by construction.",
+      "down": "false: declared edges are ignored loudly and FK columns use marginals."
+    },
+    "relationships_uri": {
+      "purpose": "Where the relationship models live: a folder or YAML file, local or gs://. The only source of relational truth.",
+      "up": "A gs:// path changes PK/FK without rebuilding the image.",
+      "down": "The default reads config/relationships packaged in the image."
+    },
+    "multi_table_mode": {
+      "purpose": "How a multi-table plan runs: single_job (one fleet, one vLLM ignition, in-DAG key handoff) or sequential_jobs.",
+      "up": "sequential_jobs: one job per table, parents first — a fallback for debugging.",
+      "down": "single_job (default): one worker fleet for the whole component."
+    },
+    "on_model_conflict": {
+      "purpose": "What a measured contradiction between the relationship model and the source does: adjust (drop the disproved PK and announce it) or stop.",
+      "up": "stop refuses the launch, as before ADR 0038.",
+      "down": "adjust (default) carries on and reproduces the source's key-repeat share.",
+      "tip": "Self-contradictions and the PK-capacity gate stop under both settings."
+    },
+    "fk_candidate_cap": {
+      "purpose": "Top-M parent candidates kept per shared value on a conditional (diamond) edge.",
+      "up": "A wider per-key choice, and fewer keys per batch to keep a request under the value cap.",
+      "down": "Hot shared keys wrap sooner over a shorter candidate list.",
+      "formula": "\\text{keys per batch} \\le \\left\\lfloor \\frac{100{,}000}{M_{\\text{cap}}} \\right\\rfloor"
+    },
+    "fk_key_sample_floor": {
+      "purpose": "The side-input cap: a child samples at most this many parent key tuples unless its PK needs more.",
+      "up": "Bigger side inputs per worker, fewer duplicate draws.",
+      "down": "Smaller side inputs; PKs built on the key draw collide sooner.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "fk_key_sample_ceiling": {
+      "purpose": "The largest parent-key side input the sizing will ask for (about 40 MB pickled per million single-column keys).",
+      "up": "More SDK memory per process; past it the answer is the co-partitioned join (ADR 0036).",
+      "down": "PK capacity runs out sooner on big children.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "fk_key_sample_margin": {
+      "purpose": "The capacity target over num_rows when PK members are drawn at random: at 10×, expected duplicates are about 4.8 %.",
+      "up": "Fewer duplicate draws, larger side inputs.",
+      "down": "More pk.duplicate rows diverted to the DLQ.",
+      "formula": "\\text{dup share} = 1 - \\frac{K}{M}\\left(1 - e^{-M/K}\\right),\\quad K = 10 \\cdot M \\Rightarrow 4.8\\%"
+    },
+    "max_conditional_values_per_request": {
+      "purpose": "The most candidate values one fan-out request may carry per conditional edge; keys per batch shrink to stay under it.",
+      "up": "Bigger requests and fewer elements.",
+      "down": "Smaller requests; more elements for the same keys.",
+      "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
+    },
+    "client_type": {
+      "purpose": "Which ModelClient generates: vllm (a server the worker owns), mlx (local Apple smoke) or fake (no model).",
+      "up": "vllm: real free-text pools on a GPU worker.",
+      "down": "fake: exercises the whole Dataflow → BigQuery path without a GPU."
+    },
+    "vllm_dtype": {
+      "purpose": "vLLM's --dtype: auto (the checkpoint's), float16 or bfloat16.",
+      "up": "bfloat16 needs an L4-class GPU.",
+      "down": "float16 is required on T4 for bf16 checkpoints like Qwen; refused for Gemma (empty output).",
+      "tip": "The Composer DAG defaults it to float16."
+    },
+    "vllm_max_model_len": {
+      "purpose": "vLLM's --max-model-len cap; without it the KV cache is sized for the checkpoint's native context.",
+      "up": "Longer prompts fit, and the KV cache takes more VRAM (262k native context killed a T4 at startup).",
+      "down": "Less VRAM for KV; 8,192 already dwarfs the synthesis prompts."
+    },
+    "autoscaling": {
+      "purpose": "Fleet sizing: auto (pinned when --initial_workers is set), fixed (pinned, workers required) or throughput (Dataflow scales).",
+      "up": "throughput: Dataflow scales freely; multi runs lost about 4 min per job to mid-job scale-downs.",
+      "down": "fixed: a fleet that starts and stays full."
+    },
+    "initial_workers": {
+      "purpose": "The initial Dataflow worker count; empty keeps Dataflow's own default.",
+      "up": "A scale run starts at its max_num_workers and skips the ramp.",
+      "down": "Empty: the R6 pair started on 2 workers and ran 8 min at a quarter of its steady rate."
+    },
+    "ddl_uri": {
+      "purpose": "A pinned _ddl.json read only when live schema extraction fails (air-gap, BigQuery outage).",
+      "up": "A path: the pin is the fallback, and its staleness is reported as ddl_pin_drift.",
+      "down": "Empty: no fallback — a failed live extraction stops the launch."
+    },
+    "reference_table": {
+      "purpose": "The source table the reference sample is SELECTed from and the schema is extracted from.",
+      "up": "Point it at another table to generate from a different source.",
+      "down": "Required — a launch without it is refused."
+    },
+    "landing_table": {
+      "purpose": "Where valid synthetic rows land; a comma-separated list plans several tables at once.",
+      "up": "More tables in the list widen the plan to their components (one job in single_job mode).",
+      "down": "Required — a launch without it is refused."
+    },
+    "dlq_table": {
+      "purpose": "Where rejected records land with their rule id and full error context.",
+      "up": "Point it at another dataset to keep a run's rejects apart.",
+      "down": "Required — a launch without it is refused."
+    },
+    "create_if_not_exists": {
+      "purpose": "true creates the landing table on first write from the derived schema; anything else needs it to exist.",
+      "up": "true: a first launch creates the table, without parameterized column constraints.",
+      "down": "false: a missing landing table fails the load job."
+    },
+    "validation_runs_table": {
+      "purpose": "Where each launch writes one summary row per table — the gate outcome and its provenance.",
+      "up": "Set: every launch is recorded, and the evaluator can find it.",
+      "down": "Empty: no summary row is written."
+    },
+    "rag_chunks_table": {
+      "purpose": "The persisted embedding store B.1 reads instead of re-embedding its row documents.",
+      "up": "Set: stored vectors are read; with build_rag_layer they are also written.",
+      "down": "Empty: every worker embeds its row documents in setup."
+    },
+    "freetext_pools_table": {
+      "purpose": "The persisted free-text pools workers read instead of rebuilding them.",
+      "up": "Set: stored pools are served; with build_pool_layer a branch builds missing ones.",
+      "down": "Empty: every worker process infers its own pools in setup."
+    },
+    "fk_fanout_stats_table": {
+      "purpose": "Caches each driving edge's measured source fan-out so a repeat launch skips the measurement.",
+      "up": "Set: a repeat launch reads the cached histogram.",
+      "down": "Empty: fan-out is measured on every launch."
+    },
+    "source_stats_table": {
+      "purpose": "Where per-column source stats rows are written, once per table and reference digest.",
+      "up": "Set: the stats are queryable after the run.",
+      "down": "Empty: the stats land only in the log and the JSON artifact."
+    },
+    "source_stats_json": {
+      "purpose": "A gs:// or local path the source stats are also written to as one JSON file.",
+      "up": "Set: the stats are kept next to the run's other artifacts.",
+      "down": "Empty: no JSON artifact."
+    },
+    "run_id": {
+      "purpose": "The launch's identity — it seeds batch draws when seed is empty and names every summary row.",
+      "up": "A fresh id per trigger keeps retriggers from replaying the same rows.",
+      "down": "Required, and a flag only — a config file may not set it."
+    },
+    "identity_cols": {
+      "purpose": "Columns synthesized fresh for every row (PK, UUID), never sampled from the reference.",
+      "up": "More columns get per-row-unique values none of which is copied from the source.",
+      "down": "Empty: only the relationship model's identity columns apply."
+    },
+    "pk_cols": {
+      "purpose": "A primary key for a table the relationship model does not cover; duplicates divert as pk.duplicate.",
+      "up": "More columns make a wider key that fewer rows can collide on.",
+      "down": "Empty: the relationship model decides the key."
+    },
+    "fk_parent_landing": {
+      "purpose": "Expert override — the project.dataset parents landed in, when it is not the landing table's own.",
+      "up": "Set: parent keys are read from that dataset.",
+      "down": "Empty: parents are assumed to land next to the child."
+    },
+    "model_uri": {
+      "purpose": "The gs:// location of the LLM weights, staged once from a model hub; config/models.yml lists them.",
+      "up": "Point it at another staged model to change the generator's LLM.",
+      "down": "Required — a launch without it is refused."
+    },
+    "thresholds_uri": {
+      "purpose": "Where the per-environment severity gates are read from.",
+      "up": "Point it at a gs:// copy to change the gates without rebuilding the image.",
+      "down": "Unreadable: the launch falls back to a permissive gate and says so."
+    },
+    "profiler_version": {
+      "purpose": "The version of profile_source_table, part of the stats table's append-skip key.",
+      "up": "Bumping it re-profiles every table on its next run, even when the reference digest is unchanged.",
+      "down": "Never lower it: tables already profiled at a newer version keep their rows, and stale ones stay stale.",
+      "tip": "A constant: changing it is a code edit, a test run and an image rebuild."
+    },
+    "generation_max_retries": {
+      "purpose": "GenerationConfig.max_retries, declared with a default of 2. No engine or DoFn reads it at the exported commit.",
+      "up": "No effect today.",
+      "down": "No effect today.",
+      "tip": "Pool retries follow the sampling ladder, and a failed batch goes to the DLQ as engine_failure; neither reads this field."
+    },
+    "hashing_embedder_dim": {
+      "purpose": "Dimension of the laptop HashingEmbedder (feature hashing, no model weights).",
+      "up": "Fewer hash collisions between tokens, more memory per vector.",
+      "down": "More collisions; neighbours blur.",
+      "tip": "A constant: changing it is a code edit, a test run and an image rebuild."
+    },
+    "bge_embedder_dim": {
+      "purpose": "Output dimension of bge-small-en-v1.5, fixed by the model.",
+      "up": "Fixed by the checkpoint.",
+      "down": "Fixed by the checkpoint."
+    },
+    "default_embedder_identity": {
+      "purpose": "The embedder name and version used when --embedder_uri is empty: the HashingEmbedder.",
+      "up": "A constant identity: chunks are keyed by it.",
+      "down": "A constant identity: chunks are keyed by it."
+    },
+    "blocker_failure_ratio_dev": {
+      "purpose": "The share of rows failing a BLOCKER rule a dev run may reach before the job fails.",
+      "up": "Looser: more defective rows are tolerated.",
+      "down": "Stricter: fewer defective rows before FAILED_BLOCKER.",
+      "tip": "Declared in config/thresholds.yml, not in code."
+    },
+    "blocker_failure_ratio_uat": {
+      "purpose": "The share of rows failing a BLOCKER rule a uat run may reach before the job fails.",
+      "up": "Looser: more defective rows are tolerated.",
+      "down": "Stricter: fewer defective rows before FAILED_BLOCKER.",
+      "tip": "Declared in config/thresholds.yml, not in code."
+    },
+    "blocker_failure_ratio_prd": {
+      "purpose": "The share of rows failing a BLOCKER rule a prd run may reach before the job fails.",
+      "up": "Looser: more defective rows are tolerated.",
+      "down": "Stricter: fewer defective rows before FAILED_BLOCKER.",
+      "tip": "Declared in config/thresholds.yml, not in code."
+    },
+    "blocker_rules_declared": {
+      "purpose": "The rule ids config/thresholds.yml declares with severity BLOCKER.",
+      "up": "Declaring a rule BLOCKER documents intent; only BLOCKER_RULE_IDS makes the gate count it.",
+      "down": "Removing one changes the contract, not the gate."
+    },
+    "blocker_rule_ids": {
+      "purpose": "The rule ids whose DLQ rows the BLOCKER gate counts (BLOCKER_RULE_IDS in validation/summary.py).",
+      "up": "Counting more rules fails more runs.",
+      "down": "A rule left out diverts rows to the DLQ without ever moving the gate.",
+      "tip": "engine_failure is weighted by the lost batch size, not one per envelope."
+    },
+    "gpu": {
+      "purpose": "The Composer DAG's GPU profile (l4 or t4), resolved at deploy time from the {{GPU}} marker.",
+      "up": "l4: bfloat16 and larger models fit.",
+      "down": "t4: cheaper, float16 only, tighter VRAM."
+    },
+    "sdk_containers": {
+      "purpose": "SDK-container topology for vLLM launches: single (one Python process per worker) or multi (one per vCPU).",
+      "up": "multi: generation escapes the one-interpreter GIL ceiling; the sheet charts the measured pair.",
+      "down": "single (default): one process owns the GPU; generation is bound by one interpreter."
+    },
+    "temperature_ladder": {
+      "purpose": "The temperatures a free-text pool call escalates through when its novel yield is empty (every value a copy).",
+      "up": "A higher ceiling diversifies further away from exemplar echoes, at the cost of format and plausibility.",
+      "down": "Fewer escalation levels: an echo-saturated column gives up sooner.",
+      "tip": "Derived by escalating_temperatures(start); 1.3 is the ceiling b2 uses for maximum divergence."
+    },
+    "sampling_ladder": {
+      "purpose": "The (temperature, top_p, top_k) level of each pool attempt: the first keeps the model's own defaults, every retry escalates temperature with truncation unclamped.",
+      "up": "More levels give an echoing model more chances to leave the exemplar nucleus.",
+      "down": "Fewer levels: temperature alone cannot diversify a nucleus pinned by the model's generation_config.",
+      "tip": "none = the served model's default; top_k 0 means all tokens in vLLM."
+    }
+  },
+  "exported_from": {
+    "commit": "6856c5d0c8d8f107baef056d80c59e64ff05a7b6",
+    "dirty": []
+  }
+}
