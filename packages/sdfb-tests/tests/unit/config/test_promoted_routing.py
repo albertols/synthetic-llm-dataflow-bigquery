@@ -11,7 +11,8 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Column routing thresholds and temporal age floors come from the config.
+"""Column routing thresholds and temporal age floors come from the config
+(ADR 0043).
 
 Design: docs/DESIGN.md §8 Configuration
 (ADR 0043).

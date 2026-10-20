@@ -377,8 +377,8 @@ def _temporal_range_and_sentinels(
     Sentinel-year values leave the range and come back as ``(value,
     fraction)`` pairs the sampler re-injects; an all-sentinel column keeps
     its observed range (nothing to trim toward). The floor is then clamped
-    to now - `generation.temporal_max_age_years_b1` unless the whole range is older
-    (fully-historical columns keep old truth; per-column DDL-JSON
+    to now - `generation.temporal_max_age_years_b1` unless the whole range
+    is older (fully-historical columns keep old truth; per-column DDL-JSON
     descriptions will govern those later). TIME columns are untouched by
     the clamp: their axis is seconds-of-day, far below any epoch floor.
     """
