@@ -82,6 +82,7 @@ from typing import Any
 from unittest import mock
 
 import yaml
+from sdfb_core.config.model import REQUIRED_FLAGS
 
 REPO = Path(__file__).resolve().parents[2]
 OUT_DIR = REPO / "gui" / "packages" / "contracts" / "generated"
@@ -407,7 +408,8 @@ def _cli_knob(
     settable.append("composer")
   if dest in _flex_params():
     settable.append("flex")
-  value = None if action.required else defaults[dest]
+  required = dest in REQUIRED_FLAGS
+  value = None if required else defaults[dest]
   composer_default = None
   if composer and str(composer[0]) != str(value if value is not None else ""):
     composer_default = composer[0]
@@ -424,7 +426,7 @@ def _cli_knob(
       composer_default=composer_default,
       flex_param=dest if dest in _flex_params() else None,
       choices=list(action.choices) if action.choices else None,
-      required=action.required,
+      required=required,
       help=help_text,
       source=_source(_RUN_PIPELINE, line),
       source_token=f'"{flag}"',

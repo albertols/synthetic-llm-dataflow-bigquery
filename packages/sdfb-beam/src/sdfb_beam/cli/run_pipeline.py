@@ -36,7 +36,7 @@ REFs:
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
 §6 Throughput; §8 Configuration
 (ADR 0019, 0022, 0023, 0024, 0027, 0028, 0029, 0030, 0031, 0032, 0034, 0035,
-0036, 0037, 0038, 0039).
+0036, 0037, 0038, 0039, 0043).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -73,7 +73,15 @@ from apache_beam.options.pipeline_options import (
     WorkerOptions,
 )
 from sdfb_core.codegen import derive_bq_load_schema
-from sdfb_core.config.model import DEFAULT_CONFIG
+from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
+from sdfb_core.config.resolve import (
+    ConfigError,
+    ConfigResolution,
+    missing_required,
+    namespace_values,
+    parse_config_text,
+    resolve,
+)
 from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.model_adjustment import (
     ModelAdjustment,
@@ -124,6 +132,7 @@ from sdfb_beam.cli.preflight import (
 from sdfb_beam.ddl import extract_table_schema
 from sdfb_beam.dofns.uniqueness import MODE_STREAMING, UNIQUENESS_MODES
 from sdfb_beam.io.bq_sources import load_reference_rows
+from sdfb_beam.io.config import read_config_text
 from sdfb_beam.io.digest import compute_reference_digest
 from sdfb_beam.io.fanout_stats import (
     BigQueryFanoutStatsStore,
@@ -138,10 +147,7 @@ from sdfb_beam.io.fk_pools import (
     parent_landing_fqn,
     per_column_view,
 )
-from sdfb_beam.io.relationships import (
-    DEFAULT_RELATIONSHIPS_URI,
-    load_relationship_registry,
-)
+from sdfb_beam.io.relationships import load_relationship_registry
 from sdfb_beam.io.source_values import (
     BigQuerySourceValueStore,
     pool_source_overlap,
@@ -286,10 +292,10 @@ def resolve_batch_size(requested: int, num_rows: int) -> int:
 def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides the CLI surface
     argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
   p = argparse.ArgumentParser(
-      description="Synthetic Dataflow BigQuery — pipeline launcher")
+      description="Synthetic Dataflow BigQuery — pipeline launcher",
+      argument_default=argparse.SUPPRESS)
   p.add_argument(
       "--ddl_uri",
-      default="",
       help="gs:// or local path to _ddl.json — the OFFLINE "
       "FALLBACK only (ADR 0027 D2). Live extraction is "
       "authoritative at every launch: structure from "
@@ -303,13 +309,11 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "(ddl_pin_drift/ddl_pin_fresh).")
   p.add_argument(
       "--reference_table",
-      required=True,
       help="FQN of source table for live SELECT reference rows")
-  p.add_argument("--reference_rows_limit", type=int, default=10_000)
+  p.add_argument("--reference_rows_limit", type=int)
   p.add_argument(
       "--rag_row_docs_limit",
       type=parse_rag_row_docs_limit,
-      default=MAX_ROW_DOC_ROWS,
       help="B.1 RAG: how many reference rows (the first N of the "
       "fingerprint-ordered sample) are embedded as row documents — "
       "the in-worker exemplar index, the rag_chunks row_doc prefix "
@@ -319,16 +323,13 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "missing rows when --build_rag_layer is on (ADR 0019).")
   p.add_argument(
       "--landing_table",
-      required=True,
       help="BQ table for synthetic rows (project.dataset.table). "
       "Accepts a comma-separated list for multi-table "
       "launches (ADR 0029 scenarios): each table runs "
       "sequentially with a suffixed run_id.")
-  p.add_argument(
-      "--dlq_table", required=True, help="BQ DLQ table (project.dataset.table)")
+  p.add_argument("--dlq_table", help="BQ DLQ table (project.dataset.table)")
   p.add_argument(
       "--write_disposition",
-      default="append",
       choices=["append", "overwrite"],
       help="Landing-table write mode. append = WRITE_APPEND "
       "(default, today's behavior); overwrite = "
@@ -336,7 +337,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "validation_runs and rag_chunks always append.")
   p.add_argument(
       "--create_if_not_exists",
-      default="false",
       help="true/1/yes: create the landing table on first "
       "write (CREATE_IF_NEEDED) carrying the landing "
       "schema derived in-pipeline from the DDL. Anything "
@@ -349,10 +349,9 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "because the FILE_LOADS load-job API rejects them "
       "at runtime. Pre-provision the table out-of-band "
       "(e.g. `bq mk`/DDL) if those constraints matter.")
-  p.add_argument("--num_rows", type=int, required=True)
+  p.add_argument("--num_rows", type=int)
   p.add_argument(
       "--autoscaling",
-      default="auto",
       choices=list(_AUTOSCALING_MODES),
       help="auto (default) = a fleet sized by --initial_workers "
       "stays that size (autoscaling_algorithm=NONE), "
@@ -364,7 +363,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "stages, ADR 0034 D9).")
   p.add_argument(
       "--initial_workers",
-      default="",
       help="Initial Dataflow worker count (ADR 0034). Empty = "
       "Dataflow's own default: the 2026-08-29 R6 pair "
       "started on 2 workers and autoscaled to 4 only ~4 min "
@@ -376,48 +374,38 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
   p.add_argument(
       "--batch_size",
       type=int,
-      default=DEFAULT_BATCH_SIZE,
       help="Rows per element. Left at the default, this scales "
       "with --num_rows toward ~1,000 elements (never below "
       "the default). Pass an explicit value to pin it.")
-  p.add_argument("--similarity", type=float, default=0.5)
+  p.add_argument("--similarity", type=float)
   p.add_argument(
       "--seed",
-      default="",
       help="Explicit base RNG seed (int). Empty = derive per "
       "(run_id, batch_id) — never replays across runs "
       "because run_id is salted per trigger.")
-  p.add_argument("--run_id", required=True)
+  p.add_argument("--run_id")
   p.add_argument(
       "--identity_cols",
-      default="",
       help="Comma-separated per-row-unique columns synthesized "
       "fresh each row (PK/UUID); never sampled from "
       "reference data")
   p.add_argument(
       "--pk_cols",
-      default="",
       help="Comma-separated declared primary-key columns; "
       "duplicate PK tuples divert to the DLQ "
       "(rule_id=pk.duplicate, BLOCKER). Empty disables.")
-  p.add_argument(
-      "--engine",
-      default="b1_rag",
-      help="Engine name registered in ENGINE_REGISTRY")
+  p.add_argument("--engine", help="Engine name registered in ENGINE_REGISTRY")
   p.add_argument(
       "--model_uri",
-      required=True,
       help="gs://<bucket>/synthetic/models/<family>/<model>/<version>/")
   p.add_argument(
       "--embedder_uri",
-      default="",
       help="gs://<bucket>/synthetic/models/embedders/<model>/<version>/ "
       "for the B.1 RAG embedder (optional; empty → HashingEmbedder)")
   p.add_argument(
       "--build_rag_layer",
       nargs="?",
       const="true",
-      default="",
       help="true/false (bare flag = true). Populate "
       "synthetic_rag.rag_chunks from this run's "
       "reference sample (skipped if the reference_digest "
@@ -426,7 +414,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "pass --build_rag_layer=true.")
   p.add_argument(
       "--rag_chunks_table",
-      default="",
       help="FQN of synthetic_rag.rag_chunks. Enables the "
       "read-instead-of-reembed path; with "
       "--build_rag_layer also enables population.")
@@ -434,7 +421,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "--build_pool_layer",
       nargs="?",
       const="true",
-      default="",
       help="true/false (bare flag = true). Build free-text "
       "pools in their own branch and persist them to "
       "--freetext_pools_table (skipped if this "
@@ -443,13 +429,11 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "process's setup().")
   p.add_argument(
       "--freetext_pools_table",
-      default="",
       help="FQN of synthetic_rag.freetext_pools. Enables the "
       "read-instead-of-rebuild path; with "
       "--build_pool_layer also enables the build branch.")
   p.add_argument(
       "--uniqueness_mode",
-      default="exact",
       choices=list(UNIQUENESS_MODES),
       help="exact = divert every duplicate to the DLQ behind "
       "ONE full-row shuffle barrier (default; PK/identity "
@@ -465,14 +449,12 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "--write_disposition=overwrite.")
   p.add_argument(
       "--fk_fanout_stats_table",
-      default="",
       help="FQN of synthetic_data_quality.fk_fanout_stats (ADR 0036 cache of "
       "the SOURCE fan-out histogram + PK cells per driving edge). "
       "Empty = measure every launch, never cache.")
   p.add_argument(
       "--fk_candidate_cap",
       type=validate_candidate_cap,
-      default=DEFAULT_FK_CANDIDATE_CAP,
       help="ADR 0037: Top-M candidates kept per SHARED value on a "
       "CONDITIONAL edge (an edge sharing columns with the "
       "driving edge — a diamond branch). A hot shared key "
@@ -483,14 +465,12 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "request under ~100k candidate values.")
   p.add_argument(
       "--driven_uniqueness_mode",
-      default="streaming",
       choices=list(UNIQUENESS_MODES),
       help="Uniqueness mode for a DRIVEN child without identity columns "
       "(ADR 0036): its PK is unique by construction, so `streaming` "
       "measures duplicates without the landing-path barrier.")
   p.add_argument(
       "--on_model_conflict",
-      default=ON_CONFLICT_ADJUST,
       choices=list(ON_MODEL_CONFLICT_MODES),
       help="What a MEASURED contradiction between the "
       "relationship model and the SOURCE does (ADR "
@@ -507,7 +487,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "ADR 0035 capacity gate stop under BOTH settings.")
   p.add_argument(
       "--pool_seed_strategy",
-      default="centroid",
       choices=list(POOL_SEED_STRATEGIES),
       help="How the 8 free-text prompt seeds are chosen. "
       "centroid = control (densest region, today). "
@@ -518,7 +497,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "--pool_pattern_guidance",
       nargs="?",
       const="true",
-      default="",
       help="true/false (bare flag = true). Constrain "
       "identifier-ish free-text pool completions at "
       "decode time with a charset/length regex "
@@ -527,7 +505,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "format gate protects pools either way.")
   p.add_argument(
       "--freetext_expansion",
-      default="identifiers",
       choices=["off", "identifiers", "all"],
       help="Shape-preserving expander for free-text columns "
       "(2026-08-05 spec C3). off = pool draws only "
@@ -539,14 +516,12 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "docs/designs/2026-08-05-freetext-expansion-modes.md")
   p.add_argument(
       "--prompt_constraints",
-      default="on",
       choices=["on", "off"],
       help="Attach per-column llm_prompt_constraint (parsed "
       "from column-description JSON) to pool prompts "
       "(spec C5). Prefix-cache-safe constant suffix.")
   p.add_argument(
       "--prompt_debug",
-      default="off",
       choices=["off", "redacted", "full"],
       help="Log each built pool prompt as a "
       "freetext_pool_prompt milestone (ADR 0024). "
@@ -555,7 +530,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "reach Dataflow logs, debug runs only.")
   p.add_argument(
       "--source_stats",
-      default="sample",
       choices=["off", "sample", "exact"],
       help="Compute per-column source_table_stats from the "
       "reference sample (driver-side, zero DAG cost). "
@@ -565,18 +539,15 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "off disables entirely.")
   p.add_argument(
       "--source_stats_table",
-      default="",
       help="BQ table for source_table_stats rows "
       "(project.dataset.table); empty skips the BQ write. "
       "Existing (table, digest) rows are never rewritten.")
   p.add_argument(
       "--source_stats_json",
-      default="",
       help="gs:// or local path for the stats JSON artifact; "
       "empty skips it.")
   p.add_argument(
       "--generate_fk_relationships",
-      default="true",
       help="true (default): declared relationships are "
       "honored — a launch expands to the table's whole "
       "FK component (parents first) and children sample "
@@ -587,14 +558,12 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "ADR 0029.")
   p.add_argument(
       "--fk_parent_landing",
-      default="",
       help="EXPERT OVERRIDE only (ADR 0029): parents are "
       "assumed landed in the --landing_table dataset and "
       "this derives automatically. Set it only when "
       "parents land in a DIFFERENT project.dataset.")
   p.add_argument(
       "--multi_table_mode",
-      default="single_job",
       choices=["single_job", "sequential_jobs"],
       help="How a multi-table plan executes (ADR 0030). "
       "single_job (default): every planned table in ONE "
@@ -604,7 +573,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "debugging).")
   p.add_argument(
       "--relationships_uri",
-      default=DEFAULT_RELATIONSHIPS_URI,
       help="Where the relational models live (ADR 0032): a "
       "folder or a single YAML file, local or gs://. "
       "Default: the config/relationships folder packaged "
@@ -614,22 +582,15 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "read for it.")
   p.add_argument(
       "--validation_runs_table",
-      default="",
       help="BQ table for the run-level summary row "
       "(project.dataset.table); empty skips the write")
   p.add_argument(
-      "--env",
-      default="dev",
-      help="Environment tier selecting thresholds (dev|uat|prd)")
+      "--env", help="Environment tier selecting thresholds (dev|uat|prd)")
   p.add_argument(
-      "--thresholds_uri",
-      default="config/thresholds.yml",
-      help="gs:// or local path to thresholds.yml")
-  p.add_argument(
-      "--client_type", default="vllm", choices=["vllm", "mlx", "fake"])
+      "--thresholds_uri", help="gs:// or local path to thresholds.yml")
+  p.add_argument("--client_type", choices=["vllm", "mlx", "fake"])
   p.add_argument(
       "--vllm_dtype",
-      default="auto",
       choices=["auto", "float16", "bfloat16"],
       help="vLLM --dtype override. auto = checkpoint dtype "
       "(bf16 for Gemma/Qwen). float16 is REQUIRED on T4 "
@@ -637,19 +598,67 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "gemma-family models (fp16 Gemma emits empty output)")
   p.add_argument(
       "--vllm_max_model_len",
-      default="8192",
       help="vLLM --max-model-len cap. Without it vLLM sizes the "
       "KV cache for the checkpoint's NATIVE context "
       "(Qwen3-2507: 262K → 36GiB KV, kills the T4 "
       "EngineCore at startup). 8192 fits every registry "
       "model/GPU pairing and dwarfs the synthesis prompts. "
       "Empty = no cap (native context).")
-  args, beam_args = p.parse_known_args(argv)
+  p.add_argument(
+      "--config_uri",
+      help="gs:// or local path to a generator config file (ADR 0043). "
+      "Keys it sets win over the same flags; flags fill the keys it leaves "
+      "out. Empty = no file. Reference: config/generator.yaml.")
+  typed, beam_args = p.parse_known_args(argv)
+  typed_values = vars(typed)
+  config_uri = str(typed_values.pop("config_uri", "") or "").strip()
+  file_values = None
+  if config_uri:
+    try:
+      text = read_config_text(config_uri)
+    except OSError as e:
+      p.error(f"could not read --config_uri {config_uri}: {e}")
+    else:
+      try:
+        file_values = parse_config_text(text, source=config_uri)
+      except ConfigError as e:
+        p.error(str(e))
+  try:
+    resolution = resolve(typed_values, file_values, config_uri=config_uri)
+  except ConfigError as e:
+    p.error(str(e))
+  missing = missing_required(resolution.config)
+  if missing:
+    p.error("the following arguments are required: " +
+            ", ".join(f"--{dest}" for dest in missing))
+  args = argparse.Namespace(
+      **namespace_values(resolution),
+      config_uri=config_uri,
+      config_resolution=resolution)
   if parse_bool_flag(args.build_rag_layer) and not args.rag_chunks_table:
     p.error("--build_rag_layer requires --rag_chunks_table")
   if parse_bool_flag(args.build_pool_layer) and not args.freetext_pools_table:
     p.error("--build_pool_layer requires --freetext_pools_table")
   return args, beam_args
+
+
+def config_of(args: argparse.Namespace) -> GeneratorConfig:
+  """The launch's resolved config; the defaults for a hand-built namespace."""
+  resolution = getattr(args, "config_resolution", None)
+  return resolution.config if resolution is not None else DEFAULT_CONFIG
+
+
+def log_config_resolution(resolution: ConfigResolution) -> None:
+  """One line for the resolution, one WARNING row per flag a file overrode."""
+  counts: dict[str, int] = {}
+  for origin in resolution.provenance.values():
+    counts[origin] = counts.get(origin, 0) + 1
+  logger.info("config_resolved uri=%s file=%d flag=%d default=%d",
+              resolution.config_uri or "-", counts.get("file", 0),
+              counts.get("flag", 0), counts.get("default", 0))
+  for item in resolution.overridden:
+    logger.warning("config_override key=%s typed=%r file=%r (the file wins)",
+                   item.key, item.typed, item.file)
 
 
 def resolve_thresholds(thresholds_uri: str, env: str) -> Thresholds:
@@ -2410,6 +2419,7 @@ def main(argv: list[str] | None = None) -> int:
   # two same-day runs were indistinguishable by build from the logs.)
   log_build_info("launcher")
   args, beam_argv = parse_args(argv or sys.argv[1:])
+  log_config_resolution(args.config_resolution)
 
   # ADR 0029 rev B — resolve the launch scenario BEFORE any per-table
   # work: minimal inputs (landing table(s) + one flag), everything

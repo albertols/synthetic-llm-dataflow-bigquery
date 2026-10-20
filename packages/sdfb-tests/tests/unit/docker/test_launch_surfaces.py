@@ -74,7 +74,10 @@ _FLEX_ENTRY = _REPO_ROOT / "docker" / "flex_entry.py"
 
 # Flags the generator's CLI accepts and the template never declared: they
 # stay reachable only from a direct launch (ADR 0024 §3c precedent).
-_UNDECLARED = frozenset({"pool_pattern_guidance"})
+_UNDECLARED = frozenset({
+    "pool_pattern_guidance",
+    "config_uri",  # until the Flex parameter lands (A1 Task 15)
+})
 # The names both jobs use. Each appears once in the template.
 _SHARED = frozenset({
     "reference_rows_limit", "relationships_uri", "run_id", "thresholds_uri",
