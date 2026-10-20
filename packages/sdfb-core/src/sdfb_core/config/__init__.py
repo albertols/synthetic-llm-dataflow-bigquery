@@ -20,9 +20,14 @@ from sdfb_core.config.model import (ALL_KEYS, CONFIG_VERSION, CONSTANT_KEYS,
                                     DEFAULT_CONFIG, FLAG_KEYS, IDENTITY_KEYS,
                                     REQUIRED_FLAGS, SECTION_TYPES, SECTIONS,
                                     GeneratorConfig, value_of)
+from sdfb_core.config.resolve import (ConfigError, ConfigResolution, Override,
+                                      missing_required, namespace_values,
+                                      parse_config_text, resolve)
 
 __all__ = [
     "ALL_KEYS", "CONFIG_VERSION", "CONSTANT_KEYS", "DEFAULT_CONFIG",
     "FLAG_KEYS", "IDENTITY_KEYS", "REQUIRED_FLAGS", "SECTIONS", "SECTION_TYPES",
-    "GeneratorConfig", "value_of"
+    "ConfigError", "ConfigResolution", "GeneratorConfig", "Override",
+    "missing_required", "namespace_values", "parse_config_text", "resolve",
+    "value_of"
 ]
