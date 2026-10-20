@@ -118,7 +118,8 @@ from sdfb_core.rag.chunking import (
     resolve_row_docs_limit,
 )
 from sdfb_core.rag.embedding import embedder_identity
-from sdfb_core.stats import PROFILER_VERSION, profile_source_table, stats_rows
+from sdfb_core.stats import profile_source_table, stats_rows
+from sdfb_core.stats.source_stats import stats_profiler_version
 from sdfb_core.validation import Thresholds
 
 from sdfb_beam.cli.preflight import (
@@ -2248,8 +2249,9 @@ def _emit_source_stats(args, table_schema, reference_rows,
     """
   if args.source_stats == "off" or not reference_rows:
     return {}
+  config = config_of(args)
   stats = profile_source_table(
-      table_schema, reference_rows, relations=pf.relations)
+      table_schema, reference_rows, relations=pf.relations, config=config)
   source_distinct: dict[str, int] = {}
   if args.source_stats == "exact":
     from sdfb_beam.io.exact_stats import compute_exact_stats
@@ -2257,7 +2259,8 @@ def _emit_source_stats(args, table_schema, reference_rows,
     # A failed exact pass degrades LOUDLY to sample-tier stats: the run
     # is still valid, just without exact pool sizing.
     try:
-      stats = compute_exact_stats(args.reference_table, table_schema, stats)
+      stats = compute_exact_stats(
+          args.reference_table, table_schema, stats, sampling=config.sampling)
     except Exception as exc:  # pylint: disable=broad-exception-caught
       log_milestone(
           "source_stats_exact_failed",
@@ -2296,7 +2299,7 @@ def _emit_source_stats(args, table_schema, reference_rows,
     if store.exists(
         table_schema.fqn,
         digest,
-        profiler_version=PROFILER_VERSION,
+        profiler_version=stats_profiler_version(config),
         stats_tier=achieved_tier,
     ):
       log_milestone("source_stats_skipped", reference_digest=digest[:12])
