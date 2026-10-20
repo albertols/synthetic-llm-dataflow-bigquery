@@ -13,6 +13,8 @@
 #  limitations under the License.
 """`--config_uri`: the file wins, missing files fail cleanly, blank means none.
 
+The launcher's side of the generator config file (ADR 0043).
+
 Design: docs/DESIGN.md §8 Configuration
 (ADR 0043).
 """
