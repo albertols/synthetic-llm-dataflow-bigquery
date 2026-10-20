@@ -18,6 +18,9 @@ concurrently with Generate, writing an artifact keyed on the reference
 digest. Without it every autoscaled worker process rebuilt all pools —
 108 rebuilds and 68,805 s of LLM service time on the 2026-07-26 1M run,
 because `_POOL_CACHE` lives for exactly one worker process.
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0043).
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 import apache_beam as beam
+from sdfb_core.config.salt import pool_store_model_key
 from sdfb_core.engines import get_engine
 from sdfb_core.observability import log_milestone, milestone_scope
 from sdfb_core.pools import FreeTextPool
@@ -119,7 +123,9 @@ class BuildFreeTextPoolsDoFn(beam.DoFn):
           pool_to_row(
               FreeTextPool(
                   reference_digest=self.ctx.reference_digest,
-                  model_uri=self.ctx.model_uri,
+                  # The key every pool-store reader uses (ADR 0043).
+                  model_uri=pool_store_model_key(self.ctx.model_uri,
+                                                 self.ctx.generator_config),
                   column=column,
                   target=int(info.get("target", len(values))),
                   values=tuple(values),

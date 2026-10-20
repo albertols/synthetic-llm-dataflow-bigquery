@@ -39,10 +39,10 @@ import logging
 import threading
 
 import pytest
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationContext
 from sdfb_core.engines.b1_rag import B1RagEngine
-from sdfb_core.engines.b1_rag.engine import _POOL_VALUES_PER_CALL
 from sdfb_core.engines.base import ModelClientTransientError
 from sdfb_core.rag.embedding import HashingEmbedder
 
@@ -69,10 +69,11 @@ class _FlakyClient:
       out = []
       for _ in range(max(1, n)):
         base = self._issued
-        self._issued += _POOL_VALUES_PER_CALL
+        self._issued += DEFAULT_CONFIG.free_text.pool_values_per_call
         out.append({
             "values": [
-                f"fresh memo {base + i}" for i in range(_POOL_VALUES_PER_CALL)
+                f"fresh memo {base + i}"
+                for i in range(DEFAULT_CONFIG.free_text.pool_values_per_call)
             ]
         })
       return out

@@ -322,7 +322,8 @@ class GenerateRecordsDoFn(beam.DoFn):
       ctx = ctx.model_copy(
           update={
               "source_value_store": (source_values_mod.BigQuerySourceValueStore(
-                  ctx.source_values_table))
+                  ctx.source_values_table,
+                  cap=ctx.generator_config.free_text.source_domain_cap))
           })
       self.ctx = ctx
 

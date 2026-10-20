@@ -31,7 +31,7 @@ declares fall back to the CLI flags, which is how a one-off table with
 no relationships generates with zero config.
 
 Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuration
-(ADR 0024, 0026, 0028, 0029, 0030, 0031, 0032, 0035, 0036, 0037, 0038).
+(ADR 0024, 0026, 0028, 0029, 0030, 0031, 0032, 0035, 0036, 0037, 0038, 0043).
 """
 
 # f-string fields keep single quotes: yapf 0.43 cannot parse PEP 701
@@ -66,7 +66,6 @@ from sdfb_core.engines.b1_rag.profile import (
     profile_columns,
 )
 from sdfb_core.engines.constraint_sampler import compile_pattern_sampler
-from sdfb_core.engines.generation_plan import FREE_TEXT_POOL_MAX
 from sdfb_core.engines.pk_capacity import (
     FK_KEY_SAMPLE_CEILING,
     effective_cells,
@@ -170,7 +169,10 @@ _POOL_ROUTED_BQ_TYPES = frozenset({"STRING", "JSON", "GEOGRAPHY", "BYTES"})
 def _pk_capacity_factor(
     field_,
     pc,
-    profile: ColumnProfile | None = None) -> tuple[int | None, bool]:
+    profile: ColumnProfile | None = None,
+    *,
+    config: GeneratorConfig,
+) -> tuple[int | None, bool]:
   """One PK member's ``(unique-value capacity, draws_at_random)``;
     capacity ``None`` = unbounded.
 
@@ -183,7 +185,8 @@ def _pk_capacity_factor(
     stop). Bounded constrained members: an enum ``values`` clause (its
     domain, random), a samplable ``pattern`` (its language, with the
     emitted-set rejection of ADR 0028 — exact), else the
-    ``FREE_TEXT_POOL_MAX`` pool cap (random)."""
+    ``free_text.free_text_pool_max`` pool cap of the launch config
+    (random, ADR 0043)."""
   if pc is None:
     return _unconstrained_factor(profile), profile is not None
   if pc.values:
@@ -195,7 +198,7 @@ def _pk_capacity_factor(
     sampler = compile_pattern_sampler(pc.pattern, families=pc.families)
     if sampler is not None:
       return sampler.capacity, False
-  return FREE_TEXT_POOL_MAX, True
+  return config.free_text.free_text_pool_max, True
 
 
 def _unconstrained_factor(profile: ColumnProfile | None) -> int | None:
@@ -252,6 +255,8 @@ def _fold_pk_members(
     effective_pk: tuple[str, ...],
     skip: set[str],
     profiles: Mapping[str, ColumnProfile],
+    *,
+    config: GeneratorConfig,
 ) -> _PkMembers:
   by_name = {c.name: c for c in table_schema.columns}
   m = _PkMembers()
@@ -263,7 +268,7 @@ def _fold_pk_members(
       continue
     pc = parse_prompt_constraint(field_.description, column=col)
     profile = profiles.get(col)
-    factor, at_random = _pk_capacity_factor(field_, pc, profile)
+    factor, at_random = _pk_capacity_factor(field_, pc, profile, config=config)
     if factor is None:
       m.unbounded = True  # one unbounded member covers the tuple
       return m
@@ -311,6 +316,7 @@ def _check_pk_capacity(
     fk_edges: tuple[FkEdge, ...] = (),
     fk_parent_rows: Mapping[str, int] | None = None,
     blocker_failure_ratio: float = 1.0,
+    config: GeneratorConfig,
 ) -> dict[tuple[str, ...], int]:
   """P4 (ADR 0028, tuple-aware since ADR 0030, FK/categorical-aware
     since ADR 0035) — the PK TUPLE's generator capacity must cover
@@ -337,6 +343,7 @@ def _check_pk_capacity(
       effective_pk,
       skip={c for fk in edges for c in fk.cols},
       profiles=profiles or {},
+      config=config,
   )
   cells = (
       _joint_cell_weights(reference_rows or [], tuple(m.sampled_cols))
@@ -1280,6 +1287,7 @@ def _run_p4(
     candidate_cap: int | None,
     on_model_conflict: str,
     fk_parent_distinct_keys: Mapping[str, int] | None = None,
+    config: GeneratorConfig,
 ) -> tuple[
     tuple[str, ...],
     int | None,
@@ -1308,6 +1316,7 @@ def _run_p4(
           fk_edges=enforced_fk,
           fk_parent_rows=fk_parent_rows,
           blocker_failure_ratio=blocker_failure_ratio,
+          config=config,
       )
     return effective_pk, None, caps, ()
   # ADR 0037: an independent edge touching the PK is BOTH a P4 factor
@@ -1439,6 +1448,7 @@ def preflight(
           profiles=profiles,
           reference_rows=reference_rows,
           blocker_failure_ratio=blocker_failure_ratio,
+          config=config,
       )
     return PreflightResult(pk_cols, identity_cols, None, warnings)
 
@@ -1569,6 +1579,7 @@ def preflight(
       candidate_cap=candidate_cap,
       on_model_conflict=on_model_conflict,
       fk_parent_distinct_keys=fk_parent_distinct_keys,
+      config=config,
   )
 
   log_milestone(

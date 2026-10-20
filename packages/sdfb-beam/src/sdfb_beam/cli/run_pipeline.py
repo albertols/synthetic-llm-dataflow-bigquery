@@ -82,7 +82,7 @@ from sdfb_core.config.resolve import (
     parse_config_text,
     resolve,
 )
-from sdfb_core.config.salt import salted, settings_salt
+from sdfb_core.config.salt import pool_store_model_key, salted, settings_salt
 from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.model_adjustment import (
     ModelAdjustment,
@@ -2319,7 +2319,7 @@ def _emit_source_stats(args, table_schema, reference_rows,
 
 
 def warm_pools_trusted(pool_store, source_value_store, reference_digest: str,
-                       model_uri: str) -> bool:
+                       model_uri: str, *, config: GeneratorConfig) -> bool:
   """False ⇒ the persisted pools overlap the live source and were
     deleted for a clean rebuild; True ⇒ keep the warm path.
 
@@ -2331,8 +2331,12 @@ def warm_pools_trusted(pool_store, source_value_store, reference_digest: str,
     delete would leave stale rows racing the rebuilt ones in `fetch`.
     """
   try:
-    overlap = pool_source_overlap(pool_store, source_value_store,
-                                  reference_digest, model_uri)
+    overlap = pool_source_overlap(
+        pool_store,
+        source_value_store,
+        reference_digest,
+        model_uri,
+        config=config)
   except Exception as exc:  # pylint: disable=broad-exception-caught
     log_milestone(
         "pool_taint_check_error",
@@ -2352,7 +2356,7 @@ def warm_pools_trusted(pool_store, source_value_store, reference_digest: str,
       },
   )
   try:
-    pool_store.delete(reference_digest, model_uri)
+    pool_store.delete(reference_digest, pool_store_model_key(model_uri, config))
   except Exception as exc:  # pylint: disable=broad-exception-caught
     log_milestone(
         "pool_taint_delete_error",
@@ -2373,11 +2377,13 @@ def resolve_pool_layer(args, reference_rows: list[dict]) -> tuple:
     """
   if not (parse_bool_flag(args.build_pool_layer) and args.freetext_pools_table):
     return None, None
+  config = config_of(args)
   digest = compute_reference_digest(reference_rows)
   pool_store = BigQueryFreeTextPoolStore(args.freetext_pools_table)
   # Full-domain novelty rejection for the build branch, and the
   # taint preflight for the warm path (2026-08-05/07 E2E findings).
-  source_value_store = BigQuerySourceValueStore(args.reference_table)
+  source_value_store = BigQuerySourceValueStore(
+      args.reference_table, cap=config.free_text.source_domain_cap)
   # A MISSING pool table must not surface as a cryptic NotFound out of
   # the driver — that is exactly how TEST_1 (2026-07-25 16:38) died on
   # a 404. The table is never auto-created (the CREATE_IF_NEEDED
@@ -2385,7 +2391,8 @@ def resolve_pool_layer(args, reference_rows: list[dict]) -> tuple:
   # say what to run. The READ path degrades silently and correctly on
   # its own; only an explicit --build_pool_layer reaches here.
   try:
-    already_built = pool_store.exists(digest, args.model_uri)
+    already_built = pool_store.exists(
+        digest, pool_store_model_key(args.model_uri, config))
   except Exception as exc:
     proj, ds, tbl = args.freetext_pools_table.split(".", 2)
     raise SystemExit(
@@ -2400,8 +2407,8 @@ def resolve_pool_layer(args, reference_rows: list[dict]) -> tuple:
     # exists() alone let the 2026-08-07 10M warm run replay the
     # memorized 2026-08-05 pools; a warm store must also prove it
     # holds no live source values before it is trusted.
-    already_built = warm_pools_trusted(pool_store, source_value_store, digest,
-                                       args.model_uri)
+    already_built = warm_pools_trusted(
+        pool_store, source_value_store, digest, args.model_uri, config=config)
   if already_built:
     log_milestone(
         "pool_build_skipped",

@@ -1212,8 +1212,10 @@ def _population_branch(
     free_text_columns = _rag_free_text_columns(config.table_schema,
                                                reference_rows,
                                                config.generator_config)
-    distinct_values = distinct_free_text_values(reference_rows,
-                                                free_text_columns)
+    distinct_values = distinct_free_text_values(
+        reference_rows,
+        free_text_columns,
+        cap=config.generator_config.rag.max_free_text_values_per_column)
   row_doc_chunks = (
       p
       | f"{label_prefix}RagReferenceRows" >> beam.Create(prefix)

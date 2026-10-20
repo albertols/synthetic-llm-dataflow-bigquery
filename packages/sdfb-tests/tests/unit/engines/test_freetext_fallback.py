@@ -32,6 +32,7 @@ import re
 
 import numpy as np
 import pytest
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import (
     FreeTextEmptyYieldError,
@@ -744,8 +745,13 @@ def test_b1_pool_yield_separates_prompt_echoes_from_reference_collisions():
     def generate_json(self, *a, **k):
       return [{"key": "K-0050"}, {"key": "K-0060"}, {"key": "K-0001"}]
 
-  y = _pool_llm_yield(_CollidingClient(), "p", {}, _KeyProf(),
-                      ["K-0001", "K-0002"])
+  y = _pool_llm_yield(
+      _CollidingClient(),
+      "p", {},
+      _KeyProf(), ["K-0001", "K-0002"],
+      target=DEFAULT_CONFIG.free_text.pool_values_per_call,
+      n_choices=DEFAULT_CONFIG.free_text.pool_parallel_choices,
+      ladder=DEFAULT_CONFIG.free_text)
   assert y.pool == []
   assert y.parsed == 3 * y.attempts
   assert y.copies == y.parsed
@@ -761,7 +767,13 @@ def test_b1_pool_yield_counts_pure_echo():
     def generate_json(self, *a, **k):
       return [{"key": "K-0001"}, {"key": "K-0001"}, {"key": "K-0002"}]
 
-  y = _pool_llm_yield(_EchoClient(), "p", {}, _KeyProf(), ["K-0001", "K-0002"])
+  y = _pool_llm_yield(
+      _EchoClient(),
+      "p", {},
+      _KeyProf(), ["K-0001", "K-0002"],
+      target=DEFAULT_CONFIG.free_text.pool_values_per_call,
+      n_choices=DEFAULT_CONFIG.free_text.pool_parallel_choices,
+      ladder=DEFAULT_CONFIG.free_text)
   assert y.prompt_echoes == y.parsed
   assert y.distinct == 2
 
@@ -793,7 +805,7 @@ def test_b2_strict_message_reports_distinct_and_prompt_echoes(wide_ctx):
 # (2026-07-16 runs: distinct=1, prompt_echoes=96 at every sampling level).
 # The pool must be ARRAY completions — each choice carries a values array,
 # where the model sees what it already wrote and can actually be distinct
-# (B.2's shape). Since 2026-07-25, n=_POOL_PARALLEL_CHOICES independent
+# (B.2's shape). Since 2026-07-25, n=pool_parallel_choices independent
 # array completions ride one round trip (unseeded, so choices diverge) —
 # never n single-value choices, which is the 2026-07-16 collapse shape.
 # ---------------------------------------------------------------------------
@@ -801,7 +813,6 @@ def test_b2_strict_message_reports_distinct_and_prompt_echoes(wide_ctx):
 
 def test_b1_pool_requests_parallel_array_completions_not_single_values(
     free_text_ctx):
-  from sdfb_core.engines.b1_rag.engine import _POOL_PARALLEL_CHOICES
 
   class _RecordingNovelClient:
 
@@ -816,7 +827,7 @@ def test_b1_pool_requests_parallel_array_completions_not_single_values(
   engine = B1RagEngine(embedder=HashingEmbedder(dim=64))
   engine.setup(client, free_text_ctx)
   call = client.calls[0]
-  assert call["n"] == _POOL_PARALLEL_CHOICES
+  assert call["n"] == DEFAULT_CONFIG.free_text.pool_parallel_choices
   assert call["json_schema"]["properties"]["values"]["type"] == "array"
   assert "A fresh synthetic bio." in engine._free_text_pools["bio"]
 

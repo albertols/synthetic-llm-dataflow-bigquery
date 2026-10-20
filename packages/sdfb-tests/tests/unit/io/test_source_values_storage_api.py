@@ -25,8 +25,8 @@ installed (both true on the worker image), and falls back to the cached
 first page for small results. Nothing else changes: same SQL, same cap
 semantics, same process cache.
 
-Design: docs/DESIGN.md §5 Fidelity; §6 Throughput
-(ADR 0023, 0033, 0034).
+Design: docs/DESIGN.md §5 Fidelity; §6 Throughput; §8 Configuration
+(ADR 0023, 0033, 0034, 0043).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
@@ -39,6 +39,10 @@ from sdfb_beam.io.source_values import (
     BigQuerySourceValueStore,
     clear_source_value_cache,
 )
+from sdfb_core.config.model import DEFAULT_CONFIG
+
+# The launch-default cap (ADR 0043): the store has none of its own.
+_CAP = DEFAULT_CONFIG.free_text.source_domain_cap
 
 
 class _ArrowResult:
@@ -82,7 +86,7 @@ def setup_function(_fn) -> None:
 
 def test_fetch_distinct_reads_the_arrow_column_without_iterating_rows():
   result = _ArrowResult(["a", "b", "b", "c"])
-  store = BigQuerySourceValueStore("p.d.t", client=_Client(result))
+  store = BigQuerySourceValueStore("p.d.t", cap=_CAP, client=_Client(result))
   assert store.fetch_distinct("col") == frozenset({"a", "b", "c"})
   assert result.arrow_calls == 1
   assert result.iterated is False
@@ -98,7 +102,7 @@ def test_arrow_failure_falls_back_to_row_iteration(caplog):
   import logging
 
   result = _ArrowResult(["x", "y"], arrow_fails=True)
-  store = BigQuerySourceValueStore("p.d.t", client=_Client(result))
+  store = BigQuerySourceValueStore("p.d.t", cap=_CAP, client=_Client(result))
   with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
     assert store.fetch_distinct("col") == frozenset({"x", "y"})
   assert result.iterated is True
@@ -107,7 +111,7 @@ def test_arrow_failure_falls_back_to_row_iteration(caplog):
 
 def test_fetch_frequent_uses_the_arrow_path_too():
   result = _ArrowResult(["2000", "35"])
-  store = BigQuerySourceValueStore("p.d.t", client=_Client(result))
+  store = BigQuerySourceValueStore("p.d.t", cap=_CAP, client=_Client(result))
   assert store.fetch_frequent("acct", 10) == frozenset({"2000", "35"})
   assert result.arrow_calls == 1
   assert result.iterated is False
@@ -115,7 +119,7 @@ def test_fetch_frequent_uses_the_arrow_path_too():
 
 def test_arrow_nulls_are_dropped_like_the_rest_path_would():
   result = _ArrowResult(["a", None, "b"])  # type: ignore[list-item]
-  store = BigQuerySourceValueStore("p.d.t", client=_Client(result))
+  store = BigQuerySourceValueStore("p.d.t", cap=_CAP, client=_Client(result))
   assert store.fetch_distinct("col") == frozenset({"a", "b"})
 
 
@@ -194,7 +198,7 @@ def test_rest_fallback_uses_a_fresh_row_iterator_after_a_failed_arrow_read(
 
   client = _JobClient(["a", "b"],
                       arrow_error=PermissionDenied("readsessions.create"))
-  store = BigQuerySourceValueStore("p.d.t", client=client)
+  store = BigQuerySourceValueStore("p.d.t", cap=_CAP, client=client)
   with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
     assert store.fetch_distinct("col") == frozenset({"a", "b"})
   (job,) = client.jobs
@@ -210,7 +214,7 @@ def test_permission_denied_disables_the_storage_api_for_the_process(caplog):
 
   client = _JobClient(["x"],
                       arrow_error=PermissionDenied("readsessions.create"))
-  store = BigQuerySourceValueStore("p.d.t", client=client)
+  store = BigQuerySourceValueStore("p.d.t", cap=_CAP, client=client)
   with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
     assert store.fetch_distinct("c1") == frozenset({"x"})
     assert store.fetch_frequent("c1", 10) == frozenset({"x"})
@@ -225,7 +229,7 @@ def test_a_transient_arrow_failure_does_not_disable_the_storage_api(caplog):
   import logging
 
   client = _JobClient(["x"], arrow_error=RuntimeError("stream reset"))
-  store = BigQuerySourceValueStore("p.d.t", client=client)
+  store = BigQuerySourceValueStore("p.d.t", cap=_CAP, client=client)
   with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
     assert store.fetch_distinct("c1") == frozenset({"x"})
     assert store.fetch_distinct("c2") == frozenset({"x"})

@@ -44,3 +44,12 @@ def settings_salt(config: GeneratorConfig, cache: str) -> str:
 
 def salted(key: str, salt: str) -> str:
   return f"{key}+cfg.{salt}" if salt else key
+
+
+def pool_store_model_key(model_uri: str, config: GeneratorConfig) -> str:
+  """The `model_uri` a persisted free-text pool is keyed on.
+
+  Every pool-store call — the launcher's exists/taint/delete, the worker's
+  fetch, the pool branch's write — goes through here, so a pool built
+  under one ladder is never served under another."""
+  return salted(model_uri, settings_salt(config, "freetext_pools"))

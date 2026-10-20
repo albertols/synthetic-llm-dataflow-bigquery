@@ -42,6 +42,7 @@ from sdfb_beam.cli.run_pipeline import (
     resolve_landing_dispositions,
 )
 from sdfb_core.codegen import derive_bq_load_schema
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts import TableSchema
 
 
@@ -594,7 +595,8 @@ def test_warm_pools_trusted_when_clean():
   from sdfb_beam.cli.run_pipeline import warm_pools_trusted
 
   store = _PreflightPoolStore([_preflight_pool("c", ("nov-1", "nov-2"))])
-  assert warm_pools_trusted(store, _PreflightValueStore(), "d", "m") is True
+  assert warm_pools_trusted(
+      store, _PreflightValueStore(), "d", "m", config=DEFAULT_CONFIG) is True
   assert store.deleted == []
 
 
@@ -602,7 +604,8 @@ def test_warm_pools_tainted_deletes_and_rebuilds():
   from sdfb_beam.cli.run_pipeline import warm_pools_trusted
 
   store = _PreflightPoolStore([_preflight_pool("c", ("real-1", "nov-2"))])
-  assert warm_pools_trusted(store, _PreflightValueStore(), "d", "m") is False
+  assert warm_pools_trusted(
+      store, _PreflightValueStore(), "d", "m", config=DEFAULT_CONFIG) is False
   assert store.deleted == [("d", "m")]
 
 
@@ -615,7 +618,8 @@ def test_warm_pools_overlap_check_error_keeps_warm_path():
       raise RuntimeError("bq down")
 
   store = _PreflightPoolStore([_preflight_pool("c", ("real-1",))])
-  assert warm_pools_trusted(store, _BoomValueStore(), "d", "m") is True
+  assert warm_pools_trusted(
+      store, _BoomValueStore(), "d", "m", config=DEFAULT_CONFIG) is True
   assert store.deleted == []
 
 
@@ -630,7 +634,8 @@ def test_warm_pools_delete_failure_keeps_warm_path():
       raise RuntimeError("dml denied")
 
   store = _NoDeleteStore([_preflight_pool("c", ("real-1",))])
-  assert warm_pools_trusted(store, _PreflightValueStore(), "d", "m") is True
+  assert warm_pools_trusted(
+      store, _PreflightValueStore(), "d", "m", config=DEFAULT_CONFIG) is True
 
 
 # --- num_workers: start a scale run at its worker ceiling (ADR 0034) --------

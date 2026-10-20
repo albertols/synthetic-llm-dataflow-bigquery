@@ -106,8 +106,7 @@ def test_every_knob_is_complete_and_in_a_known_channel(knobs):
 
 def test_values_are_imported_from_code_not_retyped(knobs):
   from sdfb_beam.cli import run_pipeline
-  from sdfb_core.engines import generation_plan
-  from sdfb_core.engines.b1_rag import engine as b1_engine
+  from sdfb_core.config.model import DEFAULT_CONFIG
   from sdfb_core.rag import chunking
   from sdfb_core.rag.embedding import BgeEmbedder, HashingEmbedder
   from sdfb_core.stats import source_stats
@@ -118,10 +117,10 @@ def test_values_are_imported_from_code_not_retyped(knobs):
       "cli", "composer", "flex", "config"
   ]
   assert (by_id["max_free_text_values_per_column"]["value"] ==
-          chunking.MAX_FREE_TEXT_VALUES_PER_COLUMN)
+          DEFAULT_CONFIG.rag.max_free_text_values_per_column)
   assert by_id["free_text_pool_max"][
-      "value"] == generation_plan.FREE_TEXT_POOL_MAX
-  assert by_id["rag_top_k"]["value"] == b1_engine._DEFAULT_TOP_K
+      "value"] == DEFAULT_CONFIG.free_text.free_text_pool_max
+  assert by_id["rag_top_k"]["value"] == DEFAULT_CONFIG.rag.rag_top_k
   assert by_id["hashing_embedder_dim"]["value"] == HashingEmbedder().dim
   assert by_id["bge_embedder_dim"]["value"] == BgeEmbedder("/nowhere").dim
   assert by_id["profiler_version"]["value"] == source_stats.PROFILER_VERSION
