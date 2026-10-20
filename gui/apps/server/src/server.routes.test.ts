@@ -463,7 +463,19 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
 
   it("/api/knobs and /api/catalogue serve the generated contracts", async () => {
     const knobs = await get("/api/knobs", knobsFileSchema);
-    expect(knobs.channels).toHaveLength(8);
+    expect(knobs.channels.map((c) => c.id)).toEqual([
+      "io",
+      "launch",
+      "sampling",
+      "generation",
+      "free_text",
+      "rag",
+      "guardrails",
+      "relational",
+      "serving",
+      "evaluation",
+    ]);
+    expect(knobs.knobs).toHaveLength(100);
     const catalogue = await get("/api/catalogue", catalogueResponseSchema);
     expect(catalogue.metrics).toHaveLength(79);
   });

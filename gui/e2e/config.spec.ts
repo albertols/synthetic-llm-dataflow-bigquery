@@ -86,14 +86,24 @@ test("amp: dials turn with the keyboard, constants do not, and a knob opens its 
   await expect(sheet).toBeHidden();
   await expect(dial).toBeFocused();
 
-  // A constant is a fixed screw: a button, never a slider.
+  // A setting only a config file sets is a fixed screw: a button, never a slider, whose sheet names its key.
   await page.getByRole("radio", { name: "FREE TEXT" }).click();
-  const screw = page.getByRole("button", { name: /^Pool cap: 512 values$/ });
   await expect(page.locator('[data-knob="free_text_pool_max"] [role="slider"]')).toHaveCount(0);
-  await screw.click();
-  const screwSheet = page.getByRole("dialog", { name: "Pool cap" });
-  await expect(screwSheet.getByText("Fixed constant: not settable, change it in code.")).toBeVisible();
+  await expect(page.locator('[data-knob="pool_values_per_call"] [role="slider"]')).toHaveCount(0);
+  await page.getByRole("button", { name: /^Values per LLM call: 32 values$/ }).click();
+  const screwSheet = page.getByRole("dialog", { name: "Values per LLM call" });
+  await expect(screwSheet.getByText("Set in a config file as free_text.pool_values_per_call — no flag.")).toBeVisible();
+  await expect(screwSheet.getByText("Config file", { exact: true })).toBeVisible();
   await expect(screwSheet.getByRole("slider")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(screwSheet).toBeHidden();
+
+  // A code constant stays a fixed constant.
+  await page.getByRole("radio", { name: "SAMPLING" }).click();
+  await page.getByRole("button", { name: /^Profiler version: 2$/ }).click();
+  const constantSheet = page.getByRole("dialog", { name: "Profiler version" });
+  await expect(constantSheet.getByText("Fixed constant: not settable, change it in code.")).toBeVisible();
+  await expect(constantSheet.getByRole("slider")).toHaveCount(0);
   await page.keyboard.press("Escape");
 
   expect(errors).toEqual([]);

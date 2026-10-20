@@ -68,11 +68,35 @@ describe("the pipeline amp", { timeout: 30_000 }, () => {
     expect(shown()).toEqual(["free_text"]);
   });
 
-  it("announces a constant as a fixed screw that does not turn", async () => {
+  it("starts a phone on the first channel with a knob to turn, past the IO and launch jacks", () => {
+    vi.spyOn(window, "matchMedia").mockImplementation(
+      (query: string) =>
+        ({
+          matches: query === "(max-width: 639px)",
+          media: query,
+          onchange: null,
+          addEventListener: () => {},
+          removeEventListener: () => {},
+          addListener: () => {},
+          removeListener: () => {},
+          dispatchEvent: () => false,
+        }) as MediaQueryList,
+    );
+    render(
+      <ScenarioProvider initialParams={{ scenario: "90m-from-1m" }}>
+        <AmpPanel onOpenKnob={() => undefined} />
+      </ScenarioProvider>,
+    );
+    expect([...document.querySelectorAll("[data-channel]")].map((el) => el.getAttribute("data-channel"))).toEqual([
+      "sampling",
+    ]);
+  });
+
+  it("announces a config-file setting as a screw that does not turn", async () => {
     const user = userEvent.setup();
     render(<Harness channel="free_text" />);
     const screw = screen.getByRole("button", { name: /^Pool cap: 512 values$/ });
-    expect(screw).toHaveAccessibleDescription(/Fixed constant: not settable/);
+    expect(screw).toHaveAccessibleDescription(/Set in a config file as free_text\.free_text_pool_max — no flag\./);
     screw.focus();
     await user.keyboard("{ArrowUp}{ArrowUp}{End}");
     expect(screen.getByRole("button", { name: /^Pool cap: 512 values$/ })).toBeInTheDocument();
@@ -123,9 +147,10 @@ describe("the pipeline amp", { timeout: 30_000 }, () => {
     expect(within(sheet).getByText("--reference_rows_limit")).toBeInTheDocument();
     expect(within(sheet).getByTestId("knob-sheet-value")).toHaveTextContent("10,000 rows");
     // The line is the exporter's, read from knobs.json: a Python edit above the flag moves it.
+    expect(within(sheet).getByText("sampling.reference_rows_limit")).toBeInTheDocument();
     const [path, line] = knob("reference_rows_limit").source.split(":");
-    expect(path).toBe("packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py");
-    expect(within(sheet).getByRole("link", { name: new RegExp(`run_pipeline\\.py:${line}`) })).toHaveAttribute(
+    expect(path).toBe("packages/sdfb-core/src/sdfb_core/config/model.py");
+    expect(within(sheet).getByRole("link", { name: new RegExp(`model\\.py:${line}`) })).toHaveAttribute(
       "href",
       expect.stringMatching(new RegExp(`/blob/[0-9a-f]{40}/${path}#L${line}$`)),
     );
@@ -140,13 +165,24 @@ describe("the pipeline amp", { timeout: 30_000 }, () => {
     expect(within(sheet).getByText(/Docs differ: similarity means different things/)).toBeInTheDocument();
   });
 
-  it("shows a constant's sheet as not settable, and an evaluator flag with its launch surfaces", async () => {
+  it("shows a config-file setting's key, a constant as not settable, and an evaluator flag with its launch surfaces", async () => {
     const user = userEvent.setup();
     render(<Harness channel="free_text" />);
-    await user.click(screen.getByRole("button", { name: /^Pool cap: 512 values$/ }));
-    const sheet = await screen.findByRole("dialog", { name: "Pool cap" });
-    expect(within(sheet).getByText(/Fixed constant: not settable, change it in code/)).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: /^Values per LLM call: 32 values$/ }));
+    let sheet = await screen.findByRole("dialog", { name: "Values per LLM call" });
+    expect(
+      within(sheet).getByText("Set in a config file as free_text.pool_values_per_call — no flag."),
+    ).toBeInTheDocument();
+    const row = within(sheet).getByText("Config file").closest("li")!;
+    expect(within(row).getByText("free_text.pool_values_per_call")).toBeInTheDocument();
     expect(within(sheet).queryByRole("slider")).toBeNull();
+    await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("radio", { name: "SAMPLING" }));
+
+    await user.click(screen.getByRole("button", { name: /^Profiler version: 2$/ }));
+    sheet = await screen.findByRole("dialog", { name: "Profiler version" });
+    expect(within(sheet).getByText(/Fixed constant: not settable, change it in code/)).toBeInTheDocument();
+    expect(within(sheet).queryByText("Config file")).toBeNull();
     await user.keyboard("{Escape}");
     await user.click(screen.getByRole("radio", { name: "EVALUATION" }));
 

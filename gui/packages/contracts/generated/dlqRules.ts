@@ -32,7 +32,7 @@ export const dlqRules: DlqRulesFile = {
       "error_type": "engine",
       "pipeline_step": "GenerateRecordsDoFn",
       "stage": "pre_write",
-      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:627",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:628",
       "declared": true,
       "severity": "BLOCKER",
       "dimension": "reliability",
@@ -71,7 +71,7 @@ export const dlqRules: DlqRulesFile = {
       "error_type": "referential_integrity",
       "pipeline_step": "GenerateRecordsDoFn",
       "stage": "pre_generate",
-      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:476",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:477",
       "declared": false,
       "severity": null,
       "dimension": null,
@@ -262,7 +262,7 @@ export const dlqRules: DlqRulesFile = {
     }
   ],
   "exported_from": {
-    "commit": "b1e672da682837318495b58323194e771d6af644",
+    "commit": "6856c5d0c8d8f107baef056d80c59e64ff05a7b6",
     "dirty": []
   }
 };

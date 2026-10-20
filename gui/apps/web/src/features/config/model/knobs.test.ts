@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { concepts, knobGuides } from "@contracts/concepts/config";
-import { knobs as knobsFile } from "@contracts/generated/knobs";
+import { generatorGuides, type GeneratedGuide } from "@contracts/generated/knobGuides";
+import { knobs as knobsFile, type KnobId } from "@contracts/generated/knobs";
+
+import { settableText } from "../amp/KnobControl";
 
 import { ADRS, CODE_REF, docTitle, sourceUrl } from "./links";
 import {
@@ -29,6 +32,48 @@ describe("the knob model (knobs.json is the truth)", () => {
       ).toBeDefined();
     }
     for (const id of Object.keys(knobGuides)) expect(ids.has(id), id).toBe(true);
+    // 89 generator knobs (the setting catalogue) + 11 evaluator flags.
+    expect(Object.keys(knobGuides)).toHaveLength(100);
+  });
+
+  it("generator guides are the setting catalogue's, links included; evaluator guides are written in config.ts", () => {
+    for (const k of KNOBS) {
+      const generated = (generatorGuides as Readonly<Record<string, GeneratedGuide>>)[k.id];
+      if (k.channel === "evaluation") {
+        expect(generated, k.id).toBeUndefined();
+        continue;
+      }
+      if (!generated) throw new Error(`${k.id}: no generated guide`);
+      const { refs, ...prose } = generated;
+      const guide = knobGuides[k.id as KnobId];
+      expect(guide, k.id).toEqual(expect.objectContaining(prose));
+      expect(
+        guide.refs?.map((r) => r.label),
+        k.id,
+      ).toEqual(refs?.map((r) => r.label));
+    }
+    // The knobs new since master carry catalogue prose too.
+    expect(knobGuides.run_id.down).toBe("Required, and a flag only — a config file may not set it.");
+    expect(knobGuides.ddl_uri.purpose).toMatch(/^A pinned _ddl\.json read only when live schema extraction fails/);
+    // {{GPU}} is the Composer DAG's deploy-time marker, quoted in the prose — not a template slot.
+    expect(knobGuides.gpu.purpose).toContain("from the {{GPU}} marker");
+    // A paper keeps its URL, an external doc its URL, a repo doc resolves at the exported commit.
+    expect(knobGuides.reference_rows_limit.refs).toEqual([
+      expect.objectContaining({ kind: "paper", url: "https://doi.org/10.1214/aoms/1177728174" }),
+      expect.objectContaining({ kind: "paper", url: "https://doi.org/10.1214/aop/1176990746" }),
+      {
+        label: "Article 2 — the 10k sample, its knobs and their aftermath",
+        url: `https://github.com/albertols/synthetic-llm-dataflow-bigquery/blob/${CODE_REF}/docs/articles/02-type-system-freetext-resolution.md#L262`,
+        kind: "docs",
+      },
+    ]);
+    expect(knobGuides.pool_parallel_choices.refs).toEqual([
+      {
+        label: "vLLM automatic prefix caching",
+        url: "https://docs.vllm.ai/en/stable/design/prefix_caching/",
+        kind: "docs",
+      },
+    ]);
   });
 
   it("every ADR the knobs and annotations cite has a file in the ADR map", () => {
@@ -36,13 +81,15 @@ describe("the knob model (knobs.json is the truth)", () => {
     for (const number of cited) expect(ADRS[number], `ADR ${number}`).toBeDefined();
   });
 
-  it("classifies constants as screws, derived values as readouts and every flag as a dial, a selector or a jack", () => {
+  it("classifies constants and config-file-only settings as screws, derived values as readouts and every flag as a dial, a selector or a jack", () => {
     for (const k of KNOBS) {
       const kind = kindOf(k);
       if (k.settable_via.includes("constant")) expect(kind, k.id).toBe("screw");
       else if (k.settable_via.includes("derived")) expect(kind, k.id).toBe("readout");
+      else if (k.settable_via.every((via) => via === "config")) expect(kind, k.id).toBe("screw");
       else expect(["dial", "selector", "port"], k.id).toContain(kind);
     }
+    expect(knob("free_text_pool_max").settable_via).toEqual(["config"]);
     expect(kindOf(knob("free_text_pool_max"))).toBe("screw");
     expect(kindOf(knob("reference_rows_limit"))).toBe("dial");
     expect(kindOf(knob("source_stats"))).toBe("selector");
@@ -51,6 +98,15 @@ describe("the knob model (knobs.json is the truth)", () => {
     expect(kindOf(knob("eval_sample_rows"))).toBe("port");
     for (const k of knobsFile.knobs.filter((k) => k.channel === "evaluation"))
       expect(k.source, k.id).toMatch(/^packages\/sdfb-evaluation\/src\/sdfb_evaluation\/cli\/main\.py:\d+$/);
+  });
+
+  it("says how a knob is set: a config key, a fixed constant, or the flags", () => {
+    expect(settableText(knob("pool_values_per_call"))).toBe(
+      "Set in a config file as free_text.pool_values_per_call — no flag.",
+    );
+    expect(settableText(knob("profiler_version"))).toBe("Fixed constant: not settable, change it in code.");
+    expect(settableText(knob("env"))).toBe("Settable via CLI, Flex, Config.");
+    expect(settableText(knob("run_id"))).toBe("Settable via CLI, Flex; free-form, not turnable here.");
   });
 
   it("a selector whose default is none of its choices starts on a position of its own", () => {

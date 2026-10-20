@@ -19,10 +19,15 @@ import { KnobControl } from "./KnobControl";
 
 const ALL = "all";
 
-/** Phones start on one channel (every knob is a long scroll at 390 px); wider screens see the whole console. */
+/**
+ * Phones start on one channel (every knob is a long scroll at 390 px): the first with a knob to
+ * turn, not the IO and launch jacks that lead the list. Wider screens see the whole console.
+ */
 function defaultChannel(): string {
   const narrow = typeof window !== "undefined" && window.matchMedia?.("(max-width: 639px)").matches;
-  return narrow ? (CHANNELS[0]?.id ?? ALL) : ALL;
+  if (!narrow) return ALL;
+  const turnable = CHANNELS.find((c) => channelKnobs(c.id).some((k) => ["dial", "selector"].includes(kindOf(k))));
+  return (turnable ?? CHANNELS[0])?.id ?? ALL;
 }
 
 export function AmpPanel({
@@ -33,7 +38,7 @@ export function AmpPanel({
   onOpenKnob: (id: string) => void;
   /**
    * A channel id to show first (a deep link: `/config?section=amp&channel=free_text`);
-   * an unknown id falls back to "all" on wide screens, the first channel on phones.
+   * an unknown id falls back to "all" on wide screens, the first turnable channel on phones.
    */
   initialChannel?: string;
   /** The channel the reader picks (the page keeps it in the URL, and the panel follows the URL back). */
