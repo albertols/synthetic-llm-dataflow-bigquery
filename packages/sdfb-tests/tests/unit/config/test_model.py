@@ -13,6 +13,8 @@
 #  limitations under the License.
 """`GeneratorConfig`: one typed home per setting, defaults equal to master.
 
+The model is specified by ADR 0043.
+
 Design: docs/DESIGN.md §8 Configuration
 (ADR 0043).
 """

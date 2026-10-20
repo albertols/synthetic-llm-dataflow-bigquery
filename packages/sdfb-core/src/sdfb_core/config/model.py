@@ -16,7 +16,7 @@
 Every setting the generator reads at launch lives here exactly once, with its
 type and its default. Flags keep their CLI names inside their section; the
 other fields are the constants the GUI already shows as knobs. The prose that
-explains each key lives in `catalogue.yaml`, matched 1:1 by a test.
+explains each key lives in `catalogue.yaml`, matched 1:1 by a test (ADR 0043).
 
 Flag fields mirror argparse exactly — same type, choices and default,
 including the string encodings argparse holds (`"true"`, `""`, `"8192"`) —
@@ -25,8 +25,9 @@ downstream may notice. YAML-native values (`true`, `4096`, `[a, b]`) are
 coerced to those encodings on the way in. This module imports nothing from
 sdfb_core: everything else may import it.
 
-Design: docs/DESIGN.md §8 Configuration
-(ADR 0043).
+Design: docs/DESIGN.md §3 Serving; §4 Relational generation; §5 Fidelity;
+§8 Configuration
+(ADR 0014, 0028, 0030, 0031, 0033, 0037, 0038, 0043).
 """
 from __future__ import annotations
 

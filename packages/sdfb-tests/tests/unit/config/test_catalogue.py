@@ -11,7 +11,7 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""The catalogue documents every setting exactly once.
+"""The catalogue documents every setting exactly once (ADR 0043).
 
 Design: docs/DESIGN.md §8 Configuration
 (ADR 0043).

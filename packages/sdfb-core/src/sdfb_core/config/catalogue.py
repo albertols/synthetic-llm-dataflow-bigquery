@@ -17,7 +17,7 @@
 for, what raising and lowering it does, the tip, the formula, the sources —
 and nothing else: values and types live in `model.py`. The loader is strict
 in the way the evaluator's metric catalogue is: a missing or unknown key is
-a load error, so the file cannot drift silently.
+a load error, so the file cannot drift silently (ADR 0043).
 
 Design: docs/DESIGN.md §8 Configuration
 (ADR 0043).
