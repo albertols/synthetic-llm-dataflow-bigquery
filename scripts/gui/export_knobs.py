@@ -19,11 +19,21 @@
 
 Writes `gui/packages/contracts/generated/knobs.json`, which the Synthetic
 Platform GUI (ADR 0042) renders as the CONFIG tab's knobs. Nothing here
-retypes a number: CLI defaults come from `run_pipeline.parse_args` itself
-(called with the minimal required flags), constants are imported from the
-modules that own them, `thresholds.yml` is parsed, and every knob carries
-the `path:line` of its definition, found by an AST (or text) search, plus
-the ADRs its help text or comment block cites.
+retypes a number. The generator's knobs are the entries of the setting
+catalogue (`sdfb_core/config/catalogue.yaml`, ADR 0043), in its order:
+
+- a settable entry takes its value and its `path:line` from the config model
+  (`sdfb_core/config/model.py`) and its config-file key (`config_key`); a
+  flag also takes its help text and choices from `run_pipeline.parse_args`'s
+  own parser (called with the minimal required flags), and its Composer and
+  flex surfaces from the DAG and the template metadata;
+- a fixed or derived entry is read from the code or file that owns it
+  (an imported constant, `thresholds.yml`, a Composer DAG param, a function
+  the value is derived by).
+
+Every knob carries the catalogue's label, group and unit, the `path:line` of
+its definition, found by an AST (or text) search, and the ADRs its catalogue
+entry, help text or comment block cites.
 
 Three more sections:
 
@@ -37,8 +47,11 @@ Three more sections:
   standalone project, ADR 0041). Default, choices, help text and line are
   the CLI's own; a listed flag the CLI no longer has fails the export.
 
-Two sibling files, same run:
+Three sibling files, same run:
 
+- `knob_guides.json`: each generator knob's explanation (purpose, what
+  raising and lowering it does, tip, formula, sources), rendered from the
+  catalogue with the model's defaults filled into its placeholders.
 - `relationships.json`: the committed sample relationship models
   (`config/relationships/example_*.yaml`, `*_example.yaml`) parsed by
   `sdfb_core`'s own registry, every edge with its role (driving, implied,
@@ -58,8 +71,8 @@ move, so an unrelated Python edit that shifts a line passes. `--check-strict`
 compares line numbers too. The check runs in `.github/workflows/gui.yml`,
 not in the Python test suite.
 
-Design: docs/DESIGN.md §12 Platform GUI
-(ADR 0042).
+Design: docs/DESIGN.md §8 Configuration; §12 Platform GUI
+(ADR 0042, 0043).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -76,13 +89,15 @@ import math
 import re
 import subprocess
 import sys
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
 import yaml
-from sdfb_core.config.model import REQUIRED_FLAGS
+from sdfb_core.config.catalogue import Entry, load_catalogue, render_text
+from sdfb_core.config.model import (DEFAULT_CONFIG, FLAG_KEYS, IDENTITY_KEYS,
+                                    REQUIRED_FLAGS, SECTION_TYPES, value_of)
 
 REPO = Path(__file__).resolve().parents[2]
 OUT_DIR = REPO / "gui" / "packages" / "contracts" / "generated"
@@ -93,7 +108,7 @@ _SOURCE_REF = re.compile(r"^(?P<path>[\w./-]+\.(?:py|yml|yaml|json|md)):\d+$")
 EVAL_CLI = (
     REPO / "packages" / "sdfb-evaluation" / "src" / "sdfb_evaluation" / "cli" /
     "main.py")
-_RUN_PIPELINE = REPO / "packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py"
+_MODEL = REPO / "packages/sdfb-core/src/sdfb_core/config/model.py"
 _COMPOSER = REPO / "composer" / "synthetic_beam_bigquery.py"
 _FLEX = REPO / "docker" / "flex_template_metadata.json"
 _THRESHOLDS = REPO / "config" / "thresholds.yml"
@@ -126,6 +141,8 @@ _MEASURED_HEADER = re.compile(r"^# --- (MEASURED.*?)\s*-*$")
 _BLOCK_HEADER = re.compile(r"^# --- ")
 
 CHANNELS = (
+    ("io", "IO", "Where a launch reads from and writes to."),
+    ("launch", "LAUNCH", "A launch's identity."),
     ("sampling", "SAMPLING",
      "How much of the source the generator reads, and what the profiler "
      "keeps from it."),
@@ -293,6 +310,9 @@ def _knob(**fields: Any) -> dict[str, Any]:
       "unit": fields.pop("unit", None),
       "settable_via": fields.pop("settable_via"),
   }
+  config_key = fields.pop("config_key", None)
+  if config_key:
+    base["config_key"] = config_key
   for key in ("cli_flag", "composer_param", "composer_default", "flex_param",
               "choices", "required", "help", "comment"):
     value = fields.pop(key, None)
@@ -311,8 +331,8 @@ def _knob(**fields: Any) -> dict[str, Any]:
 
 
 @functools.cache
-def _cli() -> tuple[dict[str, Any], dict[str, argparse.Action]]:
-  """`run_pipeline.parse_args`'s parsed defaults and its argparse actions."""
+def _cli_actions() -> dict[str, argparse.Action]:
+  """`run_pipeline.parse_args`'s argparse actions, by dest."""
   from sdfb_beam.cli import run_pipeline
 
   parsers: list[argparse.ArgumentParser] = []
@@ -323,25 +343,12 @@ def _cli() -> tuple[dict[str, Any], dict[str, argparse.Action]]:
     return original(self, *args, **kwargs)
 
   with mock.patch.object(argparse.ArgumentParser, "parse_known_args", spy):
-    args, _ = run_pipeline.parse_args(list(_REQUIRED_ARGV))
-  actions = {
+    run_pipeline.parse_args(list(_REQUIRED_ARGV))
+  return {
       action.dest: action
       for action in parsers[0]._actions  # pylint: disable=protected-access  # argparse keeps its actions private
       if action.option_strings
   }
-  return vars(args), actions
-
-
-@functools.cache
-def _add_argument_lines() -> dict[str, int]:
-  """flag → line of its `add_argument` call inside `parse_args`."""
-  out: dict[str, int] = {}
-  for node in ast.walk(_tree(_RUN_PIPELINE)):
-    if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and
-        node.func.attr == "add_argument" and node.args and
-        isinstance(node.args[0], ast.Constant)):
-      out[str(node.args[0].value)] = node.args[0].lineno
-  return out
 
 
 @functools.cache
@@ -387,600 +394,336 @@ def _flex_params() -> frozenset[str]:
   return frozenset(p["name"] for p in data["parameters"])
 
 
-def _cli_knob(
-    dest: str,
-    channel: str,
-    group: str,
-    label: str,
-    unit: str | None = None,
-    *,
-    adrs: Iterable[str] = (),
-    docs: Iterable[str] = ()) -> dict[str, Any]:
-  """A launcher flag: default from `parse_args`, line from its AST."""
-  defaults, actions = _cli()
-  action = actions[dest]
-  flag = action.option_strings[0]
-  line = _add_argument_lines()[flag]
-  help_text = " ".join((action.help or "").split())
-  composer = _composer_params().get(dest)
-  settable = ["cli"]
-  if composer:
-    settable.append("composer")
-  if dest in _flex_params():
-    settable.append("flex")
-  required = dest in REQUIRED_FLAGS
-  value = None if required else defaults[dest]
+# ----------------------------------------------------------------- knobs --
+
+
+def _knob_id(entry: Entry) -> str:
+  """`free_text.pool_values_per_call` → `pool_values_per_call`."""
+  return entry.key.split(".", 1)[1]
+
+
+def _place(entry: Entry) -> dict[str, Any]:
+  """Where a knob sits and what it is called: all from the catalogue."""
+  return {
+      "id": _knob_id(entry),
+      "channel": entry.key.split(".", 1)[0],
+      "group": entry.group,
+      "label": entry.label,
+      "unit": entry.unit,
+  }
+
+
+def _model_field_line(dotted: str) -> int:
+  section, key = dotted.split(".", 1)
+  return _class_member_line(_MODEL, SECTION_TYPES[section].__name__, key)
+
+
+def _settable_knob(entry: Entry, actions: dict[str, argparse.Action],
+                   composer: dict[str, tuple[str, int]],
+                   flex: frozenset[str]) -> dict[str, Any]:
+  """A key of the config model: value and line from the model; a flag also
+  gets its help, choices and launch surfaces from argparse, the DAG and the
+  flex template. Launch identity is a flag only: a config file may not set
+  it, so it has no `config_key`."""
+  key = _knob_id(entry)
+  line = _model_field_line(entry.key)
+  is_flag = key in FLAG_KEYS or key in IDENTITY_KEYS
+  action = actions.get(key)
+  if is_flag and action is None:
+    raise LookupError(f"--{key} is a flag of the config model but not of "
+                      "run_pipeline.parse_args: the launcher changed")
+  in_file = key not in IDENTITY_KEYS
+  via = ["cli"] if is_flag else []
+  if is_flag and key in composer:
+    via.append("composer")
+  if is_flag and key in flex:
+    via.append("flex")
+  if in_file:
+    via.append("config")
+  value = None if key in REQUIRED_FLAGS else value_of(DEFAULT_CONFIG, entry.key)
   composer_default = None
-  if composer and str(composer[0]) != str(value if value is not None else ""):
-    composer_default = composer[0]
+  if "composer" in via and str(
+      composer[key][0]) != str(value if value is not None else ""):
+    composer_default = composer[key][0]
+  help_text = " ".join((action.help or "").split()) if action else ""
+  comment = _comment_above(_MODEL, line)
   return _knob(
-      id=dest,
-      channel=channel,
-      group=group,
-      label=label,
+      **_place(entry),
       value=value,
-      unit=unit,
-      settable_via=settable,
-      cli_flag=flag,
-      composer_param=dest if composer else None,
+      settable_via=via,
+      config_key=entry.key if in_file else None,
+      cli_flag=f"--{key}" if is_flag else None,
+      composer_param=key if "composer" in via else None,
       composer_default=composer_default,
-      flex_param=dest if dest in _flex_params() else None,
-      choices=list(action.choices) if action.choices else None,
-      required=required,
+      flex_param=key if "flex" in via else None,
+      choices=list(action.choices) if action and action.choices else None,
+      required=key in REQUIRED_FLAGS,
       help=help_text,
-      source=_source(_RUN_PIPELINE, line),
-      source_token=f'"{flag}"',
-      related_adrs=[*_adrs(help_text), *adrs],
-      docs=[*_doc_paths(help_text), *docs],
+      comment=comment,
+      source=_source(_MODEL, line),
+      source_token=key,
+      related_adrs=[*_adrs(help_text, comment), *entry.adrs],
+      docs=[*_doc_paths(help_text, comment), *entry.docs],
   )
 
 
-def _const_knob(
-    knob_id: str,
-    module,
-    name: str,
-    channel: str,
-    group: str,
-    label: str,
-    unit: str | None = None,
-    *,
-    adrs: Iterable[str] = (),
-    docs: Iterable[str] = ()) -> dict[str, Any]:
+# A knob the catalogue lists as fixed or derived is read from the code or the
+# file that owns it; each builder takes its catalogue entry.
+
+
+def _const_knob(entry: Entry, module, name: str) -> dict[str, Any]:
   """A module constant: value imported, line and comment block from its AST."""
   path = _module_file(module)
   line = _assign_line(path, name)
   comment = _comment_above(path, line)
   return _knob(
-      id=knob_id,
-      channel=channel,
-      group=group,
-      label=label,
+      **_place(entry),
       value=getattr(module, name),
-      unit=unit,
       settable_via=["constant"],
       comment=comment,
       source=_source(path, line),
       source_token=name,
-      related_adrs=[*_adrs(comment), *adrs],
-      docs=[*_doc_paths(comment), *docs],
+      related_adrs=_adrs(comment),
+      docs=_doc_paths(comment),
   )
 
 
-def _composer_only_knob(param: str,
-                        channel: str,
-                        group: str,
-                        label: str,
-                        unit: str | None,
-                        *,
-                        adrs: Iterable[str] = ()):
+def _composer_only_knob(entry: Entry) -> dict[str, Any]:
+  param = _knob_id(entry)
   default, line = _composer_params()[param]
   return _knob(
-      id=param,
-      channel=channel,
-      group=group,
-      label=label,
+      **_place(entry),
       value=default,
-      unit=unit,
       settable_via=["composer"],
       composer_param=param,
       source=_source(_COMPOSER, line),
       source_token=f'"{param}"',
-      related_adrs=list(adrs),
   )
 
 
-# ----------------------------------------------------------------- knobs --
-
-
-def _sampling() -> list[dict[str, Any]]:
+def _profiler_version(entry: Entry) -> dict[str, Any]:
   from sdfb_core.stats import source_stats
 
-  group = "Profiler (source_table_stats)"
-  return [
-      _cli_knob(
-          "reference_rows_limit",
-          "sampling",
-          "Reference sample",
-          "Reference rows (n)",
-          "rows",
-          adrs=["0005", "0022"],
-          docs=["docs/designs/2026-07-24-reference-sample-scaling.md"]),
-      _cli_knob(
-          "source_stats",
-          "sampling",
-          "Reference sample",
-          "Source-stats tier",
-          adrs=["0022"],
-          docs=["docs/designs/2026-08-05-source-table-stats.md"]),
-      _const_knob("profiler_version", source_stats, "PROFILER_VERSION",
-                  "sampling", group, "Profiler version"),
-      _const_knob("top_values_max_distinct", source_stats,
-                  "_TOP_VALUES_MAX_DISTINCT", "sampling", group,
-                  "Literal top values up to (distinct)", "values"),
-      _const_knob("top_values_top_k", source_stats, "_TOP_VALUES_TOP_K",
-                  "sampling", group, "Top values kept", "values"),
-      _const_knob("shape_mix_top_k", source_stats, "_SHAPE_MIX_TOP_K",
-                  "sampling", group, "Shape masks kept", "masks"),
-      _const_knob("length_percentiles", source_stats, "_LEN_PCTS", "sampling",
-                  group, "Length percentiles", "quantile"),
-      _const_knob("null_pattern_max_cols", source_stats,
-                  "_NULL_PATTERN_MAX_COLS", "sampling", group,
-                  "Null-pattern column cap", "columns"),
-      _const_knob("null_pattern_top_k", source_stats, "_NULL_PATTERN_TOP_K",
-                  "sampling", group, "Null patterns kept", "patterns"),
-  ]
+  return _const_knob(entry, source_stats, "PROFILER_VERSION")
 
 
-def _generation() -> list[dict[str, Any]]:
+def _generation_max_retries(entry: Entry) -> dict[str, Any]:
   from sdfb_core.engines import base
-  from sdfb_core.engines.b1_rag import profile as b1_profile
-  from sdfb_core.engines.b2_library import fidelity as b2_fidelity
 
-  base_path = _module_file(base)
-  ladder_line = _def_line(base_path, "escalating_temperatures")
-  config_line = _class_member_line(base_path, "GenerationConfig", "max_retries")
+  path = _module_file(base)
   fields = base.GenerationConfig.model_fields
-  return [
-      _cli_knob("engine", "generation", "Engine", "Engine", adrs=["0006"]),
-      _cli_knob("num_rows", "generation", "Engine", "Rows to generate (M)",
-                "rows"),
-      _cli_knob("similarity", "generation", "Sampler", "Similarity", "0-1"),
-      _cli_knob("seed", "generation", "Sampler", "Seed"),
-      _cli_knob(
-          "batch_size",
-          "generation",
-          "Sampler",
-          "Rows per element",
-          "rows",
-          docs=["docs/designs/2026-07-26-ws5-generation-throughput.md"]),
-      _knob(
-          id="generation_max_retries",
-          channel="generation",
-          group="Sampler",
-          label="Retries per batch",
-          # pylint: disable-next=unsubscriptable-object  # pydantic's model_fields is a dict
-          value=fields["max_retries"].default,
-          unit="retries",
-          settable_via=["constant"],
-          source=_source(base_path, config_line),
-          source_token="max_retries",
-      ),
-      _knob(
-          id="temperature_ladder",
-          channel="generation",
-          group="Sampler",
-          label="Free-text temperature ladder",
-          value=list(base.escalating_temperatures()),
-          unit="temperature",
-          settable_via=["derived"],
-          comment=" ".join((base.escalating_temperatures.__doc__ or
-                            "").split()),
-          source=_source(base_path, ladder_line),
-          source_token="def escalating_temperatures",
-      ),
-      _knob(
-          id="sampling_ladder",
-          channel="free_text",
-          group="Pool ladder",
-          label="Sampling levels per retry",
-          value=list(base.escalating_sampling()),
-          unit=None,
-          settable_via=["derived"],
-          comment=" ".join((base.escalating_sampling.__doc__ or "").split()),
-          source=_source(base_path, _def_line(base_path,
-                                              "escalating_sampling")),
-          source_token="def escalating_sampling",
-      ),
-      _const_knob(
-          "temporal_max_age_years_b1",
-          b1_profile,
-          "_MAX_TEMPORAL_AGE_YEARS",
-          "generation",
-          "Temporal floor",
-          "Temporal floor, b1 (now minus years)",
-          "years",
-      ),
-      _const_knob(
-          "temporal_max_age_years_b2",
-          b2_fidelity,
-          "_MAX_TEMPORAL_AGE_YEARS",
-          "generation",
-          "Temporal floor",
-          "Temporal floor, b2 (now minus years)",
-          "years",
-      ),
-  ]
+  return _knob(
+      **_place(entry),
+      # pylint: disable-next=unsubscriptable-object  # pydantic's model_fields is a dict
+      value=fields["max_retries"].default,
+      settable_via=["constant"],
+      source=_source(
+          path, _class_member_line(path, "GenerationConfig", "max_retries")),
+      source_token="max_retries",
+  )
 
 
-def _free_text() -> list[dict[str, Any]]:
-  from sdfb_beam.io import source_values
-  from sdfb_core.engines import generation_plan
-  from sdfb_core.engines.b1_rag import engine as b1
-  from sdfb_core.engines.b1_rag import profile as b1_profile
+def _temperature_ladder(entry: Entry) -> dict[str, Any]:
+  from sdfb_core.engines import base
 
-  ladder = "Pool ladder"
-  routing = "Free-text routing (b1)"
-  return [
-      _const_knob(
-          "free_text_pool_max",
-          generation_plan,
-          "FREE_TEXT_POOL_MAX",
-          "free_text",
-          ladder,
-          "Pool cap",
-          "values",
-          adrs=["0018", "0028"]),
-      _const_knob(
-          "pool_values_per_call",
-          b1,
-          "_POOL_VALUES_PER_CALL",
-          "free_text",
-          ladder,
-          "Values per LLM call",
-          "values",
-          adrs=["0013"]),
-      _const_knob("pool_parallel_choices", b1, "_POOL_PARALLEL_CHOICES",
-                  "free_text", ladder, "Parallel choices (n)", "choices"),
-      _const_knob("pool_stagnation_window", b1, "_POOL_STAGNATION_WINDOW",
-                  "free_text", ladder, "Stagnation window", "attempts"),
-      _const_knob("pool_stagnation_min_novel", b1, "_POOL_STAGNATION_MIN_NOVEL",
-                  "free_text", ladder, "Stagnation: min novel per attempt",
-                  "values"),
-      _const_knob("pool_format_collapse_rounds", b1,
-                  "_POOL_FORMAT_COLLAPSE_ROUNDS", "free_text", ladder,
-                  "Format-collapse exit", "rounds"),
-      _const_knob("pool_build_max_workers", b1, "_POOL_BUILD_MAX_WORKERS",
-                  "free_text", ladder, "Pool ladders in parallel", "threads"),
-      _const_knob(
-          "source_domain_cap",
-          source_values,
-          "_DEFAULT_CAP",
-          "free_text",
-          "Source-domain rejection",
-          "Source-domain rejection cap",
-          "distinct values",
-          adrs=["0023"]),
-      _const_knob("free_text_unique_ratio", b1_profile,
-                  "_FREE_TEXT_UNIQUE_RATIO", "free_text", routing,
-                  "Unique ratio for free text", "ratio"),
-      _const_knob("free_text_min_mean_len", b1_profile,
-                  "_FREE_TEXT_MIN_MEAN_LEN", "free_text", routing,
-                  "Mean length for free text", "chars"),
-      _const_knob("free_text_max_categories", b1_profile,
-                  "_FREE_TEXT_MAX_CATEGORIES", "free_text", routing,
-                  "Categorical up to (distinct)", "values"),
-      _cli_knob("freetext_expansion", "free_text", "Expansion and prompts",
-                "Free-text expansion"),
-      _cli_knob(
-          "pool_seed_strategy",
-          "free_text",
-          "Expansion and prompts",
-          "Pool seed strategy",
-          docs=["docs/designs/2026-07-25-rag-retrieval-geometry-roadmap.md"]),
-      _cli_knob(
-          "prompt_constraints",
-          "free_text",
-          "Expansion and prompts",
-          "Prompt constraints",
-          adrs=["0024"],
-          docs=["docs/designs/2026-08-10-prompt-constraints.md"]),
-      _cli_knob("prompt_debug", "free_text", "Expansion and prompts",
-                "Prompt debug logging"),
-      _cli_knob("pool_pattern_guidance", "free_text", "Expansion and prompts",
-                "Decode-time pattern guidance"),
-      _cli_knob(
-          "build_pool_layer",
-          "free_text",
-          "Persistence",
-          "Build the pool layer",
-          adrs=["0020"]),
-  ]
+  path = _module_file(base)
+  return _knob(
+      **_place(entry),
+      value=list(base.escalating_temperatures()),
+      settable_via=["derived"],
+      comment=" ".join((base.escalating_temperatures.__doc__ or "").split()),
+      source=_source(path, _def_line(path, "escalating_temperatures")),
+      source_token="def escalating_temperatures",
+  )
 
 
-def _rag() -> list[dict[str, Any]]:
-  from sdfb_core.engines.b1_rag import engine as b1
-  from sdfb_core.rag import chunking, embedding
+def _sampling_ladder(entry: Entry) -> dict[str, Any]:
+  from sdfb_core.engines import base
 
-  embed_path = _module_file(embedding)
-  hashing = embedding.HashingEmbedder()
-  bge = embedding.BgeEmbedder("/unused")
-  return [
-      _cli_knob(
-          "rag_row_docs_limit",
-          "rag",
-          "Population",
-          "Row documents embedded",
-          "rows",
-          adrs=["0019"]),
-      _const_knob(
-          "max_free_text_values_per_column",
-          chunking,
-          "MAX_FREE_TEXT_VALUES_PER_COLUMN",
-          "rag",
-          "Population",
-          "Value chunks per free-text column",
-          "values",
-          adrs=["0019"]),
-      _const_knob(
-          "rag_top_k",
-          b1,
-          "_DEFAULT_TOP_K",
-          "rag",
-          "Retrieval",
-          "Exemplars per prompt (top-k)",
-          "values",
-          docs=["docs/designs/2026-07-07-rag-layer-design.md"]),
-      _knob(
-          id="hashing_embedder_dim",
-          channel="rag",
-          group="Embedders",
-          label="HashingEmbedder dimension",
-          value=hashing.dim,
-          unit="dims",
-          settable_via=["constant"],
-          source=_source(
-              embed_path,
-              _class_member_line(embed_path, "HashingEmbedder", "__init__")),
-          source_token="dim: int = 384",
-      ),
-      _knob(
-          id="bge_embedder_dim",
-          channel="rag",
-          group="Embedders",
-          label="bge-small-en-v1.5 dimension",
-          value=bge.dim,
-          unit="dims",
-          settable_via=["constant"],
-          source=_source(
-              embed_path,
-              _text_line(
-                  embed_path,
-                  "dim: int = 384",
-                  after=_class_member_line(embed_path, "BgeEmbedder",
-                                           "__init__"))),
-          source_token="dim: int = 384",
-      ),
-      _knob(
-          id="bge_max_length",
-          channel="rag",
-          group="Embedders",
-          label="bge max tokens",
-          value=bge._max_length,  # pylint: disable=protected-access  # the default is only kept on the instance
-          unit="tokens",
-          settable_via=["constant"],
-          source=_source(embed_path,
-                         _text_line(embed_path, "max_length: int = 512")),
-          source_token="max_length: int = 512",
-      ),
-      _const_knob(
-          "embedder_min_free_vram",
-          embedding,
-          "_MIN_FREE_VRAM_BYTES",
-          "rag",
-          "Embedders",
-          "Free VRAM before the embedder takes CUDA",
-          "bytes",
-          adrs=["0014", "0019"]),
-      _knob(
-          id="default_embedder_identity",
-          channel="rag",
-          group="Embedders",
-          label="Embedder when --embedder_uri is empty",
-          value=list(embedding._DEFAULT_EMBEDDER_IDENTITY),  # pylint: disable=protected-access  # shown as-is
-          unit=None,
-          settable_via=["constant"],
-          source=_source(embed_path,
-                         _assign_line(embed_path,
-                                      "_DEFAULT_EMBEDDER_IDENTITY")),
-          source_token="_DEFAULT_EMBEDDER_IDENTITY",
-      ),
-      _cli_knob("embedder_uri", "rag", "Embedders", "Embedder weights URI"),
-      _cli_knob(
-          "build_rag_layer",
-          "rag",
-          "Population",
-          "Build the RAG layer",
-          adrs=["0017", "0019"]),
-  ]
+  path = _module_file(base)
+  return _knob(
+      **_place(entry),
+      value=list(base.escalating_sampling()),
+      settable_via=["derived"],
+      comment=" ".join((base.escalating_sampling.__doc__ or "").split()),
+      source=_source(path, _def_line(path, "escalating_sampling")),
+      source_token="def escalating_sampling",
+  )
 
 
-def _guardrails() -> list[dict[str, Any]]:
-  from sdfb_core.contracts import model_adjustment
+def _hashing_embedder_dim(entry: Entry) -> dict[str, Any]:
+  from sdfb_core.rag import embedding
+
+  path = _module_file(embedding)
+  return _knob(
+      **_place(entry),
+      value=embedding.HashingEmbedder().dim,
+      settable_via=["constant"],
+      source=_source(path,
+                     _class_member_line(path, "HashingEmbedder", "__init__")),
+      source_token="dim: int = 384",
+  )
+
+
+def _bge_embedder_dim(entry: Entry) -> dict[str, Any]:
+  from sdfb_core.rag import embedding
+
+  path = _module_file(embedding)
+  return _knob(
+      **_place(entry),
+      value=embedding.BgeEmbedder("/unused").dim,
+      settable_via=["constant"],
+      source=_source(
+          path,
+          _text_line(
+              path,
+              "dim: int = 384",
+              after=_class_member_line(path, "BgeEmbedder", "__init__"))),
+      source_token="dim: int = 384",
+  )
+
+
+def _default_embedder_identity(entry: Entry) -> dict[str, Any]:
+  from sdfb_core.rag import embedding
+
+  path = _module_file(embedding)
+  return _knob(
+      **_place(entry),
+      value=list(embedding._DEFAULT_EMBEDDER_IDENTITY),  # pylint: disable=protected-access  # shown as-is
+      settable_via=["constant"],
+      source=_source(path, _assign_line(path, "_DEFAULT_EMBEDDER_IDENTITY")),
+      source_token="_DEFAULT_EMBEDDER_IDENTITY",
+  )
+
+
+@functools.cache
+def _thresholds() -> dict[str, Any]:
+  return yaml.safe_load(_THRESHOLDS.read_text(encoding="utf-8"))
+
+
+def _blocker_failure_ratio(env: str, entry: Entry) -> dict[str, Any]:
+  line = _text_line(
+      _THRESHOLDS,
+      f"{env}:",
+      after=_text_line(_THRESHOLDS, "blocker_failure_ratio:"))
+  return _knob(
+      **_place(entry),
+      value=_thresholds()["defaults"]["blocker_failure_ratio"][env],
+      settable_via=["constant"],
+      comment="Fraction of records failing any BLOCKER rule before the "
+      "Dataflow job is failed (config/thresholds.yml).",
+      source=_source(_THRESHOLDS, line),
+      source_token=f"{env}:",
+  )
+
+
+def _blocker_rules_declared(entry: Entry) -> dict[str, Any]:
+  rules = _thresholds()["rules"]
+  return _knob(
+      **_place(entry),
+      value=sorted(rule for rule, spec in rules.items()
+                   if spec.get("severity") == "BLOCKER" and
+                   spec.get("scope") != "post_run"),
+      settable_via=["constant"],
+      source=_source(_THRESHOLDS, _text_line(_THRESHOLDS, "rules:")),
+      source_token="rules:",
+  )
+
+
+def _blocker_rule_ids(entry: Entry) -> dict[str, Any]:
   from sdfb_core.validation import summary
 
-  thresholds = yaml.safe_load(_THRESHOLDS.read_text(encoding="utf-8"))
-  ratios = thresholds["defaults"]["blocker_failure_ratio"]
-  block_line = _text_line(_THRESHOLDS, "blocker_failure_ratio:")
-  knobs = [
-      _cli_knob("env", "guardrails", "Gate", "Threshold tier"),
-      _cli_knob(
-          "uniqueness_mode",
-          "guardrails",
-          "Uniqueness",
-          "Uniqueness mode",
-          adrs=["0034"],
-          docs=[
-              "docs/designs/2026-09-07-generation-throughput-where-time-goes.md"
-          ]),
-      _cli_knob(
-          "driven_uniqueness_mode",
-          "guardrails",
-          "Uniqueness",
-          "Uniqueness mode, driven children",
-          adrs=["0036"]),
-      _cli_knob("write_disposition", "guardrails", "Landing",
-                "Write disposition"),
-  ]
-  for env in ("dev", "uat", "prd"):
-    line = _text_line(_THRESHOLDS, f"{env}:", after=block_line)
-    knobs.append(
-        _knob(
-            id=f"blocker_failure_ratio_{env}",
-            channel="guardrails",
-            group="Gate",
-            label=f"BLOCKER ratio ({env})",
-            value=ratios[env],
-            unit="ratio",
-            settable_via=["constant"],
-            comment="Fraction of records failing any BLOCKER rule before the "
-            "Dataflow job is failed (config/thresholds.yml).",
-            source=_source(_THRESHOLDS, line),
-            source_token=f"{env}:",
-        ))
-  rules = thresholds["rules"]
-  blockers = sorted(
-      rule for rule, spec in rules.items()
-      if spec.get("severity") == "BLOCKER" and spec.get("scope") != "post_run")
-  rules_line = _text_line(_THRESHOLDS, "rules:")
-  knobs.append(
-      _knob(
-          id="blocker_rules_declared",
-          channel="guardrails",
-          group="Gate",
-          label="BLOCKER rules (thresholds.yml)",
-          value=blockers,
-          unit=None,
-          settable_via=["constant"],
-          source=_source(_THRESHOLDS, rules_line),
-          source_token="rules:",
-      ))
-  summary_path = _module_file(summary)
-  knobs.append(
-      _knob(
-          id="blocker_rule_ids",
-          channel="guardrails",
-          group="Gate",
-          label="BLOCKER rules counted by the gate",
-          value=sorted(summary.BLOCKER_RULE_IDS),
-          unit=None,
-          settable_via=["constant"],
-          comment=_comment_above(summary_path,
-                                 _assign_line(summary_path,
-                                              "BLOCKER_RULE_IDS")),
-          source=_source(summary_path,
-                         _assign_line(summary_path, "BLOCKER_RULE_IDS")),
-          source_token="BLOCKER_RULE_IDS",
-      ))
-  knobs.append(
-      _const_knob(
-          "repeat_share_tolerance",
-          model_adjustment,
-          "REPEAT_SHARE_TOLERANCE",
-          "guardrails",
-          "Gate",
-          "Key-repeat share tolerance",
-          "share",
-          adrs=["0038"]))
+  path = _module_file(summary)
+  line = _assign_line(path, "BLOCKER_RULE_IDS")
+  return _knob(
+      **_place(entry),
+      value=sorted(summary.BLOCKER_RULE_IDS),
+      settable_via=["constant"],
+      comment=_comment_above(path, line),
+      source=_source(path, line),
+      source_token="BLOCKER_RULE_IDS",
+  )
+
+
+_FIXED_BUILDERS: dict[str, Callable[[Entry], dict[str, Any]]] = {
+    "profiler_version":
+        _profiler_version,
+    "generation_max_retries":
+        _generation_max_retries,
+    "temperature_ladder":
+        _temperature_ladder,
+    "sampling_ladder":
+        _sampling_ladder,
+    "hashing_embedder_dim":
+        _hashing_embedder_dim,
+    "bge_embedder_dim":
+        _bge_embedder_dim,
+    "default_embedder_identity":
+        _default_embedder_identity,
+    "blocker_failure_ratio_dev":
+        functools.partial(_blocker_failure_ratio, "dev"),
+    "blocker_failure_ratio_uat":
+        functools.partial(_blocker_failure_ratio, "uat"),
+    "blocker_failure_ratio_prd":
+        functools.partial(_blocker_failure_ratio, "prd"),
+    "blocker_rules_declared":
+        _blocker_rules_declared,
+    "blocker_rule_ids":
+        _blocker_rule_ids,
+    "gpu":
+        _composer_only_knob,
+    "sdk_containers":
+        _composer_only_knob,
+}
+
+
+def _generator_knobs() -> list[dict[str, Any]]:
+  """Every catalogue entry, in catalogue order, as a knob."""
+  entries = load_catalogue().entries.values()
+  unbuilt = {_knob_id(e) for e in entries if e.status != "settable"}
+  if unbuilt != set(_FIXED_BUILDERS):
+    raise LookupError(
+        "the catalogue's fixed and derived entries and _FIXED_BUILDERS "
+        f"differ: {sorted(unbuilt ^ set(_FIXED_BUILDERS))}")
+  actions, composer, flex = _cli_actions(), _composer_params(), _flex_params()
+  knobs = []
+  for entry in entries:
+    if entry.status == "settable":
+      knobs.append(_settable_knob(entry, actions, composer, flex))
+      continue
+    knob = _FIXED_BUILDERS[_knob_id(entry)](entry)
+    knob["related_adrs"] = sorted({*knob["related_adrs"], *entry.adrs})
+    knob["docs"] = sorted({*knob["docs"], *entry.docs})
+    knobs.append(knob)
   return knobs
 
 
-def _relational() -> list[dict[str, Any]]:
-  from sdfb_beam.cli import run_pipeline
-  from sdfb_core.engines import pk_capacity
-
-  return [
-      _cli_knob("generate_fk_relationships", "relational", "Model",
-                "Generate FK relationships"),
-      _cli_knob(
-          "relationships_uri",
-          "relational",
-          "Model",
-          "Relationship models",
-          docs=["docs/designs/2026-08-24-relationships-as-config.md"]),
-      _cli_knob("multi_table_mode", "relational", "Model", "Multi-table mode"),
-      _cli_knob("on_model_conflict", "relational", "Model",
-                "On a measured model conflict"),
-      _cli_knob(
-          "fk_candidate_cap",
-          "relational",
-          "Keys",
-          "Candidates per shared key (Top-M)",
-          "candidates",
-          adrs=["0037"],
-          docs=["docs/designs/2026-09-11-multi-parent-children.md"]),
-      _const_knob(
-          "fk_key_sample_floor",
-          pk_capacity,
-          "FK_KEY_SAMPLE_FLOOR",
-          "relational",
-          "Keys",
-          "Parent keys sampled (floor)",
-          "keys",
-          adrs=["0030", "0035"]),
-      _const_knob(
-          "fk_key_sample_ceiling",
-          pk_capacity,
-          "FK_KEY_SAMPLE_CEILING",
-          "relational",
-          "Keys",
-          "Parent keys sampled (ceiling)",
-          "keys",
-          adrs=["0035"]),
-      _const_knob(
-          "fk_key_sample_margin",
-          pk_capacity,
-          "FK_KEY_SAMPLE_MARGIN",
-          "relational",
-          "Keys",
-          "Capacity margin over num_rows",
-          "x",
-          adrs=["0035"]),
-      _const_knob(
-          "max_conditional_values_per_request",
-          run_pipeline,
-          "_MAX_CONDITIONAL_VALUES_PER_REQUEST",
-          "relational",
-          "Keys",
-          "Candidate values per request",
-          "values",
-          adrs=["0037"]),
-  ]
+def _guide(entry: Entry) -> dict[str, Any]:
+  guide: dict[str, Any] = {
+      "purpose": render_text(entry.purpose),
+      "up": render_text(entry.up),
+      "down": render_text(entry.down),
+  }
+  if entry.tip:
+    guide["tip"] = render_text(entry.tip)
+  if entry.formula:
+    guide["formula"] = render_text(entry.formula)
+  if entry.refs:
+    guide["refs"] = [{
+        k: v for k, v in vars(ref).items() if v not in ("", None)
+    } for ref in entry.refs]
+  return guide
 
 
-def _serving() -> list[dict[str, Any]]:
-  return [
-      _cli_knob("client_type", "serving", "LLM", "Model client", adrs=["0014"]),
-      _cli_knob("vllm_dtype", "serving", "LLM", "vLLM dtype"),
-      _cli_knob("vllm_max_model_len", "serving", "LLM", "vLLM max model len",
-                "tokens"),
-      _cli_knob(
-          "autoscaling", "serving", "Fleet", "Autoscaling", adrs=["0034"]),
-      _cli_knob(
-          "initial_workers",
-          "serving",
-          "Fleet",
-          "Initial workers",
-          "workers",
-          adrs=["0034"]),
-      _composer_only_knob("gpu", "serving", "Fleet", "GPU profile", None),
-      _composer_only_knob(
-          "sdk_containers",
-          "serving",
-          "Fleet",
-          "SDK containers per worker",
-          None,
-          adrs=["0034"]),
-  ]
+def build_guides() -> dict[str, Any]:
+  """Each generator knob's explanation, from the catalogue (ADR 0043)."""
+  return {
+      "generated_by": "scripts/gui/export_knobs.py",
+      "guides": {
+          _knob_id(entry): _guide(entry)
+          for entry in load_catalogue().entries.values()
+      },
+  }
 
 
 def _eval_cli_flags(
@@ -1524,16 +1267,7 @@ def _tolerant(value: Any) -> Any:
 
 
 def build() -> dict[str, Any]:
-  knobs = [
-      *_sampling(),
-      *_generation(),
-      *_free_text(),
-      *_rag(),
-      *_guardrails(),
-      *_relational(),
-      *_serving(),
-      *eval_knobs(),
-  ]
+  knobs = [*_generator_knobs(), *eval_knobs()]
   return {
       "generated_by":
           "scripts/gui/export_knobs.py",
@@ -1559,6 +1293,7 @@ def build_all() -> dict[str, dict[str, Any]]:
   """Every file this exporter owns, keyed by name; `exported_from` stamped."""
   docs = {
       "knobs.json": build(),
+      "knob_guides.json": build_guides(),
       "relationships.json": build_relationships(),
       "dlq_rules.json": build_dlq_rules(),
   }
