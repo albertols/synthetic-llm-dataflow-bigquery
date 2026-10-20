@@ -467,7 +467,7 @@ on any identical real/synthetic row. Code:
 ## 8. Configuration
 
 Relational structure is configuration, in
-[`config/relationships/*.yaml`](../config/relationships/README.md) ([ADR 0032](adr/0032-relationships-as-config.md)).
+[`config/relationships/*.yaml`](../config/relationships/README.md) ([ADR 0032](adr/0032-relationships-as-config.md)). Every other generator setting has one typed home, `sdfb_core/config/model.py` ([ADR 0043](adr/0043-generator-config.md)).
 
 ![What each scenario generates](designs/assets/relationships-scenarios.png)
 
@@ -540,6 +540,7 @@ record; the section is where this document summarizes it.
 | 0040 | [§9 ADR reference map](#9-adr-reference-map) | [Publishing this design to the Dataflow Solution Guides](adr/0040-dsg-donation-golden-source-sync.md) |
 | 0041 | [§11 Evaluation (sdfb-evaluation)](#11-evaluation-sdfb-evaluation) | [Evaluation is a standalone package and a separate job](adr/0041-evaluation-standalone-package.md) |
 | 0042 | [§12 Platform GUI](#12-platform-gui) | [A self-hosted GUI; managed dashboards stay out](adr/0042-self-hosted-platform-gui.md) |
+| 0043 | [§8 Configuration](#8-configuration) | [Generator config: a typed model, a catalogue, file wins](adr/0043-generator-config.md) |
 <!-- adr-map:end -->
 
 ## 10. Figure provenance
