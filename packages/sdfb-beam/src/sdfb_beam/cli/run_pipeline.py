@@ -2450,7 +2450,8 @@ def main(argv: list[str] | None = None) -> int:
           **{
               k: v
               for k, v in sorted(vars(args).items())
-              if not k.startswith("_") and k != "model_client"
+              if not k.startswith("_") and k not in ("model_client",
+                                                     "config_resolution")
           },
           "resolved": {
               "scenario": plan.scenario,
