@@ -1,6 +1,7 @@
 /** Links and labels for the generation record (ADR 0044). */
-import { parseGeneratorVersion } from "@contracts/record";
+import { parseGeneratorVersion, type GenerationRecord } from "@contracts/record";
 
+import { REPEAT_SHARE_TOLERANCE } from "@/lib/adjustments";
 import { MISSING } from "@/lib/format";
 
 export function dataflowJobUrl(jobId: string, region: string | null, project: string | null): string {
@@ -21,4 +22,23 @@ export function shortVersion(version: string | null): string {
   if (!version) return MISSING;
   const parsed = parseGeneratorVersion(version);
   return parsed ? `${parsed.base} · ${parsed.sha}${parsed.dirty ? "*" : ""}` : version;
+}
+
+/** The generator's sections, in the order the reference file lists them. */
+export const SECTION_ORDER = [
+  "io",
+  "launch",
+  "sampling",
+  "generation",
+  "free_text",
+  "rag",
+  "guardrails",
+  "relational",
+  "serving",
+];
+
+/** The run's `guardrails.repeat_share_tolerance` (A1 ruling R16), else the default. */
+export function toleranceOf(record: GenerationRecord | null | undefined): number {
+  const value = record?.snapshot?.values?.guardrails?.repeat_share_tolerance;
+  return typeof value === "number" ? value : REPEAT_SHARE_TOLERANCE;
 }

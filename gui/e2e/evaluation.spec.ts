@@ -299,6 +299,21 @@ test("adjusted keys read the generator's verdict next to the evaluator's FAIL", 
   expect(errors).toEqual([]);
 });
 
+test("a run's Parameters tab shows its generation record (ADR 0044)", async ({ page }) => {
+  test.setTimeout(120_000);
+  const errors = watchErrors(page);
+  await page.goto("/evaluation/eval-0001?tab=params");
+  const panel = page.getByRole("region", { name: "Generator" });
+  await expect(panel).toBeVisible({ timeout: 45_000 });
+  await expect(panel.getByText(/^(file|flag|default)$/).first()).toBeVisible();
+  await expect(panel.getByRole("button", { name: "Download as config.yaml" })).toBeEnabled();
+  await expectNoSeriousViolations(page, "generator panel", "section[aria-label='Generator']");
+
+  await page.goto("/evaluation/eval-0041?tab=params");
+  await expect(page.getByText(/No generation record/)).toBeVisible({ timeout: 45_000 });
+  expect(errors).toEqual([]);
+});
+
 test("degenerate registry states render labelled empty states, never a crash", async ({ page }) => {
   test.setTimeout(180_000);
   const errors = watchErrors(page);

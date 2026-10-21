@@ -195,6 +195,7 @@ function findingRank(finding: Finding): number {
 export function findings(
   detail: Pick<EvaluationDetail, "evaluation" | "metrics">,
   adjustments?: readonly TableModelAdjustment[],
+  tolerance?: number,
 ): Finding[] {
   const orphanSource = new Map<string, number | null>();
   for (const row of detail.metrics)
@@ -209,6 +210,7 @@ export function findings(
       row.metric_id === PK_METRIC
         ? readAdjustedPk(row, adjustmentFor(row.table_name, adjustments), {
             modelAdjusted: detail.evaluation.model_adjusted,
+            tolerance,
           })
         : null;
     if (row.metric_id === PK_METRIC) pkTables.add(row.table_name);
@@ -244,7 +246,10 @@ export function findings(
   // An adjusted table the evaluator wrote no PK row for still has the generator's verdict.
   for (const adjustment of adjustments ?? []) {
     if (pkTables.has(adjustment.table)) continue;
-    const adjusted = readAdjustedPk(null, adjustment, { modelAdjusted: detail.evaluation.model_adjusted });
+    const adjusted = readAdjustedPk(null, adjustment, {
+      modelAdjusted: detail.evaluation.model_adjusted,
+      tolerance,
+    });
     if (adjusted?.kind !== "adjusted") continue;
     out.push({
       key: [PK_METRIC, adjustment.table, "", "", ""].join("|"),

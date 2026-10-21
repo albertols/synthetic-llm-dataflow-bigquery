@@ -78,7 +78,7 @@ const JOINED_BY: Record<string, string> = {
 const SHARE_TICKS = [0, 0.25, 0.5, 0.75, 1];
 
 /** The strip: each table's synthetic share (dot) against its own source share (tick) ± the tolerance (band). */
-function repeatShareRows(rows: readonly AdjustmentRow[]): IntervalRow[] {
+function repeatShareRows(rows: readonly AdjustmentRow[], tolerance: number): IntervalRow[] {
   return rows
     .filter((r) => r.adjustment.source_repeat_share !== null)
     .map((r) => {
@@ -94,8 +94,8 @@ function repeatShareRows(rows: readonly AdjustmentRow[]): IntervalRow[] {
         hi: null,
         ref: source,
         band: {
-          lo: Math.max(0, source - REPEAT_SHARE_TOLERANCE),
-          hi: Math.min(1, source + REPEAT_SHARE_TOLERANCE),
+          lo: Math.max(0, source - tolerance),
+          hi: Math.min(1, source + tolerance),
         },
         status: r.reading?.status ?? "info",
         mark: <AdjustmentPill verdict={r.adjustment.verdict} disagree={r.reading?.kind === "disagree"} />,
@@ -108,8 +108,8 @@ function repeatShareRows(rows: readonly AdjustmentRow[]): IntervalRow[] {
  * ADR 0038: the generator's half of the key question, next to the evaluator's. Nothing here
  * changes an orphan rate: referential integrity is a separate question, read below.
  */
-function ModelAdjustments({ rows }: { rows: readonly AdjustmentRow[] }) {
-  const strip = repeatShareRows(rows);
+function ModelAdjustments({ rows, tolerance }: { rows: readonly AdjustmentRow[]; tolerance: number }) {
+  const strip = repeatShareRows(rows, tolerance);
   const readouts = rows.filter((r) => r.row && r.reading);
   return (
     <section aria-labelledby="adjustments-title" className="grid gap-3" data-testid="model-adjustments">
@@ -120,8 +120,8 @@ function ModelAdjustments({ rows }: { rows: readonly AdjustmentRow[] }) {
       <p className="flex flex-wrap items-center gap-0.5 text-sm text-text-2">
         The relationship model declared these keys unique; a full scan of the source proved they repeat, so the launch
         dropped them from the effective model and copied the source&apos;s repeat share. The verdict compares the two
-        shares (tolerance {fmtTolerance()}). The evaluator still grades the declared key, where any repeat fails: its
-        rate and status stay beside the verdict, unchanged.
+        shares (tolerance {fmtTolerance(tolerance)}). The evaluator still grades the declared key, where any repeat
+        fails: its rate and status stay beside the verdict, unchanged.
         <InfoHint concept="eval:repeat-share" />
       </p>
       <TableContainer aria-label="Model adjustments per table">
@@ -215,14 +215,14 @@ function ModelAdjustments({ rows }: { rows: readonly AdjustmentRow[] }) {
         <VisualFrame
           title="Synthetic key-repeat share against the source's"
           concept="eval:repeat-share"
-          description={`Tick: the source's share. Band: the generator's tolerance, ${fmtTolerance()}. Dot: the synthetic share — inside the band, the copy is faithful. Under each table: source → synthetic.`}
+          description={`Tick: the source's share. Band: the generator's tolerance, ${fmtTolerance(tolerance)}. Dot: the synthetic share — inside the band, the copy is faithful. Under each table: source → synthetic.`}
           data={rows.map((r) => ({
             table: r.table,
             declared_pk: r.keyColumns.join(", "),
             source_repeat_share: r.adjustment.source_repeat_share,
             synthetic_repeat_share: r.adjustment.landing_repeat_share,
             delta: r.adjustment.repeat_share_delta,
-            tolerance: REPEAT_SHARE_TOLERANCE,
+            tolerance,
             verdict: r.adjustment.verdict,
             evaluator_duplicate_rate: r.row?.value ?? null,
             evaluator_status: r.row?.status ?? null,
@@ -240,7 +240,7 @@ function ModelAdjustments({ rows }: { rows: readonly AdjustmentRow[] }) {
       {readouts.length ? (
         <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {readouts.map((r) => (
-            <MetricReadout key={r.table} row={r.row!} adjusted={r} />
+            <MetricReadout key={r.table} row={r.row!} adjusted={r} tolerance={tolerance} />
           ))}
         </div>
       ) : null}
@@ -256,6 +256,7 @@ export function RelationalPanel({
   noMetrics,
   adjustments = NO_ADJUSTMENTS,
   adjustmentsError,
+  tolerance = REPEAT_SHARE_TOLERANCE,
 }: {
   graph: Graph;
   table?: string;
@@ -268,6 +269,8 @@ export function RelationalPanel({
   adjustments?: readonly AdjustmentRow[];
   /** Why the adjustments could not be loaded (the evaluator's rows below still read as stored). */
   adjustmentsError?: string | null;
+  /** The run's `guardrails.repeat_share_tolerance` from its generation record (A1 ruling R16); the default when the run has none. */
+  tolerance?: number;
 }) {
   const edges = graph.edges.filter((e) => e.rows.length && (!table || e.child === table || e.parent === table));
   const scoped = adjustments.filter((r) => !table || r.table === table);
@@ -299,7 +302,7 @@ export function RelationalPanel({
   return (
     <div className="grid gap-6">
       {failed}
-      {adjusted.length ? <ModelAdjustments rows={adjusted} /> : null}
+      {adjusted.length ? <ModelAdjustments rows={adjusted} tolerance={tolerance} /> : null}
       {edges.length ? (
         <>
           <section aria-labelledby="orphans-title" className="grid gap-3">

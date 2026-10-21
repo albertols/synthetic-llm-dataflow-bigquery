@@ -13,6 +13,7 @@ import type {
   ProfileRow,
   RowFlag,
 } from "@contracts/api";
+import type { GenerationRecord } from "@contracts/record";
 
 import { metricMeta } from "../lib/catalogue";
 
@@ -623,5 +624,53 @@ export function adjustedDetail(): EvaluationDetail {
     metrics,
     profiles: [],
     flags: [],
+  };
+}
+
+/** A generation record (ADR 0044) of a launch of three tables. */
+export function generationRecord(
+  options: { tolerance?: number; mismatch?: boolean; overridden?: boolean } = {},
+): GenerationRecord {
+  const launcher = "0.6.1-master-edcfdcd";
+  const worker = options.mismatch ? "0.6.1-master-1111111" : launcher;
+  return {
+    evaluation_id: "eval-0001",
+    runs: ["users", "orders", "order_items"].map((name, i) => ({
+      run_id: i === 0 ? "B-00-users" : `B-0${i}-${name}`,
+      landing_table: `p.land.${name}`,
+      job_id: "2026-10-21_01_02_03-123",
+      job_name: "synthetic-sdfb-v0-6-1-m",
+      launch_run_id: "B",
+      generator_version: worker,
+      launched_at: "2026-10-21T10:00:00.000000Z",
+      config_digest: "0123456789ab",
+    })),
+    snapshot: {
+      config_version: 1,
+      values: {
+        generation: { engine: "b1_rag", similarity: 0.7, seed: "" },
+        free_text: { prompt_constraints: "off", pool_seed_strategy: "centroid" },
+        guardrails: { env: "dev", repeat_share_tolerance: options.tolerance ?? 0.05 },
+        serving: { model_uri: "gs://b/synthetic/models/m/v1/", vllm_max_model_len: "8192" },
+      },
+      provenance: {
+        "generation.similarity": options.overridden ? "file" : "flag",
+        "generation.engine": "default",
+      },
+      overridden: options.overridden ? [{ key: "generation.similarity", typed: 0.3, file: 0.7 }] : [],
+      relationships: {
+        uri: "config/relationships",
+        model: "example_retail",
+        sha12: "abcdefabcdef",
+        tables: { users: { pk: ["id"] } },
+      },
+      launcher: { version: launcher },
+      batch: null,
+    },
+    snapshot_run_id: "B-00-users",
+    launcher_version: launcher,
+    worker_versions: [worker],
+    version_mismatch: !!options.mismatch,
+    config_digests: ["0123456789ab"],
   };
 }

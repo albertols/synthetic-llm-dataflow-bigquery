@@ -21,6 +21,7 @@ import {
   countsDetail,
   evaluation,
   flag,
+  generationRecord,
   metric,
   profile,
   richDetail,
@@ -49,10 +50,23 @@ function stubRun(detail = richDetail(), extra: Record<string, unknown> = {}) {
       model_adjustments: [],
       generation_job_evaluation_id: null,
     },
+    // No generation record (ADR 0044) unless a test says otherwise.
+    [`/api/evaluations/${id}/record`]: {
+      ...generationRecord(),
+      evaluation_id: id,
+      runs: [],
+      snapshot: null,
+      snapshot_run_id: null,
+      launcher_version: null,
+      worker_versions: [],
+      version_mismatch: false,
+      config_digests: [],
+    },
     ...extra,
   });
 }
 
+const RECORD = "/api/evaluations/eval-t001/record";
 const ADJUSTMENTS = "/api/evaluations/eval-t001/adjustments";
 const ABOUT_ADJUSTED = "About: Adjusted model (ADR 0038)";
 const ABOUT_SHARES = "About: Key-repeat share and duplicate rate";
@@ -605,6 +619,36 @@ describe("adjusted keys in the run view (ADR 0038)", () => {
     expect(within(orphans).getByText("Info · documented")).toBeInTheDocument();
   });
 
+  it("the relational band follows the run's tolerance (R16)", async () => {
+    stubRun(adjustedDetail(), {
+      [ADJUSTMENTS]: adjustedAdjustments(),
+      [RECORD]: generationRecord({ tolerance: 0.08 }),
+    });
+    renderAt("/evaluation/eval-t001?tab=relational");
+    const section = await screen.findByRole("region", { name: /^Model adjustments \(ADR 0038\)/ });
+    await waitFor(() => expect(within(section).getByRole("figure")).toHaveTextContent("tolerance, ±8 pt"));
+    expect(section).toHaveTextContent("tolerance ±8 pt");
+    const readout = section.querySelector<HTMLElement>('article[data-metric="table.pk_duplicate_rate"]')!;
+    const figures = Object.fromEntries(
+      [...readout.querySelectorAll("dt")].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]),
+    );
+    expect(figures).toMatchObject({ Tolerance: "±8 pt" });
+    expect(section).not.toHaveTextContent("±5 pt");
+    expect(section.textContent).toMatch(/within ±8 pt|outside ±8 pt/);
+  });
+
+  it("the scorecard's tolerance follows the run's too (R16)", async () => {
+    stubRun(adjustedDetail(), {
+      [ADJUSTMENTS]: adjustedAdjustments(),
+      [RECORD]: generationRecord({ tolerance: 0.08 }),
+    });
+    renderAt("/evaluation/eval-t001");
+    const integrity = await screen.findByRole("region", { name: /^Integrity/ });
+    await waitFor(() =>
+      expect(integrity.querySelector<HTMLElement>('li[data-adjusted="true"]')).toHaveTextContent("tolerance ±8 pt"),
+    );
+  });
+
   it("marks adjusted tables in the model graph and explains the chip in its legend", async () => {
     stubRun(adjustedDetail(), { [ADJUSTMENTS]: adjustedAdjustments() });
     renderAt("/evaluation/eval-t001");
@@ -737,5 +781,36 @@ describe("count breakdowns add up to their totals", () => {
     expect(kpi.querySelector('[data-bucket="other"]')).not.toBeNull();
     expect(breakdowns.some((el) => el !== kpi && el.querySelector('[data-bucket="info"]'))).toBe(true);
     expect(breakdowns.some((el) => el !== kpi && el.querySelector('[data-bucket="other"]'))).toBe(true);
+  });
+  describe("Generator panel (ADR 0044)", () => {
+    it("shows the resolved config with a badge per value, the override warning, the model card and the job link", async () => {
+      stubRun(richDetail(), { [RECORD]: generationRecord({ overridden: true }) });
+      renderAt("/evaluation/eval-t001?tab=params");
+      const panel = await screen.findByRole("region", { name: /generator/i });
+      expect(within(panel).getAllByText("generation.similarity").length).toBeGreaterThan(0);
+      expect(within(panel).getAllByText("file").length).toBeGreaterThan(0);
+      expect(within(panel).getByText(/overrode 1 typed param/i)).toBeInTheDocument();
+      expect(within(panel).getByText(/example_retail/)).toBeInTheDocument();
+      expect(within(panel).getByRole("link", { name: /2026-10-21_01_02_03-123/ })).toHaveAttribute(
+        "href",
+        expect.stringContaining("/dataflow/jobs/"),
+      );
+      expect(within(panel).getByRole("button", { name: /download as config\.yaml/i })).toBeEnabled();
+    });
+
+    it("version mismatch badge", async () => {
+      stubRun(richDetail(), { [RECORD]: generationRecord({ mismatch: true }) });
+      renderAt("/evaluation/eval-t001?tab=params");
+      const panel = await screen.findByRole("region", { name: /generator/i });
+      expect(
+        within(panel).getByText(/launcher 0\.6\.1-master-edcfdcd ≠ worker 0\.6\.1-master-1111111/),
+      ).toBeInTheDocument();
+    });
+
+    it("says when the run has no record", async () => {
+      stubRun(richDetail());
+      renderAt("/evaluation/eval-t001?tab=params");
+      expect(await screen.findByText(/no generation record/i)).toBeInTheDocument();
+    });
   });
 });

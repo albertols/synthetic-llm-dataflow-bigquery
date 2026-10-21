@@ -54,13 +54,22 @@ export type MetricReadoutProps = {
   /** ADR 0038: the generator's verdict on this row's key (`table.pk_duplicate_rate` only), with its reading. */
   adjusted?: Pick<AdjustmentRow, "adjustment" | "reading" | "evaluatorShare"> | null;
   /** Show the scope (table.column, edge) under the title — off inside a column drawer. */
+  /** The run's repeat-share tolerance (A1 ruling R16); the default when omitted. */
+  tolerance?: number;
   showScope?: boolean;
   /** Heading level of the title (default 4). */
   headingLevel?: 3 | 4 | 5;
   className?: string;
 };
 
-export function MetricReadout({ row, adjusted, showScope = true, headingLevel = 4, className }: MetricReadoutProps) {
+export function MetricReadout({
+  row,
+  adjusted,
+  tolerance,
+  showScope = true,
+  headingLevel = 4,
+  className,
+}: MetricReadoutProps) {
   const reading = readingOf(row);
   const concept = metricConcept(row.metric_id);
   const Heading = `h${headingLevel}` as const;
@@ -127,7 +136,7 @@ export function MetricReadout({ row, adjusted, showScope = true, headingLevel = 
             <Figure label="Source share" value={fmtRepeatShare(adjusted.adjustment.source_repeat_share)} />
             <Figure label="Synthetic share" value={fmtRepeatShare(adjusted.adjustment.landing_repeat_share)} emphasis />
             <Figure label="Δ (syn − src)" value={fmtPoints(adjusted.adjustment.repeat_share_delta)} />
-            <Figure label="Tolerance" value={fmtTolerance()} />
+            <Figure label="Tolerance" value={fmtTolerance(tolerance)} />
             <Figure label="1 − keys ÷ rows" value={fmtRepeatShare(adjusted.evaluatorShare)} />
             <Figure label="pk.duplicate" value={formatCount(adjusted.adjustment.pk_duplicate_dlq)} />
             <Figure label="Evaluator" value={statusWord(row.status)} />

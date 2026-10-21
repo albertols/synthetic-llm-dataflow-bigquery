@@ -22,7 +22,14 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ApiError, useEvaluation, useEvaluationAdjustments, useEvaluations, useRelationships } from "@/lib/api";
+import {
+  ApiError,
+  useEvaluation,
+  useEvaluationAdjustments,
+  useEvaluationRecord,
+  useEvaluations,
+  useRelationships,
+} from "@/lib/api";
 import { formatCompact, formatCount, formatDateTime } from "@/lib/format";
 import { CLOSE_BY_HAND, isStale, STALE_AFTER_HOURS } from "@/lib/runState";
 
@@ -34,10 +41,12 @@ import { fmtScore, shortModel } from "./lib/format";
 import { buildGraph } from "./lib/graph";
 import { findings, headline } from "./lib/interpret";
 import { columnSummaries, countStatuses, familyCards, heatmapModel, tableNames } from "./lib/model";
+import { toleranceOf } from "./lib/record";
 import { ColumnDrawer } from "./panels/ColumnDrawer";
 import { ColumnHeatmap, HEATMAP_PAGE } from "./panels/ColumnHeatmap";
 import { DetectionPanel } from "./panels/DetectionPanel";
 import { InterpretationPanel } from "./panels/InterpretationPanel";
+import { GeneratorPanel } from "./panels/GeneratorPanel";
 import { ModelGraph } from "./panels/ModelGraph";
 import { PairsPanel } from "./panels/PairsPanel";
 import { ParamsPanel } from "./panels/ParamsPanel";
@@ -118,9 +127,13 @@ function RunPageContent() {
   // ADR 0038: the generator's own verdict on each table's declared key, from validation_runs. Its
   // own request, so a failure there never blanks the evaluation (the Relational section says so).
   const adjustmentsQuery = useEvaluationAdjustments(knownId);
+  // ADR 0044: the generation record, also its own request. Its tolerance is the band of the relational readings.
+  const recordQuery = useEvaluationRecord(knownId);
   const relationships = useRelationships();
   const detail = query.data?.data;
   const adjustments = adjustmentsQuery.data?.data;
+  const record = recordQuery.data?.data;
+  const tolerance = toleranceOf(record);
   const previous = usePrevious(detail);
 
   const setSearch = useCallback(
@@ -136,7 +149,7 @@ function RunPageContent() {
     const summaries = columnSummaries(detail.metrics);
     // A re-reading layered on the evaluator's rows: the cards, the headline and the counts below
     // are computed from the rows as stored, whatever the adjustments say.
-    const adjusted = adjustmentRows(detail, adjustments?.model_adjustments);
+    const adjusted = adjustmentRows(detail, adjustments?.model_adjustments, tolerance);
     return {
       model,
       summaries,
@@ -144,13 +157,13 @@ function RunPageContent() {
       adjustedSummary: adjustedSummary(adjusted),
       adjustedTables: adjustedTableCount(adjustments?.model_adjustments),
       cards: familyCards(detail),
-      findings: findings(detail, adjustments?.model_adjustments),
+      findings: findings(detail, adjustments?.model_adjustments, tolerance),
       headline: headline(detail),
       graph: buildGraph(detail, model, adjusted),
       tables: tableNames(detail.evaluation, detail.metrics),
       counts: countStatuses(detail.metrics.filter((m) => !isRollup(m.metric_id))),
     };
-  }, [detail, adjustments, relationships.data]);
+  }, [detail, adjustments, tolerance, relationships.data]);
 
   const table = search.table && derived?.tables.includes(search.table) ? search.table : undefined;
   const scopedMetrics = useMemo(
@@ -386,7 +399,13 @@ function RunPageContent() {
                   footnote={`${derived.tables.length} table${derived.tables.length === 1 ? "" : "s"} · ${formatCount(detail.flags.length)} flagged rows`}
                 />
               </div>
-              <Scorecards cards={derived.cards} selectedTable={table} adjustments={derived.adjusted} onOpen={onOpen} />
+              <Scorecards
+                cards={derived.cards}
+                selectedTable={table}
+                adjustments={derived.adjusted}
+                tolerance={tolerance}
+                onOpen={onOpen}
+              />
               <div className="grid gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
                 <InterpretationPanel
                   headline={derived.headline}
@@ -485,11 +504,21 @@ function RunPageContent() {
               noMetrics={noMetrics}
               adjustments={derived.adjusted}
               adjustmentsError={adjustmentsError}
+              tolerance={tolerance}
             />
           ) : null}
         </TabsContent>
         <TabsContent value="params">
-          {tab === "params" ? <ParamsPanel evaluation={evaluation} adjustedTables={derived.adjustedTables} /> : null}
+          {tab === "params" ? (
+            <div className="grid gap-4">
+              <GeneratorPanel
+                evaluation={evaluation}
+                record={record}
+                error={recordQuery.error ? String(recordQuery.error.message) : null}
+              />
+              <ParamsPanel evaluation={evaluation} adjustedTables={derived.adjustedTables} />
+            </div>
+          ) : null}
         </TabsContent>
       </Tabs>
 

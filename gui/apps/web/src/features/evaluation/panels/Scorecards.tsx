@@ -54,9 +54,11 @@ function adjustedFor(row: MetricRow, adjustments: readonly AdjustmentRow[]): Adj
 function WorstRow({
   row,
   adjustments,
+  tolerance,
   onOpen,
 }: {
   row: MetricRow;
+  tolerance?: number;
   adjustments: readonly AdjustmentRow[];
   onOpen: (target: OpenTarget) => void;
 }) {
@@ -109,7 +111,7 @@ function WorstRow({
           <>
             source {fmtRepeatShare(adjusted.adjustment.source_repeat_share)} · synthetic{" "}
             {fmtRepeatShare(adjusted.adjustment.landing_repeat_share)} · Δ{" "}
-            {fmtPoints(adjusted.adjustment.repeat_share_delta)} · tolerance {fmtTolerance()} · evaluator value{" "}
+            {fmtPoints(adjusted.adjustment.repeat_share_delta)} · tolerance {fmtTolerance(tolerance)} · evaluator value{" "}
             {fmtCompared([row.value, 0], k)[0]}
           </>
         ) : (
@@ -127,9 +129,11 @@ function Card({
   card,
   selectedTable,
   adjustments,
+  tolerance,
   onOpen,
 }: {
   card: FamilyCard;
+  tolerance?: number;
   selectedTable?: string;
   adjustments: readonly AdjustmentRow[];
   onOpen: (t: OpenTarget) => void;
@@ -230,6 +234,7 @@ function Card({
                 key={`${row.metric_id}|${scopeLabel(row)}`}
                 row={row}
                 adjustments={adjustments}
+                tolerance={tolerance}
                 onOpen={onOpen}
               />
             ))}
@@ -248,9 +253,12 @@ export function Scorecards({
   cards,
   selectedTable,
   adjustments = NO_ADJUSTMENTS,
+  tolerance,
   onOpen,
 }: {
   cards: FamilyCard[];
+  /** The run's repeat-share tolerance (A1 ruling R16); the default when omitted. */
+  tolerance?: number;
   selectedTable?: string;
   /** ADR 0038: per table, the generator's verdict on its declared key (lib/adjustment.ts `adjustmentRows`). */
   adjustments?: readonly AdjustmentRow[];
@@ -266,7 +274,14 @@ export function Scorecards({
       </div>
       <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
         {cards.map((card) => (
-          <Card key={card.family} card={card} selectedTable={selectedTable} adjustments={adjustments} onOpen={onOpen} />
+          <Card
+            key={card.family}
+            card={card}
+            selectedTable={selectedTable}
+            adjustments={adjustments}
+            tolerance={tolerance}
+            onOpen={onOpen}
+          />
         ))}
       </div>
     </section>
