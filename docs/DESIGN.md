@@ -651,6 +651,7 @@ record; the section is where this document summarizes it.
 | 0042 | [§12 Platform GUI](#12-platform-gui) | [A self-hosted GUI; managed dashboards stay out](adr/0042-self-hosted-platform-gui.md) |
 | 0043 | [§8 Configuration](#8-configuration) | [Generator config: a typed model, a catalogue, file wins](adr/0043-generator-config.md) |
 | 0044 | [§7 Validation and the dead-letter queue](#7-validation-and-the-dead-letter-queue) | [The generation record](adr/0044-generation-record.md) |
+| 0045 | [§4 Relational generation](#4-relational-generation) | [Whole-model launches](adr/0045-whole-model-launches.md) |
 <!-- adr-map:end -->
 
 ## 10. Figure provenance

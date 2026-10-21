@@ -231,6 +231,12 @@ export const ADRS: readonly AdrRef[] = [
     title: "The generation record",
     file: "0044-generation-record.md",
   },
+  {
+    number: "0045",
+    section: 4,
+    title: "Whole-model launches",
+    file: "0045-whole-model-launches.md",
+  },
 ];
 
 const BY_NUMBER = new Map(ADRS.map((adr) => [adr.number, adr]));
