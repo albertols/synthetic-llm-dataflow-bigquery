@@ -57,9 +57,9 @@ sdfb-eval`.
 
 - `--relationships_uri` (a file or directory, local or `gs://`) may accompany
   any target; it supplies the model when the launch's own records name none.
-  On the seed path with the job's record (the row above), a record that
-  states relationships off is evaluated without a model, as it was
-  generated.
+  On the seed path a generation record that states relationships off
+  overrides it (the row above): the launch is evaluated without a model, as
+  it was generated.
 - A hand-named target (`--tables`, `--seed_table`, a model alone) carries no
   write disposition: pass `--scope manual` to read each landing table whole,
   otherwise its tables cannot be scoped.
@@ -68,6 +68,8 @@ sdfb-eval`.
   (the generation's value) and `--validation_runs_table` (the generator's
   table), with `--job_id` next to `--seed_table` so the job's window is known.
   Without them those metrics are `not_evaluated`, with the reason on the row.
+  When the rows carry the generation record, its `reference_rows_limit` is
+  the one used.
 
 ## `plan`
 

@@ -88,8 +88,9 @@ is Beam's to read.)
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
-Design: docs/DESIGN.md §11 Evaluation (sdfb-evaluation)
-(ADR 0041).
+Design: docs/DESIGN.md §7 Validation and the dead-letter queue;
+§11 Evaluation (sdfb-evaluation)
+(ADR 0041, 0044).
 """
 
 from __future__ import annotations
@@ -256,7 +257,9 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
       help="the table a launch targeted: evaluate what that launch "
       "generated, which is its enabled component in the relationship model "
       "(--relationships_uri), or the table alone when no model names it or "
-      "none is given. Needs --landing_dataset and --reference_dataset")
+      "none is given; with --generation_job_id and --validation_runs_table, "
+      "the job's validation_runs record, when present, names the tables "
+      "instead (ADR 0044). Needs --landing_dataset and --reference_dataset")
   group.add_argument(
       "--landing_dataset",
       type=_text,
@@ -279,14 +282,18 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
       help="the generator's validation-runs table, project.dataset.table: "
       "with --generation_job_id next to --seed_table, this launch's rows of "
       "it (in the job's window) give the digest that verifies the reference "
-      "sample, so the metrics that compare with it are evaluated. Fills what "
-      "the launch's own records leave open")
+      "sample, so the metrics that compare with it are evaluated, and their "
+      "generation record, when present, names the tables, datasets, "
+      "relationship model and --reference_rows_limit that were generated "
+      "(ADR 0044). Fills what the launch's own records leave open")
   group.add_argument(
       "--relationships_uri",
       type=_text,
       help="the relationship model file or directory (local or gs://), "
       "when the launch's own records name none; alone (with "
-      "--landing_dataset and --reference_dataset) it also names the tables")
+      "--landing_dataset and --reference_dataset) it also names the tables. "
+      "On the seed path a generation record that states relationships off "
+      "overrides it (ADR 0044)")
   group.add_argument("--fixture_dir", type=_text, help=argparse.SUPPRESS)
 
 

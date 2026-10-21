@@ -60,9 +60,13 @@ relationship model and `reference_rows_limit` from it, so a `config_uri` file
 that changed them is evaluated as generated: a record that states
 relationships off is evaluated without a model, whatever `relationships_uri`
 says, and every value that differs from the one passed is a warning on the
-evaluation. The values passed, and what the first point below says is
-evaluated, are then the fallback for a launch without a record, or with a
-record whose tables span more than one landing or source dataset.
+evaluation. The record is read in the generation job's window, so it needs
+the Dataflow job: for a launch without a record, or without
+`roles/dataflow.viewer`, the values passed decide, and what the first point
+below says is evaluated. A record whose tables span more than one landing or
+source dataset keeps the seed's tables and datasets, with a warning; the
+launch lookup still takes the generation's `reference_rows_limit` and
+relationship model from the record (from the job's rows of those tables).
 
 - **What is evaluated.** The launched table's enabled component in the
   relationship model, parents first, or that table alone. Each landing table
@@ -72,8 +76,10 @@ record whose tables span more than one landing or source dataset.
   is not found.
 - **What it needs.** It runs under the generation job's service account, in
   its subnetwork, as a CPU job. Of the roles that read a job it needs only
-  `roles/dataflow.viewer` (without it: a warning and no window), plus read on
-  the `validation_runs` table; the four tables and two views must exist.
+  `roles/dataflow.viewer` (without it: a warning and no window, so no
+  generation record either, and the DAG's values decide the tables), plus
+  read on the `validation_runs` table; the four tables and two views must
+  exist.
 - **Who closes the registry row.** `trigger_evaluation` returns as soon as the
   job is queued, before the launcher writes the `RUNNING` row.
   `wait_for_evaluation_launch` waits until the job is running (or already

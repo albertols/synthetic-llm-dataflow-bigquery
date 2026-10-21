@@ -1106,27 +1106,60 @@ def test_a_record_silent_on_relationships_keeps_the_given_model(
   assert not [n for n in _record_notes(planned) if "relationships_uri" in n]
 
 
-def test_a_recorded_model_that_is_not_there_is_evaluated_without_relationships(
-    bq, load_fixture, tmp_path):
-  """The record states relationships on, from a folder that holds no model
-    file where the evaluator runs (the repository's default holds samples
-    only), and the DAG names the same folder: the record's tables are
-    evaluated without relationships, with a note — as the seed alone is
-    today — never a failed evaluation."""
+@pytest.mark.parametrize(
+    "generated", [["users", "orders", "order_items"], ["users", "orders"]],
+    ids=["the seed's component", "part of it"])
+def test_the_tables_note_reports_only_a_difference_from_the_seeds_component(
+    bq, load_fixture, tmp_path, generated):
+  """Fix round 1: a relational chained evaluation whose record names the
+    seed's whole component, in the model the launch is planned with, says
+    nothing about its tables (every five-table chained row would otherwise
+    carry a warning that reports no difference); a record that names
+    something else says so, naming the component."""
+  relational = {
+      "generate_fk_relationships": "true",
+      "relationships_uri": str(tmp_path / "thelook.yaml")
+  }
+  bq.canned.append(("validation_runs", [
+      _record_row(name, i, relational=relational)
+      for i, name in enumerate(generated)
+  ]))
+  planned = _record_plan(bq, load_fixture, tmp_path)
+  assert _evaluated(planned) == generated
+  tables = [n for n in _record_notes(planned) if ": tables [" in n]
+  if len(generated) == 3:
+    assert not tables
+  else:
+    (note,) = tables
+    assert str(generated) in note
+    assert "['users', 'orders', 'order_items']" in note
+
+
+@pytest.mark.parametrize("whose", ["recorded", "given"])
+def test_a_model_folder_that_is_not_there_is_evaluated_without_relationships(
+    bq, load_fixture, tmp_path, whose):
+  """A folder that holds no model file where the evaluator runs (the
+    repository's default holds samples only), named by the record ("the
+    recorded relationships_uri") or, the snapshot silent about
+    relationships, only by the DAG ("the given relationships_uri", fix
+    round 1): the record's tables are evaluated without relationships, with
+    a note naming whose URI it was — as the seed alone is today — never a
+    failed evaluation."""
   empty = tmp_path / "samples"
   empty.mkdir()
   (empty / "example_model.yaml").write_text(MODEL_YAML)
   relational = {
       "generate_fk_relationships": "true",
       "relationships_uri": str(empty)
-  }
+  } if whose == "recorded" else {}
   bq.canned.append(
       ("validation_runs", [_record_row("orders", -1, relational=relational)]))
   planned = _record_plan(bq, load_fixture, tmp_path, uri=str(empty))
   assert _evaluated(planned) == ["orders"]
   assert planned.models == () and planned.launch.relationships_uri is None
   (note,) = [w for w in planned.warnings if "no model file" in w]
-  assert str(empty) in note and "without relationships" in note
+  assert f"the {whose} relationships_uri {empty} holds no model file" in note
+  assert "without relationships" in note
 
 
 @pytest.mark.parametrize(
@@ -1136,11 +1169,15 @@ def test_a_record_the_seed_cannot_name_keeps_the_dags_inputs(
     bq, load_fixture, tmp_path, orders):
   """Plan Ruling 10 / controller ruling F26: a record whose tables one
     `--landing_dataset` cannot name, or that names something that is no
-    table, keeps the seed's targets and the given `--reference_rows_limit`
-    and `--relationships_uri` — a note, never a failed evaluation."""
+    table, keeps the seed's tables and datasets — a note, never a failed
+    evaluation. The launch lookup still takes the generation's parameters
+    from the record: its 5,000-row limit is what verifies the privacy panel
+    (fix round 1)."""
+  recorded = tmp_path / "recorded.yaml"  # not the DAG's thelook.yaml
+  recorded.write_text(MODEL_YAML)
   relational = {
       "generate_fk_relationships": "true",
-      "relationships_uri": str(tmp_path / "thelook.yaml")
+      "relationships_uri": str(recorded)
   }
   bq.canned.append(("validation_runs", [
       _record_row("users", 0, relational=relational),
@@ -1152,8 +1189,11 @@ def test_a_record_the_seed_cannot_name_keeps_the_dags_inputs(
   assert _evaluated(planned) == ["users", "orders", "order_items"]
   (note,) = _record_notes(planned)
   assert orders.rsplit(".", 1)[0] in note
-  assert ("the seed's targets and the given --reference_rows_limit and "
-          "--relationships_uri are kept") in note
+  assert ("the seed's tables and datasets are kept; the launch lookup still "
+          "takes the generation's parameters (reference_rows_limit, the "
+          "relationship model) from the record") in note
+  assert planned.launch.typed_filters()["reference_rows_limit"] == 5000
+  assert planned.launch.relationships_uri == str(recorded)
 
 
 def test_a_run_id_target_reads_validation_runs(bq, capsys):

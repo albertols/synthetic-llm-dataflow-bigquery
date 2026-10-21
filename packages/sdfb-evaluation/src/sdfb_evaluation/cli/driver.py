@@ -671,8 +671,10 @@ def _seed_tables(args: argparse.Namespace) -> tuple[list[str], list[str]]:
 
 _RECORD_NOTE = ("the generation's record (validation_runs, job {job}) decides "
                 "what is evaluated (ADR 0044): {what}")
-_RECORD_KEPT = ("the seed's targets and the given --reference_rows_limit and "
-                "--relationships_uri are kept")
+_RECORD_KEPT = ("the seed's tables and datasets are kept; the launch lookup "
+                "still takes the generation's parameters "
+                "(reference_rows_limit, the relationship model) from the "
+                "record")
 
 
 def _recorded_place(record: GenerationRecord, project: str,
@@ -734,12 +736,13 @@ def _record_targets(args: argparse.Namespace, env: Env, bq: Any) -> list[str]:
   evaluation passes them — the generation's record names what the launch
   generated: its tables (in run order), their datasets, the relationship
   model (`_recorded_uri`) and `reference_rows_limit`. They replace the
-  caller's seed-derived values, and every difference is a note naming
-  both. Without a record (an older table or launch, an unreadable job),
-  the caller's targets stand; a record whose tables span several datasets,
-  or that names something that is no table, is a note, and the caller's
-  targets, `--reference_rows_limit` and `--relationships_uri` stand (plan
-  Ruling 10). Returns the notes."""
+  caller's seed-derived values, and every difference is a note naming both
+  (the tables' note waits for the model: `_recorded_tables_note`). Without
+  a record (an older table or launch, an unreadable job), the caller's
+  targets stand. A record whose tables span several datasets, or that
+  names something that is no table, is a note and keeps the seed's tables
+  and datasets (plan Ruling 10); the launch lookup still takes the
+  generation's parameters from the record. Returns the notes."""
   seed = getattr(args, "seed_table", None)
   table = getattr(args, "validation_runs_table", None)
   if not (seed and args.job_id and table) or args.tables:
@@ -764,8 +767,6 @@ def _record_targets(args: argparse.Namespace, env: Env, bq: Any) -> list[str]:
   uri, uri_note = _recorded_uri(record, args.relationships_uri or None)
   limit = record.reference_rows_limit
   changes = [
-      f"tables {names}, in run order (given the seed {seed!r})"
-      if names != [seed] else None,
       f"landing dataset {landing} (given {given_landing})"
       if landing != given_landing else None,
       f"source dataset {reference} (given {given_reference})"
@@ -781,6 +782,27 @@ def _record_targets(args: argparse.Namespace, env: Env, bq: Any) -> list[str]:
   if limit is not None:
     args.reference_rows_limit = limit
   return [note(what=c) for c in changes if c]
+
+
+def _recorded_tables_note(job_id: str, seed: str, names: Sequence[str],
+                          models: Sequence[RelModel]) -> str | None:
+  """The note for the tables the record named (`_record_targets`) when they
+  differ from what the seed path evaluates: the seed's enabled component in
+  the model the launch is planned with, compared as sets (the record's run
+  order never warns), or — no model loaded, so the component is unknown —
+  the seed alone. None when they agree: a relational chained evaluation
+  that generated the seed's component is no difference to report."""
+  if models:
+    expected = list(generation_order(models, component(models, seed)))
+    if set(names) == set(expected):
+      return None
+    why = f"the component of the seed {seed!r} is {expected}"
+  elif list(names) == [seed]:
+    return None
+  else:
+    why = f"given the seed {seed!r}"
+  return _RECORD_NOTE.format(
+      job=job_id, what=f"tables {list(names)}, in run order ({why})")
 
 
 def _derive_targets(args: argparse.Namespace, bq: Any) -> list[str]:
@@ -863,7 +885,8 @@ _NO_MODEL_FILES = "no model files there"
 def _models(
     launch: LaunchContext,
     *,
-    explicit_uri: str | None = None
+    explicit_uri: str | None = None,
+    given_uri: str | None = None,
 ) -> tuple[tuple[RelModel, ...], LaunchContext]:
   """The model the launch applied, and the launch to plan with: the
   adjusted copy when it adjusted one (ADR 0038), else the one it loaded;
@@ -874,7 +897,9 @@ def _models(
 
   - the URI is the operator's own `--relationships_uri` (`explicit_uri`)
     and it resolves to no model file: raises, always (the seed path passes
-    none: its target check has settled the URI);
+    none, and its `--relationships_uri` as `given_uri`: there such a URI is
+    evaluated without relationships, and the note calls it "the given"
+    one unless the generation record states it);
   - the URI is the generation job's record and the log was read and shows
     no model loaded (the generator logged `relationships_absent`): the
     launch is evaluated without relationships, with a note;
@@ -902,8 +927,11 @@ def _models(
           f"{name} (sha {sha}), which is not readable from where the "
           "evaluator runs") from exc
   if launch.model_adjusted is None:
+    record = launch.record
+    stated = record is not None and record.relationships_uri == uri
+    whose = "given" if uri == given_uri and not stated else "recorded"
     note = (f"the launch's log could not be read, so whether it loaded a "
-            f"relationship model is unknown, and the recorded "
+            f"relationship model is unknown, and the {whose} "
             f"relationships_uri {uri} holds no model file where the "
             "evaluator runs: evaluated without relationships")
   else:
@@ -960,8 +988,13 @@ def _make_plan(args: argparse.Namespace, env: Env, bq: Any,
         runner=args.runner,
         now=attempt.now,
         evaluation_id=attempt.evaluation_id)
+  seed = getattr(args, "seed_table", None)
   with _timed(attempt.evaluation_id, "target check"):
-    notes = [*_record_targets(args, env, bq), *_derive_targets(args, bq)]
+    notes = _record_targets(args, env, bq)
+    # `--tables` never comes with `--seed_table` (parse_args), so tables set
+    # by now on the seed path are the ones the record named (F1)
+    recorded = list(args.tables or ()) if seed else []
+    notes += _derive_targets(args, bq)
   with _timed(attempt.evaluation_id, "launch lookup"):
     attempt.launch = _resolve(args, env, bq)
   if notes:
@@ -971,14 +1004,23 @@ def _make_plan(args: argparse.Namespace, env: Env, bq: Any,
   if getattr(args, "no_planning_snapshots", False):
     planning_bq = _ReadOnlyPlanning(bq)
     attempt.refused = planning_bq.refused
-  # On the seed path the target check has settled the URI — `_seed_tables`
-  # cleared one that holds no model file, or the generation's record named
-  # it (F1, ADR 0044) — so it is the launch's, not the operator's: one that
-  # holds no model file is evaluated without relationships, never raised.
-  explicit_uri = (None if getattr(args, "seed_table", None) else getattr(
-      args, "relationships_uri", None))
+  # Off the seed path the operator's `--relationships_uri` is raised about
+  # when it holds no model file. On it `_seed_tables` has cleared such a URI,
+  # or (F1, ADR 0044) the record named the URI or — the snapshot silent
+  # about relationships — left the given one unchecked: either way a URI
+  # that holds no model file is evaluated without relationships, with a
+  # note saying whose it was.
+  uri = getattr(args, "relationships_uri", None)
+  explicit_uri, given_uri = (None, uri) if seed else (uri, None)
   with _timed(attempt.evaluation_id, "relationship models"):
-    models, attempt.launch = _models(attempt.launch, explicit_uri=explicit_uri)
+    models, attempt.launch = _models(
+        attempt.launch, explicit_uri=explicit_uri, given_uri=given_uri)
+  tables_note = (
+      _recorded_tables_note(args.job_id, seed, recorded, models)
+      if seed and recorded else None)
+  if tables_note:
+    attempt.launch = dataclasses.replace(
+        attempt.launch, warnings=(*attempt.launch.warnings, tables_note))
   return build_plan(
       launch=attempt.launch,
       models=models,
