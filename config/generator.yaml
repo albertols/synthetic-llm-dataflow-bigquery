@@ -26,8 +26,11 @@
 #              it can be set only in a file.
 #   raise/lower  what a higher / lower value does.
 #   null       either `required` (the entry says so: a launch needs a
-#              value from a flag or a file) or `derived` (the entry says
-#              `null = ...`: leave it null and the value is computed).
+#              value from a flag or a file; a null left in your file pins
+#              nothing, so a flag still fills it) or `derived` (the entry
+#              says `null = ...`: leave it null and the value is computed).
+#              On a key with a value, `null = ...` says what a null in
+#              your file means instead (vllm_max_model_len: no cap).
 #   Quoted values ('on', 'false', '8192', '') are string-encoded CLI
 #   values: keep them quoted.
 
@@ -177,17 +180,22 @@ sampling:
   top_values_top_k: 8
 
   # Shape masks kept — How many character-shape masks (9 digit, A upper, a
-  # lower) a column keeps with their shares.
-  # raise: Rarer shapes of identifier-like columns stay visible to the shape
-  # expander and the drift checks.
-  # lower: Only the dominant shapes survive; a long-tailed format loses its
-  # minority masks.
+  # lower) a column's source_table_stats entry keeps, with their shares. The
+  # engines build their own shape mixes and never read it.
+  # raise: The stats entry records more of a long-tailed format's minority
+  # masks; generation does not change.
+  # lower: The stats entry keeps only the dominant masks; generation does not
+  # change.
   shape_mix_top_k: 8
 
-  # Length percentiles — The length quantiles the profiler records per string
-  # column; the p05–p95 band becomes the pool prompt's length hint.
-  # raise: A wider band admits more of the tail's lengths into prompts.
-  # lower: A tighter band steers prompts toward typical lengths only.
+  # Length percentiles — The three length quantiles a string column's
+  # source_table_stats entry records, under the fixed names len_p05, len_p50
+  # and len_p95. The pool prompt's length hint has its own fixed p05–p95 band
+  # and never reads these.
+  # raise: A wider band records more of the length tails in the stats entry;
+  # prompts and generation do not change.
+  # lower: A tighter band records only typical lengths in the stats entry;
+  # prompts and generation do not change.
   length_percentiles: [0.05, 0.5, 0.95]
 
   # Null-pattern column cap — Tables wider than this skip the row
@@ -648,6 +656,7 @@ serving:
   # context killed a T4 at startup).
   # lower: Less VRAM for KV; 8,192 already dwarfs the synthesis prompts.
   # flag --vllm_max_model_len
+  # null = no cap — the checkpoint's native context (the T4 needs a cap)
   vllm_max_model_len: '8192'
 
   # Autoscaling — Fleet sizing: auto (pinned when --initial_workers is set),
