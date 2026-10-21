@@ -49,6 +49,10 @@ log, no JOBS labels — and takes the rest from the job's `validation_runs`
 record and from `manual`. Given the generator's `validation_runs_table` and
 with the window known, it reads this launch's rows of that table (one
 query), which carry the reference digests and, since ADR 0044, the record.
+`job_record` reads a job's record before its tables are known: the job,
+then the rows of that table in the job's window that name the job
+(`runs_of_job`) — the seed path's first step, where the record names what
+is evaluated (`cli.driver`).
 
 `tables_in_order` never silently narrows a relational launch to its
 `--landing_table` target:
@@ -106,13 +110,19 @@ from sdfb_evaluation.context.jobs import (
     parse_timestamp,
     writes_by_beam_job,
 )
-from sdfb_evaluation.context.runs import of_job, runs_for, split_run_id
+from sdfb_evaluation.context.runs import (
+    of_job,
+    runs_for,
+    runs_of_job,
+    split_run_id,
+)
 
 __all__ = [
     "GenerationRecord",
     "LaunchContext",
     "RunRecord",
     "UnresolvedLaunchError",
+    "job_record",
     "record_of",
     "record_params",
     "resolve_launch",
@@ -1196,6 +1206,40 @@ def _job_identity(bq: Any, jobs: DataflowJobs, job_id: str, region: str,
       base_run_id=base,
       runs=tuple(own),
       run_ids=tuple(r.run_id for r in own))
+
+
+# What reading a Dataflow job can raise: no usable credentials (`make_session`'s
+# RuntimeError; GcpApiError is one too), a malformed project, region or job id
+# (ValueError), a job that is not there (JobNotFoundError, a LookupError) or
+# not readable (PermissionError).
+_JOB_READ_ERRORS = (RuntimeError, ValueError, LookupError, PermissionError)
+
+
+def job_record(*, bq: Any, session_factory: Callable[[str], Any], project: str,
+               region: str, job_id: str,
+               validation_runs_table: str) -> GenerationRecord | None:
+  """The generation record of one Dataflow job (ADR 0044), for a caller
+  that has not named its tables yet: the job's window and name, then its own
+  `validation_runs` rows (`runs_of_job`). None when the job, the window or
+  the table cannot be read, or the rows carry no snapshot — never raises;
+  the job-only resolution reads both again and reports those failures."""
+  try:
+    jobs = DataflowJobs(session_factory(project), project, region)
+    job = jobs.get(job_id)
+  except _JOB_READ_ERRORS:
+    return None
+  dataset, _, name = _dotted(validation_runs_table).rpartition(".")
+  try:
+    rows = runs_of_job(
+        bq,
+        quality_dataset=dataset,
+        table_name=name,
+        job_id=job_id,
+        job_name=_text(job.get("name")),
+        window=jobs.window(job))
+    return record_of([RunRecord.from_row(r) for r in rows])
+  except _BQ_SOURCE_ERRORS:
+    return None
 
 
 def resolve_launch(*,

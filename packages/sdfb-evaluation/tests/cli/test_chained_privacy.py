@@ -24,6 +24,9 @@ lifts). The tables are big enough for a real panel: R and H hold
 `MIN_PANEL_ROWS` rows each.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §7 Validation and the dead-letter queue
+(ADR 0044).
 """
 
 from __future__ import annotations
@@ -136,8 +139,9 @@ def test_a_matching_digest_verifies_the_panel_down_to_both_decisions(
   planned, session = _plan(bq, load_fixture, "--validation_runs_table",
                            RUNS_TABLE)
   # what was read: the Dataflow job and one validation_runs query
-  assert [m for m, _ in session.calls] == ["GET"]
-  assert len([1 for sql, _ in bq.queries if "validation_runs" in sql]) == 1
+  # +1 of each: the record read before the targets, ADR 0044
+  assert [m for m, _ in session.calls] == ["GET", "GET"]
+  assert len([1 for sql, _ in bq.queries if "validation_runs" in sql]) == 2
   assert not [1 for sql, _ in bq.queries if "JOBS_BY_PROJECT" in sql]
   panel, privacy_reason, lift_reason, near_reason = _decisions(planned)
   assert panel.verified and panel.reason is None

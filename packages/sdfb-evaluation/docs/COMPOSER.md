@@ -54,6 +54,16 @@ false), `landing_dataset`, `reference_dataset`, `scope=manual`,
 `validation_runs_table`, `trigger=chained`, `mode`, `output_dataset` and
 `disk_size_gb=200`.
 
+When the generator wrote its record (a `validation_runs` table with the
+ADR 0044 columns), the evaluation takes the launch's tables, datasets,
+relationship model and `reference_rows_limit` from it, so a `config_uri` file
+that changed them is evaluated as generated: a record that states
+relationships off is evaluated without a model, whatever `relationships_uri`
+says, and every value that differs from the one passed is a warning on the
+evaluation. The values passed, and what the first point below says is
+evaluated, are then the fallback for a launch without a record, or with a
+record whose tables span more than one landing or source dataset.
+
 - **What is evaluated.** The launched table's enabled component in the
   relationship model, parents first, or that table alone. Each landing table
   is read whole: with `write_disposition` overwrite that is this launch's rows,
@@ -107,7 +117,7 @@ flowchart LR
 | :-- | :-- | :-- |
 | `generation_job_id` | empty | template `generation_job_id`; the sensor's job |
 | `generation_job_ids` | empty list | `fan_out`: one run of this DAG per id, each the full lookup of its own job, one after another |
-| `seed_table` | the table name of the import's default table | template `seed_table`, unless `run_id` or `tables` is given |
+| `seed_table` | the table name of the import's default table | template `seed_table`, unless `run_id` or `tables` is given; with `generation_job_id` and `validation_runs_table`, the generation's record (ADR 0044) names the tables, datasets, relationship model and `reference_rows_limit` when the generator wrote one, as in the chain |
 | `run_id`, `tables`, `relationships_uri` | empty | the template parameter of the same name |
 | `landing_dataset`, `source_dataset` | from the import's landing and default tables | template `landing_dataset`, `reference_dataset` |
 | `reference_dataset` | empty | when set, it replaces `source_dataset` |

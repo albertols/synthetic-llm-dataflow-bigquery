@@ -52,11 +52,14 @@ sdfb-eval`.
 | a launch by its base run id | `--run_id B`, looked up in `validation_runs` of `--output_dataset` |
 | tables named by hand | `--tables A,B --landing_dataset L --reference_dataset D`, parents first |
 | what a launch of one table generated | `--seed_table T --landing_dataset L --reference_dataset D`; with `--relationships_uri`, T's enabled component, parents first |
-| the same, with the job that ran it | `--seed_table T --job_id J --region R` and the two datasets: the job id is the launch's identity, only the Dataflow job is read (its window, never its log) |
+| the same, with the job that ran it | `--seed_table T --job_id J --region R` and the two datasets: the job id is the launch's identity, only the Dataflow job is read (its window, never its log). With `--validation_runs_table`, the job's generation record (ADR 0044) names the tables, their datasets, the relationship model and `--reference_rows_limit`, replacing the seed-derived ones; each difference is a warning |
 | every enabled table of a model | `--relationships_uri M --landing_dataset L --reference_dataset D` |
 
 - `--relationships_uri` (a file or directory, local or `gs://`) may accompany
   any target; it supplies the model when the launch's own records name none.
+  On the seed path with the job's record (the row above), a record that
+  states relationships off is evaluated without a model, as it was
+  generated.
 - A hand-named target (`--tables`, `--seed_table`, a model alone) carries no
   write disposition: pass `--scope manual` to read each landing table whole,
   otherwise its tables cannot be scoped.

@@ -31,6 +31,7 @@ from sdfb_evaluation.context.gcp import DataflowJobs, JobNotFoundError
 from sdfb_evaluation.context.launch import (
     LaunchContext,
     RunRecord,
+    job_record,
     resolve_launch,
 )
 from sdfb_evaluation.context.plan import Knobs, build_plan
@@ -1385,3 +1386,54 @@ def test_job_only_takes_the_callers_run_id_over_the_latest_launch(
       job_only=True)
   assert ctx.base_run_id == BASE
   assert ctx.runs and all(r.run_id.startswith(BASE) for r in ctx.runs)
+
+
+# --------------------------------------------------------------------------
+# the record of a job whose tables are not known yet (F1, ADR 0044)
+# --------------------------------------------------------------------------
+def _job_record(session_factory, bq):
+  return job_record(
+      bq=bq,
+      session_factory=session_factory,
+      project=PROJECT,
+      region=REGION,
+      job_id=JOB_ID,
+      validation_runs_table=_RUNS_TABLE)
+
+
+def test_job_record_reads_the_jobs_own_rows(fake_session, fake_bq,
+                                            fixture_data):
+  rows = _record_rows(fixture_data)
+  bq = fake_bq(responses=[("validation_runs", rows)])
+  record = _job_record(lambda project: fake_session(), bq)
+  assert record is not None
+  assert record.landing_tables == TABLES
+  assert record.reference_rows_limit == 5000
+  ((sql, params),) = [(s, p) for s, p in bq.queries if "validation_runs" in s]
+  assert "landing_tables" not in params  # the tables are what it finds out
+  assert f"`{_RUNS_TABLE}`" in sql and "start" in params and "end" in params
+
+
+def _no_credentials(project):
+  raise RuntimeError(f"no usable Application Default Credentials ({project})")
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["no job", "denied", "no credentials", "legacy rows", "unreadable table"])
+def test_job_record_is_none_without_a_record(fake_session, fake_bq,
+                                             fixture_data, case):
+  """Never raises (controller ruling F19): the job-only resolution reads
+  the job and the table again and reports what failed."""
+  session = {
+      "no job": lambda: fake_session(jobs={}),
+      "denied": lambda: fake_session(status_script=[403]),
+  }.get(case, fake_session)()
+  factory = _no_credentials if case == "no credentials" else (
+      lambda project: session)
+  bq = fake_bq(responses=[("validation_runs", _legacy_rows(fixture_data))])
+  if case == "unreadable table":
+    bq.failures["validation_runs"] = PermissionError("Access Denied")
+  assert _job_record(factory, bq) is None
+  if case in ("no job", "denied", "no credentials"):
+    assert bq.queries == []

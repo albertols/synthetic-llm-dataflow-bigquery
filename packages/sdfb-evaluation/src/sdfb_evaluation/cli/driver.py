@@ -230,6 +230,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import functools
 import hashlib
 import json
 import logging
@@ -284,7 +285,12 @@ from sdfb_evaluation.context.bq import (
     normalize_fqn,
 )
 from sdfb_evaluation.context.gcp import make_session
-from sdfb_evaluation.context.launch import LaunchContext, resolve_launch
+from sdfb_evaluation.context.launch import (
+    GenerationRecord,
+    LaunchContext,
+    job_record,
+    resolve_launch,
+)
 from sdfb_evaluation.context.plan import (
     EvaluationPlan,
     Knobs,
@@ -663,6 +669,120 @@ def _seed_tables(args: argparse.Namespace) -> tuple[list[str], list[str]]:
   return list(generation_order(models, component(models, seed))), []
 
 
+_RECORD_NOTE = ("the generation's record (validation_runs, job {job}) decides "
+                "what is evaluated (ADR 0044): {what}")
+_RECORD_KEPT = ("the seed's targets and the given --reference_rows_limit and "
+                "--relationships_uri are kept")
+
+
+def _recorded_place(record: GenerationRecord, project: str,
+                    given_reference: str) -> tuple[str, str, list[str]]:
+  """(landing dataset, source dataset, table names in run order) of the
+  record's runs; the source is `given_reference` when no run names one.
+
+  Raises:
+    ValueError: one landing and one source dataset cannot name them, or a
+      name is not a table name (it is about to go into SQL); the message
+      is the reason, as a clause."""
+  landing = sorted({
+      qualified_dataset(t.rsplit(".", 1)[0], project)
+      for t in record.landing_tables
+  })
+  sources = sorted({
+      qualified_dataset(r.reference_table.rsplit(".", 1)[0], project)
+      for r in record.runs
+      if r.reference_table
+  })
+  if len(landing) != 1 or len(sources) > 1:
+    raise ValueError(f"its tables span the datasets {landing + sources}, "
+                     "which a seed's two datasets cannot name")
+  names = list(
+      dict.fromkeys(t.rsplit(".", 1)[-1] for t in record.landing_tables))
+  reference = sources[0] if sources else given_reference
+  try:
+    for name in names:
+      normalize_fqn(f"{landing[0]}.{name}")
+      normalize_fqn(f"{reference}.{name}")
+  except ValueError as exc:
+    raise ValueError(f"a table it names is not a table name ({exc})") from exc
+  return landing[0], reference, names
+
+
+def _recorded_uri(record: GenerationRecord,
+                  given: str | None) -> tuple[str | None, str | None]:
+  """(the relationship model to evaluate with, the note when it is not
+  `given`): none when the snapshot states relationships off — an isolated
+  generation is evaluated isolated, whatever `--relationships_uri` says
+  (Review Focus 4) — else the record's model, else (the snapshot is
+  silent about relationships) `given`."""
+  if record.relationships_off:
+    if not given:
+      return None, None
+    flag = record.value("relational", "generate_fk_relationships")
+    return None, ("no relationship model: the launch generated without one "
+                  f"(generate_fk_relationships={flag!r}; given "
+                  f"relationships_uri {given!r})")
+  uri = record.relationships_uri or given
+  if uri == given:
+    return uri, None
+  return uri, f"relationships_uri {uri!r} (given {given!r})"
+
+
+def _record_targets(args: argparse.Namespace, env: Env, bq: Any) -> list[str]:
+  """F1 (ADR 0044): on the seed path — `--seed_table` with the generation's
+  job id and its `--validation_runs_table`, as the chained Composer
+  evaluation passes them — the generation's record names what the launch
+  generated: its tables (in run order), their datasets, the relationship
+  model (`_recorded_uri`) and `reference_rows_limit`. They replace the
+  caller's seed-derived values, and every difference is a note naming
+  both. Without a record (an older table or launch, an unreadable job),
+  the caller's targets stand; a record whose tables span several datasets,
+  or that names something that is no table, is a note, and the caller's
+  targets, `--reference_rows_limit` and `--relationships_uri` stand (plan
+  Ruling 10). Returns the notes."""
+  seed = getattr(args, "seed_table", None)
+  table = getattr(args, "validation_runs_table", None)
+  if not (seed and args.job_id and table) or args.tables:
+    return []
+  record = job_record(
+      bq=bq,
+      session_factory=env.session_factory or make_session,
+      project=args.project,
+      region=args.region or "",
+      job_id=args.job_id,
+      validation_runs_table=table)
+  if record is None:
+    return []
+  note = functools.partial(_RECORD_NOTE.format, job=args.job_id)
+  given_landing = qualified_dataset(args.landing_dataset, args.project)
+  given_reference = qualified_dataset(args.reference_dataset, args.project)
+  try:
+    landing, reference, names = _recorded_place(record, args.project,
+                                                given_reference)
+  except ValueError as exc:
+    return [note(what=f"{exc}; {_RECORD_KEPT}")]
+  uri, uri_note = _recorded_uri(record, args.relationships_uri or None)
+  limit = record.reference_rows_limit
+  changes = [
+      f"tables {names}, in run order (given the seed {seed!r})"
+      if names != [seed] else None,
+      f"landing dataset {landing} (given {given_landing})"
+      if landing != given_landing else None,
+      f"source dataset {reference} (given {given_reference})"
+      if reference != given_reference else None,
+      uri_note,
+      f"reference_rows_limit {limit} (given {args.reference_rows_limit})"
+      if limit is not None and limit != args.reference_rows_limit else None,
+  ]
+  args.tables = names
+  args.landing_dataset = landing
+  args.reference_dataset = reference
+  args.relationships_uri = uri
+  if limit is not None:
+    args.reference_rows_limit = limit
+  return [note(what=c) for c in changes if c]
+
+
 def _derive_targets(args: argparse.Namespace, bq: Any) -> list[str]:
   """`--seed_table`, or `--relationships_uri` alone, names the tables
   (module docstring): sets `args.tables` — the seed's component
@@ -753,7 +873,8 @@ def _models(
   where the URI came from and whether the launch's log was read (R121):
 
   - the URI is the operator's own `--relationships_uri` (`explicit_uri`)
-    and it resolves to no model file: raises, always;
+    and it resolves to no model file: raises, always (the seed path passes
+    none: its target check has settled the URI);
   - the URI is the generation job's record and the log was read and shows
     no model loaded (the generator logged `relationships_absent`): the
     launch is evaluated without relationships, with a note;
@@ -840,7 +961,7 @@ def _make_plan(args: argparse.Namespace, env: Env, bq: Any,
         now=attempt.now,
         evaluation_id=attempt.evaluation_id)
   with _timed(attempt.evaluation_id, "target check"):
-    notes = _derive_targets(args, bq)
+    notes = [*_record_targets(args, env, bq), *_derive_targets(args, bq)]
   with _timed(attempt.evaluation_id, "launch lookup"):
     attempt.launch = _resolve(args, env, bq)
   if notes:
@@ -850,9 +971,14 @@ def _make_plan(args: argparse.Namespace, env: Env, bq: Any,
   if getattr(args, "no_planning_snapshots", False):
     planning_bq = _ReadOnlyPlanning(bq)
     attempt.refused = planning_bq.refused
+  # On the seed path the target check has settled the URI — `_seed_tables`
+  # cleared one that holds no model file, or the generation's record named
+  # it (F1, ADR 0044) — so it is the launch's, not the operator's: one that
+  # holds no model file is evaluated without relationships, never raised.
+  explicit_uri = (None if getattr(args, "seed_table", None) else getattr(
+      args, "relationships_uri", None))
   with _timed(attempt.evaluation_id, "relationship models"):
-    models, attempt.launch = _models(
-        attempt.launch, explicit_uri=getattr(args, "relationships_uri", None))
+    models, attempt.launch = _models(attempt.launch, explicit_uri=explicit_uri)
   return build_plan(
       launch=attempt.launch,
       models=models,
