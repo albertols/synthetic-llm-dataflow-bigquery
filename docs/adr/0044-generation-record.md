@@ -305,7 +305,7 @@ equals master's.
 | :-- | :-- |
 | Evaluation list | the engine · model, embedder · retrieval, similarity, seed, rows, tier and env cells fill from the registry; a "Generator · job · config" cell: the short version, the generation job (linked to the Dataflow console) and the config-digest chip; filters "Generator version", "Branch" and "Config digest" |
 | Run page, Parameters tab | a Generator panel: the resolved values by section with a `file` / `flag` / `default` badge, the overridden-params warning, a launcher ≠ worker version badge, the relationships model card, the job link and "Download as config.yaml" |
-| Compare | a "Generator config" card: only the keys that differ, side by side, or "No generation record" for an evaluation without one |
+| Compare | a "Generator config" card: only the keys that differ, side by side, or "No generation record" for an evaluation without one; the Parameters diff lists a snapshot's `values` under their flat keys (`generation_params.<key>`), so a record-backed evaluation lines up with an older one |
 | Run page | the relational panel's repeat-share band and the tolerance the run's verdicts print are the run's `guardrails.repeat_share_tolerance`, else the default |
 
 The list reads the registry; the panel, the diff and the download read
@@ -346,9 +346,12 @@ the snapshot.
 - **Rollout, in order** (RUN_PLAYBOOK §2d is the checklist):
   1. **Migrate.** `bq update --schema` on `validation_runs` (optional for the
      generator, D4, but no record without it) and on `evaluation_data_history`
-     (required), then `sdfb-eval schemas --apply` to refresh the views —
-     before deploying the new evaluator or the new GUI, whose evaluation list
-     queries the two registry columns. `public_cloud/deploy/gcp/03_storage_bq.sh`
+     (required), then `sdfb-eval schemas --apply` to refresh the views — in
+     the same session as step 3 (the new image and Flex Template), with no
+     chained or standalone evaluation running in between (an evaluator image
+     from before this ADR cannot write to the migrated registry, below), and
+     before deploying the new GUI, whose evaluation list queries the two
+     registry columns. `public_cloud/deploy/gcp/03_storage_bq.sh`
      appends the `validation_runs` columns, Terraform adds them on `apply`, and
      preflight steps 4d and 13 check both tables.
   2. **Workflows.** The four untracked deploy workflows take the edits of
@@ -365,12 +368,34 @@ the snapshot.
      and `scripts/config/config_digest.py` ship with it.
 - **The registry migration is required**; the `validation_runs` one is not.
   A new evaluator against an un-migrated registry fails its registry write.
+  So does an evaluator image from before this ADR against the migrated
+  registry: its load jobs carry the old schema, and BigQuery rejects a load
+  schema that lacks a column the table has (a load can add or relax a column,
+  never drop one:
+  [modifying table schemas](https://cloud.google.com/bigquery/docs/managing-table-schemas);
+  `Provided Schema does not match
+  Table … Field generator_version is missing in new schema`). The generator's
+  `validation_runs` sink passes no schema, so an older generator image keeps
+  writing. Hence the same-session rollout above (trigger with
+  `run_evaluation` false until the new template is up), and a rollback of the
+  evaluator either stays on the new image or drops the two columns
+  (`ALTER TABLE … DROP COLUMN generator_version, DROP COLUMN
+  generator_config_digest`, then `sdfb-eval schemas --apply` to refresh the
+  views; the values written in them are lost). To confirm the rejection, an
+  operator appends one row to a migrated scratch copy of the registry with
+  `bq load --noreplace --schema=<master's schema file>`; RUN_PLAYBOOK §2d
+  step 1 has the commands.
 - **The job-id attribute is unconfirmed on Dataflow.** The worker tries
   `job_id`, then `dataflow_job_id`; the milestone
   `generation_record_job_id source=metadata:<attribute>` names the one that
   answered. When neither does (`source=none`), `job_id` stays NULL and the
-  evaluator matches the job by `job_name` in its window. RUN_PLAYBOOK §2d
-  step 8 is the check.
+  evaluator matches the job by `job_name` in its window. That name is not
+  unique per launch — a Composer job name is the same for every launch of a
+  model — so of the rows under it the evaluator keeps the launch whose
+  `launched_at` is the latest at or before the job's end (`launched_at` is
+  stamped before the job runs: after its creation on a Flex launch), and a
+  warning names the other launch's rows it ignored. RUN_PLAYBOOK §2d step 8
+  is the check.
 - **ADR 0043's WARNING is narrowed.** `config_sets_evaluation_input` is logged
   only when the launch writes no record, the one case where the chained
   evaluation still reads its DAG params.

@@ -780,8 +780,11 @@ default_dag_params = {
             "model and reference_rows_limit from the generation record in "
             "validation_runs (ADR 0044). It falls back to this DAG's params "
             "only when the launch wrote no record (the table lacks the "
-            "columns or its schema was unreadable); the launcher then logs "
-            "config_sets_evaluation_input for each key the file set.",
+            "columns or its schema was unreadable; the launcher then logs "
+            "config_sets_evaluation_input for each key the file set), or "
+            "when the evaluation cannot read the generation job (no "
+            "roles/dataflow.viewer; its warnings then say the record could "
+            "not be read).",
         ),
     "run_evaluation":
         Param(

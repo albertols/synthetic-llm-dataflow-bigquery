@@ -8,7 +8,7 @@
     "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_row_flags.schema.json": "b0856371bcf15ef4d9b313e020ca71f84dd30421907b66812b220a75a598bc8d",
     "config/bq_schema/synthetic_data_quality/dlq.schema.json": "bd91c9c7c54bb5671767d7ee8ceab4f7f2e7cae7c40518899bdc5d91f8f11f72",
     "config/bq_schema/synthetic_data_quality/fk_fanout_stats.schema.json": "00d3ed9bc1e680a2ebd12c1119ea480e16ce3881b811227cf9daeff897ade647",
-    "config/bq_schema/synthetic_data_quality/validation_runs.schema.json": "d834125b8a3b4033a6b90824a888689b114212f6482ef15fc8ce36b6e9d645ff",
+    "config/bq_schema/synthetic_data_quality/validation_runs.schema.json": "962fa0d6c82bb0ce390217b2cc33445f1bda36abaffa09f724972a77b6377011",
     "config/bq_schema/synthetic_rag/freetext_pools.schema.json": "8cd0ae3ea4daf6d60fdb01ad02088f9ec99df9b36a278c7752e0f5707c3c944b",
     "config/bq_schema/synthetic_rag/rag_chunks.schema.json": "7c793ff40c418724e5588ad6ed98d8817a1d218540a696901316ba03c13560f5",
     "config/bq_schema/synthetic_rag/source_table_stats.schema.json": "f538bd88b8570ea8722513c320234b051ed3ec53d96a0747bc02ac7d0451ba87",

@@ -167,9 +167,15 @@ The same `landing_ddl.json` also documents exactly what the pipeline will write 
   new columns (`generator_version`, `generator_config_digest`) **before the new
   evaluator runs** — unlike `validation_runs`, this is required: the
   evaluator's load jobs carry the committed schema and fail on a table without
-  them. Append them, then refresh the views — both **before deploying the new
-  evaluator or the new GUI** (the new GUI's evaluation list reads both
-  columns). Both commands run from the repository root:
+  them. Append them, then refresh the views, **in the same session as the new
+  image and Flex template rebuild**, with no chained or standalone evaluation
+  running in between, and before deploying the new GUI (its evaluation list
+  reads both columns): an evaluator image from before ADR 0044 cannot write to
+  the migrated registry, because its load jobs carry the old schema and
+  BigQuery rejects a load schema that lacks a column the table has (`Provided
+  Schema does not match Table … Field generator_version is missing in new
+  schema`). Until the new template is up, trigger the generation DAG with
+  `run_evaluation` false. Both commands run from the repository root:
 
   ```bash
   bq update --schema packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_data_history.schema.json \
@@ -179,6 +185,27 @@ The same `landing_ddl.json` also documents exactly what the pipeline will write 
   ```
 
   Preflight step 13 flags a registry that lacks them, with this command.
+
+  A **rollback** of the evaluator to an image from before ADR 0044 needs the
+  two columns dropped, then the views refreshed from the checkout rolled back
+  to (the values written in the two columns are lost; the new GUI's list then
+  fails too, so it rolls back with them); otherwise the evaluator stays on the
+  new image:
+
+  ```bash
+  bq query --use_legacy_sql=false \
+    'ALTER TABLE `<project>.<evaluation_dataset>.evaluation_data_history`
+       DROP COLUMN generator_version, DROP COLUMN generator_config_digest'
+  uv run --project packages/sdfb-evaluation sdfb-eval schemas \
+        --project <project> --dataset <evaluation_dataset> --apply   # replaces the views
+  ```
+
+  To confirm the rejection on a scratch copy: copy the registry (`bq cp`),
+  migrate the copy, and append one row with `bq load --noreplace
+  --schema=<master's evaluation_data_history.schema.json>`; BigQuery rejects
+  it naming `generator_version`, or accepts it (then an old image can write).
+  [RUN_PLAYBOOK §2d](RUN_PLAYBOOK.md#2d-corp-acceptance-of-the-generation-record-a2)
+  step 1 has the full sequence.
 - **Image and template: nothing of its own.** One image and one template serve generation and evaluation ([ADR 0041, amendment of 2026-10-06](adr/0041-evaluation-standalone-package.md#amendment-2026-10-06-one-image-one-template)). The image built from `docker/Dockerfile` carries the evaluator's source, and the template built from it with `docker/flex_template_metadata.json` launches the evaluator when a launch passes `sdfb_job=evaluation` (and `disk_size_gb=200`: the evaluation job's workers unpack the same multi-GB image, and the evaluator pins no boot disk). The deployment's own build and template steps are therefore all it takes; neither has been run with the evaluator in the image yet. `docker/flex_template_metadata.json` is the one file that declares the template's parameters, the evaluator's among them: the evaluator's own image, template metadata and template build script were removed ([ADR 0041, note of 2026-10-15](adr/0041-evaluation-standalone-package.md#amendment-2026-10-06-one-image-one-template)).
 
 ```mermaid

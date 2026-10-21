@@ -389,11 +389,11 @@ table per Dataflow job, each with the same record.
 
 | Column, or block of `config` | Read it as |
 | :-- | :-- |
-| `job_id`, `job_name` | the Dataflow job. `job_id` is read by a worker from the GCE metadata server; NULL on the DirectRunner or when no attribute answers (readers then match `job_name` in the job's window) |
+| `job_id`, `job_name` | the Dataflow job. `job_id` is read by a worker from the GCE metadata server; NULL on the DirectRunner or when no attribute answers (readers then match `job_name` in the job's window; a Composer job name is the same for every launch of a model, so the evaluator keeps the launch whose `launched_at` is the latest at or before the job's end) |
 | `launch_run_id` | the launch's base run id, the same on every table's row (`run_id` is the base or `<base>-NN-<table>`) |
 | `generator_version` | the workers' version, `<base>-<branch>-<sha7>[-dirty]`; the launcher's is `config.launcher.version` |
 | `launched_at` | when the launcher built the job's graph (`created_at` stays the row write time) |
-| `embedder_uri`, `retrieval_method`, `similarity`, `seed`, `source_stats` | the generation settings the GUI list shows; `retrieval_method` is NULL for `b2_library`, `seed` reads `derived` when none was given |
+| `embedder_uri`, `retrieval_method`, `similarity`, `seed`, `source_stats` | the generation settings the GUI list shows; `retrieval_method` is `free_text.pool_seed_strategy` for `b1_rag` and NULL for `b2_library` (the registry's `retrieval_method` carries `pool_seed_strategy` for every engine), `seed` reads `derived` when none was given |
 | `relationships_uri`, `relationships_digest` | the model as resolved and its sha12; NULL digest without a model |
 | `config_digest` | sha12 of `config.values`: same digest, same generator config |
 | `config.values` | the resolved config, every section; a valid `--config_uri` file |
@@ -442,7 +442,7 @@ SDFB_MILESTONE name=generation_record_job_id job_id=<job id> source=metadata:job
 | `source=` | Means |
 | :-- | :-- |
 | `metadata:job_id`, `metadata:dataflow_job_id` | the GCE metadata attribute that answered; `job_id=` is the job's id |
-| `none` | neither attribute answered: `job_id` stays NULL; the evaluator matches the job's rows by `job_name` in its window, the GUI by the evaluation's run ids |
+| `none` | neither attribute answered: `job_id` stays NULL; the evaluator matches the job's rows by `job_name` in its window, the GUI by the evaluation's run ids. A Composer job name is the same for every launch of a model, so of the rows under it the evaluator keeps the launch whose `launched_at` is the latest at or before the job's end, and notes the other launch's rows it ignored |
 | `not_dataflow` | the launcher did not run on Dataflow (the DirectRunner), so no metadata read is attempted; `job_id` is NULL |
 
 A worker whose generator version is not the launcher's logs one
@@ -478,8 +478,8 @@ once the launch runs, `<run id>`, `<job id>` and `<launch day>` (its date,
 `YYYY-MM-DD`). Commands run from the repository root of a checkout synced with
 `uv sync --frozen --group dev`.
 
-*Migrate before anything new is deployed, then read each surface in the order
-the launch writes it:*
+*Migrate in the same session as the image and template rebuild, then read
+each surface in the order the launch writes it:*
 
 ```mermaid
 flowchart LR
@@ -500,12 +500,19 @@ flowchart LR
   M --> B --> L --> LL --> WL --> V --> R --> G
 ```
 
-1. **Migrate the two tables, then refresh the views** — before the new image,
-   evaluator or GUI is deployed. The `validation_runs` columns are optional
-   for the generator (without them it writes today's row with one WARNING,
-   and no record); the registry's are required: the new evaluator's load jobs
-   carry them and fail on a table without them, and the new GUI's evaluation
-   list queries them.
+1. **Migrate the two tables, then refresh the views** — in the same session
+   as steps 3–5 (the new image, its Flex template, the DAG re-import), with
+   no chained or standalone evaluation running in between, and before the
+   new GUI is deployed. The `validation_runs` columns are optional for the
+   generator (without them it writes today's row with one WARNING, and no
+   record); the registry's are required: the new evaluator's load jobs carry
+   them and fail on a table without them, and the new GUI's evaluation list
+   queries them. The other direction fails too: an evaluator image from
+   before ADR 0044 cannot write to the migrated registry. Its load jobs carry
+   the old schema, and BigQuery rejects a load schema that lacks a column the
+   table has (`Provided Schema does not match Table … Field generator_version
+   is missing in new schema`). Until step 4's template is up, trigger the
+   generation DAG with `run_evaluation` false.
 
    ```bash
    bq update --schema config/bq_schema/synthetic_data_quality/validation_runs.schema.json \
@@ -528,6 +535,30 @@ flowchart LR
    Expect step 4d `BQ table · validation_runs` OK with `35 cols`, step 13c
    `Evaluation table · evaluation_data_history` OK, and the two views (13g,
    13h) OK.
+
+   **Rolling the evaluator back** to an image from before ADR 0044 needs the
+   two registry columns dropped, then the views refreshed from the checkout
+   you roll back to; the values the new evaluator wrote in them are lost.
+   Otherwise stay on the new image. With the columns gone the new GUI's
+   evaluation list fails too, so roll it back with them:
+
+   ```bash
+   bq query --use_legacy_sql=false \
+     'ALTER TABLE `<project>.<evaluation_dataset>.evaluation_data_history`
+        DROP COLUMN generator_version, DROP COLUMN generator_config_digest'
+   uv run --frozen --project packages/sdfb-evaluation sdfb-eval schemas \
+         --project <project> --dataset <evaluation_dataset> --apply   # replaces the views
+   ```
+
+   To confirm the rejection first, on a scratch copy: `bq cp` the registry
+   into a scratch dataset, migrate the copy with the registry `bq update`
+   above, then append one row to it with `bq load --noreplace
+   --source_format=NEWLINE_DELIMITED_JSON --schema=<old schema file>`, the
+   old schema file being master's
+   `packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_data_history.schema.json`
+   (`git show master:<that path>`). BigQuery either rejects the load, naming
+   `generator_version`, or accepts it (then an old image can write). Delete
+   the copy afterwards.
 
 2. **Apply the workflow edits of [§0a](#0a-workflow-edits-for-the-generation-record-untracked-workflows)**
    to workflows 1, 2, 3 and 3e, all four together.
@@ -593,7 +624,11 @@ flowchart LR
    attribute answers on Dataflow. `source=none` means neither does:
    `validation_runs.job_id` stays NULL, step 9's `job_id` check and the probe
    fail, and AC-A2-5 is not met. The evaluator still finds the job's rows by
-   `job_name`, so steps 10 and 11 still pass. Report it, so the attribute list
+   `job_name`, so steps 10 and 11 still pass. The name is not unique per
+   launch (every launch of a Composer model runs under it): of the rows in
+   the job's window the evaluator keeps the launch whose `launched_at` is the
+   latest at or before the job's end, and a warning names any other launch's
+   rows it ignored. Report it, so the attribute list
    (`sdfb_beam/io/gce_metadata.py`), the column description and ADR 0044 can
    say so. Expect **no** `generator_version_mismatch`: the
    launcher and the workers run one image. The workers' `build_info` lines
@@ -613,10 +648,14 @@ flowchart LR
    ```bash
    SDFB_RECORD_TABLE=<project>.<quality_dataset>.validation_runs \
    SDFB_RECORD_RUN_ID=<run id> \
+   SDFB_RECORD_DAY=<launch day> \
    uv run --frozen python -m pytest -m gcp packages/sdfb-tests/tests/integration/test_generation_record_gcp.py
    ```
 
-   Expect `1 passed`.
+   `SDFB_RECORD_DAY` (`YYYY-MM-DD`, any day at or before the launch) is
+   optional and recommended: it adds `created_at >= TIMESTAMP(<day>)` to the
+   probe's query, so it reads the launch's partitions only, and a table with
+   `require_partition_filter` needs it. Expect `1 passed`.
 
 10. **Check the registry** — the chained evaluation's row:
 
@@ -716,6 +755,7 @@ flowchart LR
 | `generation_record_job_id … source=not_dataflow` (worker) | a DirectRunner launch: no job id to read | none |
 | `generator_version_mismatch launcher=… worker=…` (worker) | the launcher's code is not the workers' image: a template on an older image, or a launch from a checkout | rebuild the template on the image (step 4) and launch from it |
 | the evaluation fails at its registry write, naming `generator_version` or `generator_config_digest` | the registry is not migrated | step 1's registry `bq update` |
+| the evaluation fails at its registry write with `Provided Schema does not match Table … Field generator_version is missing in new schema` | an evaluator image from before ADR 0044 wrote to the migrated registry | steps 3–4 (the new image and template), or step 1's rollback |
 | the GUI's evaluation list fails with `Unrecognized name: generator_version` | the registry or its views are not migrated | step 1's registry `bq update` and `sdfb-eval schemas --apply` |
 | `params_source` is not `validation_runs` and the list's cells are empty | the evaluation found no record: the generation job could not be read (a "no window" warning: grant `roles/dataflow.viewer`), or its rows lack the columns | step 9 first, then the job read |
 | "No generation record" on the Parameters tab | the run's rows predate the migration or went to a table without the columns | step 1, then a new launch |

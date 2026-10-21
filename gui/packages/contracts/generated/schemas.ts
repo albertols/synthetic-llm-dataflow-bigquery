@@ -400,7 +400,7 @@ export const validationRunsRowSchema = z.object({
   repeat_share_within_tolerance: z.boolean().nullable(),
   /** Row write time (UTC); DAY partition key. */
   created_at: z.iso.datetime({ offset: true }),
-  /** ADR 0044 — the Dataflow job id, read by a worker from the GCE metadata server; NULL on the DirectRunner or when the attribute is absent (readers then match job_name inside the job's window). */
+  /** ADR 0044 — the Dataflow job id, read by a worker from the GCE metadata server; NULL on the DirectRunner or when the attribute is absent (readers then match job_name inside the job's window; a Composer job name is the same for every launch of a model, so the evaluator keeps the launch whose launched_at is the latest at or before the job's end). */
   job_id: z.string().nullable(),
   /** ADR 0044 — the Dataflow job name the launcher resolved (a template launch's jobName, else sdfb-<run_id>); NULL on the DirectRunner. */
   job_name: z.string().nullable(),

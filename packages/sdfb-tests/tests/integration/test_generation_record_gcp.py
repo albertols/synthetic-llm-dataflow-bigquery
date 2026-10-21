@@ -16,8 +16,13 @@
 
     SDFB_RECORD_TABLE=<project>.synthetic_data_quality.validation_runs \
     SDFB_RECORD_RUN_ID=<the launch's run id> \
+    SDFB_RECORD_DAY=<YYYY-MM-DD, at or before the launch> \
     uv run --no-sync python3 -m pytest -m gcp \
       packages/sdfb-tests/tests/integration/test_generation_record_gcp.py
+
+`SDFB_RECORD_DAY` is optional and recommended: it adds
+`created_at >= TIMESTAMP(@day)`, so the query reads the launch's DAY
+partitions only (a table with `require_partition_filter` needs it).
 
 Design: docs/DESIGN.md §7 Validation and the dead-letter queue
 (ADR 0044).
@@ -38,11 +43,15 @@ def test_every_row_of_the_launch_carries_the_record():
 
   table = os.environ["SDFB_RECORD_TABLE"]
   run_id = os.environ["SDFB_RECORD_RUN_ID"]
+  day = os.environ.get("SDFB_RECORD_DAY")
+  sql = f"SELECT * FROM `{table}` WHERE launch_run_id = @run_id"
+  parameters = [bigquery.ScalarQueryParameter("run_id", "STRING", run_id)]
+  if day:
+    sql += " AND created_at >= TIMESTAMP(@day)"
+    parameters.append(bigquery.ScalarQueryParameter("day", "STRING", day))
   rows = list(bigquery.Client().query(
-      f"SELECT * FROM `{table}` WHERE launch_run_id = @run_id",
-      job_config=bigquery.QueryJobConfig(query_parameters=[
-          bigquery.ScalarQueryParameter("run_id", "STRING", run_id)
-      ])).result())
+      sql,
+      job_config=bigquery.QueryJobConfig(query_parameters=parameters)).result())
   assert rows, f"no validation_runs row has launch_run_id={run_id}"
   for row in rows:
     for column in RECORD_COLUMNS:
