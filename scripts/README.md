@@ -6,7 +6,7 @@ root. Current scopes:
 | Scope | Owns |
 |---|---|
 | `doc/` | figure/report generators for documentation (`make_<topic>_figures.py`; see `.claude/skills/visual-first-documentation/SKILL.md`) and `sync_design_refs.py` (the generated `Design:` docstring line that maps a module's ADR citations to `docs/DESIGN.md` sections, also in CI) |
-| `config/` | one-shot tooling for the generator-config refactor (`capture_master_goldens.py`) |
+| `config/` | generator-config tools (master goldens capture: `capture_master_goldens.py`; `config_digest.py` prints a config file's digest — ADR 0044) |
 | `e2e/` | integration-test analysis, GCP probes, sample fetch, crosschecks, redaction |
 | `evaluation/` | tooling for the standalone `packages/sdfb-evaluation/` project: `make_parity_goldens.py` (root env; regenerates `packages/sdfb-evaluation/tests/fixtures/parity/goldens.json`, the two-sided golden file that pins the eval project's `sdfb_core`/`sdfb_beam` mirrors — `--check` verifies without writing) |
 | `release/` | post-merge versioning + release reports (see `.github/workflows/release_tag_report.yaml`) |

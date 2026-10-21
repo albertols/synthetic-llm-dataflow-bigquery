@@ -86,6 +86,7 @@ include:
   - scripts/derive_landing_schema.py
   - scripts/deployment_prerequisites.py
   - scripts/relationships/card.py
+  - scripts/config/config_digest.py
 
 exclude:
   - "**/__pycache__/**"
