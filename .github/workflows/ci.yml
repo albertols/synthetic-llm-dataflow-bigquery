@@ -94,6 +94,12 @@ jobs:
         # without a re-render, or a hand edit of the block, fails.
         run: uv run python scripts/doc/render_eval_catalogue.py --check
 
+      - name: Generator config reference
+        # config/generator.yaml is rendered from sdfb_core/config (the
+        # model and its catalogue). A model or catalogue change without a
+        # re-render, or a hand edit of the file, fails.
+        run: uv run python scripts/doc/render_generator_config.py --check
+
       - name: Design references
         # Every shipped module that cites an ADR names the docs/DESIGN.md
         # section to read, and every cited ADR has a row in that document.

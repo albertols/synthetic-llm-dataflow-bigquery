@@ -1,0 +1,656 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+# Generator configuration — REFERENCE. Rendered from sdfb_core/config by
+# scripts/doc/render_generator_config.py; do not edit by hand.
+#
+# Copy ONLY the keys you want to pin into your own file and pass it with
+# --config_uri (local path or gs://). Keys in that file override the same
+# flags and DAG params; flags fill the keys it leaves out (ADR 0043).
+# Passing this whole file pins every key and makes every flag a no-op.
+# Required keys are shown as null: a launch needs them from a flag or a file.
+
+config_version: 1
+
+# =========================================================================
+# IO — where a launch reads from and writes to
+# =========================================================================
+io:
+  # DDL pin — A pinned _ddl.json read only when live schema extraction fails
+  # (air-gap, BigQuery outage).
+  # raise: A path: the pin is the fallback, and its staleness is reported as
+  # ddl_pin_drift.
+  # lower: Empty: no fallback — a failed live extraction stops the launch.
+  # flag --ddl_uri · ADR 0027
+  ddl_uri: ''
+
+  # Reference table — The source table the reference sample is SELECTed from
+  # and the schema is extracted from.
+  # raise: Point it at another table to generate from a different source.
+  # lower: Required — a launch without it is refused.
+  # flag --reference_table · ADR 0005 · required
+  reference_table: null
+
+  # Landing table — Where valid synthetic rows land; a comma-separated list
+  # plans several tables at once.
+  # raise: More tables in the list widen the plan to their components (one
+  # job in single_job mode).
+  # lower: Required — a launch without it is refused.
+  # flag --landing_table · ADR 0029, 0030 · required
+  landing_table: null
+
+  # Dead-letter table — Where rejected records land with their rule id and
+  # full error context.
+  # raise: Point it at another dataset to keep a run's rejects apart.
+  # lower: Required — a launch without it is refused.
+  # flag --dlq_table · required
+  dlq_table: null
+
+  # Create landing table — true creates the landing table on first write from
+  # the derived schema; anything else needs it to exist.
+  # raise: true: a first launch creates the table, without parameterized
+  # column constraints.
+  # lower: false: a missing landing table fails the load job.
+  # flag --create_if_not_exists
+  create_if_not_exists: 'false'
+
+  # Run summary table — Where each launch writes one summary row per table —
+  # the gate outcome and its provenance.
+  # raise: Set: every launch is recorded, and the evaluator can find it.
+  # lower: Empty: no summary row is written.
+  # flag --validation_runs_table
+  validation_runs_table: ''
+
+  # RAG chunk store — The persisted embedding store B.1 reads instead of re-
+  # embedding its row documents.
+  # raise: Set: stored vectors are read; with build_rag_layer they are also
+  # written.
+  # lower: Empty: every worker embeds its row documents in setup.
+  # flag --rag_chunks_table · ADR 0019
+  rag_chunks_table: ''
+
+  # Free-text pool store — The persisted free-text pools workers read instead
+  # of rebuilding them.
+  # raise: Set: stored pools are served; with build_pool_layer a branch
+  # builds missing ones.
+  # lower: Empty: every worker process infers its own pools in setup.
+  # flag --freetext_pools_table · ADR 0020
+  freetext_pools_table: ''
+
+  # Fan-out stats cache — Caches each driving edge's measured source fan-out
+  # so a repeat launch skips the measurement.
+  # raise: Set: a repeat launch reads the cached histogram.
+  # lower: Empty: fan-out is measured on every launch.
+  # flag --fk_fanout_stats_table · ADR 0036
+  fk_fanout_stats_table: ''
+
+  # Source stats table — Where per-column source stats rows are written, once
+  # per table and reference digest.
+  # raise: Set: the stats are queryable after the run.
+  # lower: Empty: the stats land only in the log and the JSON artifact.
+  # flag --source_stats_table · ADR 0022
+  source_stats_table: ''
+
+  # Source stats JSON — A gs:// or local path the source stats are also
+  # written to as one JSON file.
+  # raise: Set: the stats are kept next to the run's other artifacts.
+  # lower: Empty: no JSON artifact.
+  # flag --source_stats_json
+  source_stats_json: ''
+
+# =========================================================================
+# LAUNCH — identity (flags only)
+# =========================================================================
+launch:
+  # Run id — The launch's identity — it seeds batch draws when seed is empty
+  # and names every summary row.
+  # raise: A fresh id per trigger keeps retriggers from replaying the same
+  # rows.
+  # lower: Required, and a flag only — a config file may not set it.
+  # required
+  # run_id: null
+  {}
+
+# =========================================================================
+# SAMPLING — the reference sample and the source-stats profiler
+# =========================================================================
+sampling:
+  # Reference rows (n) — How many source rows the generator reads as its
+  # reference sample (n). Every profile, pool seed and validation baseline is
+  # estimated from these rows.
+  # raise: A smaller DKW band (four times the rows per halving), better tails
+  # and rare categories. A new digest makes the run cold: every pool and
+  # chunk rebuilds, and driver memory and profiling time grow linearly.
+  # lower: A cheaper sample query and a smaller leak surface, but rare
+  # categories and tails vanish first. Cardinality stays truncated at n
+  # either way.
+  # flag --reference_rows_limit · ADR 0005, 0022
+  reference_rows_limit: 10000
+
+  # Source-stats tier — Which source-stats tier the profiler writes: off,
+  # sample (the reference sample, free) or exact (one aggregate scan of the
+  # live table).
+  # raise: exact adds HLL++ distinct, deciles and top-k over the whole table,
+  # and the exact distinct count sizes the free-text pool target. One
+  # BigQuery scan of the source per run.
+  # lower: off writes no stats rows, no JSON and no pool hints; engines still
+  # profile per worker. sample is free, but every distinct count is capped at
+  # the rows the sample saw.
+  # flag --source_stats · ADR 0022
+  source_stats: sample
+
+  # Literal top values up to (distinct) — Literal source values land in the
+  # stats only for enum-like columns with at most this many distinct values.
+  # Above it a column gets shapes, entropy and lengths, never values.
+  # raise: More columns store literal values in the stats table: the
+  # exemplar-leak surface grows.
+  # lower: Fewer literal values; more columns are described by shape and
+  # entropy only.
+  top_values_max_distinct: 50
+
+  # Top values kept — How many literal top values an enum-like column keeps
+  # in its stats entry.
+  # raise: More of the head of the distribution is visible in the stats row.
+  # lower: A smaller stats row; the tail of an enum is summarised by entropy
+  # only.
+  top_values_top_k: 8
+
+  # Shape masks kept — How many character-shape masks (9 digit, A upper, a
+  # lower) a column keeps with their shares.
+  # raise: Rarer shapes of identifier-like columns stay visible to the shape
+  # expander and the drift checks.
+  # lower: Only the dominant shapes survive; a long-tailed format loses its
+  # minority masks.
+  shape_mix_top_k: 8
+
+  # Length percentiles — The length quantiles the profiler records per string
+  # column; the p05–p95 band becomes the pool prompt's length hint.
+  # raise: A wider band admits more of the tail's lengths into prompts.
+  # lower: A tighter band steers prompts toward typical lengths only.
+  length_percentiles: [0.05, 0.5, 0.95]
+
+  # Null-pattern column cap — Tables wider than this skip the row null-
+  # pattern pass, which costs O(rows × columns).
+  # raise: Wide tables get their joint null structure measured, at a pass
+  # whose alphabet grows with width.
+  # lower: More tables fall back to per-column null rates only.
+  null_pattern_max_cols: 64
+
+  # Null patterns kept — How many row null patterns (which columns are null
+  # together) the __table__ entry keeps.
+  # raise: More of the joint null structure is recorded.
+  # lower: Only the most common patterns survive.
+  null_pattern_top_k: 8
+
+# =========================================================================
+# GENERATION — what is generated, and how close to the source
+# =========================================================================
+generation:
+  # Engine — Which GenerationEngine runs, by its ENGINE_REGISTRY name: b1_rag
+  # (retrieval plus bounded LLM pools) or b2_library (the sdgx wrapper).
+  # raise: b2_library fits a library model once per worker and keeps more
+  # joint structure; numerics interpolate through 11 deciles.
+  # lower: b1_rag samples marginals from the whole sorted sample and seeds
+  # LLM pools by retrieval.
+  # flag --engine · ADR 0006
+  engine: b1_rag
+
+  # Rows to generate (M) — Rows to generate (M) for a root table. A driven
+  # child derives its count from its parent's landed keys times the measured
+  # fan-out (ADR 0036).
+  # raise: More rows reuse each pool value more often and tighten identifier
+  # keyspaces; time grows linearly.
+  # lower: Faster runs; the fidelity per row does not change, because the
+  # sample, not M, sets the error.
+  # flag --num_rows · required
+  num_rows: null
+
+  # Similarity — A 0–1 dial the engines interpret differently: b2 maps it to
+  # sampling temperatures, b1 only blends its temporal draws.
+  # raise: b2: colder categorical sampling and a lower LLM temperature,
+  # output closer to the reference. b1: temporal draws anchored nearer
+  # observed instants.
+  # lower: b2: hotter sampling, more divergence. b1: temporal draws closer to
+  # uniform over the range.
+  # flag --similarity
+  similarity: 0.5
+
+  # Seed — An explicit base RNG seed; empty derives one per (run_id,
+  # batch_id), so runs never replay across triggers.
+  # raise: A fixed seed replays the same draws for the same run inputs —
+  # useful for A/B runs and goldens.
+  # lower: Empty (default) keeps every trigger's draws independent.
+  # flag --seed
+  seed: ''
+
+  # Rows per element — Rows per Beam element. At the default it scales with
+  # --num_rows toward about 1,000 elements, never below 16.
+  # raise: Fewer, larger elements amortise per-element Python overhead over
+  # vectorized draws; a failed batch loses more rows.
+  # lower: More elements, more per-element overhead: 16 rows per element made
+  # a 1M-row run pay it 62,500 times.
+  # flag --batch_size
+  batch_size: 16
+
+  # Temporal floor, b1 (now minus years) — b1 clamps the jitter floor of
+  # generated dates to now minus this many years; fully historical columns
+  # keep their observed range.
+  # raise: Older dates are allowed again.
+  # lower: A tighter window pushes generated instants toward the present.
+  temporal_max_age_years_b1: 10
+
+  # Temporal floor, b2 (now minus years) — b2's floor for generated dates and
+  # timestamps: max(observed min, now minus this many years). A column whose
+  # whole range is older keeps it.
+  # raise: Older dates are allowed again.
+  # lower: A tighter window; the decile vector's sub-floor points collapse
+  # onto the floor.
+  temporal_max_age_years_b2: 10
+
+# =========================================================================
+# FREE TEXT — pools, routing and expansion
+# =========================================================================
+free_text:
+  # Free-text expansion — The shape-preserving expander after pool draws: off
+  # (pool draws only), identifiers (code-like columns expand from their shape
+  # mix) or all.
+  # raise: all also mutates digit runs inside texty draws: more distinct
+  # values, never an LLM call.
+  # lower: off caps every free-text column's distinct count at the pool size.
+  # flag --freetext_expansion
+  freetext_expansion: identifiers
+
+  # Pool seed strategy — How the 8 prompt seeds are chosen: centroid (densest
+  # region), kcenter (spans the column's modes) or kcenter_rotate (re-seeded
+  # per attempt).
+  # raise: kcenter and kcenter_rotate widen coverage of rare modes; rotate
+  # forfeits vLLM prefix caching by design.
+  # lower: centroid (control) keeps a byte-identical prefix and conditions on
+  # the densest region.
+  # flag --pool_seed_strategy
+  pool_seed_strategy: centroid
+
+  # Prompt constraints — Attach each column's llm_prompt_constraint and
+  # measured length band to pool prompts, as a constant suffix.
+  # raise: on: prompts follow the declared format; the shared prefix stays
+  # cacheable.
+  # lower: off: prompts rely on exemplars alone.
+  # flag --prompt_constraints · ADR 0024
+  prompt_constraints: 'on'
+
+  # Prompt debug logging — Log each built pool prompt as a milestone: off,
+  # redacted (seed exemplars elided) or full.
+  # raise: full logs verbatim prompts at WARNING: reference values reach
+  # Dataflow logs. Debug runs only.
+  # lower: off logs nothing about prompts.
+  # flag --prompt_debug · ADR 0024
+  prompt_debug: 'off'
+
+  # Decode-time pattern guidance — Constrain identifier-ish pool completions
+  # at decode time with a charset and length regex (vLLM structured output).
+  # raise: true: fewer off-format values reach the post-hoc gate, at an
+  # unmeasured T4 throughput cost.
+  # lower: empty or false (default): the post-hoc format gate alone protects
+  # pools.
+  # flag --pool_pattern_guidance
+  pool_pattern_guidance: ''
+
+  # Build the pool layer — Build free-text pools in their own branch and
+  # persist them (skipped when this reference digest and model are already
+  # stored).
+  # raise: true: pools are built once and every worker reads them (warm runs
+  # skip the LLM entirely).
+  # lower: empty: pools are inferred inside every worker process's setup().
+  # flag --build_pool_layer · ADR 0020
+  build_pool_layer: ''
+
+  # Pool cap — The most distinct values a free-text pool can hold, shared by
+  # both engines' ladders and the launcher's PK-capacity preflight. A PK
+  # routed to a pool caps at it.
+  # raise: More diversity per column, at LLM cost linear in the pool size.
+  # lower: Cheaper pools; M rows reuse each value M/cap times.
+  # ADR 0018, 0028
+  free_text_pool_max: 512
+
+  # Values per LLM call — Values requested per LLM call: one JSON-array
+  # completion.
+  # raise: Fewer round trips per pool, longer completions per call.
+  # lower: More round trips; each call is shorter and cheaper to retry.
+  # ADR 0013
+  pool_values_per_call: 32
+
+  # Parallel choices (n) — Independent completions (vLLM n=) per HTTP round
+  # trip, de-duplicated across choices. It multiplies novel yield per call
+  # about four times.
+  # raise: More yield per round trip; more sequences in flight on the GPU.
+  # lower: Less parallel sampling; more round trips.
+  pool_parallel_choices: 4
+
+  # Stagnation window — Once every escalation level has run, this many
+  # consecutive low-yield attempts end a pool ladder.
+  # raise: Ladders keep trying longer against decaying yield.
+  # lower: Ladders stop sooner; a slow-but-productive column may end
+  # undersized.
+  pool_stagnation_window: 3
+
+  # Stagnation: min novel per attempt — An attempt that adds fewer novel
+  # values than this counts toward stagnation.
+  # raise: Stricter: more attempts count as stagnant, ladders end sooner.
+  # lower: Looser: a trickle of novel values keeps a ladder alive.
+  pool_stagnation_min_novel: null
+
+  # Format-collapse exit — Consecutive full-yield rounds with zero in-format
+  # values that end a ladder (a structural mismatch temperature cannot fix).
+  # raise: More wasted rounds before the shape fallback takes over.
+  # lower: Faster exit to the shape fallback, less tolerance for a noisy
+  # first round.
+  # ADR 0033
+  pool_format_collapse_rounds: 2
+
+  # Pool ladders in parallel — How many column ladders run in parallel on a
+  # thread pool; vLLM continuous-batches the concurrent requests.
+  # raise: More concurrency, until the GPU's KV cache queues the extra
+  # sequences.
+  # lower: Closer to sequential ladders: setup time grows with the number of
+  # free-text columns.
+  pool_build_max_workers: 4
+
+  # Source-domain rejection cap — The largest source-distinct set kept as a
+  # worker-side rejection filter against copies. Above it the engine degrades
+  # loudly to sample-only rejection.
+  # raise: High-cardinality columns keep full-domain copy rejection, at tens
+  # of MB of worker memory per million strings.
+  # lower: More columns fall back to rejecting only what the sample saw.
+  # ADR 0023
+  source_domain_cap: 1000000
+
+  # Unique ratio for free text — A string column whose unique share exceeds
+  # this, with a long mean length, routes to free text instead of
+  # categorical.
+  # raise: Fewer columns reach the LLM pool.
+  # lower: More columns reach the LLM pool, including repetitive ones.
+  free_text_unique_ratio: 0.9
+
+  # Mean length for free text — The mean rendered length above which a high-
+  # unique string column is free text.
+  # raise: Short unique strings stay categorical or shaped.
+  # lower: Short unique strings route to the pool.
+  free_text_min_mean_len: 20
+
+  # Categorical up to (distinct) — Above this distinct count a string column
+  # is high-cardinality and treated as free text even if short.
+  # raise: More columns stay categorical (sampled from their observed
+  # values).
+  # lower: More columns become free text or shaped identifiers.
+  free_text_max_categories: 50
+
+# =========================================================================
+# RAG — the embedder, the chunk store and the exemplar pick
+# =========================================================================
+rag:
+  # Embedder weights URI — gs:// path of the B.1 RAG embedder's weights;
+  # empty uses the HashingEmbedder.
+  # raise: Setting it loads bge-small from GCS (never the Hub) for semantic
+  # retrieval.
+  # lower: Empty: hashing vectors, no model download, lexical neighbours
+  # only.
+  # flag --embedder_uri
+  embedder_uri: ''
+
+  # Build the RAG layer — Populate synthetic_rag.rag_chunks from this run's
+  # reference sample (skipped when the digest is already present for this
+  # embedder).
+  # raise: true: chunks and vectors persist, and later runs read them instead
+  # of re-embedding.
+  # lower: empty: the engine embeds its 1,024 rows in setup on every fresh
+  # digest.
+  # flag --build_rag_layer · ADR 0017, 0019
+  build_rag_layer: ''
+
+  # Row documents embedded — How many fingerprint-ordered reference rows are
+  # embedded as row documents: exactly the rows the engine reads back.
+  # raise: More rows in the in-worker index and more population cost; a value
+  # above the reference sample is clamped to it.
+  # lower: A smaller index that covers fewer of the sample's modes.
+  # flag --rag_row_docs_limit · ADR 0019
+  rag_row_docs_limit: 1024
+
+  # Value chunks per free-text column — Distinct (column, value) chunks
+  # embedded per free-text column; a near-unique column stays bounded here.
+  # raise: More candidates for the top-8 exemplar pick, more embedding work.
+  # lower: Fewer candidates; rare values are less likely to be seeds.
+  # ADR 0019
+  max_free_text_values_per_column: 1024
+
+  # Exemplars per prompt (top-k) — Exemplars retrieved to seed each free-text
+  # pool prompt.
+  # raise: Longer prompts with more context; exemplar echoes become more
+  # likely.
+  # lower: Shorter prompts, less diversity to condition on.
+  rag_top_k: 8
+
+  # bge max tokens — Tokens bge-small reads per chunk; longer serialized rows
+  # are truncated.
+  # raise: Fixed by the checkpoint's position embeddings.
+  # lower: Truncates more of each serialized row.
+  bge_max_length: 512
+
+  # Free VRAM before the embedder takes CUDA — Free VRAM required before the
+  # embedder's auto device picks CUDA over CPU.
+  # raise: The embedder yields the GPU more often (safer next to vLLM).
+  # lower: More CUDA embeds, and a real OOM risk when the card is already
+  # spoken for.
+  # ADR 0014, 0019
+  embedder_min_free_vram: 536870912
+
+# =========================================================================
+# GUARDRAILS — the gate and the landing write mode
+# =========================================================================
+guardrails:
+  # Threshold tier — The threshold tier (dev, uat, prd) that selects the
+  # BLOCKER ratio a run may reach before it fails.
+  # raise: Toward prd: a stricter gate (1 %).
+  # lower: Toward dev: a looser gate (20 %).
+  # flag --env
+  env: dev
+
+  # Uniqueness mode — How duplicates are handled before landing: exact (one
+  # full-row shuffle barrier), exact_chained (the older three-barrier chain)
+  # or streaming (measure, do not remove).
+  # raise: exact_chained: three shuffles per table, kept for A/B runs only.
+  # lower: streaming: no barrier between generation and BigQuery; duplicate
+  # rows land and the run still fails the gate.
+  # flag --uniqueness_mode · ADR 0034
+  uniqueness_mode: exact
+
+  # Uniqueness mode, driven children — The uniqueness mode for a driven child
+  # without identity columns: its PK is unique by construction, so streaming
+  # measures without a barrier.
+  # raise: exact adds a barrier the construction already made unnecessary.
+  # lower: streaming (default) lands rows without the landing-path shuffle.
+  # flag --driven_uniqueness_mode · ADR 0036
+  driven_uniqueness_mode: streaming
+
+  # Write disposition — Landing-table write mode: append (WRITE_APPEND) or
+  # overwrite (WRITE_TRUNCATE).
+  # raise: overwrite replaces the table: the re-run after a streaming-mode
+  # failure.
+  # lower: append adds rows; the DLQ, validation_runs and rag_chunks always
+  # append.
+  # flag --write_disposition
+  write_disposition: append
+
+  # Thresholds file — Where the per-environment severity gates are read from.
+  # raise: Point it at a gs:// copy to change the gates without rebuilding
+  # the image.
+  # lower: Unreadable: the launch falls back to a permissive gate and says
+  # so.
+  # flag --thresholds_uri
+  thresholds_uri: config/thresholds.yml
+
+  # Key-repeat share tolerance — The absolute tolerance between the source's
+  # key-repeat share and the landed one, when a launch adjusted the model
+  # (ADR 0038).
+  # raise: Looser verdicts on an adjusted table's copy.
+  # lower: Tighter: per-key sampling noise (O(1/√keys)) may flag a faithful
+  # copy.
+  # ADR 0038
+  repeat_share_tolerance: 0.05
+
+# =========================================================================
+# RELATIONAL — keys, edges and FK key samples
+# =========================================================================
+relational:
+  # Generate FK relationships — Honour declared relationships: a launch
+  # expands to the table's whole FK component, parents first, and children
+  # sample landed parent keys.
+  # raise: true (default): referential integrity by construction.
+  # lower: false: declared edges are ignored loudly and FK columns use
+  # marginals.
+  # flag --generate_fk_relationships · ADR 0029
+  generate_fk_relationships: 'true'
+
+  # Relationship models — Where the relationship models live: a folder or
+  # YAML file, local or gs://. The only source of relational truth.
+  # raise: A gs:// path changes PK/FK without rebuilding the image.
+  # lower: The default reads config/relationships packaged in the image.
+  # flag --relationships_uri · ADR 0032
+  relationships_uri: config/relationships
+
+  # Multi-table mode — How a multi-table plan runs: single_job (one fleet,
+  # one vLLM ignition, in-DAG key handoff) or sequential_jobs.
+  # raise: sequential_jobs: one job per table, parents first — a fallback for
+  # debugging.
+  # lower: single_job (default): one worker fleet for the whole component.
+  # flag --multi_table_mode · ADR 0030
+  multi_table_mode: single_job
+
+  # On a measured model conflict — What a measured contradiction between the
+  # relationship model and the source does: adjust (drop the disproved PK and
+  # announce it) or stop.
+  # raise: stop refuses the launch, as before ADR 0038.
+  # lower: adjust (default) carries on and reproduces the source's key-repeat
+  # share.
+  # flag --on_model_conflict · ADR 0035, 0038
+  on_model_conflict: adjust
+
+  # Candidates per shared key (Top-M) — Top-M parent candidates kept per
+  # shared value on a conditional (diamond) edge.
+  # raise: A wider per-key choice, and fewer keys per batch to keep a request
+  # under the value cap.
+  # lower: Hot shared keys wrap sooner over a shorter candidate list.
+  # flag --fk_candidate_cap · ADR 0037
+  fk_candidate_cap: 64
+
+  # Identity columns — Columns synthesized fresh for every row (PK, UUID),
+  # never sampled from the reference.
+  # raise: More columns get per-row-unique values none of which is copied
+  # from the source.
+  # lower: Empty: only the relationship model's identity columns apply.
+  # flag --identity_cols
+  identity_cols: ''
+
+  # Primary key columns — A primary key for a table the relationship model
+  # does not cover; duplicates divert as pk.duplicate.
+  # raise: More columns make a wider key that fewer rows can collide on.
+  # lower: Empty: the relationship model decides the key.
+  # flag --pk_cols
+  pk_cols: ''
+
+  # Parent landing override — Expert override — the project.dataset parents
+  # landed in, when it is not the landing table's own.
+  # raise: Set: parent keys are read from that dataset.
+  # lower: Empty: parents are assumed to land next to the child.
+  # flag --fk_parent_landing · ADR 0029
+  fk_parent_landing: ''
+
+  # Parent keys sampled (floor) — The side-input cap: a child samples at most
+  # this many parent key tuples unless its PK needs more.
+  # raise: Bigger side inputs per worker, fewer duplicate draws.
+  # lower: Smaller side inputs; PKs built on the key draw collide sooner.
+  # ADR 0030, 0035
+  fk_key_sample_floor: 100000
+
+  # Parent keys sampled (ceiling) — The largest parent-key side input the
+  # sizing will ask for (about 40 MB pickled per million single-column keys).
+  # raise: More SDK memory per process; past it the answer is the co-
+  # partitioned join (ADR 0036).
+  # lower: PK capacity runs out sooner on big children.
+  # ADR 0031, 0035
+  fk_key_sample_ceiling: 1000000
+
+  # Capacity margin over num_rows — The capacity target over num_rows when PK
+  # members are drawn at random: at 10×, expected duplicates are about 4.8 %.
+  # raise: Fewer duplicate draws, larger side inputs.
+  # lower: More pk.duplicate rows diverted to the DLQ.
+  # ADR 0035
+  fk_key_sample_margin: 10
+
+  # Candidate values per request — The most candidate values one fan-out
+  # request may carry per conditional edge; keys per batch shrink to stay
+  # under it.
+  # raise: Bigger requests and fewer elements.
+  # lower: Smaller requests; more elements for the same keys.
+  # ADR 0037
+  max_conditional_values_per_request: 100000
+
+# =========================================================================
+# SERVING — the model, vLLM and the worker fleet
+# =========================================================================
+serving:
+  # Model client — Which ModelClient generates: vllm (a server the worker
+  # owns), mlx (local Apple smoke) or fake (no model).
+  # raise: vllm: real free-text pools on a GPU worker.
+  # lower: fake: exercises the whole Dataflow → BigQuery path without a GPU.
+  # flag --client_type · ADR 0014
+  client_type: vllm
+
+  # Model URI — The gs:// location of the LLM weights, staged once from a
+  # model hub; config/models.yml lists them.
+  # raise: Point it at another staged model to change the generator's LLM.
+  # lower: Required — a launch without it is refused.
+  # flag --model_uri · required
+  model_uri: null
+
+  # vLLM dtype — vLLM's --dtype: auto (the checkpoint's), float16 or
+  # bfloat16.
+  # raise: bfloat16 needs an L4-class GPU.
+  # lower: float16 is required on T4 for bf16 checkpoints like Qwen; refused
+  # for Gemma (empty output).
+  # flag --vllm_dtype
+  vllm_dtype: auto
+
+  # vLLM max model len — vLLM's --max-model-len cap; without it the KV cache
+  # is sized for the checkpoint's native context.
+  # raise: Longer prompts fit, and the KV cache takes more VRAM (262k native
+  # context killed a T4 at startup).
+  # lower: Less VRAM for KV; 8,192 already dwarfs the synthesis prompts.
+  # flag --vllm_max_model_len
+  vllm_max_model_len: '8192'
+
+  # Autoscaling — Fleet sizing: auto (pinned when --initial_workers is set),
+  # fixed (pinned, workers required) or throughput (Dataflow scales).
+  # raise: throughput: Dataflow scales freely; multi runs lost about 4 min
+  # per job to mid-job scale-downs.
+  # lower: fixed: a fleet that starts and stays full.
+  # flag --autoscaling · ADR 0034
+  autoscaling: auto
+
+  # Initial workers — The initial Dataflow worker count; empty keeps
+  # Dataflow's own default.
+  # raise: A scale run starts at its max_num_workers and skips the ramp.
+  # lower: Empty: the R6 pair started on 2 workers and ran 8 min at a quarter
+  # of its steady rate.
+  # flag --initial_workers · ADR 0034
+  initial_workers: ''

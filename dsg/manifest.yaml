@@ -64,6 +64,8 @@ include:
   - config/relationships/*_example.yaml
   - config/models.yml
   - config/thresholds.yml
+  - config/generator.yaml
+  - config/generator.personal.example.yaml
   - docker/**
   # One design document ships. The decision records (docs/adr/) and the
   # per-topic design docs stay in the source repository: links to them are
