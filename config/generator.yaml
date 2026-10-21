@@ -19,7 +19,17 @@
 # --config_uri (local path or gs://). Keys in that file override the same
 # flags and DAG params; flags fill the keys it leaves out (ADR 0043).
 # Passing this whole file pins every key and makes every flag a no-op.
-# Required keys are shown as null: a launch needs them from a flag or a file.
+# A file of your own starts with `config_version: 1`.
+#
+# How to read an entry:
+#   flag --x   the key is also a CLI / Flex / Composer flag; keys without
+#              it can be set only in a file.
+#   raise/lower  what a higher / lower value does.
+#   null       either `required` (the entry says so: a launch needs a
+#              value from a flag or a file) or `derived` (the entry says
+#              `null = ...`: leave it null and the value is computed).
+#   Quoted values ('on', 'false', '8192', '') are string-encoded CLI
+#   values: keep them quoted.
 
 config_version: 1
 
@@ -72,8 +82,8 @@ io:
   # flag --validation_runs_table
   validation_runs_table: ''
 
-  # RAG chunk store — The persisted embedding store B.1 reads instead of re-
-  # embedding its row documents.
+  # RAG chunk store — The persisted embedding store B.1 reads instead of
+  # re-embedding its row documents.
   # raise: Set: stored vectors are read; with build_rag_layer they are also
   # written.
   # lower: Empty: every worker embeds its row documents in setup.
@@ -118,7 +128,7 @@ launch:
   # raise: A fresh id per trigger keeps retriggers from replaying the same
   # rows.
   # lower: Required, and a flag only — a config file may not set it.
-  # required
+  # flag --run_id · required
   # run_id: null
   {}
 
@@ -180,8 +190,8 @@ sampling:
   # lower: A tighter band steers prompts toward typical lengths only.
   length_percentiles: [0.05, 0.5, 0.95]
 
-  # Null-pattern column cap — Tables wider than this skip the row null-
-  # pattern pass, which costs O(rows × columns).
+  # Null-pattern column cap — Tables wider than this skip the row
+  # null-pattern pass, which costs O(rows × columns).
   # raise: Wide tables get their joint null structure measured, at a pass
   # whose alphabet grows with width.
   # lower: More tables fall back to per-column null rates only.
@@ -348,6 +358,7 @@ free_text:
   # values than this counts toward stagnation.
   # raise: Stricter: more attempts count as stagnant, ladders end sooner.
   # lower: Looser: a trickle of novel values keeps a ladder alive.
+  # null = derived: max(1, pool_values_per_call // 8)
   pool_stagnation_min_novel: null
 
   # Format-collapse exit — Consecutive full-yield rounds with zero in-format
@@ -382,8 +393,8 @@ free_text:
   # lower: More columns reach the LLM pool, including repetitive ones.
   free_text_unique_ratio: 0.9
 
-  # Mean length for free text — The mean rendered length above which a high-
-  # unique string column is free text.
+  # Mean length for free text — The mean rendered length above which a
+  # high-unique string column is free text.
   # raise: Short unique strings stay categorical or shaped.
   # lower: Short unique strings route to the pool.
   free_text_min_mean_len: 20
@@ -584,8 +595,8 @@ relational:
 
   # Parent keys sampled (ceiling) — The largest parent-key side input the
   # sizing will ask for (about 40 MB pickled per million single-column keys).
-  # raise: More SDK memory per process; past it the answer is the co-
-  # partitioned join (ADR 0036).
+  # raise: More SDK memory per process; past it the answer is the
+  # co-partitioned join (ADR 0036).
   # lower: PK capacity runs out sooner on big children.
   # ADR 0031, 0035
   fk_key_sample_ceiling: 1000000

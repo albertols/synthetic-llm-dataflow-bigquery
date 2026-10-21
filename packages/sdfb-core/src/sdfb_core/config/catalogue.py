@@ -45,8 +45,10 @@ _STATUS_OF_BLOCK = {
 }
 _TOP_KEYS = frozenset({"catalogue_version", *_STATUS_OF_BLOCK})
 _REQUIRED = frozenset({"label", "group", "purpose", "up", "down"})
-_OPTIONAL = frozenset(
-    {"unit", "tip", "formula", "refs", "adrs", "docs", "shapes_cache"})
+_OPTIONAL = frozenset({
+    "unit", "tip", "formula", "refs", "adrs", "docs", "shapes_cache",
+    "null_means"
+})
 _REF_KINDS = frozenset({"paper", "doc", "code"})
 _PLACEHOLDER = re.compile(
     r"\{\{(value|tex|dkw_eps|dup_share|dup_share_tex):([a-z_]+\.[a-z0-9_]+)\}\}"
@@ -87,6 +89,7 @@ class Entry:
   docs: tuple[str, ...] = ()
   shapes_cache: tuple[str, ...] = ()
   why_fixed: str = ""
+  null_means: str = ""
 
 
 @dataclass(frozen=True)
@@ -158,7 +161,8 @@ def _entry(key: str, status: str, raw: Any) -> Entry:
       adrs=tuple(str(a) for a in raw.get("adrs", ())),
       docs=tuple(str(d) for d in raw.get("docs", ())),
       shapes_cache=caches,
-      why_fixed=str(raw.get("why_fixed", "")))
+      why_fixed=str(raw.get("why_fixed", "")),
+      null_means=str(raw.get("null_means", "")))
 
 
 def parse_catalogue(text: str) -> Catalogue:

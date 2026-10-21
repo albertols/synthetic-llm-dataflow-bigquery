@@ -12,10 +12,10 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
-# Example generator config for the personal GCP project
-# (public_cloud/deploy/gcp). Sparse on purpose: it pins only what differs per
-# environment. Copy it to config/<env>.local.yaml (gitignored) and fill in
-# your project's names.
+# Example generator config for a personal GCP project. Sparse on purpose: it
+# pins only what differs per environment. Copy it to config/<env>.local.yaml
+# (gitignored), fill in your project's names and pass it to a launch:
+#   --config_uri gs://my-bucket/synthetic/config/personal.yaml
 config_version: 1
 io:
   dlq_table: my-project.synthetic_data_quality.dlq

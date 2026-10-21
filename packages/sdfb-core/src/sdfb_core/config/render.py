@@ -35,7 +35,17 @@ _HEADER = """\
 # --config_uri (local path or gs://). Keys in that file override the same
 # flags and DAG params; flags fill the keys it leaves out (ADR 0043).
 # Passing this whole file pins every key and makes every flag a no-op.
-# Required keys are shown as null: a launch needs them from a flag or a file.
+# A file of your own starts with `config_version: 1`.
+#
+# How to read an entry:
+#   flag --x   the key is also a CLI / Flex / Composer flag; keys without
+#              it can be set only in a file.
+#   raise/lower  what a higher / lower value does.
+#   null       either `required` (the entry says so: a launch needs a
+#              value from a flag or a file) or `derived` (the entry says
+#              `null = ...`: leave it null and the value is computed).
+#   Quoted values ('on', 'false', '8192', '') are string-encoded CLI
+#   values: keep them quoted.
 """
 
 _RULE = "# " + "=" * 73
@@ -54,7 +64,10 @@ _SECTION_TITLES = {
 
 
 def _comment(text: str, indent: str) -> list[str]:
-  return [f"{indent}# {line}" for line in textwrap.wrap(text, 75 - len(indent))]
+  return [
+      f"{indent}# {line}"
+      for line in textwrap.wrap(text, 75 - len(indent), break_on_hyphens=False)
+  ]
 
 
 def _value(value: object) -> str:
@@ -78,7 +91,7 @@ def render_reference() -> str:
       out += _comment(f"raise: {render_text(entry.up)}", "  ")
       out += _comment(f"lower: {render_text(entry.down)}", "  ")
       where = []
-      if key in FLAG_KEYS:
+      if key in FLAG_KEYS or key in IDENTITY_KEYS:
         where.append(f"flag --{key}")
       if entry.adrs:
         where.append("ADR " + ", ".join(entry.adrs))
@@ -86,6 +99,8 @@ def render_reference() -> str:
         where.append("required")
       if where:
         out += _comment(" · ".join(where), "  ")
+      if entry.null_means:
+        out += _comment(f"null = {entry.null_means}", "  ")
       line = f"{key}: {_value(getattr(getattr(DEFAULT_CONFIG, section), key))}"
       out.append(f"  # {line}" if key in IDENTITY_KEYS else f"  {line}")
       out.append("")

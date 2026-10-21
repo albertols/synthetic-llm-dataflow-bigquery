@@ -277,6 +277,7 @@ settings:
     down: 'Looser: a trickle of novel values keeps a ladder alive.'
     unit: values
     tip: Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value.
+    null_means: 'derived: max(1, pool_values_per_call // 8)'
     shapes_cache:
     - freetext_pools
   free_text.pool_format_collapse_rounds:
