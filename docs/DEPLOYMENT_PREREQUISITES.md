@@ -168,12 +168,14 @@ The same `landing_ddl.json` also documents exactly what the pipeline will write 
   evaluator runs** — unlike `validation_runs`, this is required: the
   evaluator's load jobs carry the committed schema and fail on a table without
   them. Append them, then refresh the views — both **before deploying the new
-  evaluator or the new GUI** (the GUI's evaluation list reads both columns):
+  evaluator or the new GUI** (the new GUI's evaluation list reads both
+  columns). Both commands run from the repository root:
 
   ```bash
   bq update --schema packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_data_history.schema.json \
-        project:<evaluation_dataset>.evaluation_data_history
-  uv run sdfb-eval schemas --project <project> --dataset <evaluation_dataset> --apply   # from packages/sdfb-evaluation; replaces the views
+        <project>:<evaluation_dataset>.evaluation_data_history
+  uv run --project packages/sdfb-evaluation sdfb-eval schemas \
+        --project <project> --dataset <evaluation_dataset> --apply   # replaces the views
   ```
 
   Preflight step 13 flags a registry that lacks them, with this command.

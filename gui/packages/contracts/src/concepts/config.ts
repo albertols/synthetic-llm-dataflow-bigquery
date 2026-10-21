@@ -354,7 +354,7 @@ const statsConcepts: Concept[] = [
         url: blob("docs/adr/0033-pool-ladder-integrity-at-scale.md", 58),
         kind: "adr",
       },
-      code("_pool_target (b1 engine)", "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py", 1554),
+      code("_pool_target (b1 engine)", "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py", 1552),
       P.hurlbert,
       doc("Source-table stats — why two tiers", STATS_DOC),
     ],
@@ -542,7 +542,7 @@ const configConcepts: Concept[] = [
       P.pydantic,
       P.pandera,
       P.beamDlq,
-      code("sdfb_beam/pipeline.py", "packages/sdfb-beam/src/sdfb_beam/pipeline.py", 377),
+      code("sdfb_beam/pipeline.py", "packages/sdfb-beam/src/sdfb_beam/pipeline.py", 387),
     ],
   },
   {

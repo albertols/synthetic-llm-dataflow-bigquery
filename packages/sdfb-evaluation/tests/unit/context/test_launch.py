@@ -33,6 +33,9 @@ from sdfb_evaluation.context.launch import (
     RunRecord,
     resolve_launch,
 )
+from sdfb_evaluation.context.plan import Knobs, build_plan
+
+from .plan_fakes import NOW, thelook_bq, thelook_models
 
 PROJECT = "demo-project"
 REGION = "europe-west1"
@@ -1159,3 +1162,226 @@ def test_legacy_rows_keep_todays_sources(fake_session, fake_bq):
   ctx = _resolve(fake_session(), fake_bq(), job_id=JOB_ID)
   assert ctx.params_source == "jobs_labels+logs"
   assert ctx.record is None and ctx.generator_version is None
+
+
+def _full_path_bq(fake_bq, fixture_data, rows, **kwargs):
+  return fake_bq(
+      responses=[("JOBS_BY_PROJECT", fixture_data("jobs_by_project")),
+                 ("validation_runs", rows)],
+      **kwargs)
+
+
+def test_the_full_path_keeps_the_jobs_own_rows_when_its_run_id_is_unknown(
+    fake_session, fake_bq, fixture_data):
+  """Past Dataflow's retention there is no log, no display data and no run
+  id, and the latest launch in the window is another job's: its snapshot
+  must not fill this job's params (ADR 0044)."""
+  other = _snapshot()
+  other["values"]["generation"]["similarity"] = 0.2
+  rows = _record_rows(fixture_data)
+  later = [
+      dict(
+          r,
+          run_id=f"other-0913-ffffff-{i:02d}-{_table_name(r)}",
+          created_at="2026-09-13T14:01:00.000000Z",
+          job_id="another-job",
+          generator_version="0.6.1-master-ffffff0",
+          config=json.dumps(other))
+      for i, r in enumerate(rows)
+      if r["run_id"].startswith(BASE)
+  ]
+  ctx = _resolve(
+      fake_session(jobs={}),
+      _full_path_bq(fake_bq, fixture_data, rows + later, location="EU"),
+      job_id=JOB_ID,
+      manual={
+          "params": {
+              "validation_runs_table": _RUNS_TABLE,
+              "similarity": 0.7
+          }
+      })
+  assert ctx.base_run_id == BASE
+  assert all(r.run_id.startswith(BASE) for r in ctx.runs)
+  assert ctx.generator_version == _VERSION
+  assert ctx.params["similarity"] == 0.7
+  assert not [w for w in ctx.warnings if w.startswith("manual params.")]
+  (dropped,) = [w for w in ctx.warnings if "another Dataflow job" in w]
+  assert all(r["run_id"] in dropped for r in later)
+
+
+def test_a_snapshot_silent_on_relationships_keeps_the_launchs_model(
+    fake_session, fake_bq, fixture_data):
+  """A snapshot that does not state `generate_fk_relationships` says
+  nothing about relationships: the launch log's model stays."""
+  snapshot = _snapshot()
+  del snapshot["values"]["relational"]
+  rows = _record_rows(fixture_data, snapshot=snapshot)
+  ctx = _resolve(
+      fake_session(), _full_path_bq(fake_bq, fixture_data, rows), job_id=JOB_ID)
+  assert ctx.params_source == "validation_runs"
+  uri = fixture_data("launch_config")["relationships_uri"]
+  assert ctx.params["relationships_uri"] == uri
+  assert ctx.relationships_uri == uri
+  assert ctx.record is not None and not ctx.record.relationships_off
+
+
+def test_a_snapshot_without_values_is_no_snapshot(fake_session, fake_bq,
+                                                  fixture_data):
+  """A `config` object with no `values` block (another format, or a newer
+  generator's) is no snapshot: a note, then the row's typed columns."""
+  rows = _record_rows(fixture_data, snapshot={"config_version": 2})
+  ctx = _resolve(
+      fake_session(), _full_path_bq(fake_bq, fixture_data, rows), job_id=JOB_ID)
+  assert ctx.record is None
+  assert ctx.params_source == "jobs_labels+logs"
+  assert ctx.params == fixture_data("launch_config")
+  assert ctx.relationships_uri == fixture_data(
+      "launch_config")["relationships_uri"]
+  assert any("no values block" in w for w in ctx.warnings)
+  assert ctx.generator_version == _VERSION  # the typed columns still count
+
+
+# A real 21-column validation_runs row: master's table has always carried
+# engine, model_uri and env, which the generator writes from the launch's
+# own arguments.
+_LEGACY_COLUMNS = {
+    "engine":
+        "b1_rag",
+    "model_uri":
+        "gs://demo-bucket/synthetic/models/qwen/qwen2.5-3b-instruct/v1/",
+    "env":
+        "dev",
+}
+
+
+def _legacy_rows(fixture_data) -> list[dict]:
+  return [dict(r, **_LEGACY_COLUMNS) for r in fixture_data("validation_runs")]
+
+
+def _registry_seed(ctx: LaunchContext) -> dict:
+  plan = build_plan(
+      launch=ctx,
+      models=thelook_models(),
+      bq=thelook_bq(),
+      knobs=Knobs(temp_dataset=QDS),
+      mode="exact",
+      trigger="cli",
+      runner="DirectRunner",
+      now=NOW)
+  return plan.registry_seed()
+
+
+def test_a_legacy_row_on_the_job_only_path_fills_only_its_three_columns(
+    fake_session, fake_bq, fixture_data):
+  """Controller ruling F12 / plan Ruling 11: a legacy row's typed columns
+  are the only params besides manual input, so they fill the engine, model
+  and env cells and name the source; nothing else moves."""
+
+  def resolve(rows):
+    return _resolve(
+        fake_session(),
+        fake_bq(responses=[("validation_runs", rows)]),
+        job_id=JOB_ID,
+        manual=_with_runs_table(),
+        job_only=True)
+
+  bare, legacy = resolve(fixture_data("validation_runs")), resolve(
+      _legacy_rows(fixture_data))
+  assert (bare.params_source, legacy.params_source) == ("manual",
+                                                        "validation_runs")
+  filled = {
+      "engine": "b1_rag",
+      "llm_model_uri": _LEGACY_COLUMNS["model_uri"],
+      "env": "dev"
+  }
+  assert legacy.typed_filters() == {**bare.typed_filters(), **filled}
+  for name in ("tables_in_order", "run_ids", "base_run_id", "relationships_uri",
+               "write_disposition", "warnings"):
+    assert getattr(legacy, name) == getattr(bare, name), name
+  before, after = _registry_seed(bare), _registry_seed(legacy)
+  changed = {"params_source", "generation_params", *filled}
+  assert {
+      k: v for k, v in after.items() if k not in changed
+  } == {
+      k: v for k, v in before.items() if k not in changed
+  }
+  assert after["params_source"] == "validation_runs"
+  assert after["generation_params"] == {
+      **before["generation_params"],
+      **_LEGACY_COLUMNS
+  }
+
+
+def test_a_legacy_row_on_the_full_path_changes_nothing(fake_session, fake_bq,
+                                                       fixture_data):
+  bare = _resolve(fake_session(), fake_bq(), job_id=JOB_ID)
+  legacy = _resolve(
+      fake_session(),
+      _full_path_bq(fake_bq, fixture_data, _legacy_rows(fixture_data)),
+      job_id=JOB_ID)
+  assert legacy.params_source == bare.params_source == "jobs_labels+logs"
+  assert legacy.typed_filters() == bare.typed_filters()
+  assert legacy.params == bare.params
+  assert legacy.warnings == bare.warnings
+
+
+def test_the_warnings_keep_their_order_without_a_record(fake_session, fake_bq):
+  """Controller ruling: a launch without a record warns in master's order,
+  the params notes before validation_runs' (the registry's `warnings`)."""
+  ctx = _resolve(
+      fake_session(),
+      fake_bq(),
+      job_id=JOB_ID,
+      manual={"params": {
+          "engine": "b2_library"
+      }})
+  notes = list(ctx.warnings)
+  manual = next(
+      i for i, w in enumerate(notes) if w.startswith("manual params.engine"))
+  other = next(
+      i for i, w in enumerate(notes) if "another launch in the window" in w)
+  assert manual < other
+
+
+def test_a_manual_disagreement_names_the_source_that_supplied_the_value(
+    fake_session, fake_bq, fixture_data):
+  ctx = _resolve(
+      fake_session(),
+      _full_path_bq(fake_bq, fixture_data, _record_rows(fixture_data)),
+      job_id=JOB_ID,
+      manual={"params": {
+          "batch_size": 32,
+          "similarity": 0.9
+      }})
+  assert ctx.params_source == "validation_runs"
+  assert ("manual params.batch_size=32 ignored: the jobs_labels+logs value "
+          "16 is kept") in ctx.warnings
+  assert ("manual params.similarity=0.9 ignored: the validation_runs value "
+          "0.7 is kept") in ctx.warnings
+
+
+@pytest.mark.parametrize(
+    "manual", [
+        _with_runs_table(run_id=BASE),
+        {
+            **_with_runs_table(), "base_run_id": BASE
+        },
+    ],
+    ids=["params.run_id", "base_run_id"])
+def test_job_only_takes_the_callers_run_id_over_the_latest_launch(
+    fake_session, fake_bq, fixture_data, manual):
+  rows = list(fixture_data("validation_runs"))
+  later = [
+      dict(
+          r,
+          run_id=f"other-0913-ffffff-{i:02d}-{_table_name(r)}",
+          created_at="2026-09-13T14:01:00.000000Z") for i, r in enumerate(rows)
+  ]
+  ctx = _resolve(
+      fake_session(),
+      fake_bq(responses=[("validation_runs", rows + later)]),
+      job_id=JOB_ID,
+      manual=manual,
+      job_only=True)
+  assert ctx.base_run_id == BASE
+  assert ctx.runs and all(r.run_id.startswith(BASE) for r in ctx.runs)

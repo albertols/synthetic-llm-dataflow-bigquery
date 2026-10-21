@@ -1182,15 +1182,19 @@ def test_pools_are_read_under_the_recorded_key(bq, pooled, monkeypatch, capsys):
   """A1 ruling R11: under a non-default pool setting the generator stores
     pools under a salted key; the record carries it and the evaluator binds
     it (ADR 0044)."""
-  salted = f"{pooled.params['model_uri']}+cfg.abc123abc123"
+  model_uri = pooled.params["model_uri"]
+  salted = f"{model_uri}+cfg.abc123abc123"
   record = RunRecord(
       landing_table=pooled.tables_in_order[0],
       run_id="r-00-users",
-      config={"derived": {
-          "cache_keys": {
-              "freetext_pools": salted
+      config={
+          "values": {},
+          "derived": {
+              "cache_keys": {
+                  "freetext_pools": salted
+              }
           }
-      }})
+      })
   launch = dataclasses.replace(pooled, runs=(*pooled.runs, record))
   monkeypatch.setattr(driver, "resolve_launch", lambda **kwargs: launch)
   build = tiny_pipeline(fast=True)
@@ -1199,6 +1203,33 @@ def test_pools_are_read_under_the_recorded_key(bq, pooled, monkeypatch, capsys):
   assert main(["run", *TARGET], make_env(bq, submit=write_stand_in)) == 0
   reads = [p for sql, p in bq.queries if "freetext_pools" in sql]
   assert reads and {p["model_uri"] for p in reads} == {salted}
+  assert not [w for w in build.built[0][0].warnings if "cache_keys" in w]
+  capsys.readouterr()
+
+
+def test_a_record_without_a_pool_key_reads_under_model_uri_with_a_note(
+    bq, pooled, monkeypatch, capsys):
+  """A record that states no `derived.cache_keys.freetext_pools` (an older
+    or foreign snapshot): the pools are read under `model_uri`, and the
+    plan says so (ADR 0044)."""
+  record = RunRecord(
+      landing_table=pooled.tables_in_order[0],
+      run_id="r-00-users",
+      config={"values": {}})
+  launch = dataclasses.replace(pooled, runs=(*pooled.runs, record))
+  monkeypatch.setattr(driver, "resolve_launch", lambda **kwargs: launch)
+  build = tiny_pipeline(fast=True)
+  monkeypatch.setattr(driver, "build_evaluation_pipeline", build)
+  bq.canned.append(("freetext_pools", []))
+  assert main(["run", *TARGET], make_env(bq, submit=write_stand_in)) == 0
+  reads = [p for sql, p in bq.queries if "freetext_pools" in sql]
+  assert reads and {p["model_uri"] for p in reads
+                   } == {pooled.params["model_uri"]}
+  notes = [w for w in build.built[0][0].warnings if "cache_keys" in w]
+  assert notes == [
+      "the generation record carries no derived.cache_keys.freetext_pools; "
+      "pools are read under model_uri"
+  ]
   capsys.readouterr()
 
 

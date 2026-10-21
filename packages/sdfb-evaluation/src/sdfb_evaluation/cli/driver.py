@@ -1291,7 +1291,9 @@ def _free_text_pools(
   """The launch's free-text pools per table (`census.read_pools`) and a
   note for each table whose pools BigQuery refused to give; None when
   the launch names no pools table (`field.pool_memorization_lift` then
-  says so itself).
+  says so itself). They are read under the store key the generation record
+  states (ADR 0044), else under `model_uri` — with a note when a record
+  states none.
 
   Raises:
     BqApiError: a read failed for a reason a retry may remove
@@ -1306,9 +1308,12 @@ def _free_text_pools(
   notes = []
   # A1 ruling R11 / ADR 0044: a non-default pool setting salts the store key;
   # the record carries the one the generator used.
-  model_key = (
-      planned.launch.cache_key("freetext_pools") or
-      str(params.get("model_uri") or ""))
+  recorded_key = planned.launch.cache_key("freetext_pools")
+  if recorded_key is None and planned.launch.record is not None:
+    notes.append("the generation record carries no "
+                 "derived.cache_keys.freetext_pools; pools are read under "
+                 "model_uri")
+  model_key = recorded_key or str(params.get("model_uri") or "")
   for entry in planned.tables:
     if not entry.evaluated or not entry.reference_digest:
       continue

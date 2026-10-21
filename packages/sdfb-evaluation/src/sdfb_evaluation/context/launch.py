@@ -31,10 +31,15 @@ source filling only the keys still missing: the record (its snapshot's
 `values`, or its typed columns on a row without a snapshot) → the
 `launch_config` log, else the Dataflow display data → manual. A manual value
 that disagrees with a resolved one is ignored and warned about. The
-caller's tables are never replaced here. `params_source` names the first
-source that supplied the params: `validation_runs`, `jobs_labels+logs`,
-`logs`, `dataflow_params` or `manual`. With a snapshot, `generation_params`
-is the snapshot itself. Every fallback taken is a warning on the context —
+caller's tables are never replaced here. `params_source`, in the
+registry's vocabulary, is `validation_runs` when the record supplied the
+snapshot, or the only params besides manual input (ADR 0044);
+otherwise the launch's own source, as before the record:
+`jobs_labels+logs` (the `launch_config` log, with JOBS labels resolved),
+`logs` (the log without them), `dataflow_params` (the display data) or
+`manual`. With a snapshot, `generation_params` is the snapshot itself.
+When rows of the launch's tables name their Dataflow job, only the job's
+own rows are its runs. Every fallback taken is a warning on the context —
 nothing is dropped silently.
 
 One path reads less: `resolve_launch(job_only=True)`, for a job id given
@@ -376,11 +381,18 @@ def _truthy(value: Any) -> bool:
   return value is not None and str(value).strip().lower() in _TRUTHY
 
 
+def _is_snapshot(config: Mapping[str, Any] | None) -> bool:
+  """A parsed `config` this reader can use: an object with a `values`
+  block (ADR 0044). Anything else — another format, or a newer
+  generator's — is no snapshot."""
+  return config is not None and isinstance(config.get("values"), Mapping)
+
+
 @dataclass(frozen=True)
 class GenerationRecord:
-  """A generation job's own `validation_runs` rows that carry the config
-  snapshot (ADR 0044), in run order; every table of one job carries the
-  same snapshot."""
+  """A generation job's `validation_runs` rows — every run it was given, in
+  run order — and the config snapshot they carry (ADR 0044); every table of
+  one job carries the same snapshot."""
   runs: tuple[RunRecord, ...]
   snapshot: Mapping[str, Any] = field(compare=False, hash=False, repr=False)
 
@@ -391,13 +403,22 @@ class GenerationRecord:
 
   @property
   def generates_relationships(self) -> bool:
+    """The snapshot states `generate_fk_relationships` as true."""
     return _truthy(self.value("relational", "generate_fk_relationships"))
+
+  @property
+  def relationships_off(self) -> bool:
+    """The snapshot states `generate_fk_relationships`, and not as true. A
+    snapshot that does not state it says nothing about relationships."""
+    flag = self.value("relational", "generate_fk_relationships")
+    return flag is not None and not _truthy(flag)
 
   @property
   def relationships_uri(self) -> str | None:
     """The model the launch generated with; None when relationships were
-    off (an isolated generation is evaluated as one)."""
-    if not self.generates_relationships:
+    off (an isolated generation is evaluated as one) or when the snapshot
+    names no model."""
+    if self.relationships_off:
       return None
     return _text(self.value("relational", "relationships_uri"))
 
@@ -425,7 +446,7 @@ def record_of(runs: Sequence[RunRecord]) -> GenerationRecord | None:
   ordered = sorted(
       runs, key=lambda r: (r.base_and_index[1] or 0, r.created_at or ""))
   for run in ordered:
-    if run.config is not None:
+    if run.config is not None and _is_snapshot(run.config):
       return GenerationRecord(runs=tuple(ordered), snapshot=run.config)
   return None
 
@@ -443,35 +464,38 @@ def record_params(runs: Sequence[RunRecord],
   """The generation parameters the record states, under launch-argument
   names: the snapshot's `values` flattened (a key keeps its CLI name inside
   its section, ADR 0043) minus the two table-naming flags, plus
-  `derived.profiler_version`, with `relationships_uri` "" when relationships
-  were off. A null value is a derived default the snapshot does not pin
-  (ADR 0043), so it states nothing and a later source may fill the key.
-  Without a snapshot, the first run's typed columns. A row that has a
-  `config_digest` but no parseable `config` is a note."""
+  `derived.profiler_version`, with `relationships_uri` "" when the snapshot
+  states relationships were off. A null value is a derived default the
+  snapshot does not pin (ADR 0043), so it states nothing and a later source
+  may fill the key. Without a snapshot, the first run's typed columns. A
+  row that has a `config_digest` but no parseable `config`, or a `config`
+  with no `values` block, is a note."""
   record = record_of(runs)
   if record is not None:
     params: dict[str, Any] = {}
-    values = record.snapshot.get("values")
-    if isinstance(values, Mapping):
-      for block in values.values():
-        if isinstance(block, Mapping):
-          params.update({
-              k: v
-              for k, v in block.items()
-              if k not in _RECORD_PARAM_EXCLUDED and v is not None
-          })
+    for block in record.snapshot["values"].values():
+      if isinstance(block, Mapping):
+        params.update({
+            k: v
+            for k, v in block.items()
+            if k not in _RECORD_PARAM_EXCLUDED and v is not None
+        })
     derived = record.snapshot.get("derived")
     if isinstance(derived, Mapping) and derived.get("profiler_version"):
       params["profiler_version"] = derived["profiler_version"]
-    if not record.generates_relationships:
+    if record.relationships_off:
       params["relationships_uri"] = ""
     return params
   if notes is not None:
-    notes.extend(
-        f"{r.landing_table}: validation_runs has a config_digest but its "
-        "config could not be parsed; the record's typed columns are used"
-        for r in runs
-        if r.config_digest and r.config is None)
+    for run in runs:
+      if run.config is not None:
+        notes.append(f"{run.landing_table}: validation_runs.config has no "
+                     "values block (another format, or a newer generator's); "
+                     "the record's typed columns are used")
+      elif run.config_digest:
+        notes.append(f"{run.landing_table}: validation_runs has a "
+                     "config_digest but its config could not be parsed; the "
+                     "record's typed columns are used")
   ordered = sorted(runs, key=lambda r: (r.base_and_index[1] or 0))
   if not ordered:
     return {}
@@ -592,6 +616,25 @@ def _pick_runs(records: list[RunRecord], base: str | None,
                    f"for run {record.run_id}; the latest is used")
     latest_by_table[record.landing_table] = record
   return base, list(latest_by_table.values())
+
+
+def _job_rows(records: list[RunRecord], job_id: str | None,
+              job_name: str | None, notes: list[str]) -> list[RunRecord]:
+  """The rows whose record names this Dataflow job (ADR 0044), when any
+  does — another job's rows of the same tables in the window are dropped
+  loudly, never taken for this launch's; else every row, as before the
+  record (`_pick_runs` then decides by run id)."""
+  mine = [r for r in records if r.written_by(job_id, job_name)]
+  if not mine:
+    return records
+  others = sorted(
+      r.run_id for r in records if not r.written_by(job_id, job_name))
+  if others:
+    notes.append(f"validation_runs rows written by another Dataflow job in "
+                 f"the window were ignored: {others} — they wrote to the "
+                 f"same landing tables as job {job_id or job_name}; check the "
+                 "scope for contamination")
+  return mine
 
 
 def _milestone_fields(milestones: Mapping[str, Sequence[Mapping[str, str]]],
@@ -719,13 +762,21 @@ class LaunchContext:
     # the launch's run id, else manual's (manual fills only a missing key)
     run_id = (launch_params
               if "run_id" in launch_params else manual_params).get("run_id")
-    base, own = _pick_runs([RunRecord.from_row(r) for r in runs], _text(run_id),
-                           notes)
+    # The runs are picked first (their record fills the params), but their
+    # notes follow the params' notes, in the order a launch without a record
+    # has always warned in.
+    run_notes: list[str] = []
+    identity = job or {}
+    records = _job_rows([RunRecord.from_row(r) for r in runs],
+                        _text(identity.get("id")), _text(identity.get("name")),
+                        run_notes)
+    base, own = _pick_runs(records, _text(run_id), run_notes)
     filled_from = own if record_runs is None else list(record_runs)
     params, source = _params(
         record_params(filled_from, notes),
         record_of(filled_from) is not None, launch_params, source,
         manual_params, notes)
+    notes.extend(run_notes)
     resolved = (launch_config or {}).get("resolved")
     resolved = resolved if isinstance(resolved, Mapping) else {}
     tables, own, run_ids = _order(resolved, own, params, writes_t, notes)
@@ -791,10 +842,16 @@ def _params(record: Mapping[str, Any], full_record: bool,
   """(generation params, params_source), filled in order (ADR 0044): the
   record → the launch's own records → manual, each only where a key is
   still missing. The record names the source when it carried the snapshot,
-  or when nothing but manual input would have."""
+  or when nothing but manual input would have. A manual value that
+  disagrees is a note naming the source that supplied the kept value — the
+  launch's own when it states the same value, as before the record."""
   params = dict(record)
+  supplied_by = dict.fromkeys(record, "validation_runs")
   for key, value in launch.items():
-    params.setdefault(key, value)
+    if key not in params:
+      params[key] = value
+    if params[key] == value:
+      supplied_by[key] = source
   if record and (full_record or source == "manual"):
     source = "validation_runs"
   if not params and not manual:
@@ -804,8 +861,8 @@ def _params(record: Mapping[str, Any], full_record: bool,
     if key not in params:
       params[key] = value
     elif params[key] != value:
-      notes.append(f"manual params.{key}={value!r} ignored: the {source} "
-                   f"value {params[key]!r} is kept")
+      notes.append(f"manual params.{key}={value!r} ignored: the "
+                   f"{supplied_by[key]} value {params[key]!r} is kept")
   return params, source
 
 
@@ -1089,8 +1146,10 @@ def _job_identity(bq: Any, jobs: DataflowJobs, job_id: str, region: str,
   window known, this launch's rows of that table are read too — the one
   query, `runs_for` over the landing tables and the window, no run-id base
   — and carry the reference digests the privacy panel is verified against.
-  Rows whose record names this job are kept over another launch's in the
-  same window (ADR 0044). They are attached to the context, and given to
+  Rows whose record names this job are kept over another job's in the same
+  window (ADR 0044); among the rest, the caller's run id (`params.run_id`,
+  else `base_run_id`) picks the launch, else the latest one does. They are
+  attached to the context, and given to
   `from_sources` only as `record_runs`, whose record fills the params
   first: the run rows must not decide the table list (`_order` would
   narrow it to the tables that have a row); the caller's tables stay the
@@ -1114,15 +1173,14 @@ def _job_identity(bq: Any, jobs: DataflowJobs, job_id: str, region: str,
   tables = [_dotted(str(t)) for t in fields.get("tables_in_order") or ()]
   records: list[RunRecord] = []
   if window[0] and "validation_runs_table" in params:
-    records = [
+    records = _job_rows([
         RunRecord.from_row(r)
         for r in _read_runs(bq, params, tables, window, None, notes)
-    ]
-    # ADR 0044: rows whose record names this job are certainly its own —
-    # another launch that wrote the same tables in the window is dropped.
-    mine = [r for r in records if r.written_by(job_id, _text(job.get("name")))]
-    records = mine or records
-  base, own = _pick_runs(records, None, notes)
+    ], job_id, _text(job.get("name")), notes)
+  # the caller's run id decides, as on the full path; else the latest launch
+  base, own = _pick_runs(
+      records,
+      _text(params.get("run_id")) or fields.get("base_run_id"), notes)
   position = {t: i for i, t in enumerate(tables)}
   own.sort(key=lambda r: position.get(r.landing_table, len(tables)))
   _check_positions(own, len(tables), notes)
