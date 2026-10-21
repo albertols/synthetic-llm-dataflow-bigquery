@@ -51,8 +51,10 @@ with the window known, it reads this launch's rows of that table (one
 query), which carry the reference digests and, since ADR 0044, the record.
 `job_record` reads a job's record before its tables are known: the job,
 then the rows of that table in the job's window that name the job
-(`runs_of_job`) — the seed path's first step, where the record names what
-is evaluated (`cli.driver`).
+(`runs_of_job`), of the job's own launch when only its name matched them
+(a Composer job name is the same for every launch of a model) — the seed
+path's first step, where the record names what is evaluated
+(`cli.driver`).
 
 `tables_in_order` never silently narrows a relational launch to its
 `--landing_table` target:
@@ -93,6 +95,7 @@ import logging
 import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from sdfb_evaluation.context.bq import BqApiError
@@ -1215,31 +1218,114 @@ def _job_identity(bq: Any, jobs: DataflowJobs, job_id: str, region: str,
 _JOB_READ_ERRORS = (RuntimeError, ValueError, LookupError, PermissionError)
 
 
-def job_record(*, bq: Any, session_factory: Callable[[str], Any], project: str,
-               region: str, job_id: str,
-               validation_runs_table: str) -> GenerationRecord | None:
-  """The generation record of one Dataflow job (ADR 0044), for a caller
-  that has not named its tables yet: the job's window and name, then its own
-  `validation_runs` rows (`runs_of_job`). None when the job, the window or
-  the table cannot be read, or the rows carry no snapshot — never raises;
-  the job-only resolution reads both again and reports those failures."""
+def _moment(value: str | None) -> datetime | None:
+  try:
+    return None if value is None else parse_timestamp(value)
+  except ValueError:
+    return None
+
+
+def _own_launch(runs: list[RunRecord], job_name: str | None, end: str | None,
+                notes: list[str]) -> list[RunRecord]:
+  """The rows of the job's own launch (final review I2). Rows that recorded
+  a job id are this job's (`of_job` matched them by it) and say which launch
+  it ran. Rows matched by `job_name` alone are kept only for that launch —
+  or, when no row recorded the id, for the launch stamped last at or before
+  the job's end: a Composer job name is the same for every launch of a
+  model, so the job's padded window can hold another launch's rows under
+  it, and `launched_at` is stamped before the job runs (after the job was
+  created on a Flex launch, just before it on a direct submission). No
+  launch stamped by then: the latest one, with a note. Another launch's
+  rows are dropped with a note naming them."""
+  named = [r for r in runs if not r.job_id]
+  launches = {r.launch_run_id or "" for r in named}
+  own = {r.launch_run_id or "" for r in runs if r.job_id}
+  if not named or (len(launches) == 1 and (not own or launches <= own)):
+    return runs
+  why = "its rows that recorded the job id name it"
+  if not own:
+    # per launch: (the latest launched_at it states, its latest row)
+    stamps: dict[str, tuple[datetime | None, str]] = {}
+    for r in named:
+      when, created = stamps.get(r.launch_run_id or "", (None, ""))
+      stamped = _moment(r.launched_at)
+      if stamped is not None and (when is None or stamped > when):
+        when = stamped
+      stamps[r.launch_run_id or ""] = (when, max(created, r.created_at or ""))
+    bound = _moment(end)
+    before = [
+        launch for launch, (when, _) in stamps.items()
+        if when is not None and bound is not None and when <= bound
+    ]
+    floor = datetime.min.replace(tzinfo=UTC)
+    pick = max(
+        before or stamps,
+        key=lambda launch: (stamps[launch][0] or floor, stamps[launch][1]))
+    own = {pick}
+    if before:
+      why = f"the last launched at or before the job's end, {end}"
+    elif bound is None:
+      why = "the job's end is unknown, so the latest is taken"
+    else:
+      why = (f"no launch states it was launched at or before the job's end, "
+             f"{end}, so the latest is taken")
+  dropped = sorted(
+      r.run_id for r in named if (r.launch_run_id or "") not in own)
+  if dropped:
+    notes.append(f"validation_runs rows of another launch under the job name "
+                 f"{job_name!r}, without a job id, were ignored: {dropped} — "
+                 f"a Composer job name is the same for every launch of a "
+                 f"model; the record is the job's own launch's, "
+                 f"{', '.join(sorted(own))} ({why})")
+  return [r for r in runs if r.job_id or (r.launch_run_id or "") in own]
+
+
+def job_record(*,
+               bq: Any,
+               session_factory: Callable[[str], Any],
+               project: str,
+               region: str,
+               job_id: str,
+               validation_runs_table: str,
+               notes: list[str] | None = None) -> GenerationRecord | None:
+  """The generation record of one Dataflow job (ADR 0044), for the seed
+  path, whose caller has not named its tables yet: the job's window and
+  name, then its own `validation_runs` rows (`runs_of_job`), of its own
+  launch (`_own_launch`). None when the job, the window or the table cannot
+  be read, or the rows carry no snapshot — never raises; the job-only
+  resolution reads both again and reports those failures. A job or table
+  that could not be read, and another launch's rows under the job's name,
+  are each a sentence in `notes` (final review M4, I2)."""
+  notes = notes if notes is not None else []
+
+  def unread(what: str, exc: Exception) -> None:
+    notes.append(f"the generation record of Dataflow job {job_id} could not "
+                 f"be read ({what} could not be read: {exc}): the seed's "
+                 "tables and the given inputs are evaluated (ADR 0044)")
+
   try:
     jobs = DataflowJobs(session_factory(project), project, region)
     job = jobs.get(job_id)
-  except _JOB_READ_ERRORS:
+  except _JOB_READ_ERRORS as exc:
+    unread("the job", exc)
     return None
   dataset, _, name = _dotted(validation_runs_table).rpartition(".")
+  job_name = _text(job.get("name"))
+  window = jobs.window(job)
   try:
-    rows = runs_of_job(
-        bq,
-        quality_dataset=dataset,
-        table_name=name,
-        job_id=job_id,
-        job_name=_text(job.get("name")),
-        window=jobs.window(job))
-    return record_of([RunRecord.from_row(r) for r in rows])
-  except _BQ_SOURCE_ERRORS:
+    runs = [
+        RunRecord.from_row(r) for r in runs_of_job(
+            bq,
+            quality_dataset=dataset,
+            table_name=name,
+            job_id=job_id,
+            job_name=job_name,
+            window=window)
+    ]
+  except _BQ_SOURCE_ERRORS as exc:
+    unread(validation_runs_table, exc)
     return None
+  return record_of(_own_launch(runs, job_name, window[1], notes))
 
 
 def resolve_launch(*,

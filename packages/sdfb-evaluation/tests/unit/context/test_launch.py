@@ -1391,14 +1391,15 @@ def test_job_only_takes_the_callers_run_id_over_the_latest_launch(
 # --------------------------------------------------------------------------
 # the record of a job whose tables are not known yet (F1, ADR 0044)
 # --------------------------------------------------------------------------
-def _job_record(session_factory, bq):
+def _job_record(session_factory, bq, notes=None):
   return job_record(
       bq=bq,
       session_factory=session_factory,
       project=PROJECT,
       region=REGION,
       job_id=JOB_ID,
-      validation_runs_table=_RUNS_TABLE)
+      validation_runs_table=_RUNS_TABLE,
+      notes=notes)
 
 
 def test_job_record_reads_the_jobs_own_rows(fake_session, fake_bq,
@@ -1434,6 +1435,135 @@ def test_job_record_is_none_without_a_record(fake_session, fake_bq,
   bq = fake_bq(responses=[("validation_runs", _legacy_rows(fixture_data))])
   if case == "unreadable table":
     bq.failures["validation_runs"] = PermissionError("Access Denied")
-  assert _job_record(factory, bq) is None
+  notes: list[str] = []
+  assert _job_record(factory, bq, notes) is None
   if case in ("no job", "denied", "no credentials"):
     assert bq.queries == []
+  # final review M4: a record that could not be READ is said, one that does
+  # not exist is not
+  if case == "legacy rows":
+    assert notes == []
+  else:
+    (note,) = notes
+    assert note.startswith(
+        f"the generation record of Dataflow job {JOB_ID} could not be read")
+    assert note.endswith(
+        "the seed's tables and the given inputs are evaluated (ADR 0044)")
+    what = (f"({_RUNS_TABLE} could not be read: Access Denied)"
+            if case == "unreadable table" else "(the job could not be read: ")
+    assert what in note
+
+
+# The fixture job's name: what a worker that could not read the job id
+# records, and what every launch of the same Composer model is named.
+_JOB_NAME = "sdfb-thelook-0913-a1b2c3"
+_PREVIOUS = "prev-0913-aaaaaa"
+
+
+def _named_rows(fixture_data,
+                base: str,
+                launched_at: str | None,
+                limit: int,
+                created_at: str | None = None,
+                job_id: str | None = None) -> list[dict]:
+  """One launch's rows of the fixture's three tables, written by workers
+  that could not read the job id (`source=none`) unless `job_id` is given:
+  matched by the job's name alone."""
+  snapshot = _snapshot()
+  snapshot["values"]["sampling"]["reference_rows_limit"] = limit
+  return [
+      dict(
+          r,
+          run_id=r["run_id"].replace(BASE, base),
+          job_id=job_id,
+          job_name=_JOB_NAME,
+          launch_run_id=base,
+          launched_at=launched_at,
+          **({
+              "created_at": created_at
+          } if created_at else {}))
+      for r in _record_rows(fixture_data, snapshot)
+      if r["run_id"].startswith(BASE)
+  ]
+
+
+@pytest.mark.parametrize(
+    "launched_at",
+    ["2026-09-13T13:14:30Z", "2026-09-13T13:09:50Z"],
+    # a Flex launch stamps launched_at after the job was created; a direct
+    # submission, just before
+    ids=["flex launch", "direct submission"])
+def test_job_record_by_name_takes_the_jobs_own_launch_not_the_previous(
+    fake_session, fake_bq, fixture_data, launched_at):
+  """Final review I2: a Composer job name is the same for every launch of
+  a model, so the job's padded window holds the previous launch's rows
+  under the same name (back-to-back triggers). The record is the job's own
+  launch's — 5,000 rows, not the previous launch's 10,000 — and the
+  previous launch's rows are named in a note."""
+  previous = _named_rows(
+      fixture_data,
+      _PREVIOUS,
+      "2026-09-13T12:20:00Z",
+      10_000,
+      created_at="2026-09-13T13:03:00Z")
+  own = _named_rows(fixture_data, BASE, launched_at, 5000)
+  bq = fake_bq(responses=[("validation_runs", previous + own)])
+  notes: list[str] = []
+  record = _job_record(lambda project: fake_session(), bq, notes)
+  assert record is not None and record.reference_rows_limit == 5000
+  assert {r.launch_run_id for r in record.runs} == {BASE}
+  assert record.landing_tables == TABLES
+  (note,) = notes
+  assert _JOB_NAME in note and BASE in note and _PREVIOUS in note
+
+
+def test_job_record_by_name_ignores_a_later_launch_in_the_end_pad(
+    fake_session, fake_bq, fixture_data):
+  """Final review I2: the job's own launch, not the latest one — a launch
+  stamped after the job ended (its rows inside the window's end pad) is
+  another launch's."""
+  own = _named_rows(fixture_data, BASE, "2026-09-13T13:14:30Z", 5000)
+  later = _named_rows(
+      fixture_data,
+      "next-0913-bbbbbb",
+      "2026-09-13T14:05:00Z",
+      10_000,
+      created_at="2026-09-13T14:10:00Z")
+  bq = fake_bq(responses=[("validation_runs", own + later)])
+  record = _job_record(lambda project: fake_session(), bq, [])
+  assert record is not None and record.reference_rows_limit == 5000
+  assert {r.launch_run_id for r in record.runs} == {BASE}
+
+
+def test_job_record_rows_with_the_job_id_decide_the_launch(
+    fake_session, fake_bq, fixture_data):
+  """Final review I2: rows that recorded this job's id are the job's
+  (unaffected); a same-named launch's rows without an id are dropped,
+  even when they come first in run order."""
+  previous = _named_rows(
+      fixture_data,
+      _PREVIOUS,
+      "2026-09-13T12:20:00Z",
+      10_000,
+      created_at="2026-09-13T13:03:00Z")
+  own = _named_rows(
+      fixture_data, BASE, "2026-09-13T13:14:30Z", 5000, job_id=JOB_ID)
+  bq = fake_bq(responses=[("validation_runs", previous + own)])
+  record = _job_record(lambda project: fake_session(), bq, [])
+  assert record is not None and record.reference_rows_limit == 5000
+  assert {r.run_id for r in record.runs} == set(RUN_IDS)
+
+
+def test_job_record_by_name_without_a_launch_time_takes_the_latest_with_a_note(
+    fake_session, fake_bq, fixture_data):
+  """Final review I2: when no launch says it was launched before the job
+  ended, the latest one in the window is taken — and a note says so."""
+  previous = _named_rows(
+      fixture_data, _PREVIOUS, None, 10_000, created_at="2026-09-13T13:03:00Z")
+  own = _named_rows(fixture_data, BASE, None, 5000)
+  bq = fake_bq(responses=[("validation_runs", previous + own)])
+  notes: list[str] = []
+  record = _job_record(lambda project: fake_session(), bq, notes)
+  assert record is not None and record.reference_rows_limit == 5000
+  (note,) = notes
+  assert "the latest is taken" in note and BASE in note and _PREVIOUS in note

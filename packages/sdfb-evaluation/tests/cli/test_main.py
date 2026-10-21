@@ -1016,12 +1016,16 @@ def _record_row(name: str, i: int, **values) -> dict:
   }
 
 
-def _record_plan(bq, load_fixture, tmp_path, seed="orders", uri=None):
+def _record_plan(bq,
+                 load_fixture,
+                 tmp_path,
+                 seed="orders",
+                 uri=None,
+                 session=None):
   """The chained evaluation's argv: the DAG's seed, datasets, model (`uri`,
     else the thelook model) and 10,000-row limit, plus the job id and
     validation_runs table."""
-  job = load_fixture("context/dataflow_job.json")
-  session = JobOnlySession(job)
+  session = session or JobOnlySession(load_fixture("context/dataflow_job.json"))
   model = tmp_path / "thelook.yaml"
   model.write_text(MODEL_YAML)
   args, _ = parse_args([
@@ -1090,6 +1094,65 @@ def test_a_seed_path_without_a_record_keeps_the_dags_inputs(
   assert planned.launch.params_source == "validation_runs"
   assert planned.launch.relationships_uri == str(tmp_path / "thelook.yaml")
   assert not _record_notes(planned)
+  assert not [w for w in planned.warnings if "could not be read" in w]
+
+
+@pytest.mark.parametrize("failure", ["not found", "denied"])
+def test_a_seed_path_whose_record_cannot_be_read_says_so(
+    bq, load_fixture, tmp_path, failure):
+  """Final review M4: a record that could not be READ — here the job, so
+    neither its window nor its rows — is its own note, apart from one that
+    does not exist (no note, the test above): the operator then knows the
+    config file the launch followed was not."""
+  bq.canned.append(("validation_runs", [_record_row("users", -1)]))
+  planned = _record_plan(
+      bq,
+      load_fixture,
+      tmp_path,
+      session=JobOnlySession(None if failure == "not found" else "denied"))
+  assert _evaluated(planned) == ["users", "orders", "order_items"]
+  assert planned.launch.typed_filters()["reference_rows_limit"] == 10000
+  (note,) = [
+      w for w in planned.warnings
+      if w.startswith("the generation record of Dataflow job")
+  ]
+  assert f"job {JOB_ID} could not be read (the job could not be read" in note
+  assert note.endswith(
+      "the seed's tables and the given inputs are evaluated (ADR 0044)")
+
+
+def test_a_seed_path_by_job_name_follows_the_jobs_own_launch(
+    bq, load_fixture, tmp_path):
+  """Final review I2: workers that could not read the job id
+    (`source=none`) leave the job's name, the same for every launch of a
+    Composer model. The previous launch's rows in the window — 10,000 rows,
+    the DAG's — are not this job's record: its own launch's 5,000 is."""
+  name = load_fixture("context/dataflow_job.json")["name"]
+
+  def named(row, base, launched_at, **extra):
+    return dict(
+        row,
+        job_id=None,
+        job_name=name,
+        launch_run_id=base,
+        launched_at=launched_at,
+        **extra)
+
+  previous = named(
+      _record_row("users", -1, sampling={"reference_rows_limit": 10000}),
+      "prev-0913-aaaaaa",
+      "2026-09-13T12:20:00Z",
+      run_id="prev-0913-aaaaaa",
+      created_at="2026-09-13T13:03:00Z")
+  own = named(_record_row("users", -1), BASE, "2026-09-13T13:14:30Z")
+  bq.canned.append(("validation_runs", [previous, own]))
+  planned = _record_plan(bq, load_fixture, tmp_path)
+  assert _evaluated(planned) == ["users"]
+  assert planned.launch.typed_filters()["reference_rows_limit"] == 5000
+  assert any("reference_rows_limit 5000 (given 10000)" in n
+             for n in _record_notes(planned))
+  (ignored,) = [w for w in planned.warnings if "under the job name" in w]
+  assert "prev-0913-aaaaaa" in ignored and BASE in ignored
 
 
 def test_a_record_silent_on_relationships_keeps_the_given_model(

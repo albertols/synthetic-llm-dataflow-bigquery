@@ -744,20 +744,24 @@ def _record_targets(args: argparse.Namespace, env: Env, bq: Any) -> list[str]:
   (plan Ruling 10): the seed's tables and datasets and the given
   `--relationships_uri` — even when the record states relationships off,
   which then skips only the FK edges — while the launch lookup still takes
-  the generation's parameters from the record. Returns the notes."""
+  the generation's parameters from the record. A record that could not be
+  read, and another launch's rows under the job's name, are notes of
+  their own (`job_record`). Returns the notes."""
   seed = getattr(args, "seed_table", None)
   table = getattr(args, "validation_runs_table", None)
   if not (seed and args.job_id and table) or args.tables:
     return []
+  found: list[str] = []
   record = job_record(
       bq=bq,
       session_factory=env.session_factory or make_session,
       project=args.project,
       region=args.region or "",
       job_id=args.job_id,
-      validation_runs_table=table)
+      validation_runs_table=table,
+      notes=found)
   if record is None:
-    return []
+    return found
   note = functools.partial(_RECORD_NOTE.format, job=args.job_id)
   given_landing = qualified_dataset(args.landing_dataset, args.project)
   given_reference = qualified_dataset(args.reference_dataset, args.project)
@@ -772,7 +776,7 @@ def _record_targets(args: argparse.Namespace, env: Env, bq: Any) -> list[str]:
              "is not applied to the tables: the given relationships_uri "
              f"{args.relationships_uri} names them and is loaded; only the FK "
              "edges are skipped")
-    return [note(what=f"{exc}; {_RECORD_KEPT}{off}")]
+    return [*found, note(what=f"{exc}; {_RECORD_KEPT}{off}")]
   uri, uri_note = _recorded_uri(record, args.relationships_uri or None)
   limit = record.reference_rows_limit
   changes = [
@@ -790,7 +794,7 @@ def _record_targets(args: argparse.Namespace, env: Env, bq: Any) -> list[str]:
   args.relationships_uri = uri
   if limit is not None:
     args.reference_rows_limit = limit
-  return [note(what=c) for c in changes if c]
+  return [*found, *(note(what=c) for c in changes if c)]
 
 
 def _recorded_tables_note(job_id: str, seed: str, names: Sequence[str],

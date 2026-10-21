@@ -192,8 +192,13 @@ def test_without_the_job_window_validation_runs_is_not_read(failure):
   panel, privacy_reason, _, _ = _decisions(planned)
   assert not panel.verified and privacy_reason.startswith(
       privacy.UNVERIFIED_REASON)
-  (note,) = [w for w in planned.warnings if JOB_ID in w]
-  assert "reference sample cannot be verified" in note
+  # the window's note, and (final review M4) the record's that could not be
+  # read before the targets were known
+  window, record = sorted((w for w in planned.warnings if JOB_ID in w),
+                          key=lambda w: w.startswith("the generation record"))
+  assert "reference sample cannot be verified" in window
+  assert record.startswith(
+      f"the generation record of Dataflow job {JOB_ID} could not be read")
 
 
 def test_two_launches_in_the_window_use_the_latest(load_fixture):

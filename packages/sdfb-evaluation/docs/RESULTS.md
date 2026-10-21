@@ -70,6 +70,7 @@ Every row also says which generation it evaluated, and with what:
 | :-- | :-- |
 | `params_source` | where the generation parameters came from: `jobs_labels+logs`, `logs`, `dataflow_params`, `validation_runs` (the generation's own record, ADR 0044) or `manual` |
 | `generation_params` | the generation's config snapshot (`validation_runs.config`) when it wrote one; otherwise the flat launch parameters |
+| `retrieval_method` | `free_text.pool_seed_strategy` as launched, for every engine, `b2_library` included (as before ADR 0044); `validation_runs.retrieval_method` is NULL for `b2_library` |
 | `generator_version` | `validation_runs.generator_version` of the evaluated generation, `<base>-<branch>-<sha7>[-dirty]`; NULL when the generation wrote no record |
 | `generator_config_digest` | `validation_runs.config_digest` of the evaluated generation: same digest, same generator config; NULL when the generation wrote no record |
 
