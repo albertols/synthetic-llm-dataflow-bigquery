@@ -230,9 +230,13 @@ def test_the_launcher_threads_the_config_into_every_consumer():
   reports = _calls(run_pipeline, "report_model_adjustments")
   assert len(reports) == 2
   assert {_kw(c, "config") for c in reports} == {"config_of(args)"}
-  (row,) = [
-      c for c in _calls(_SRC / "pipeline.py", "Map")
-      if any(k.arg == "repeat_share_tolerance" for k in c.keywords)
-  ]
-  assert _kw(row, "repeat_share_tolerance") == (
+  (row,) = _calls(_SRC / "pipeline.py", "_BuildValidationRunDoFn")
+  (kwargs,) = [k.value for k in row.keywords if k.arg == "row_kwargs"]
+  assert isinstance(kwargs, ast.Dict)
+  tolerance = {
+      ast.unparse(k): ast.unparse(v)
+      for k, v in zip(kwargs.keys, kwargs.values, strict=True)
+      if k is not None
+  }["'repeat_share_tolerance'"]
+  assert tolerance == (
       "config.generator_config.guardrails.repeat_share_tolerance")

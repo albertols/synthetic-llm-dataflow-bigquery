@@ -30,9 +30,9 @@ REFs:
   - https://beam.apache.org/documentation/programming-guide/#additional-outputs
 
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
-§6 Throughput; §8 Configuration
+§6 Throughput; §7 Validation and the dead-letter queue; §8 Configuration
 (ADR 0019, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0034, 0036, 0037, 0038,
-0043).
+0043, 0044).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -65,6 +65,8 @@ from sdfb_core.rag.chunking import (
     compute_row_digest,
     distinct_free_text_values,
 )
+from sdfb_core.record import LaunchRecord
+from sdfb_core.version import generator_version
 from sdfb_core.validation import (
     STATUS_FAILED_BLOCKER,
     BlockerThresholdExceeded,
@@ -82,6 +84,7 @@ from sdfb_beam.dofns import (
 from sdfb_beam.dofns.fk_integrity import EnforceFkIntegrityDoFn
 from sdfb_beam.dofns.pools import BuildFreeTextPoolsDoFn
 from sdfb_beam.io.digest import compute_reference_digest
+from sdfb_beam.io.gce_metadata import read_job_id
 from sdfb_beam.rag.population import ChunkReferenceRowsDoFn, EmbedChunksDoFn
 
 
@@ -224,6 +227,10 @@ class PipelineConfig:
   # worker `GenerationContext`.
   generator_config: GeneratorConfig = field(
       default_factory=lambda: DEFAULT_CONFIG)
+  # ADR 0044 — this job's generation record as the launcher built it.
+  # None writes exactly master's 21-column summary row (the launcher passes
+  # None when validation_runs lacks the record columns).
+  record: LaunchRecord | None = None
 
 
 def _default_requests(p: beam.Pipeline, config: PipelineConfig,
@@ -451,22 +458,37 @@ def build_pipeline(
     summary_rows = (
         p
         | f"{label_prefix}SummarySeed" >> beam.Create([None])
-        | f"{label_prefix}BuildValidationRun" >> beam.Map(
-            _build_validation_run_row,
+        | f"{label_prefix}BuildValidationRun" >> beam.ParDo(
+            _BuildValidationRunDoFn(
+                record=config.record,
+                row_kwargs={
+                    "thresholds":
+                        thresholds,
+                    "run_id":
+                        config.run_id,
+                    "reference_digest":
+                        digest,
+                    "num_rows":
+                        config.num_rows,
+                    "reference_table":
+                        config.reference_table,
+                    "landing_table":
+                        config.landing_table,
+                    "engine":
+                        config.engine_name,
+                    "model_uri":
+                        config.model_uri,
+                    "excluded_blocker_rules":
+                        tuple(config.gate_excluded_rules),
+                    "source_repeat_share":
+                        config.source_repeat_share,
+                    "repeat_share_tolerance":
+                        config.generator_config.guardrails
+                        .repeat_share_tolerance,
+                },
+            ),
             valid_count=beam.pvalue.AsSingleton(valid_count),
             dlq_by_rule=beam.pvalue.AsSingleton(dlq_by_rule),
-            thresholds=thresholds,
-            run_id=config.run_id,
-            reference_digest=digest,
-            num_rows=config.num_rows,
-            reference_table=config.reference_table,
-            landing_table=config.landing_table,
-            engine=config.engine_name,
-            model_uri=config.model_uri,
-            excluded_blocker_rules=tuple(config.gate_excluded_rules),
-            source_repeat_share=config.source_repeat_share,
-            repeat_share_tolerance=(
-                config.generator_config.guardrails.repeat_share_tolerance),
         ))
     write_result = summary_rows | f"{label_prefix}WriteValidationRun" >> validation_runs_sink
     if config.fail_on_blocker:
@@ -1409,6 +1431,53 @@ def _build_validation_run_row(
         excluded_blocker_rules=summary.excluded_blocker_rules,
     )
   return summary.to_bq_row()
+
+
+class _BuildValidationRunDoFn(beam.DoFn):
+  """The table's one `validation_runs` row and, with a launch record, the
+    generation record's fourteen columns (ADR 0044).
+
+    `setup()` runs once per DoFn instance on a worker: it reads the
+    Dataflow job id from the GCE metadata server — only when the launcher
+    ran on Dataflow — and this worker's generator version, and warns once
+    when that version is not the launcher's (the rows are the worker's
+    code's, so the row records the worker's)."""
+
+  def __init__(self, *, record: LaunchRecord | None, row_kwargs: dict[str,
+                                                                      Any]):
+    super().__init__()
+    self._record = record
+    self._row_kwargs = row_kwargs
+    self._worker: dict[str, Any] = {}
+
+  def setup(self):
+    if self._record is None:
+      return
+    job_id, source = (
+        read_job_id() if self._record.read_job_id else (None, "not_dataflow"))
+    worker_version = generator_version()
+    log_milestone(
+        "generation_record_job_id", job_id=job_id or "", source=source)
+    if worker_version != self._record.launcher_version:
+      log_milestone(
+          "generator_version_mismatch",
+          level=logging.WARNING,
+          launcher=self._record.launcher_version,
+          worker=worker_version,
+      )
+    self._worker = {"job_id": job_id, "generator_version": worker_version}
+
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
+  def process(self, unused_seed, valid_count, dlq_by_rule):
+    row = _build_validation_run_row(
+        unused_seed,
+        valid_count=valid_count,
+        dlq_by_rule=dlq_by_rule,
+        **self._row_kwargs)
+    if self._record is not None:
+      row.update(self._record.columns)
+      row.update(self._worker)
+    yield row
 
 
 class _BlockerGateDoFn(beam.DoFn):
