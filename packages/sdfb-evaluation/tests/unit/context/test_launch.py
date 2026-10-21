@@ -811,7 +811,7 @@ def test_job_only_without_a_window_does_not_read_validation_runs(
   session, bq = fake_session(jobs={}), fake_bq()
   ctx = _resolve(
       session, bq, job_id=JOB_ID, manual=_with_runs_table(), job_only=True)
-  assert bq.queries == [] and ctx.runs == ()
+  assert bq.queries == [] and not ctx.runs
   (warning,) = [w for w in ctx.warnings if JOB_ID in w]
   assert "window" in warning and "not evaluated" in warning
   assert "reference sample" in warning
@@ -826,7 +826,7 @@ def test_job_only_without_a_runs_table_reads_no_validation_runs(
       job_id=JOB_ID,
       manual={"tables_in_order": list(TABLES)},
       job_only=True)
-  assert bq.queries == [] and ctx.runs == ()
+  assert bq.queries == [] and not ctx.runs
 
 
 @pytest.mark.parametrize(
@@ -843,7 +843,7 @@ def test_job_only_survives_an_unreadable_validation_runs(
       job_id=JOB_ID,
       manual=_with_runs_table(),
       job_only=True)
-  assert ctx.runs == () and ctx.tables_in_order == TABLES
+  assert not ctx.runs and ctx.tables_in_order == TABLES
   (warning,) = [w for w in ctx.warnings if "validation_runs" in w]
   assert _RUNS_TABLE in warning and "could not be read" in warning
 
@@ -926,4 +926,8 @@ def test_a_snapshot_with_unknown_blocks_is_kept_whole():
 
 def test_the_snapshot_does_not_decide_equality():
   row = {"run_id": "r", "landing_table": f"{DS}.users"}
-  assert RunRecord.from_row({**row, "config": "{}"}) == RunRecord.from_row(row)
+  with_snapshot = RunRecord.from_row({**row, "config": '{"values": {"a": 1}}'})
+  without = RunRecord.from_row(row)
+  assert with_snapshot.config == {"values": {"a": 1}}
+  assert with_snapshot == without
+  assert hash(with_snapshot) == hash(without)
