@@ -533,9 +533,12 @@ flowchart LR
    to workflows 1, 2, 3 and 3e, all four together.
 
 3. **Rebuild the image** (workflow 1, a build of this branch). Expect the
-   `docker build` line of the build log to carry
-   `--build-arg GIT_COMMIT_ARG=<sha>` and
-   `--build-arg SDFB_BUILD_BRANCH_ARG=feat/config-record-model-launch`.
+   `docker build` step's script, as the build log prints it, to carry the
+   `GIT_COMMIT_ARG` build argument and
+   `--build-arg SDFB_BUILD_BRANCH_ARG=${GITHUB_REF_NAME}` (GitHub Actions
+   prints the script with its variables unexpanded, and the build does not
+   echo build arguments). The proof that the branch reached the image is
+   step 7's `build_info … version=0.6.1-feat-config-record-model-<sha7>`.
 
 4. **Rebuild the Flex template** (workflow 2) on that image tag. This phase
    adds no template parameter; the rebuild points the template at the new
@@ -588,10 +591,11 @@ flowchart LR
    table with `source=metadata:job_id` (or `source=metadata:dataflow_job_id`)
    and `job_id=` the job id the console shows: this confirms which metadata
    attribute answers on Dataflow. `source=none` means neither does:
-   `validation_runs.job_id` stays NULL and the evaluator matches `job_name`
-   instead — the run still passes the other steps; report it, so the
-   attribute list (`sdfb_beam/io/gce_metadata.py`), the column description
-   and ADR 0044 can say so. Expect **no** `generator_version_mismatch`: the
+   `validation_runs.job_id` stays NULL, step 9's `job_id` check and the probe
+   fail, and AC-A2-5 is not met. The evaluator still finds the job's rows by
+   `job_name`, so steps 10 and 11 still pass. Report it, so the attribute list
+   (`sdfb_beam/io/gce_metadata.py`), the column description and ADR 0044 can
+   say so. Expect **no** `generator_version_mismatch`: the
    launcher and the workers run one image. The workers' `build_info` lines
    carry the version of step 7.
 
@@ -628,7 +632,7 @@ flowchart LR
     ```
 
     Expect `params_source` = `validation_runs`; `engine`, `llm_model_uri`,
-    `embedder_id`, `retrieval_method` (NULL for `b2_library`), `similarity`
+    `embedder_id`, `retrieval_method`, `similarity`
     (`0.6`), `seed`, `num_rows_requested`, `source_stats_tier` and `env` all
     filled (AC-A2-4); `reference_rows_limit` = `5000`, the file's and not the
     DAG's 10000; `generator_version` and `snapshot_version` = step 9's
@@ -638,7 +642,9 @@ flowchart LR
     10000)`.
 
 11. **Check the GUI**, this branch's `gui/`, read-only against the corp
-    project (it reads `validation_runs` and the registry from one dataset):
+    project. It reads `validation_runs` and the registry from one
+    `QUALITY_DATASET`, so this step needs `<evaluation_dataset>` =
+    `<quality_dataset>` (the default):
 
     ```bash
     cd gui
@@ -670,7 +676,9 @@ flowchart LR
       evaluation from before the migration.
 
 12. **The degrade path** (optional; on a scratch table, with `run_evaluation`
-    false). Create a 21-column copy of the schema and a table from it, in a
+    false; run it only after steps 9–11 are recorded: under
+    `write_disposition` overwrite its rows replace step 6's landed rows).
+    Create a 21-column copy of the schema and a table from it, in a
     scratch dataset `<scratch_dataset>` the job's service account can write,
     and point one launch at it with a second config file:
 
@@ -704,7 +712,7 @@ flowchart LR
 | `generation_record_degraded … reason=missing_columns` (launcher) | `validation_runs` lacks the record columns: today's row, no record | the `bq update` the WARNING prints (step 1) |
 | `generation_record_degraded … reason=schema_unreadable` (launcher) | the launcher could not read the table's schema: a wrong FQN, or no `bigquery.tables.get` for the job's service account | correct `validation_runs_table`, or grant `roles/bigquery.dataViewer` on `<quality_dataset>` |
 | `config_sets_evaluation_input key=…` (launcher) | this launch writes no record, so its chained evaluation reads the DAG params for that key | fix the line above, or keep the key out of the file |
-| `generation_record_job_id … source=none` (worker) | no metadata attribute gave the job id: `job_id` is NULL, readers match `job_name` | nothing to fix in the run; report it (step 8) |
+| `generation_record_job_id … source=none` (worker) | no metadata attribute gave the job id: `job_id` is NULL (step 9 and AC-A2-5 fail), readers match `job_name` | nothing to fix in the run; report it (step 8) |
 | `generation_record_job_id … source=not_dataflow` (worker) | a DirectRunner launch: no job id to read | none |
 | `generator_version_mismatch launcher=… worker=…` (worker) | the launcher's code is not the workers' image: a template on an older image, or a launch from a checkout | rebuild the template on the image (step 4) and launch from it |
 | the evaluation fails at its registry write, naming `generator_version` or `generator_config_digest` | the registry is not migrated | step 1's registry `bq update` |
@@ -1426,7 +1434,10 @@ Stats / DDL / build provenance:
 | `generation_plan` (detail) | per-column route + null/empty/shapes/constraint/expandable — the first thing to check when a column misbehaves |
 | `prompt_constraints_found` (launcher + worker) | the `llm_prompt_constraint` clauses actually fetched from the DDL: rendered clause + `clause_sha12` per column; diff `clause_sha12` across launches to verify a Terraform edit landed |
 | `prompt_constraint_unknown_keys` (WARNING) | a description carries a typo'd/newer constraint key — names the `column=` |
-| `build_info commit=` (launcher + workers) | the image's git commit — compare builds BEFORE comparing runs (ADR 0027) |
+| `build_info commit= version=` (launcher + workers) | the image's git commit and the generator version `<base>-<branch>-<sha7>[-dirty]` (ADR 0044) — compare builds BEFORE comparing runs (ADR 0027) |
+| `generation_record_degraded table= reason=` (WARNING, launcher; a plain log line) | the launch writes no generation record: `reason=missing_columns missing=…` (the line carries the `bq update` that adds them) or `reason=schema_unreadable`; today's 21-column row is written (§2c, ADR 0044) |
+| `generation_record_job_id job_id= source=` (worker) | a summary DoFn's job-id read, once per instance: `source=metadata:job_id` / `metadata:dataflow_job_id` (the attribute that answered), `none` (neither: `job_id` NULL) or `not_dataflow` (DirectRunner, no read) (§2c) |
+| `generator_version_mismatch launcher= worker=` (WARNING, worker) | the worker's generator version is not the launcher's (a template on an older image, a launch from a checkout); the row keeps the worker's (§2c) |
 | `ddl_live_extracted` | the LIVE `INFORMATION_SCHEMA` schema is what this launch generates from — BigQuery metadata edits always take effect |
 | `target_metadata_overlaid constraint_columns=` / `target_metadata_unavailable` (WARNING) | constraints + contract come from the LANDING table's descriptions; unavailable = NO constraints this run |
 | `ddl_live_extract_failed` (WARNING) → `ddl_loaded_from_uri fallback=True` | live extraction unreachable — OFFLINE mode, the pin's (possibly stale) constraints/contract apply |

@@ -274,8 +274,11 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
       type=_positive,
       help="the generation's reference sample size (its "
       "--reference_rows_limit): it sizes the reference panel behind the "
-      "privacy metrics, which a hand-named target cannot read from the "
-      "launch's records. Without it those metrics are not evaluated")
+      "privacy metrics. A target named by --tables or --relationships_uri "
+      "cannot read it from the launch's records; on the seed path "
+      "(--seed_table with --generation_job_id and --validation_runs_table) "
+      "the generation record's value, when present, replaces it (ADR 0044). "
+      "With a value from neither, those metrics are not evaluated")
   group.add_argument(
       "--validation_runs_table",
       type=_bq_table,
