@@ -109,15 +109,35 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
   it("/api/evaluations filters by generator version, branch and config digest", async () => {
     const recorded = latestPerEvaluation(getMockDataset().registry).find((r) => r.generator_version)!;
     const branch = parseGeneratorVersion(recorded.generator_version)!.branch;
-    for (const query of [
-      `generator_version=${encodeURIComponent(recorded.generator_version!)}`,
-      `generator_branch=${encodeURIComponent(branch)}`,
-      `config_digest=${recorded.generator_config_digest}`,
-    ]) {
+    const all = await get("/api/evaluations?limit=500", evaluationPageSchema);
+    // The filters can only be told from a no-op if the mock holds a null-version row and several values.
+    expect(all.items.some((e) => e.generator_version === null)).toBe(true);
+    expect(new Set(all.items.map((e) => e.generator_version).filter(Boolean)).size).toBeGreaterThan(1);
+    expect(new Set(all.items.map((e) => e.generator_config_digest).filter(Boolean)).size).toBeGreaterThan(1);
+    const cases: [string, (e: (typeof all.items)[number]) => boolean][] = [
+      [
+        `generator_version=${encodeURIComponent(recorded.generator_version!)}`,
+        (e) => e.generator_version === recorded.generator_version,
+      ],
+      [
+        `generator_branch=${encodeURIComponent(branch)}`,
+        (e) => parseGeneratorVersion(e.generator_version)?.branch === branch,
+      ],
+      [
+        `config_digest=${recorded.generator_config_digest}`,
+        (e) => e.generator_config_digest === recorded.generator_config_digest,
+      ],
+    ];
+    for (const [query, matches] of cases) {
       const page = await get(`/api/evaluations?${query}&limit=500`, evaluationPageSchema);
       expect(page.items.length).toBeGreaterThan(0);
+      expect(page.items.every(matches), query).toBe(true);
       expect(page.items.some((e) => e.evaluation_id === recorded.evaluation_id)).toBe(true);
+      expect(page.items.some((e) => e.generator_version === null)).toBe(false);
+      expect(page.total).toBeLessThan(all.total);
     }
+    const none = await get("/api/evaluations?generator_branch=no-such-branch&limit=500", evaluationPageSchema);
+    expect(none.items).toHaveLength(0);
   });
 
   it("/api/facets lists the generator versions, branches and config digests", () => {

@@ -91,10 +91,16 @@ describe("the list shows the generation record (ADR 0044)", () => {
   });
 
   it("shows — for a run without a record", async () => {
-    stubApi({ "/api/facets": facets(null), "/api/evaluations": pageOf(evaluation({ evaluation_id: "eval-old" })) });
+    stubApi({
+      "/api/facets": facets(null),
+      "/api/evaluations": pageOf(evaluation({ evaluation_id: "eval-old", generation_job_id: null })),
+    });
     renderAt("/evaluation");
     const row = await listItem("eval-old");
-    expect(within(row).queryByText("0123456789ab")).toBeNull();
+    const generatorCell = [...row.querySelectorAll("td")].find((c) => c.textContent === "— · —")!;
+    expect(generatorCell).toBeDefined();
+    expect(generatorCell.querySelector("[data-slot=badge]")).toBeNull();
+    expect(within(generatorCell).queryByRole("link")).toBeNull();
   });
 
   it("sends the branch, version and digest filters from the URL", async () => {

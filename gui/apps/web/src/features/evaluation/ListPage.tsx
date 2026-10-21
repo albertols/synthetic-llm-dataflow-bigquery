@@ -560,7 +560,7 @@ function EvaluationCards({
             {formatDateTime(e.evaluated_at)} · {e.engine ?? MISSING} · {shortModel(e.llm_model_uri)} ·{" "}
             {e.env ?? MISSING}
           </p>
-          <p className="font-mono text-xs text-text-2">
+          <p className="font-mono text-xs break-words text-text-2">
             {shortVersion(e.generator_version)}
             {e.generator_config_digest ? ` · ${e.generator_config_digest}` : ""}
           </p>
