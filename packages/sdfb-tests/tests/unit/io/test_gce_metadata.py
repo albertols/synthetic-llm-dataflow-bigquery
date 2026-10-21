@@ -19,6 +19,7 @@ Design: docs/DESIGN.md §7 Validation and the dead-letter queue
 """
 from __future__ import annotations
 
+import http.client
 import io
 import urllib.error
 
@@ -44,7 +45,8 @@ def test_the_job_id_attribute_answers():
   got = gce_metadata.read_job_id(
       opener=_opener({"job_id": b"2026-10-21_01_02_03-123\n"}, seen))
   assert got == ("2026-10-21_01_02_03-123", "metadata:job_id")
-  ((url, flavor, timeout),) = seen
+  assert len(seen) == 1
+  url, flavor, timeout = seen[0]
   assert url == ("http://metadata.google.internal/computeMetadata/v1/"
                  "instance/attributes/job_id")
   assert flavor == "Google" and timeout == 1.0
@@ -75,3 +77,21 @@ def test_an_empty_answer_is_no_answer():
           "job_id": b"  ",
           "dataflow_job_id": b""
       }, seen)) == (None, "none")
+
+
+def test_a_read_cut_short_degrades_to_none():
+  """`IncompleteRead` is an HTTPException, not an OSError."""
+
+  class _Cut:
+
+    def __enter__(self):
+      return self
+
+    def __exit__(self, *exc):
+      return False
+
+    def read(self):
+      raise http.client.IncompleteRead(b"par")
+
+  assert gce_metadata.read_job_id(
+      opener=lambda request, timeout: _Cut()) == (None, "none")

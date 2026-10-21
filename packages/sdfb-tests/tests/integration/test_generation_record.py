@@ -186,3 +186,7 @@ def test_a_version_mismatch_warns_once(tmp_path, monkeypatch, caplog):
 def test_the_record_pickles():
   record = _record()
   assert pickle.loads(pickle.dumps(record)) == record
+  dofn = pipeline_mod._BuildValidationRunDoFn(  # pylint: disable=protected-access
+      record=record,
+      row_kwargs={"run_id": "r"})
+  assert pickle.loads(pickle.dumps(dofn))._record == record  # pylint: disable=protected-access

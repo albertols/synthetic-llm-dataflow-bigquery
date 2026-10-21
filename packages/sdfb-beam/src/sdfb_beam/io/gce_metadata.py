@@ -22,6 +22,7 @@ Design: docs/DESIGN.md §7 Validation and the dead-letter queue
 """
 from __future__ import annotations
 
+import http.client
 import urllib.request
 from collections.abc import Callable
 from typing import Any
@@ -45,7 +46,7 @@ def read_job_id(
     try:
       with opener(request, timeout=timeout) as response:
         value = response.read().decode("utf-8").strip()
-    except (OSError, ValueError):
+    except (OSError, ValueError, http.client.HTTPException):
       continue
     if value:
       return value, f"metadata:{name}"
