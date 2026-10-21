@@ -27,6 +27,7 @@ import logging
 import pytest
 from sdfb_beam.cli import run_pipeline as rp
 from sdfb_tests.config_parity import ARGV_BASE
+from sdfb_tests.launcher_logging import restoring_root_handlers
 
 
 def _write(tmp_path, text):
@@ -173,10 +174,11 @@ def test_main_reads_the_file(tmp_path, monkeypatch, capsys):
     return 0
 
   monkeypatch.setattr(rp, "_run_one_table", fake_run_one_table)
-  rc = rp.main([
-      *ARGV_BASE, "--similarity=0.3", "--relationships_uri=",
-      "--client_type=fake", f"--config_uri={uri}"
-  ])
+  with restoring_root_handlers():
+    rc = rp.main([
+        *ARGV_BASE, "--similarity=0.3", "--relationships_uri=",
+        "--client_type=fake", f"--config_uri={uri}"
+    ])
   assert rc == 0 and len(seen) == 1
   args = seen[0]
   assert args.similarity == 0.7

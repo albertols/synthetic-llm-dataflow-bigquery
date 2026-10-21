@@ -40,6 +40,7 @@ from sdfb_core.validation.summary import RunSummary
 from sdfb_tests.config_parity import ARGV_BASE
 from sdfb_tests.fakes import FakeModelClient
 from sdfb_tests.fixtures import load_ddl, load_reference
+from sdfb_tests.launcher_logging import restoring_root_handlers
 
 _ROOT = Path(__file__).resolve().parents[5]
 _ALL = frozenset(
@@ -92,10 +93,13 @@ def fixture_launcher(tmp_path, monkeypatch):
   """`main` end to end on the DirectRunner: the table spec is built by hand
     (`_prepare_table_spec` reads BigQuery), everything after it is real.
     `live["columns"]` is what the table's schema read returns (a set, or an
-    exception to raise); `live["out"]` is where the sinks write."""
-  live: dict[str, object] = {"columns": _ALL, "out": tmp_path}
+    exception to raise); `live["out"]` is where the sinks write;
+    `live["reads"]` lists every table whose schema was read."""
+  reads: list[str] = []
+  live: dict[str, object] = {"columns": _ALL, "out": tmp_path, "reads": reads}
 
   def columns(fqn):
+    reads.append(fqn)
     assert fqn == _VR
     value = live["columns"]
     if isinstance(value, Exception):
@@ -127,19 +131,12 @@ def _main(launcher, out: Path, *extra: str) -> int:
   launcher["out"] = out
   cfg = out / "launch.yaml"
   cfg.write_text("generation: {similarity: 0.7}\n")
-  before = list(logging.root.handlers)
-  try:
+  with restoring_root_handlers():
     return rp.main([
         *ARGV_BASE, "--client_type=fake", "--relationships_uri=",
         f"--validation_runs_table={_VR}", f"--config_uri={cfg}",
         "--runner=DirectRunner", *extra
     ])
-  finally:
-    # main() points the root logger at this test's captured stderr, which
-    # pytest closes after the test; Beam's job server logs once more at exit.
-    for handler in logging.root.handlers[:]:
-      if handler not in before:
-        logging.root.removeHandler(handler)
 
 
 def test_a_launch_writes_every_record_column_and_its_values_replay(
@@ -211,8 +208,56 @@ def test_no_validation_runs_table_reads_no_schema(monkeypatch, caplog):
   args, _ = rp.parse_args(ARGV_BASE)
   plan = rp.plan_launch(["p.land.t"], "p.src.t", True, RelationshipRegistry(),
                         "r1")
+  caplog.clear()
   with caplog.at_level(logging.WARNING):
     assert rp.prepare_record_base(args, RelationshipRegistry(), plan) is None
+  # No table is not a degraded launch, and ARGV_BASE sets no evaluation
+  # input from a file: nothing to warn about.
+  assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def _warnings(caplog, prefix: str) -> list[str]:
+  return [
+      r.getMessage()
+      for r in caplog.records
+      if r.levelno == logging.WARNING and r.getMessage().startswith(prefix)
+  ]
+
+
+@pytest.mark.parametrize(
+    "table,live,reason,degraded", [
+        ("", None, "no --validation_runs_table", 0),
+        (_VR, PermissionError("403 tables.get denied"),
+         "validation_runs schema unreadable", 1),
+        (_VR, _LEGACY, "validation_runs lacks the columns", 1),
+        (_VR, _ALL, None, 0),
+    ],
+    ids=["no_table", "schema_unreadable", "missing_columns", "supported"])
+def test_record_supported_warns_the_evaluation_inputs_only_when_degraded(
+    tmp_path, monkeypatch, caplog, table, live, reason, degraded):
+  # Ruling 10: with no record, each evaluation input the file set warns
+  # once, naming why; with the record, none does.
+  def columns(fqn):
+    assert fqn == _VR
+    if isinstance(live, Exception):
+      raise live
+    return live
+
+  monkeypatch.setattr(rp, "read_table_columns", columns)
+  cfg = tmp_path / "launch.yaml"
+  cfg.write_text("io: {reference_table: p.src.u}\n")
+  args, _ = rp.parse_args([*ARGV_BASE, f"--config_uri={cfg}"])
+  caplog.clear()
+  with caplog.at_level(logging.WARNING):
+    supported = rp.record_supported(table, args.config_resolution)
+  assert supported is (reason is None)
+  expected = [] if reason is None else [
+      "config_sets_evaluation_input key=io.reference_table (no generation "
+      f"record is written — {reason} — so a chained evaluation reads the DAG "
+      "param, not the file)"
+  ]
+  assert _warnings(caplog, "config_sets_evaluation_input") == expected
+  assert len(_warnings(caplog, "generation_record_degraded")) == degraded
 
 
 def test_the_record_carries_the_keys_main_stored(monkeypatch):
@@ -247,22 +292,58 @@ def test_every_table_of_a_single_job_launch_carries_one_record(
          ] == ["p.land.A_TABLE", "p.land.B_TABLE"]
   records = [s.config.record for s in seen]
   assert all(r is not None for r in records)
+  # One job, one record: the same object on every spec, from one schema read.
+  assert len({id(r) for r in records}) == 1
   assert len({r.columns["config_digest"] for r in records}) == 1
   assert {r.columns["launch_run_id"] for r in records} == {"r1"}
+  assert launcher["reads"] == [_VR]
+
+
+_L4 = "type:nvidia-l4;count:1;install-nvidia-driver"
+
+
+def _base() -> rp.RecordBase:
+  args, _ = rp.parse_args(ARGV_BASE)
+  return rp.RecordBase(
+      resolution=args.config_resolution,
+      launch_run_id="r1",
+      derived={},
+      thresholds={},
+      relationships={},
+      relationships_digest=None,
+      launcher_version=_VERSION)
 
 
 def test_finish_record_reads_the_jobs_beam_options():
   options = PipelineOptions([
       "--runner=DataflowRunner", "--job_name=synthetic-sdfb-v0-6-1-m",
       "--machine_type=g2-standard-8", "--max_num_workers=4",
-      "--experiments=use_runner_v2",
-      "--experiments=worker_accelerator=type:nvidia-l4;count:1;install-nvidia-driver",
+      "--experiments=use_runner_v2", f"--experiments=worker_accelerator={_L4}",
       "--experiments=use_network_tags=tag-a"
   ])
   beam_ = rp.beam_block(options, "DataflowRunner")
   assert beam_["job_name"] == "synthetic-sdfb-v0-6-1-m"
   assert beam_["machine_type"] == "g2-standard-8"
   assert beam_["max_num_workers"] == 4
-  assert beam_["accelerator"] == (
-      "type:nvidia-l4;count:1;install-nvidia-driver")
+  assert beam_["accelerator"] == _L4
   assert not [e for e in beam_["experiments"] if "network_tags" in e]
+  record = rp.finish_record(_base(), options, runner="DataflowRunner")
+  assert record.columns["job_name"] == "synthetic-sdfb-v0-6-1-m"
+  assert record.read_job_id is True
+  assert record.launcher_version == _VERSION
+  assert json.loads(record.columns["config"])["beam"] == beam_
+
+
+def test_the_accelerator_can_come_from_the_service_options():
+  options = PipelineOptions([
+      "--runner=DataflowRunner", "--job_name=j",
+      f"--dataflow_service_options=worker_accelerator={_L4}"
+  ])
+  assert rp.beam_block(options, "DataflowRunner")["accelerator"] == _L4
+
+
+def test_a_direct_runner_record_reads_no_job():
+  options = PipelineOptions(["--runner=DirectRunner", "--job_name=j"])
+  record = rp.finish_record(_base(), options, runner="DirectRunner")
+  assert record.columns["job_name"] is None
+  assert record.read_job_id is False

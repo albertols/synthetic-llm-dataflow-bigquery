@@ -768,10 +768,10 @@ default_dag_params = {
             "exactly as before. The chained evaluation (run_evaluation) "
             "follows the file: it takes the launch's tables, relationship "
             "model and reference_rows_limit from the generation record in "
-            "validation_runs (ADR 0044). Only when that table lacks the "
-            "record columns does it fall back to this DAG's params (the "
-            "launcher then logs config_sets_evaluation_input for each key "
-            "the file set).",
+            "validation_runs (ADR 0044). It falls back to this DAG's params "
+            "only when the launch wrote no record (the table lacks the "
+            "columns or its schema was unreadable); the launcher then logs "
+            "config_sets_evaluation_input for each key the file set.",
         ),
     "run_evaluation":
         Param(
