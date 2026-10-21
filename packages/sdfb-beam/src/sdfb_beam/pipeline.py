@@ -31,8 +31,8 @@ REFs:
 
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
 §6 Throughput; §8 Configuration
-(ADR 0019, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0034, 0035, 0036, 0037,
-0038, 0043).
+(ADR 0019, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0034, 0036, 0037, 0038,
+0043).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -55,13 +55,9 @@ from apache_beam.metrics import Metrics
 from apache_beam.transforms import combiners
 from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
 from sdfb_core.contracts import TableSchema
-from sdfb_core.contracts.model_adjustment import (
-    REPEAT_SHARE_TOLERANCE,
-    ModelAdjustment,
-)
+from sdfb_core.contracts.model_adjustment import ModelAdjustment
 from sdfb_core.engines import GenerationContext, ModelClient
 from sdfb_core.engines.fanout import FanoutPlan, conditional_edge_id
-from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
 from sdfb_core.observability import log_milestone
 from sdfb_core.rag.chunking import (
     MAX_ROW_DOC_ROWS,
@@ -469,6 +465,8 @@ def build_pipeline(
             model_uri=config.model_uri,
             excluded_blocker_rules=tuple(config.gate_excluded_rules),
             source_repeat_share=config.source_repeat_share,
+            repeat_share_tolerance=(
+                config.generator_config.guardrails.repeat_share_tolerance),
         ))
     write_result = summary_rows | f"{label_prefix}WriteValidationRun" >> validation_runs_sink
     if config.fail_on_blocker:
@@ -538,13 +536,6 @@ def _generate_pardo(config: PipelineConfig, ctx, fk_side):
   return beam.ParDo(dofn)
 
 
-# In-DAG FK key-pool cap (ADR 0030) — the floor: a child samples from at
-# most this many parent key tuples unless its PK contains the FK, in which
-# case preflight sizes the edge's `key_sample_cap` from num_rows and the
-# sibling PK members (ADR 0035 — the 2026-09-09 C_TABLE collapse).
-_FK_SIDE_SAMPLE_CAP = FK_KEY_SAMPLE_FLOOR
-
-
 @dataclass(frozen=True)
 class FkEdgeSpec:
   """One enforced FK edge resolved INSIDE the job (ADR 0030): the
@@ -563,9 +554,11 @@ class FkEdgeSpec:
   # built PCollection up by.
   parent_table: str = ""
   parent_pk: tuple[str, ...] = ()
-  # Parent key tuples the child sees (ADR 0035): the floor unless the
-  # child's PK contains this edge's columns, then preflight's sizing.
-  key_sample_cap: int = FK_KEY_SAMPLE_FLOOR
+  # Parent key tuples the child sees (ADR 0030, 0035): the floor
+  # (`relational.fk_key_sample_floor`) unless the child's PK contains this
+  # edge's columns, then preflight's sizing from num_rows and the sibling
+  # PK members (the 2026-09-09 C_TABLE collapse).
+  key_sample_cap: int = DEFAULT_CONFIG.relational.fk_key_sample_floor
   # ADR 0036: "side_input" (ADR 0030 key sample), "fanout" (this edge DRIVES
   # the child — its parent's keys are the child's generation input) or
   # "implied" (satisfied by construction through the driving edge; no DAG
@@ -638,9 +631,7 @@ def _edge_key_pools(parent_valid, edge: FkEdgeSpec, prefix: str):
       _key_pool_payload, cols=list(edge.child_cols), cap=edge.key_sample_cap)
 
 
-def _key_pool_payload(keys,
-                      cols: list[str],
-                      cap: int = _FK_SIDE_SAMPLE_CAP) -> list[dict]:
+def _key_pool_payload(keys, cols: list[str], cap: int) -> list[dict]:
   """One edge's side-input payload. The cap is announced, never
     silent: a child sampling 100k of a larger parent's keys references
     only those, which caps its own FK distinct count."""
@@ -1373,6 +1364,7 @@ def _build_validation_run_row(
     model_uri: str,
     excluded_blocker_rules: tuple[str, ...] = (),
     source_repeat_share: float | None = None,
+    repeat_share_tolerance: float,
 ) -> dict:
   """Driver of the single validation_runs row (side inputs are singletons).
 
@@ -1395,6 +1387,7 @@ def _build_validation_run_row(
       model_uri=model_uri,
       excluded_blocker_rules=excluded_blocker_rules,
       source_repeat_share=source_repeat_share,
+      repeat_share_tolerance=repeat_share_tolerance,
   )
   if summary.source_repeat_share is not None:
     log_milestone(
@@ -1411,7 +1404,7 @@ def _build_validation_run_row(
                  if summary.landing_repeat_share is not None else ""),
         delta=(round(summary.repeat_share_delta, 4)
                if summary.repeat_share_delta is not None else ""),
-        tolerance=REPEAT_SHARE_TOLERANCE,
+        tolerance=repeat_share_tolerance,
         within_tolerance=summary.repeat_share_within_tolerance,
         excluded_blocker_rules=summary.excluded_blocker_rules,
     )

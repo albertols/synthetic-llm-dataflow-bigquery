@@ -67,7 +67,6 @@ from sdfb_core.engines.b1_rag.profile import (
 )
 from sdfb_core.engines.constraint_sampler import compile_pattern_sampler
 from sdfb_core.engines.pk_capacity import (
-    FK_KEY_SAMPLE_CEILING,
     effective_cells,
     expected_duplicate_share_cells,
     fk_key_sample_cap,
@@ -291,9 +290,11 @@ def _random_draw_stop(
     gate: float,
     max_rows: int | None,
     at_ceiling: bool,
+    *,
+    fk_key_sample_ceiling: int,
 ) -> SystemExit:
   ceiling_note = (
-      f" The FK key sample is at its {FK_KEY_SAMPLE_CEILING:,}-tuple "
+      f" The FK key sample is at its {fk_key_sample_ceiling:,}-tuple "
       f"side-input ceiling; beyond it the parent join must move to "
       f"the co-partitioned shuffle (ADR 0031)." if at_ceiling else "")
   return SystemExit(
@@ -350,7 +351,11 @@ def _check_pk_capacity(
       if m.sampled_cols else [1.0])
   n_eff = effective_cells(cells)
   other = None if m.unbounded else m.uniform * n_eff
-  caps = {tuple(fk.cols): fk_key_sample_cap(num_rows, other) for fk in edges}
+  relational = config.relational
+  caps = {
+      tuple(fk.cols): fk_key_sample_cap(num_rows, other, relational=relational)
+      for fk in edges
+  }
   if m.unbounded:
     return caps
   uniform = m.uniform
@@ -390,8 +395,11 @@ def _check_pk_capacity(
         detail,
         share,
         blocker_failure_ratio,
-        max_rows_under_share(uniform, blocker_failure_ratio, cells),
-        at_ceiling=any(c >= FK_KEY_SAMPLE_CEILING for c in caps.values()),
+        max_rows_under_share(
+            uniform, blocker_failure_ratio, cells, relational=relational),
+        at_ceiling=any(
+            c >= relational.fk_key_sample_ceiling for c in caps.values()),
+        fk_key_sample_ceiling=relational.fk_key_sample_ceiling,
     )
   if share > _PK_DUPLICATE_WARN_SHARE:
     log_milestone(
@@ -1172,8 +1180,8 @@ def _derived_rows(
 
 
 def _independent_pool_caps(
-    supply: EdgeSupply, rows: int,
-    fk_parent_rows: Mapping[str, int]) -> dict[tuple[str, ...], int]:
+    supply: EdgeSupply, rows: int, fk_parent_rows: Mapping[str, int], *,
+    config: GeneratorConfig) -> dict[tuple[str, ...], int]:
   """Per INDEPENDENT edge touching the PK, the parent key sample the
     composer will broadcast (ADR 0037 §6; ruling 13). P4 counts it as a
     per-key factor and `in_set_parent_edges` sizes the side input from
@@ -1195,7 +1203,7 @@ def _independent_pool_caps(
     the whole component and every enabled parent is in-set."""
   caps: dict[tuple[str, ...], int] = {}
   for edge in supply.independent:
-    cap = fk_key_sample_cap(rows, 1)
+    cap = fk_key_sample_cap(rows, 1, relational=config.relational)
     parent_rows = fk_parent_rows.get(edge.ref)
     caps[tuple(edge.cols)] = min(cap, parent_rows) if parent_rows else cap
   return caps
@@ -1215,6 +1223,7 @@ def _driven_child_rows(
     on_conflict: str = ON_CONFLICT_ADJUST,
     fk_parent_distinct_keys: Mapping[str, int] = _NO_PARENT_KEYS,
     gate: float = 1.0,
+    config: GeneratorConfig,
 ) -> tuple[int | None, dict[tuple[str, ...], int], ModelAdjustment | None]:
   """``(derived rows, independent pool caps, adjustment)`` for a DRIVEN
     child.
@@ -1238,7 +1247,8 @@ def _driven_child_rows(
       fk_parent_distinct_keys,
   )
   supply = edge_supplied_members(effective_pk, edge_roles, conditional_rest)
-  caps = _independent_pool_caps(supply, derived or num_rows, parent_rows)
+  caps = _independent_pool_caps(
+      supply, derived or num_rows, parent_rows, config=config)
   adjustment = None
   if num_rows > 0 and effective_pk:
     adjustment = _check_driven_pk(
@@ -1336,6 +1346,7 @@ def _run_p4(
       on_conflict=on_model_conflict,
       fk_parent_distinct_keys=fk_parent_distinct_keys or _NO_PARENT_KEYS,
       gate=blocker_failure_ratio,
+      config=config,
   )
   if adjustment is None:
     return effective_pk, derived_rows, caps, ()

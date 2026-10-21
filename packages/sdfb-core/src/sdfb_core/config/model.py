@@ -304,7 +304,7 @@ class RelationalSettings(_Section):
   pk_cols: CsvText = _flag("")
   fk_parent_landing: str = _flag("")
   # The ADR 0030 side-input cap: a child samples at most this many parent
-  # key tuples unless its PK needs more. Mirrored by `io/fk_pools._DEFAULT_LIMIT`.
+  # key tuples unless its PK needs more; `io/fk_pools` defaults to it too.
   fk_key_sample_floor: int = _const(100_000, ge=1)
   # Largest side input this sizing will ask for. 1M single-column string
   # keys is ~40 MB pickled / ~130 MB live per SDK process; beyond it the

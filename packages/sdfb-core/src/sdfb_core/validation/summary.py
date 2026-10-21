@@ -33,6 +33,7 @@ from datetime import UTC, datetime
 
 from pydantic import BaseModel, Field
 
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts.model_adjustment import (
     landing_repeat_share,
     repeat_share_verdict,
@@ -151,6 +152,8 @@ def build_run_summary(
     created_at: str | None = None,
     excluded_blocker_rules: Sequence[str] = (),
     source_repeat_share: float | None = None,
+    repeat_share_tolerance: float = DEFAULT_CONFIG.guardrails
+    .repeat_share_tolerance,
 ) -> RunSummary:
   """Fold counts + thresholds into a :class:`RunSummary` with a status.
 
@@ -165,7 +168,7 @@ def build_run_summary(
     ``source_repeat_share`` arms the comparison that proves the copy:
     the landed share is derived from the same counts (`pk.duplicate`
     over the rows generated) and the delta is checked against
-    ``REPEAT_SHARE_TOLERANCE``. Both describe the DECLARED PK (fix J
+    ``repeat_share_tolerance``. Both describe the DECLARED PK (fix J
     measures the source over exactly the columns `pk.duplicate` counts),
     so the verdict is like-for-like wherever a share arrives at all —
     fix H4's "not comparable" case cannot occur any more, and a launch
@@ -178,7 +181,8 @@ def build_run_summary(
   total = gate_total(valid_count, dlq_by_rule, excluded)
   landed = landing_repeat_share(
       valid_count=valid_count, dlq_by_rule=dlq_by_rule)
-  delta, within = repeat_share_verdict(source_repeat_share, landed)
+  delta, within = repeat_share_verdict(source_repeat_share, landed,
+                                       repeat_share_tolerance)
   observed = (blocker_count / total) if total else 0.0
   status = (
       STATUS_FAILED_BLOCKER

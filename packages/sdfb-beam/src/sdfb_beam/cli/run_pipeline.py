@@ -106,7 +106,6 @@ from sdfb_core.contracts.row_projection import (
 )
 from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.engines.fanout import conditional_edge_id
-from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
 from sdfb_core.observability import (
     log_build_info,
     log_milestone,
@@ -209,10 +208,6 @@ _EDGE_MODES = {
     "independent": "side_input",
     "conditional": "conditional",
 }
-# ADR 0037 §7 — a fan-out request carries `keys_per_batch * M` candidate
-# tuples per conditional edge; `keys_per_batch` is lowered so the whole
-# request stays under this many values, whatever the cap is set to.
-_MAX_CONDITIONAL_VALUES_PER_REQUEST = 100_000
 
 # WS5 §3 — the seeding experiment's only variable. Three arms off ONE build
 # so the E2E runs differ in exactly one thing.
@@ -1557,7 +1552,8 @@ def log_relationship_model(
   )
 
 
-def log_model_adjustments(adjustments: Sequence[ModelAdjustment],) -> None:
+def log_model_adjustments(adjustments: Sequence[ModelAdjustment], *,
+                          tolerance: float) -> None:
   """Announce every ADR 0038 adjustment, loudly and twice.
 
     The BANNER is one multi-line WARNING block in the relationship
@@ -1573,7 +1569,7 @@ def log_model_adjustments(adjustments: Sequence[ModelAdjustment],) -> None:
     return
   log_milestone_text(
       "model_adjustments",
-      adjustment_banner(adjustments),
+      adjustment_banner(adjustments, tolerance),
       level=logging.WARNING,
       count=len(adjustments),
       tables=",".join(a.table_name for a in adjustments),
@@ -1662,6 +1658,8 @@ def report_model_adjustments(
     registry: RelationshipRegistry,
     options: PipelineOptions,
     run_id: str,
+    *,
+    config: GeneratorConfig,
 ) -> tuple[ModelAdjustment, ...]:
   """Every table's adjustments, announced ONCE for the whole launch.
 
@@ -1673,7 +1671,8 @@ def report_model_adjustments(
   adjustments = tuple(a for s in specs for a in s.adjustments)
   if not adjustments:
     return ()
-  log_model_adjustments(adjustments)
+  log_model_adjustments(
+      adjustments, tolerance=config.guardrails.repeat_share_tolerance)
   emit_effective_model(registry, adjustments, options, run_id)
   return adjustments
 
@@ -2232,7 +2231,10 @@ def _load_reference_and_preflight(
   if parse_bool_flag(args.generate_fk_relationships) and external_fk:
     parent_landing = args.fk_parent_landing or derive_fk_parent_landing(
         args.landing_table)
-    fk_key_pools = load_fk_key_pools(external_fk, parent_landing)
+    fk_key_pools = load_fk_key_pools(
+        external_fk,
+        parent_landing,
+        limit=config_of(args).relational.fk_key_sample_floor)
     fk_pools = per_column_view(fk_key_pools)
     assert_fk_pools_nonempty(external_fk, fk_pools, parent_landing)
     args.fk_parent_landing = parent_landing  # ctx fk_edges read it
@@ -2717,6 +2719,7 @@ def in_set_parent_edges(
     generation_schema=None,
     candidate_cap: int = DEFAULT_FK_CANDIDATE_CAP,
     effective_pk: tuple[str, ...] = (),
+    config: GeneratorConfig = DEFAULT_CONFIG,
 ) -> tuple[FkEdgeSpec, ...]:
   """This table's enforced edges whose parent generates in the same
     job, as composer specs. ``key_sample_caps`` (preflight P4, ADR 0035)
@@ -2734,7 +2737,9 @@ def in_set_parent_edges(
     ``candidate_cap`` is ``--fk_candidate_cap``.
 
     With conditional edges present ``keys_per_batch`` is LOWERED so one
-    request never carries more than ~100k candidate values (design §7) —
+    request never carries more than
+    ``relational.max_conditional_values_per_request`` candidate values
+    (ADR 0037 §7; 100k by default, design §7) —
     the cap itself is the operator's knob and is never touched. Once
     ``cap x edges`` passes that ceiling on its own the bound degenerates
     to one key per request and stops bounding anything, which is a
@@ -2744,10 +2749,11 @@ def in_set_parent_edges(
       fk for fk in registry.enforced_edges(landing_table)
       if fk.ref.rsplit(".", 1)[-1] in in_set_names
   ]
+  max_values = config.relational.max_conditional_values_per_request
   n_conditional = sum(1 for fk in edges if roles.get(fk) == "conditional")
   if n_conditional:
     per_request = candidate_cap * n_conditional
-    bound = _MAX_CONDITIONAL_VALUES_PER_REQUEST // per_request
+    bound = max_values // per_request
     if bound < 1:
       # Fix wave G5: the bound has STOPPED bounding. The floor below
       # pins it at ONE key per request, and that one key still
@@ -2763,7 +2769,7 @@ def in_set_parent_edges(
           candidate_cap=candidate_cap,
           conditional_edges=n_conditional,
           tuples_per_request=per_request,
-          ceiling=_MAX_CONDITIONAL_VALUES_PER_REQUEST,
+          ceiling=max_values,
           note="--fk_candidate_cap x conditional edges already "
           "exceeds the per-request candidate ceiling at ONE key per "
           "request, so keys_per_batch cannot bound the request any "
@@ -2791,7 +2797,7 @@ def in_set_parent_edges(
             # conditional edge's co-parent.
             parent_pk=tuple(parent.pk) if parent else (),
             key_sample_cap=key_sample_caps.get(
-                tuple(fk.cols), FK_KEY_SAMPLE_FLOOR),
+                tuple(fk.cols), config.relational.fk_key_sample_floor),
             mode=_EDGE_MODES.get(role, "side_input"),
             keys_per_batch=keys_per_batch,
             overlap=(registry.edge_overlap(landing_table, fk)
@@ -3183,6 +3189,7 @@ def _prepare_table_spec(
       # ADR 0038 adjustment: reading the registry here would hand the
       # composer a key the source disproved and preflight dropped.
       effective_pk=pf.pk_cols,
+      config=config_of(args),
   )
 
   return TableSpec(
@@ -3235,8 +3242,11 @@ def _run_one_table(
       cross_process=cross_process,
   )
   spec = _prepare_table_spec(args, model_client, registry=registry)
-  report_model_adjustments([spec], registry or RelationshipRegistry(), options,
-                           args.run_id)
+  report_model_adjustments([spec],
+                           registry or RelationshipRegistry(),
+                           options,
+                           args.run_id,
+                           config=config_of(args))
   # ADR 0039 — one root table, so the projection is `--num_rows` and
   # nothing else. It is printed anyway: the block is where an operator
   # reads what a launch will generate, and a single-table launch must
@@ -3374,8 +3384,12 @@ def _run_relational_job(
   # ADR 0038 — say what this launch generated with, before it
   # generates anything: the banner, one milestone per adjustment, and
   # the effective model handed back as YAML.
-  report_model_adjustments(specs, registry or RelationshipRegistry(), options,
-                           args.run_id)
+  report_model_adjustments(
+      specs,
+      registry or RelationshipRegistry(),
+      options,
+      args.run_id,
+      config=config_of(args))
   # ADR 0039 — and say how many rows that model will GENERATE, per
   # table and in total, while there is still time to stop.
   report_row_projection(

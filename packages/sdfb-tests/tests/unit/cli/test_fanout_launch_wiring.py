@@ -523,7 +523,7 @@ def test_the_launcher_names_a_defaulted_driving_edge_and_an_external_overlap(
   monkeypatch.setattr(
       rp,
       "load_fk_key_pools",
-      lambda fks, landing: [{
+      lambda fks, landing, limit: [{
           "cols": list(fk.cols),
           "keys": [tuple("t0" for _ in fk.cols)]
       } for fk in fks],
@@ -719,7 +719,7 @@ def test_an_independent_pk_member_gets_a_sized_key_pool(monkeypatch):
     into `in_set_parent_edges`, exactly as the random-draw path's caps
     do (ADR 0035)."""
   import sdfb_beam.cli.run_pipeline as rp
-  from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
+  from sdfb_core.config.model import DEFAULT_CONFIG
 
   monkeypatch.setattr(rp, "load_reference_rows", lambda **kw: _STAR37_ROWS)
   monkeypatch.setattr(
@@ -749,9 +749,9 @@ def test_an_independent_pk_member_gets_a_sized_key_pool(monkeypatch):
       key_sample_caps=pf.fk_key_sample_caps,
       edge_roles=_STAR37_REG.edge_roles("F_TABLE"),
   )
-  assert [(e.mode, e.key_sample_cap) for e in edges] == [("fanout",
-                                                          FK_KEY_SAMPLE_FLOOR),
-                                                         ("side_input", 100)]
+  assert [(e.mode, e.key_sample_cap) for e in edges
+         ] == [("fanout", DEFAULT_CONFIG.relational.fk_key_sample_floor),
+               ("side_input", 100)]
 
 
 # --- ADR 0037 fix round 1: metadata matching, cap validation, nullability ---
