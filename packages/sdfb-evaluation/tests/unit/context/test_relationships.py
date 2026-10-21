@@ -15,7 +15,7 @@
 
 These exercise the mirror directly, on small hand-written models, beyond
 what the golden-file parity test (`test_parity_goldens.py`) covers off
-the three committed example models and the goldens script's own invented
+the four committed example models and the goldens script's own invented
 cases: the widening tests here (`test_enforced_edges_widens_...`) are a
 second proof of the path that script's own invented widening model pins,
 written independently of it; the `parse_model` strictness tests duplicate
