@@ -16,7 +16,8 @@
 
     SDFB_RECORD_TABLE=<project>.synthetic_data_quality.validation_runs \
     SDFB_RECORD_RUN_ID=<the launch's run id> \
-    uv run --no-sync python3 -m pytest -m gcp packages/sdfb-tests/tests/integration/test_generation_record_gcp.py
+    uv run --no-sync python3 -m pytest -m gcp \
+      packages/sdfb-tests/tests/integration/test_generation_record_gcp.py
 
 Design: docs/DESIGN.md §7 Validation and the dead-letter queue
 (ADR 0044).
