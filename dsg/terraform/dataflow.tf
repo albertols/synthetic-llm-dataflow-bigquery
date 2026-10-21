@@ -50,6 +50,7 @@ resource "random_id" "launch" {
     num_rows   = var.num_rows
     model      = var.model
     machine    = local.machine_type
+    config_uri = var.config_uri
     parameters = sha256(jsonencode(local.launch_parameters))
   }
 }
