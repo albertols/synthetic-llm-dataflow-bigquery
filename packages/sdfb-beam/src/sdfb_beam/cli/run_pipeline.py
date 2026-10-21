@@ -49,6 +49,7 @@ Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import logging
 import os
@@ -56,7 +57,8 @@ import re
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 import apache_beam as beam
 # Side-effect import: populates ENGINE_REGISTRY at import time.
@@ -72,6 +74,7 @@ from apache_beam.options.pipeline_options import (
     StandardOptions,
     WorkerOptions,
 )
+from google.cloud import bigquery
 from sdfb_core.codegen import derive_bq_load_schema
 from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
 from sdfb_core.config.resolve import (
@@ -106,6 +109,7 @@ from sdfb_core.contracts.row_projection import (
     projection_warnings,
 )
 from sdfb_core.engines.b1_rag.profile import profile_columns
+from sdfb_core.engines.base import escalating_temperatures
 from sdfb_core.engines.fanout import conditional_edge_id
 from sdfb_core.observability import (
     log_build_info,
@@ -119,9 +123,21 @@ from sdfb_core.rag.chunking import (
     resolve_row_docs_limit,
 )
 from sdfb_core.rag.embedding import embedder_identity
+from sdfb_core.record import (
+    LaunchRecord,
+    bq_update_command,
+    build_snapshot,
+    launch_record,
+    missing_record_columns,
+    relationships_block,
+)
 from sdfb_core.stats import profile_source_table, stats_rows
-from sdfb_core.stats.source_stats import stats_profiler_version
+from sdfb_core.stats.source_stats import (
+    PROFILER_VERSION,
+    stats_profiler_version,
+)
 from sdfb_core.validation import Thresholds
+from sdfb_core.version import generator_version
 
 from sdfb_beam.cli.preflight import (
     DEFAULT_FK_CANDIDATE_CAP,
@@ -686,9 +702,9 @@ def cache_keys_of(
   return dict(keys) if keys is not None else launch_cache_keys(args, registry)
 
 
-# The keys the Composer DAG's chained evaluation takes from its own params
-# (seed_table, landing_dataset, reference_dataset, relationships_uri,
-# reference_rows_limit), never from the generator's config file (ADR 0043).
+# The keys a chained Composer evaluation takes from its own DAG params when
+# the launch writes no generation record. With the record it reads them
+# from validation_runs (ADR 0044), whatever the file set.
 _EVALUATION_INPUT_KEYS = ("io.reference_table", "io.landing_table",
                           "relational.relationships_uri",
                           "relational.generate_fk_relationships",
@@ -696,8 +712,7 @@ _EVALUATION_INPUT_KEYS = ("io.reference_table", "io.landing_table",
 
 
 def log_config_resolution(resolution: ConfigResolution) -> None:
-  """One line for the resolution, one WARNING row per flag a file overrode,
-    and one per evaluation input the file sets."""
+  """One line for the resolution, one WARNING row per flag a file overrode."""
   counts: dict[str, int] = {}
   for origin in resolution.provenance.values():
     counts[origin] = counts.get(origin, 0) + 1
@@ -707,11 +722,18 @@ def log_config_resolution(resolution: ConfigResolution) -> None:
   for item in resolution.overridden:
     logger.warning("config_override key=%s typed=%r file=%r (the file wins)",
                    item.key, item.typed, item.file)
+
+
+def warn_unrecorded_evaluation_inputs(resolution: ConfigResolution,
+                                      reason: str) -> None:
+  """With no generation record, a chained evaluation falls back to its DAG
+    params: one WARNING per evaluation input the file set."""
   for key in _EVALUATION_INPUT_KEYS:
     if resolution.provenance.get(key) == PROVENANCE_FILE:
       logger.warning(
-          "config_sets_evaluation_input key=%s (a chained evaluation reads "
-          "the DAG param, not the file)", key)
+          "config_sets_evaluation_input key=%s (no generation record is "
+          "written — %s — so a chained evaluation reads the DAG param, not "
+          "the file)", key, reason)
 
 
 def resolve_thresholds(thresholds_uri: str, env: str) -> Thresholds:
@@ -727,6 +749,158 @@ def resolve_thresholds(thresholds_uri: str, env: str) -> Thresholds:
         e,
     )
     return Thresholds(env=env, blocker_failure_ratio=1.0)
+
+
+def read_table_columns(table_fqn: str) -> frozenset[str]:
+  """A live BigQuery table's column names."""
+  table = table_fqn.replace(":", ".", 1)
+  return frozenset(f.name for f in bigquery.Client().get_table(table).schema)
+
+
+def record_supported(table_fqn: str, resolution: ConfigResolution) -> bool:
+  """Whether this launch can write the generation record (ADR 0044).
+
+    A table without the record columns — or one whose schema cannot be
+    read — gets today's 21-column row: an un-migrated table behaves exactly
+    as before instead of FILE_LOADS rejecting the row at the end of a long
+    job. Never raises."""
+  if not table_fqn:
+    warn_unrecorded_evaluation_inputs(resolution, "no --validation_runs_table")
+    return False
+  try:
+    live = read_table_columns(table_fqn)
+  except Exception as exc:  # pylint: disable=broad-exception-caught  # the record is optional: no failure here may stop a launch
+    logger.warning(
+        "generation_record_degraded table=%s reason=%s — its schema could "
+        "not be read (%s: %s); writing today's 21-column row. Check the "
+        "table, or add the record columns with:\n  %s", table_fqn,
+        "schema_unreadable",
+        type(exc).__name__, exc, bq_update_command(table_fqn))
+    warn_unrecorded_evaluation_inputs(resolution,
+                                      "validation_runs schema unreadable")
+    return False
+  missing = missing_record_columns(live)
+  if missing:
+    logger.warning(
+        "generation_record_degraded table=%s reason=missing_columns "
+        "missing=%s — writing today's 21-column row. Add the columns once "
+        "with:\n  %s", table_fqn, ",".join(missing),
+        bq_update_command(table_fqn))
+    warn_unrecorded_evaluation_inputs(resolution,
+                                      "validation_runs lacks the columns")
+    return False
+  return True
+
+
+@dataclass(frozen=True)
+class RecordBase:
+  """The generation record before a launch's jobs start (ADR 0044): what
+    every job of the launch shares. `finish_record` adds each job's own."""
+  resolution: ConfigResolution
+  launch_run_id: str
+  derived: Mapping[str, Any]
+  thresholds: Mapping[str, Any]
+  relationships: Mapping[str, Any]
+  relationships_digest: str | None
+  launcher_version: str
+
+
+def prepare_record_base(args: argparse.Namespace,
+                        registry: RelationshipRegistry | None,
+                        plan: LaunchPlan) -> RecordBase | None:
+  """The launch's record base, or None when no record can be written.
+
+    `derived.cache_keys` are the keys `main` stored for the launch
+    (`args._cache_keys`): the record states the key each cache was read and
+    written under, never a recomputation of it."""
+  resolution: ConfigResolution = args.config_resolution
+  if not record_supported(args.validation_runs_table, resolution):
+    return None
+  reg = registry or RelationshipRegistry()
+  thresholds = resolve_thresholds(args.thresholds_uri, args.env)
+  return RecordBase(
+      resolution=resolution,
+      launch_run_id=args.run_id,
+      derived={
+          "temperature_ladder": list(escalating_temperatures()),
+          "profiler_version": PROFILER_VERSION,
+          "cache_keys": cache_keys_of(args, reg),
+      },
+      thresholds={
+          "uri": args.thresholds_uri,
+          "env": thresholds.env,
+          "blocker_failure_ratio": thresholds.blocker_failure_ratio,
+      },
+      relationships=relationships_block(reg, args.relationships_uri,
+                                        [r.landing_table for r in plan.runs]),
+      relationships_digest=reg.sha12() if reg.models else None,
+      launcher_version=generator_version(),
+  )
+
+
+# Network topology is infrastructure, not generation config (the
+# evaluator's `_PARAM_DROP_KEYS`): never recorded.
+_UNRECORDED_EXPERIMENTS = ("use_network_tags=",
+                           "use_network_tags_for_flex_templates=")
+_ACCELERATOR = "worker_accelerator="
+
+
+def beam_block(options: PipelineOptions, runner: str) -> dict[str, Any]:
+  """The snapshot's `beam`: the Dataflow options the job ran with."""
+  google = options.view_as(GoogleCloudOptions)
+  worker = options.view_as(WorkerOptions)
+  experiments = [
+      e for e in (options.view_as(DebugOptions).experiments or [])
+      if not e.startswith(_UNRECORDED_EXPERIMENTS)
+  ]
+  service = list(google.dataflow_service_options or [])
+  accelerator = next((x[len(_ACCELERATOR):]
+                      for x in [*experiments, *service]
+                      if x.startswith(_ACCELERATOR)), None)
+  return {
+      "runner": runner,
+      "job_name": google.job_name,
+      "machine_type": worker.machine_type,
+      "accelerator": accelerator,
+      "max_num_workers": worker.max_num_workers,
+      "num_workers": worker.num_workers,
+      "autoscaling_algorithm": worker.autoscaling_algorithm,
+      "experiments": sorted(experiments),
+  }
+
+
+def finish_record(base: RecordBase,
+                  options: PipelineOptions,
+                  *,
+                  runner: str,
+                  batch: Mapping[str, Any] | None = None) -> LaunchRecord:
+  """One Dataflow job's record, built just before its graph: `launched_at`
+    is now, `job_name` the one the job runs under (Ruling 2, 3)."""
+  beam_ = beam_block(options, runner)
+  snapshot = build_snapshot(
+      base.resolution,
+      derived=base.derived,
+      thresholds=base.thresholds,
+      relationships=base.relationships,
+      beam=beam_,
+      launcher_version=base.launcher_version,
+      batch=batch)
+  return launch_record(
+      snapshot,
+      job_name=beam_["job_name"] if runner == "DataflowRunner" else None,
+      launch_run_id=base.launch_run_id,
+      launched_at=datetime.now(tz=UTC).isoformat(),
+      relationships_digest=base.relationships_digest,
+      read_job_id=runner == "DataflowRunner")
+
+
+def attach_record(specs: Sequence[TableSpec],
+                  record: LaunchRecord) -> list[TableSpec]:
+  """Every table of the job writes the same record."""
+  return [
+      dataclasses.replace(
+          s, config=dataclasses.replace(s.config, record=record)) for s in specs
+  ]
 
 
 def resolve_num_workers(value: str | int | None) -> int | None:
@@ -2520,6 +2694,8 @@ def main(argv: list[str] | None = None) -> int:
                      args.run_id)
   # A1 ruling R14 / ADR 0044: every cache key of the launch, computed once.
   args._cache_keys = launch_cache_keys(args, registry)  # pylint: disable=protected-access
+  # ADR 0044 — one schema check per launch; None writes today's row.
+  args._record_base = prepare_record_base(args, registry, plan)  # pylint: disable=protected-access
   for warning in plan.warnings:
     logger.warning("launch plan: %s", warning)
   log_milestone(
@@ -3313,6 +3489,10 @@ def _run_one_table(
   # reads what a launch will generate, and a single-table launch must
   # not be the one shape that stays silent.
   report_row_projection([spec], launch_rows=args.num_rows)
+  record_base = getattr(args, "_record_base", None)
+  if record_base is not None:
+    (spec,) = attach_record([spec],
+                            finish_record(record_base, options, runner=runner))
 
   with beam.Pipeline(options=options) as p:
     result = build_pipeline(
@@ -3487,6 +3667,10 @@ def _run_relational_job(
         "marked [DISABLED] hands out no keys. Flip the flag in "
         "config/relationships to change it.",
     )
+  record_base = getattr(args, "_record_base", None)
+  if record_base is not None:
+    specs = attach_record(specs,
+                          finish_record(record_base, options, runner=runner))
   with beam.Pipeline(options=options) as p:
     results = build_relational_pipeline(p, specs)
     logger.info(

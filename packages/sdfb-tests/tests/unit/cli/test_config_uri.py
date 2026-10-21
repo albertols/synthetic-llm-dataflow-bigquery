@@ -81,7 +81,8 @@ def _evaluation_input_warnings(caplog) -> list[str]:
   ]
 
 
-def test_a_file_set_evaluation_input_warns(tmp_path, caplog):
+def test_a_file_set_evaluation_input_warns_when_no_record_is_written(
+    tmp_path, caplog):
   uri = _write(
       tmp_path, "io: {reference_table: p.src.u, landing_table: p.land.u}\n"
       "relational: {relationships_uri: gs://b/rel/, "
@@ -91,9 +92,14 @@ def test_a_file_set_evaluation_input_warns(tmp_path, caplog):
   args, _ = rp.parse_args([*ARGV_BASE, f"--config_uri={uri}"])
   with caplog.at_level(logging.WARNING):
     rp.log_config_resolution(args.config_resolution)
+  assert not _evaluation_input_warnings(caplog)  # the record carries them
+  with caplog.at_level(logging.WARNING):
+    rp.warn_unrecorded_evaluation_inputs(args.config_resolution,
+                                         "validation_runs lacks the columns")
   assert _evaluation_input_warnings(caplog) == [
-      f"config_sets_evaluation_input key={key} (a chained evaluation reads "
-      "the DAG param, not the file)" for key in _EVALUATION_INPUTS
+      f"config_sets_evaluation_input key={key} (no generation record is "
+      "written — validation_runs lacks the columns — so a chained evaluation "
+      "reads the DAG param, not the file)" for key in _EVALUATION_INPUTS
   ]
 
 
@@ -104,7 +110,7 @@ def test_evaluation_inputs_from_flags_do_not_warn(tmp_path, caplog):
       f"--config_uri={uri}"
   ])
   with caplog.at_level(logging.WARNING):
-    rp.log_config_resolution(args.config_resolution)
+    rp.warn_unrecorded_evaluation_inputs(args.config_resolution, "no table")
   assert not _evaluation_input_warnings(caplog)
 
 
