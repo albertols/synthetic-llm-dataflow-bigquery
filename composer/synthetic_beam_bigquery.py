@@ -758,6 +758,15 @@ default_dag_params = {
             "rebuild and no BigQuery metadata edit — it is the ONLY "
             "source of relational truth.",
         ),
+    "config_uri":
+        Param(
+            default="",
+            type="string",
+            description="gs:// path to a generator config YAML (ADR 0043). "
+            "Keys it sets win over every param of this DAG; params fill "
+            "the keys it leaves out. Empty = no file — the launch behaves "
+            "exactly as before.",
+        ),
     "run_evaluation":
         Param(
             default=True,
@@ -1150,6 +1159,7 @@ with models.DAG(
                   "fk_parent_landing": "{{ params.fk_parent_landing }}",
                   "generate_fk_relationships": "{{ params.generate_fk_relationships }}",
                   "relationships_uri": "{{ params.relationships_uri }}",
+                  "config_uri": "{{ params.config_uri }}",
                   "multi_table_mode": "{{ params.multi_table_mode }}",
                   "uniqueness_mode": "{{ params.uniqueness_mode }}",
                   "pool_seed_strategy": "{{ params.pool_seed_strategy }}",

@@ -76,7 +76,6 @@ _FLEX_ENTRY = _REPO_ROOT / "docker" / "flex_entry.py"
 # stay reachable only from a direct launch (ADR 0024 §3c precedent).
 _UNDECLARED = frozenset({
     "pool_pattern_guidance",
-    "config_uri",  # until the Flex parameter lands (A1 Task 15)
 })
 # The names both jobs use. Each appears once in the template.
 _SHARED = frozenset({
@@ -488,3 +487,11 @@ def test_the_generation_launch_knows_nothing_of_the_evaluation():
   launch = ast.unparse(_composer_launch_operator())
   assert _SELECTOR not in launch
   assert "evaluation" not in launch
+
+
+def test_config_uri_reaches_every_surface():
+  param = _metadata_param("config_uri")
+  assert param["isOptional"] is True
+  assert re.search(param["regexes"][0], "")
+  assert "config_uri" in _composer_params()
+  assert _composer_forwarded()["config_uri"] == "{{ params.config_uri }}"

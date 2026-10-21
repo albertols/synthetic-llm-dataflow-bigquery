@@ -381,6 +381,15 @@
       "isOptional": true
     },
     {
+      "name": "config_uri",
+      "label": "Generator config file",
+      "helpText": "gs:// path to a generator config YAML (ADR 0043). Keys it sets win over the same parameters here; parameters fill the keys it leaves out. Empty = no file, exactly as before. Reference with every key documented: config/generator.yaml.",
+      "isOptional": true,
+      "regexes": [
+        "^(gs://[^/]+/.+\\.ya?ml)?$"
+      ]
+    },
+    {
       "name": "multi_table_mode",
       "label": "Multi-table execution mode",
       "helpText": "single_job (default): every planned table in ONE Dataflow job \u2014 one worker fleet, one vLLM ignition, in-DAG FK key handoff (ADR 0030). sequential_jobs: one job per table, parents first (fallback/debugging).",

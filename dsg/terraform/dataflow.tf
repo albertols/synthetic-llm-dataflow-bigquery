@@ -77,7 +77,7 @@ resource "google_dataflow_flex_template_job" "generation" {
     "worker_accelerator=${local.gpu.accelerator}",
     "no_use_multiple_sdk_containers",
   ]
-  parameters = merge(local.launch_parameters, {
+  parameters = merge(local.launch_parameters, var.config_uri == "" ? {} : { config_uri = var.config_uri }, {
     num_rows = tostring(var.num_rows)
     run_id   = "thelook-tf-${random_id.launch[0].hex}"
   })
