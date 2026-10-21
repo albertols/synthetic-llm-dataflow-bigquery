@@ -989,3 +989,67 @@ def test_step13_label_key_relative_or_other_form_names_the_three_forms(
     assert by["13k"].status == _mod.ACTION, bad
     for form in ("gs://", "projects/P/secrets/S/versions/V", "absolute"):
       assert form in by["13k"].action, (bad, form)
+
+
+_VR_FQN = "p.synthetic_data_quality.validation_runs"
+
+
+def _vr_schema_names():
+  return [
+      f["name"] for f in json.loads((_REPO_ROOT / "config" / "bq_schema" /
+                                     "synthetic_data_quality" /
+                                     "validation_runs.schema.json").read_text())
+  ]
+
+
+def _run4(monkeypatch, columns):
+  fake = _FakeBQ(tables={
+      _VR_FQN:
+          SimpleNamespace(schema=[SimpleNamespace(name=c) for c in columns])
+  })
+  _patch_bq(monkeypatch, fake)
+  ctx = _mod.Ctx(args=_mod.parse_args(_BASE_ARGV))
+  _mod.step4_bq_tables(ctx)
+  return {r.step: r for r in ctx.results}
+
+
+def test_4d_flags_a_validation_runs_without_the_record_columns(monkeypatch):
+  """ADR 0044: the generator degrades without the columns (21-column row,
+    one WARNING), so a drifted table is an ACTION naming the one command."""
+  row = _run4(monkeypatch, _vr_schema_names()[:21])["4d"]
+  assert row.status == _mod.ACTION
+  assert "missing columns: job_id" in row.resource
+  assert ("bq update --schema "
+          "config/bq_schema/synthetic_data_quality/validation_runs.schema.json "
+          "p:synthetic_data_quality.validation_runs") in row.action
+
+
+def test_4d_is_ok_with_every_column(monkeypatch):
+  row = _run4(monkeypatch, _vr_schema_names())["4d"]
+  assert row.status == _mod.OK
+  assert f"{len(_vr_schema_names())} cols" in row.resource
+
+
+def test_13_names_the_exact_update_when_only_columns_are_missing(monkeypatch):
+  """A registry table missing only columns gets the one `bq update` that
+    appends them: the evaluator's load jobs carry the committed schema and
+    fail until it runs (ADR 0044)."""
+  bq = _FakeBQ(
+      datasets={_EVAL_DS},
+      tables=_provisioned(evaluation_data_history={"drop": ("params_source",)}))
+  _, by = _run13(monkeypatch, bq)
+  row = by["13c"]
+  assert row.status == _mod.ACTION
+  assert ("bq update --schema packages/sdfb-evaluation/src/sdfb_evaluation/"
+          "schemas/evaluation_data_history.schema.json "
+          "p:synthetic_data_quality.evaluation_data_history") in row.action
+
+
+def test_13_keeps_the_general_remedy_for_a_retyped_column(monkeypatch):
+  bq = _FakeBQ(
+      datasets={_EVAL_DS},
+      tables=_provisioned(
+          evaluation_data_history={"retype": ("params_source", "INT64")}))
+  _, by = _run13(monkeypatch, bq)
+  assert "bq update --schema" not in by["13c"].action
+  assert "Columns can be added with" in by["13c"].action

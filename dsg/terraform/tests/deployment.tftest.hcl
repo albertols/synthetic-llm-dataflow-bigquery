@@ -41,6 +41,10 @@ run "deployment_contract" {
     error_message = "A pipeline table takes its name and schema from its schema file."
   }
   assert {
+    condition     = google_bigquery_table.pipeline["synthetic_data_quality/validation_runs"].schema == file("${local.schema_dir}/synthetic_data_quality/validation_runs.schema.json")
+    error_message = "validation_runs takes its schema, record columns included (ADR 0044), from its schema file."
+  }
+  assert {
     condition     = google_bigquery_table.pipeline["synthetic_data_quality/dlq"].time_partitioning[0].field == "dlq_inserted_at" && google_bigquery_table.pipeline["synthetic_rag/rag_chunks"].time_partitioning[0].field == "created_at" && length(google_bigquery_table.pipeline["synthetic_data_quality/fk_fanout_stats"].time_partitioning) == 0
     error_message = "Pipeline tables must follow docs/DEPLOYMENT_PREREQUISITES.md partitioning."
   }

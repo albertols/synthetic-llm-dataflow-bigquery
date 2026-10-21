@@ -135,6 +135,8 @@ def test_storage_bq_dry_run_creates_buckets_datasets_dq():
     assert f"mk --dataset sdfb-e2e-test123:{ds}" in out
   assert "dlq_inserted_at" in out and "created_at" in out  # DQ partition fields
   assert "objectViewer" in out and "objectAdmin" in out  # bucket-level SA grants
+  assert ("+ bq update --schema " in out and "validation_runs.schema.json "
+          "sdfb-e2e-test123:synthetic_data_quality.validation_runs" in out)
 
 
 def test_storage_bq_dry_run_stages_snapshots_ddl_landing():

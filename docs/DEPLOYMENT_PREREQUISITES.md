@@ -37,7 +37,7 @@ All sinks are `FILE_LOADS` + `WRITE_APPEND` + `CREATE_NEVER`, so the three desti
 | **Reference / source** | `project.dataset.table` (`--reference_table`) | *pre-existing* | The table you clone. Read `SELECT * … LIMIT N` (`sdfb_beam/io/bq_sources.py`). Read access only. |
 | **Landing** | `project.synthetic_data.<source table>` (defaults to the DDL table name; override with `landing_table`) | **derived from the target DDL** | `sdfb_core/codegen/derive_bq_ddl.py` turns the `_ddl.json` into a BQ `TableSchema` → `bq mk`. **No committed schema file** — it's per-target (the preflight writes `config/bq_schema/synthetic_data/<table>.schema.json`). |
 | **DLQ** | `project.synthetic_data_quality.dlq` | `config/bq_schema/synthetic_data_quality/dlq.schema.json` | DAY-partition on `dlq_inserted_at`. |
-| **validation_runs** | `project.synthetic_data_quality.validation_runs` | `config/bq_schema/synthetic_data_quality/validation_runs.schema.json` | DAY-partition on `created_at`. Optional (empty FQN skips the write) but recommended. **ADR 0038 added five NULLABLE columns** (`excluded_blocker_rules`, `source_repeat_share`, `landing_repeat_share`, `repeat_share_delta`, `repeat_share_within_tolerance`) — an existing table must be widened before the next run or FILE_LOADS rejects the summary row (see below). Fix J dropped a sixth, `repeat_share_note`: both shares now describe the declared PK, so there is no "not comparable" case to explain. A table already widened for it keeps a harmless unused column. |
+| **validation_runs** | `project.synthetic_data_quality.validation_runs` | `config/bq_schema/synthetic_data_quality/validation_runs.schema.json` | DAY-partition on `created_at`. Optional (empty FQN skips the write) but recommended. **ADR 0038 added five NULLABLE columns** (`excluded_blocker_rules`, `source_repeat_share`, `landing_repeat_share`, `repeat_share_delta`, `repeat_share_within_tolerance`) — an existing table must be widened before the next run or FILE_LOADS rejects the summary row (see below). Fix J dropped a sixth, `repeat_share_note`: both shares now describe the declared PK, so there is no "not comparable" case to explain. A table already widened for it keeps a harmless unused column. **ADR 0044 added fourteen NULLABLE generation-record columns** (`job_id` … `config`). Without them the generator still runs: it writes the 21-column row and logs one `generation_record_degraded` WARNING with the command below, so no generation is recorded and the evaluator and the GUI fall back to what they read today. |
 | **rag_chunks** (WS2) | `project.synthetic_rag.rag_chunks` | `config/bq_schema/synthetic_rag/rag_chunks.schema.json` | DAY-partition on `created_at`. **One shared store for the whole project**: chunks from *every* source `dataset.table` coexist, scoped by `source_fqn` and pinned to a vector space by (`embedder_id`, `embedder_version`) — adding a new source table needs **no** new RAG table. Optional (only needed for `--build_rag_layer` / b1 chunk reuse). |
 | **fk_fanout_stats** (ADR 0036) | `project.synthetic_data_quality.fk_fanout_stats` | `config/bq_schema/synthetic_data_quality/fk_fanout_stats.schema.json` | **OPTIONAL** — no partition. Absent, unreadable or unwritable: the launcher logs `fk_fanout_cache_unavailable` (WARNING) and measures the fan-out every launch instead of caching it. **No column change for ADR 0038 fix J**: the declared PK's source measurement rides inside the existing `payload` JSON (`pk_source`), under the same `(source_table, edge_cols, model_sha)` key. A row written before fix J simply lacks it, and that launch re-scans the PK alone and rewrites the row. |
 
@@ -58,10 +58,11 @@ bq mk --schema config/bq_schema/synthetic_data_quality/fk_fanout_stats.schema.js
       project:synthetic_data_quality.fk_fanout_stats
 ```
 
-An **existing** `validation_runs` predating ADR 0038 needs its six new
-NULLABLE columns before the next launch — adding columns is a
-non-breaking schema relaxation, so the committed file is applied
-directly:
+An **existing** `validation_runs` predating ADR 0038 needs its five ADR 0038
+columns (and, since ADR 0044, the fourteen record columns) before the next
+launch — adding columns is a non-breaking schema relaxation, so the committed
+file is applied directly. The same command appends any column the committed
+file has and the table lacks; it never rewrites rows:
 
 ```bash
 bq update --schema config/bq_schema/synthetic_data_quality/validation_runs.schema.json \
