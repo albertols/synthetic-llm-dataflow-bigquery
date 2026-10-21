@@ -1442,9 +1442,10 @@ def test_job_record_is_none_without_a_record(fake_session, fake_bq,
   # final review M4: a record that could not be READ is said, one that does
   # not exist is not
   if case == "legacy rows":
-    assert notes == []
+    assert not notes
   else:
-    (note,) = notes
+    assert len(notes) == 1
+    note = notes[0]
     assert note.startswith(
         f"the generation record of Dataflow job {JOB_ID} could not be read")
     assert note.endswith(
@@ -1513,7 +1514,8 @@ def test_job_record_by_name_takes_the_jobs_own_launch_not_the_previous(
   assert record is not None and record.reference_rows_limit == 5000
   assert {r.launch_run_id for r in record.runs} == {BASE}
   assert record.landing_tables == TABLES
-  (note,) = notes
+  assert len(notes) == 1
+  note = notes[0]
   assert _JOB_NAME in note and BASE in note and _PREVIOUS in note
 
 
@@ -1565,5 +1567,6 @@ def test_job_record_by_name_without_a_launch_time_takes_the_latest_with_a_note(
   notes: list[str] = []
   record = _job_record(lambda project: fake_session(), bq, notes)
   assert record is not None and record.reference_rows_limit == 5000
-  (note,) = notes
+  assert len(notes) == 1
+  note = notes[0]
   assert "the latest is taken" in note and BASE in note and _PREVIOUS in note

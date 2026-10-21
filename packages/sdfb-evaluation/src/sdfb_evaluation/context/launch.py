@@ -1272,11 +1272,12 @@ def _own_launch(runs: list[RunRecord], job_name: str | None, end: str | None,
   dropped = sorted(
       r.run_id for r in named if (r.launch_run_id or "") not in own)
   if dropped:
+    kept = ", ".join(sorted(own))
     notes.append(f"validation_runs rows of another launch under the job name "
                  f"{job_name!r}, without a job id, were ignored: {dropped} — "
                  f"a Composer job name is the same for every launch of a "
-                 f"model; the record is the job's own launch's, "
-                 f"{', '.join(sorted(own))} ({why})")
+                 f"model; the record is the job's own launch's, {kept} "
+                 f"({why})")
   return [r for r in runs if r.job_id or (r.launch_run_id or "") in own]
 
 
