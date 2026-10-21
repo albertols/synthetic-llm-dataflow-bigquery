@@ -245,7 +245,17 @@ const PARAM_COLUMNS = [
   "evaluator_version",
   "catalogue_version",
   "relationship_model",
+  "generator_version",
+  "generator_config_digest",
 ] as const;
+
+/** A record snapshot (ADR 0044): the Config diff card owns its keys; the parameter diff skips it. */
+const isSnapshot = (value: unknown): boolean =>
+  typeof value === "object" &&
+  value !== null &&
+  !Array.isArray(value) &&
+  typeof (value as Record<string, unknown>).config_version === "number" &&
+  typeof (value as Record<string, unknown>).values === "object";
 
 export function buildComparison(
   ids: readonly string[],
@@ -282,7 +292,7 @@ export function buildComparison(
   ordered.forEach((e, i) => {
     const flat = new Map<string, Json>();
     for (const column of PARAM_COLUMNS) flat.set(column, e[column] ?? null);
-    flatten(e.generation_params, "generation_params", flat);
+    if (!isSnapshot(e.generation_params)) flatten(e.generation_params, "generation_params", flat);
     flatten(e.evaluation_params, "evaluation_params", flat);
     for (const [path, value] of flat) {
       const list = params.get(path) ?? ordered.map(() => null as Json);

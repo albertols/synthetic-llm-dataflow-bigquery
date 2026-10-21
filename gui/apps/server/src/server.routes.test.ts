@@ -41,7 +41,7 @@ import { z } from "zod";
 import { buildApp } from "./app";
 import { loadConfig } from "./config";
 import { MockProvider } from "./providers/mock";
-import { latestPerEvaluation } from "./providers/shared";
+import { buildComparison, latestPerEvaluation } from "./providers/shared";
 
 let app: FastifyInstance;
 let staticDir: string;
@@ -232,6 +232,18 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
     const same = await get("/api/compare?ids=eval-0021,eval-0036", comparisonSchema);
     expect(same.comparability.not_comparable).toEqual([]);
     await get("/api/compare", apiErrorSchema, 400);
+  });
+
+  it("does not flatten a generation_params that is a record snapshot (ADR 0044)", () => {
+    const [first, second] = latestPerEvaluation(getMockDataset().registry);
+    const snapshot = { config_version: 1, values: { generation: { similarity: 0.7 } }, provenance: {} };
+    const a = { ...first!, generation_params: snapshot };
+    const comparison = buildComparison([a.evaluation_id, second!.evaluation_id], [a, second!], []);
+    expect(comparison.params.some((p) => p.path.startsWith("generation_params.values."))).toBe(false);
+    expect(comparison.params.some((p) => p.path.startsWith("generation_params.provenance"))).toBe(false);
+    expect(comparison.params.some((p) => p.path === "generator_version")).toBe(true);
+    // a flat generation_params (the second row's) is still flattened
+    expect(comparison.params.some((p) => p.path === "generation_params.engine")).toBe(true);
   });
 
   it("/api/trend returns one metric across evaluations, oldest first", async () => {
