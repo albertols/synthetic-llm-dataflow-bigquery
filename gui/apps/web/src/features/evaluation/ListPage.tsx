@@ -54,6 +54,7 @@ import {
   type SavedView,
 } from "./lib/filters";
 import { fmtScore, fmtSig, shortModel } from "./lib/format";
+import { dataflowJobUrl, projectOf, shortVersion } from "./lib/record";
 import { useChartTokens } from "./lib/tokens";
 import type { EvaluationListSearch } from "./route";
 import { RelatedKnobsProvider } from "./components/RelatedKnobs";
@@ -401,6 +402,7 @@ function EvaluationsTable({
             <SortHead id="rows" label="Rows" search={search} onSort={onSort} align="right" />
             <TableHead scope="col">Tier</TableHead>
             <TableHead scope="col">Env</TableHead>
+            <TableHead scope="col">Generator · job · config</TableHead>
             <TableHead scope="col">Trigger · runner · mode</TableHead>
             <TableHead scope="col">Tables</TableHead>
             <TableHead scope="col">Catalogue · evaluator</TableHead>
@@ -471,6 +473,34 @@ function EvaluationsTable({
                 <TableCell className="text-right text-xs tabular-nums">{formatCompact(e.num_rows_requested)}</TableCell>
                 <TableCell className="text-xs">{e.source_stats_tier ?? MISSING}</TableCell>
                 <TableCell className="text-xs">{e.env ?? MISSING}</TableCell>
+                <TableCell className="text-xs whitespace-nowrap">
+                  <span className="font-mono" title={e.generator_version ?? undefined}>
+                    {shortVersion(e.generator_version)}
+                  </span>
+                  {" · "}
+                  {e.generation_job_id ? (
+                    <a
+                      className="font-mono text-text-2 underline-offset-2 hover:underline"
+                      href={dataflowJobUrl(
+                        e.generation_job_id,
+                        e.generation_region,
+                        projectOf(e.tables[0]?.landing_table),
+                      )}
+                      target="_blank"
+                      rel="noreferrer"
+                      title="Open the generation job in the Dataflow console"
+                    >
+                      {e.generation_job_id}
+                    </a>
+                  ) : (
+                    MISSING
+                  )}
+                  {e.generator_config_digest ? (
+                    <Badge variant="outline" className="ml-1 font-mono" title="Same digest, same generator config">
+                      {e.generator_config_digest}
+                    </Badge>
+                  ) : null}
+                </TableCell>
                 <TableCell className="text-xs whitespace-nowrap text-text-2">
                   {e.trigger ?? MISSING} · {e.runner?.replace("Runner", "") ?? MISSING} · {e.mode ?? MISSING}
                 </TableCell>
@@ -529,6 +559,10 @@ function EvaluationCards({
           <p className="text-xs text-text-2">
             {formatDateTime(e.evaluated_at)} · {e.engine ?? MISSING} · {shortModel(e.llm_model_uri)} ·{" "}
             {e.env ?? MISSING}
+          </p>
+          <p className="font-mono text-xs text-text-2">
+            {shortVersion(e.generator_version)}
+            {e.generator_config_digest ? ` · ${e.generator_config_digest}` : ""}
           </p>
           <dl className="grid grid-cols-5 gap-1 text-center">
             {(

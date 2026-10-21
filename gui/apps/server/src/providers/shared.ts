@@ -10,6 +10,7 @@ import {
   joinModelAdjustments,
   joinWindow,
   knobs,
+  parseGeneratorVersion,
   profilerStatsSchema,
   snapshotKey,
   type ComparedMetric,
@@ -83,6 +84,9 @@ export function matchesFilter(row: EvaluationSummary, f: EvaluationFilterParsed)
   if (!anyOf(f.evaluator_version, row.evaluator_version)) return false;
   if (!anyOf(f.catalogue_version, row.catalogue_version)) return false;
   if (!anyOf(f.relationship_model, row.relationship_model)) return false;
+  if (!anyOf(f.generator_version, row.generator_version)) return false;
+  if (!anyOf(f.config_digest, row.generator_config_digest)) return false;
+  if (!anyOf(f.generator_branch, parseGeneratorVersion(row.generator_version)?.branch ?? null)) return false;
   if (!withinWindow(row.evaluated_at, f.from, f.to)) return false;
   if (f.q) {
     const q = f.q.toLowerCase();
@@ -172,6 +176,9 @@ export function buildFacets(input: FacetInputs): Facets {
     evaluator_versions: sortedDistinct(rows.map((r) => r.evaluator_version)),
     catalogue_versions: sortedDistinct(rows.map((r) => r.catalogue_version)),
     relationship_models: sortedDistinct(rows.map((r) => r.relationship_model)),
+    generator_versions: sortedDistinct(rows.map((r) => r.generator_version)),
+    generator_branches: sortedDistinct(rows.map((r) => parseGeneratorVersion(r.generator_version)?.branch ?? null)),
+    config_digests: sortedDistinct(rows.map((r) => r.generator_config_digest)),
     metric_ids: [...input.metricIds].sort(),
     source_tables: input.sourceTables,
     rag: [...input.rag],

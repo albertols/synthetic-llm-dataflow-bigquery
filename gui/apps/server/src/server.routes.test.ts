@@ -24,6 +24,7 @@ import {
   generationRecordSchema,
   healthSchema,
   knobsFileSchema,
+  parseGeneratorVersion,
   relationshipsResponseSchema,
   sourceStatsSchema,
   trendPointSchema,
@@ -103,6 +104,26 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
     expect(facets.latest?.evaluation_id).toBe("eval-0039");
     expect(facets.rag.length).toBeGreaterThan(0);
     expect(facets.source_tables.length).toBeGreaterThan(3);
+  });
+
+  it("/api/evaluations filters by generator version, branch and config digest", async () => {
+    const recorded = latestPerEvaluation(getMockDataset().registry).find((r) => r.generator_version)!;
+    const branch = parseGeneratorVersion(recorded.generator_version)!.branch;
+    for (const query of [
+      `generator_version=${encodeURIComponent(recorded.generator_version!)}`,
+      `generator_branch=${encodeURIComponent(branch)}`,
+      `config_digest=${recorded.generator_config_digest}`,
+    ]) {
+      const page = await get(`/api/evaluations?${query}&limit=500`, evaluationPageSchema);
+      expect(page.items.length).toBeGreaterThan(0);
+      expect(page.items.some((e) => e.evaluation_id === recorded.evaluation_id)).toBe(true);
+    }
+  });
+
+  it("/api/facets lists the generator versions, branches and config digests", () => {
+    expect(facets.generator_versions.length).toBeGreaterThan(0);
+    expect(facets.generator_branches).toContain("master");
+    expect(facets.config_digests.length).toBeGreaterThan(0);
   });
 
   it("/api/evaluations pages, filters and sorts", async () => {

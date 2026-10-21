@@ -156,6 +156,10 @@ export const evaluationFilterSchema = z.object({
   evaluator_version: csv(z.string()),
   catalogue_version: csv(z.string()),
   relationship_model: csv(z.string()),
+  /** ADR 0044 — the generator version, its branch (parsed from the version) and the config digest. */
+  generator_version: csv(z.string()),
+  generator_branch: csv(z.string()),
+  config_digest: csv(z.string()),
   /** evaluated_at ≥ from (ISO timestamp with offset, or a date = midnight UTC). */
   from: timeBound,
   /** evaluated_at < to. */
@@ -189,6 +193,9 @@ export interface EvaluationFilter {
   evaluator_version?: string[];
   catalogue_version?: string[];
   relationship_model?: string[];
+  generator_version?: string[];
+  generator_branch?: string[];
+  config_digest?: string[];
   /** ISO timestamp with offset (`…Z`, `…+02:00`) or a date: evaluated_at ≥ from. Anything else is a 400. */
   from?: string;
   /** evaluated_at < to. */
@@ -694,6 +701,9 @@ export const facetsSchema = z.object({
   evaluator_versions: z.array(z.string()),
   catalogue_versions: z.array(z.string()),
   relationship_models: z.array(z.string()),
+  generator_versions: z.array(z.string()),
+  generator_branches: z.array(z.string()),
+  config_digests: z.array(z.string()),
   /** Metric ids present in evaluation_metrics. */
   metric_ids: z.array(z.string()),
   source_tables: z.array(

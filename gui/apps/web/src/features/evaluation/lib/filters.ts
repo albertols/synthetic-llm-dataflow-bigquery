@@ -28,6 +28,9 @@ export type ListFacetKey =
   | "evaluator_version"
   | "catalogue_version"
   | "relationship_model"
+  | "generator_version"
+  | "generator_branch"
+  | "config_digest"
   | "reference_rows_limit"
   | "num_rows";
 
@@ -79,6 +82,9 @@ export const FACETS: readonly FacetDef[] = [
     primary: false,
     options: (f) => plain(f.relationship_models),
   },
+  { key: "generator_version", label: "Generator version", primary: false, options: (f) => plain(f.generator_versions) },
+  { key: "generator_branch", label: "Branch", primary: false, options: (f) => plain(f.generator_branches) },
+  { key: "config_digest", label: "Config digest", primary: false, options: (f) => plain(f.config_digests) },
 ];
 
 /** A date "YYYY-MM-DD" or an ISO timestamp passes; anything else is dropped (the API would 400). */
@@ -109,6 +115,9 @@ export function toFilter(search: EvaluationListSearch, pageSize = PAGE_SIZE): Ev
     evaluator_version: search.evaluator_version,
     catalogue_version: search.catalogue_version,
     relationship_model: search.relationship_model,
+    generator_version: search.generator_version,
+    generator_branch: search.generator_branch,
+    config_digest: search.config_digest,
     reference_rows_limit: search.reference_rows_limit,
     num_rows: search.num_rows,
     similarity_min: search.similarity_min,

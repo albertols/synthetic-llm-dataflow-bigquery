@@ -77,6 +77,9 @@ export const EVALUATION_FILTER_TYPES: Record<string, ParamType> = {
   evaluator_version: ["STRING"],
   catalogue_version: ["STRING"],
   relationship_model: ["STRING"],
+  generator_version: ["STRING"],
+  generator_branch: ["STRING"],
+  config_digest: ["STRING"],
   from: "STRING",
   to: "STRING",
   q: "STRING",
@@ -111,6 +114,10 @@ function evaluationWhere(a: string): string {
     inList("evaluator_version", "evaluator_version"),
     inList("catalogue_version", "catalogue_version"),
     inList("relationship_model", "relationship_model"),
+    inList("generator_version", "generator_version"),
+    inList("config_digest", "generator_config_digest"),
+    // The branch group of GENERATOR_VERSION_RE (@contracts/record) in RE2 syntax.
+    `(IFNULL(ARRAY_LENGTH(@generator_branch), 0) = 0 OR REGEXP_EXTRACT(${a}.generator_version, r'^[^-]+-(.+)-(?:[0-9a-f]{7}|unknown)(?:-dirty)?$') IN UNNEST(@generator_branch))`,
     `(@from IS NULL OR ${a}.evaluated_at >= TIMESTAMP(@from))`,
     `(@to IS NULL OR ${a}.evaluated_at < TIMESTAMP(@to))`,
     `(@q IS NULL OR STRPOS(LOWER(${a}.evaluation_id), LOWER(@q)) > 0
