@@ -673,8 +673,8 @@ _RECORD_NOTE = ("the generation's record (validation_runs, job {job}) decides "
                 "what is evaluated (ADR 0044): {what}")
 _RECORD_KEPT = ("the seed's tables and datasets are kept; the launch lookup "
                 "still takes the generation's parameters "
-                "(reference_rows_limit, the relationship model) from the "
-                "record")
+                "(reference_rows_limit, a relationship model the record "
+                "states) from the record")
 
 
 def _recorded_place(record: GenerationRecord, project: str,
@@ -740,9 +740,11 @@ def _record_targets(args: argparse.Namespace, env: Env, bq: Any) -> list[str]:
   (the tables' note waits for the model: `_recorded_tables_note`). Without
   a record (an older table or launch, an unreadable job), the caller's
   targets stand. A record whose tables span several datasets, or that
-  names something that is no table, is a note and keeps the seed's tables
-  and datasets (plan Ruling 10); the launch lookup still takes the
-  generation's parameters from the record. Returns the notes."""
+  names something that is no table, is a note and keeps today's behaviour
+  (plan Ruling 10): the seed's tables and datasets and the given
+  `--relationships_uri` — even when the record states relationships off,
+  which then skips only the FK edges — while the launch lookup still takes
+  the generation's parameters from the record. Returns the notes."""
   seed = getattr(args, "seed_table", None)
   table = getattr(args, "validation_runs_table", None)
   if not (seed and args.job_id and table) or args.tables:
@@ -763,7 +765,14 @@ def _record_targets(args: argparse.Namespace, env: Env, bq: Any) -> list[str]:
     landing, reference, names = _recorded_place(record, args.project,
                                                 given_reference)
   except ValueError as exc:
-    return [note(what=f"{exc}; {_RECORD_KEPT}")]
+    off = ""
+    if record.relationships_off and args.relationships_uri:
+      flag = record.value("relational", "generate_fk_relationships")
+      off = (f"; its relationships off (generate_fk_relationships={flag!r}) "
+             "is not applied to the tables: the given relationships_uri "
+             f"{args.relationships_uri} names them and is loaded; only the FK "
+             "edges are skipped")
+    return [note(what=f"{exc}; {_RECORD_KEPT}{off}")]
   uri, uri_note = _recorded_uri(record, args.relationships_uri or None)
   limit = record.reference_rows_limit
   changes = [

@@ -293,7 +293,7 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
       "when the launch's own records name none; alone (with "
       "--landing_dataset and --reference_dataset) it also names the tables. "
       "On the seed path a generation record that states relationships off "
-      "overrides it (ADR 0044)")
+      "overrides it when the record names the tables (ADR 0044)")
   group.add_argument("--fixture_dir", type=_text, help=argparse.SUPPRESS)
 
 

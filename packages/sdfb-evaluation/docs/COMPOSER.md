@@ -64,9 +64,11 @@ evaluation. The record is read in the generation job's window, so it needs
 the Dataflow job: for a launch without a record, or without
 `roles/dataflow.viewer`, the values passed decide, and what the first point
 below says is evaluated. A record whose tables span more than one landing or
-source dataset keeps the seed's tables and datasets, with a warning; the
-launch lookup still takes the generation's `reference_rows_limit` and
-relationship model from the record (from the job's rows of those tables).
+source dataset keeps the seed's tables and datasets and the
+`relationships_uri` passed, with a warning (if it states relationships off,
+only the FK edges are skipped); the launch lookup still takes the
+generation's `reference_rows_limit` and a relationship model the record
+states from the record (from the job's rows of those tables).
 
 - **What is evaluated.** The launched table's enabled component in the
   relationship model, parents first, or that table alone. Each landing table

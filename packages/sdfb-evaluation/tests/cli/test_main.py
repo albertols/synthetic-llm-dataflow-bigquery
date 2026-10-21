@@ -1190,10 +1190,40 @@ def test_a_record_the_seed_cannot_name_keeps_the_dags_inputs(
   (note,) = _record_notes(planned)
   assert orders.rsplit(".", 1)[0] in note
   assert ("the seed's tables and datasets are kept; the launch lookup still "
-          "takes the generation's parameters (reference_rows_limit, the "
-          "relationship model) from the record") in note
+          "takes the generation's parameters (reference_rows_limit, a "
+          "relationship model the record states) from the record") in note
   assert planned.launch.typed_filters()["reference_rows_limit"] == 5000
   assert planned.launch.relationships_uri == str(recorded)
+
+
+def test_an_isolated_record_the_seed_cannot_name_keeps_the_given_model(
+    bq, load_fixture, tmp_path):
+  """Controller ruling, fix round 2: a record that states relationships off
+    but spans two landing datasets keeps today's behaviour — the seed's
+    tables AND the given `--relationships_uri`, which names them and is
+    loaded; only the FK edges are skipped — and its note says so."""
+  relational = {
+      "generate_fk_relationships": "false",
+      "relationships_uri": "config/relationships"
+  }
+  bq.canned.append(("validation_runs", [
+      _record_row("users", 0, relational=relational),
+      dict(
+          _record_row("orders", 1, relational=relational),
+          landing_table=f"{PROJECT}.other_synthetic.orders"),
+  ]))
+  planned = _record_plan(bq, load_fixture, tmp_path)
+  given = str(tmp_path / "thelook.yaml")
+  assert _evaluated(planned) == ["users", "orders", "order_items"]
+  assert planned.models and planned.launch.relationships_uri == given
+  (note,) = _record_notes(planned)
+  assert ("its relationships off (generate_fk_relationships='false') is not "
+          f"applied to the tables: the given relationships_uri {given} names "
+          "them and is loaded; only the FK edges are skipped") in note
+  skipped = [w for w in planned.warnings if "FK edges were not generated" in w]
+  assert sorted(w.split(":", 1)[0] for w in skipped) == [
+      f"{DS}.order_items", f"{DS}.orders"
+  ]
 
 
 def test_a_run_id_target_reads_validation_runs(bq, capsys):

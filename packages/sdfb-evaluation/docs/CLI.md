@@ -58,8 +58,8 @@ sdfb-eval`.
 - `--relationships_uri` (a file or directory, local or `gs://`) may accompany
   any target; it supplies the model when the launch's own records name none.
   On the seed path a generation record that states relationships off
-  overrides it (the row above): the launch is evaluated without a model, as
-  it was generated.
+  overrides it when the record names the tables (the row above): the launch
+  is evaluated without a model, as it was generated.
 - A hand-named target (`--tables`, `--seed_table`, a model alone) carries no
   write disposition: pass `--scope manual` to read each landing table whole,
   otherwise its tables cannot be scoped.
