@@ -275,7 +275,9 @@ flowchart LR
 
    The Flex parameter and the DAG param exist only in an image and template
    built from this release, and in a DAG re-imported from it. A DAG that is
-   not re-imported launches exactly as before.
+   not re-imported launches exactly as before. Rebuild the Flex template
+   before re-importing the Composer DAG — the DAG always forwards
+   `config_uri`, which an old template does not declare.
 
 4. **Read the launcher log.** Every launch logs one `config_resolved` line
    (`uri=-` without a file). A launch with the example file that types the
@@ -297,6 +299,11 @@ flowchart LR
      value. An override you did not expect means the file decides a key you
      meant to set from the DAG: drop that key from the file or change it
      there.
+   - One `config_sets_evaluation_input key=… (a chained evaluation reads the
+     DAG param, not the file)` WARNING per evaluation input the file sets
+     (the example sets none); see the next paragraph.
+   - A `null` the file copied from the reference for a required key
+     (`reference_table: null`) pins nothing: the typed flag fills it.
    - A file the launch refuses fails it before any Dataflow work, with exit
      status 2 and one `error:` line: `could not read --config_uri <uri>:
      <reason>`; `unknown key '…' — did you mean '…'?`; a type or range error
@@ -315,6 +322,21 @@ next launch with the same values is warm again, and a launch back at the
 defaults finds the original rows. For §6d this means two arms that differ in
 a pool-shaping value no longer mask each other; two arms at the same values
 still share their pools.
+
+**The chained evaluation reads the DAG params, not the file.** With
+`run_evaluation` on, the Composer DAG builds the evaluation's inputs from its
+own params: the seed table from `table_fqn`, the reference dataset from
+`source_dataset` (or `table_fqn`), the landing dataset from the landing-table
+marker, `relationships_uri` and `generate_fk_relationships` from their params,
+and `reference_rows_limit` fixed at 10000. A file that sets
+`io.reference_table`, `io.landing_table`, `relational.relationships_uri`,
+`relational.generate_fk_relationships` or `sampling.reference_rows_limit`
+generates one thing and evaluates another, and the launcher logs a
+`config_sets_evaluation_input` WARNING for each. Until the generation record
+carries these values ([ADR 0043](adr/0043-generator-config.md),
+Consequences), keep these five keys out of the file on a launch you
+evaluate, and set the ones that are DAG params (`table_fqn`,
+`relationships_uri`, `generate_fk_relationships`) there.
 
 ---
 
