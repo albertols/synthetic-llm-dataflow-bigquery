@@ -605,6 +605,7 @@ record; the section is where this document summarizes it.
 | 0041 | [§11 Evaluation (sdfb-evaluation)](#11-evaluation-sdfb-evaluation) | [Evaluation is a standalone package and a separate job](adr/0041-evaluation-standalone-package.md) |
 | 0042 | [§12 Platform GUI](#12-platform-gui) | [A self-hosted GUI; managed dashboards stay out](adr/0042-self-hosted-platform-gui.md) |
 | 0043 | [§8 Configuration](#8-configuration) | [Generator config: a typed model, a catalogue, file wins](adr/0043-generator-config.md) |
+| 0044 | [§7 Validation and the dead-letter queue](#7-validation-and-the-dead-letter-queue) | [The generation record](adr/0044-generation-record.md) |
 <!-- adr-map:end -->
 
 ## 10. Figure provenance
