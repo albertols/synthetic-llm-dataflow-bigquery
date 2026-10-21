@@ -5,13 +5,14 @@
  * encoding plan are flagged "not comparable". The verdicts themselves are held
  * to `sdfb-eval compare` by lib/compare.golden.test.ts.
  */
-import { configure, screen, within } from "@testing-library/react";
+import { configure, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import type { MetricCell } from "@contracts/api";
 import type { GenerationRecord } from "@contracts/record";
 
+import { ConfigDiff } from "./components/ConfigDiff";
 import { diffMetric, encodingDiffers, paretoFrontier, pairReasons, slotMap } from "./lib/compare";
 import { radarSpec, scoreAxisFloor, topMovers, trendSpec } from "./lib/compareCharts";
 import { FALLBACK_TOKENS } from "./lib/tokens";
@@ -346,6 +347,24 @@ describe("config diff (ADR 0044)", () => {
   it("says when the configs are the same", async () => {
     stubCompare({ a: generationRecord(), b: generationRecord() });
     renderAt(COMPARE_URL);
-    expect(await screen.findByText(/same generator config/i)).toBeInTheDocument();
+    const same = await screen.findByText(/same generator config/i);
+    expect(same).toHaveTextContent("(0123456789ab)");
+  });
+
+  it("says the record could not be read when its request fails, and the page still renders", async () => {
+    stubApi({
+      "/api/compare": comparison(),
+      "/api/evaluations": EMPTY_PAGE,
+      "/api/evaluations/eval-a/record": { ...generationRecord(), evaluation_id: "eval-a" },
+    });
+    renderAt(COMPARE_URL);
+    expect(await screen.findByText(/generation record of eval-b could not be read/i)).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /config diff/i })).toBeInTheDocument();
+  });
+
+  it("shows a skeleton while a record is loading", () => {
+    const { container } = render(<ConfigDiff ids={["eval-a", "eval-b"]} records={[undefined, undefined]} />);
+    expect(container.querySelector(".animate-skeleton")).not.toBeNull();
+    expect(screen.queryByText(/could not be read/i)).toBeNull();
   });
 });

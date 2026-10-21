@@ -942,7 +942,11 @@ function ComparePageContent() {
         onRows={(rows) => setSearch({ rows })}
       />
       <RunMetricHeatmap comparison={comparison} family={search.family} />
-      <ConfigDiff ids={comparedIds}records={records.map((q) => q.data?.data)} errored={records.map((q) => q.isError)} />
+      <ConfigDiff
+        ids={comparedIds}
+        records={records.map((q) => q.data?.data)}
+        errored={records.map((q) => q.isError)}
+      />
       <ParamsDiff comparison={comparison} />
     </div>
   );
