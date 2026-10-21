@@ -377,6 +377,12 @@ def test_both_worker_image_variables_read_the_one_build_argument():
   assert "SDFB_SDK_CONTAINER_IMAGE_ARG" in arguments
   assert not [a for a in arguments if "EVAL" in a.upper()]
   assert _env("SDFB_SDK_CONTAINER_IMAGE") == "$SDFB_SDK_CONTAINER_IMAGE_ARG"
+  assert _env(
+      "SDFB_EVAL_SDK_CONTAINER_IMAGE") == "$SDFB_SDK_CONTAINER_IMAGE_ARG"
+  final = _final()
+  # declared late: a per-commit value never invalidates the `uv sync` layer
+  assert _index(final, r"^RUN uv sync ") < _index(
+      final, r"^ARG SDFB_SDK_CONTAINER_IMAGE_ARG")
 
 
 def test_the_build_identity_is_declared_after_the_dependency_layer():
@@ -389,12 +395,6 @@ def test_the_build_identity_is_declared_after_the_dependency_layer():
   assert sync < _index(final, r"^ARG SDFB_BUILD_BRANCH_ARG")
   assert _env("SDFB_BUILD_COMMIT") == "$GIT_COMMIT_ARG"
   assert _env("SDFB_BUILD_BRANCH") == "$SDFB_BUILD_BRANCH_ARG"
-  assert _env(
-      "SDFB_EVAL_SDK_CONTAINER_IMAGE") == "$SDFB_SDK_CONTAINER_IMAGE_ARG"
-  final = _final()
-  # declared late: a per-commit value never invalidates the `uv sync` layer
-  assert _index(final, r"^RUN uv sync ") < _index(
-      final, r"^ARG SDFB_SDK_CONTAINER_IMAGE_ARG")
 
 
 # --------------------------------------------------------------------------
