@@ -9,7 +9,7 @@
     "config/bq_schema/synthetic_data_quality/dlq.schema.json": "bd91c9c7c54bb5671767d7ee8ceab4f7f2e7cae7c40518899bdc5d91f8f11f72",
     "config/bq_schema/synthetic_data_quality/fk_fanout_stats.schema.json": "faa5264c2d223ec4f769ce56d039999a88ccdec4c875196790709e35c9f08c70",
     "config/bq_schema/synthetic_data_quality/validation_runs.schema.json": "03d4571c29aea5e49f4e03c71cf1242e804ae42605d651db41ac1d68a7cdc36d",
-    "config/bq_schema/synthetic_rag/freetext_pools.schema.json": "86a12014279460293f4a0ab6da5d36c7e312bef1e4b64dab49f5f2d9ea31a8fa",
+    "config/bq_schema/synthetic_rag/freetext_pools.schema.json": "1070bff66846a3a0a7cc6582979af4a0521a0a11ef757706e6ae505e64fa225a",
     "config/bq_schema/synthetic_rag/rag_chunks.schema.json": "2c2bcc99d0ae79e01217f0f04631fd1e01f5421764172474ac4560691a96b1a8",
     "config/bq_schema/synthetic_rag/source_table_stats.schema.json": "9ad24ef739e151fc54353d41f8fd1772fb077c0860c40b03cc08e451c23b5864",
     "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/views.sql": "a66589e18f037ecdd397b91b3500dfb893fc2ba37befc1d5a9cf18b0281ef29c",

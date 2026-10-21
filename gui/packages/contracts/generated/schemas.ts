@@ -407,7 +407,7 @@ export const freetextPoolsRowSchema = z.object({
   model_uri: z.string(),
   /** Free-text column the pool belongs to. */
   column: z.string(),
-  /** Requested pool size: min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX). */
+  /** Requested pool size: min(num_rows, column_distinct, free_text.free_text_pool_max). */
   target: z.int(),
   /** Deduped generated values in insertion order. REPEATED (not a JSON blob) so pools stay queryable with UNNEST. NOTE: `values` is a BigQuery RESERVED keyword — always backtick it in SQL. */
   values: z.array(z.string()),

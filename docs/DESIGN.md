@@ -467,7 +467,7 @@ on any identical real/synthetic row. Code:
 ## 8. Configuration
 
 Relational structure is configuration, in
-[`config/relationships/*.yaml`](../config/relationships/README.md) ([ADR 0032](adr/0032-relationships-as-config.md)). Every other generator setting has one typed home, `sdfb_core/config/model.py` ([ADR 0043](adr/0043-generator-config.md)).
+[`config/relationships/*.yaml`](../config/relationships/README.md) ([ADR 0032](adr/0032-relationships-as-config.md)).
 
 ![What each scenario generates](designs/assets/relationships-scenarios.png)
 
@@ -483,12 +483,76 @@ edge keeps the table and stops drawing keys through that edge.*
 
 | Knob | Where | Read by |
 | :-- | :-- | :-- |
+| Every generator setting (flags + tunable constants) | [`config/generator.yaml`](../config/generator.yaml), rendered from [`sdfb_core/config/`](../packages/sdfb-core/src/sdfb_core/config/) | launcher (`--config_uri`, file wins), workers via `generator_config` ([ADR 0043](adr/0043-generator-config.md)) |
 | Tables, keys, edges, `enabled` / `enforced` / `drives` | `config/relationships/*.yaml` | launcher and workers; one relationship card is logged per run |
-| Model URI, vLLM server flags, licence | [`config/models.yml`](../config/models.yml) | `VLLMModelClient` (§3) |
+| Model URI, vLLM server flags, licence | [`config/models.yml`](../config/models.yml) | nobody at runtime — a reference registry; `serving.model_uri` points at one of its entries |
 | Severity budgets per environment | [`config/thresholds.yml`](../config/thresholds.yml) | thresholds gate (§7) |
 | Column constraints | the table's DDL contract | constraint router (§5) |
 | B.1 row documents, `rag_row_docs_limit` (default 1,024) | launch flag / DAG param | launcher (store check), population branch, `b1_rag` setup (§2) |
 | GPU type, machine family, dtype | the Terraform module's `gpu` variable | launch scripts and the Flex Template job |
+
+Every generator setting has one typed home, `sdfb_core/config/model.py`, and
+one explanation in `catalogue.yaml`; [`config/generator.yaml`](../config/generator.yaml)
+renders both. A launch may pass a sparse file of the keys it pins
+(`--config_uri`, a local path or `gs://`; the `config_uri` param of the Flex
+Template, the generation DAG and the Terraform module).
+
+*A key set in the file wins over the same flag, which wins over the model
+default.* One panel per mode.
+
+*Mode 1 — no `config_uri`.*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  A["⚪ flags / params<br/>as typed"]:::data
+  D["⚪ defaults<br/>= the old values"]:::data
+  R["⚙️ flag > default"]:::cpu
+  O["⚪ the namespace<br/>argparse built"]:::data
+  A -->|"1st"| R
+  D -->|"2nd"| R
+  R --> O
+```
+
+*Mode 2 — with `config_uri`.*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  F[("📄 file keys")]:::store
+  A["⚪ flags / params"]:::data
+  D["⚪ model defaults"]:::data
+  R["⚙️ file > flag > default"]:::cpu
+  O["⚪ resolved config<br/>+ provenance"]:::data
+  W["🛡️ config_override<br/>WARNING per<br/>overridden param"]:::cpu
+  F -->|"1st"| R
+  A -->|"2nd"| R
+  D -->|"3rd"| R
+  R --> O
+  R --> W
+```
+
+*Without a file the launcher rebuilds exactly the namespace argparse built
+before, string encodings included (`"true"`, `""`, `"8192"`). With one, the
+file decides every key it sets, even against a Composer DAG that passes every
+param; the launcher logs `config_resolved` with the count per source and one
+`config_override` WARNING per typed param the file replaced.* A non-default
+value of a constant that shapes a persisted store (`source_table_stats`,
+`freetext_pools`, `rag_chunks`, `fk_fanout_stats`) salts that store's key, so
+a store built under one value is never served under another; at the defaults
+every key is unchanged ([ADR 0043](adr/0043-generator-config.md) D8). Code:
+[`config/resolve.py::resolve`](../packages/sdfb-core/src/sdfb_core/config/resolve.py),
+[`config/salt.py::settings_salt`](../packages/sdfb-core/src/sdfb_core/config/salt.py).
 
 ## 9. ADR reference map
 

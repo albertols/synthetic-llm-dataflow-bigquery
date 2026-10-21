@@ -9,8 +9,12 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ## [Unreleased]
 
 ### 🚀 Added
+- `--config_uri` / `config_uri`: one documented config file per environment; its keys win over flags ([ADR 0043](docs/adr/0043-generator-config.md)). A sparse YAML file, a local path or `gs://`, pins the keys it lists; flags and DAG params fill the rest, and a launch without it behaves exactly as before (pinned by goldens captured from `master`). Every launch surface takes it: the CLI, the Flex Template, the generation DAG, the Solution Guides' Terraform and `scripts/04_run_dataflow.sh`, and `public_cloud/deploy/gcp/tiers.yaml`. The launcher logs `config_resolved` with the count of keys per source and one `config_override` WARNING per typed param the file replaced; a file it refuses (unreadable, an unknown key with the closest match, a wrong type, launch identity, a fixed or derived entry, a newer `config_version`) fails the launch with exit status 2 before any Dataflow work. `run_id` stays a flag. Example: [`config/generator.personal.example.yaml`](config/generator.personal.example.yaml); recipe: [RUN_PLAYBOOK §2b](docs/RUN_PLAYBOOK.md#2b-launch-with-a-config-file). Needs an image and Flex Template rebuild, and a DAG re-import for its param; a DAG not re-imported keeps working. Not yet run on Dataflow.
+- [`config/generator.yaml`](config/generator.yaml): every generator setting with its default and explanation. Rendered from `sdfb_core/config/` (`GeneratorConfig`, one typed frozen model, and `catalogue.yaml`, one strict catalogue of explanations, matched 1:1 by a test) by `scripts/doc/render_generator_config.py`; CI fails when it drifts.
 
 ### 🔧 Changed
+- 28 constants are now settable from a config file; a non-default value salts the cache it shapes. The salt suffixes a field each store key already has (`source_table_stats.profiler_version`, the `freetext_pools` `model_uri`, the `rag_chunks` `embedder_version`, the `fk_fanout_stats` model sha) and is empty at the defaults, so every existing key is unchanged; the first launch under a non-default value rebuilds that store's rows ([ADR 0043](docs/adr/0043-generator-config.md) D8). The promoted module constants are deleted, and the defaults that were typed in several places read the model's.
+- GUI /config: knob explanations come from the config catalogue; 17 IO and identity settings added (the 11 `io` flags, `run_id`, `model_uri`, `thresholds_uri`, `identity_cols`, `pk_cols`, `fk_parent_landing`). Two new channels, `io` and `launch`; a knob's sheet names its config key, and 18 constant tips now say the value is set in a config file. The generator's hand-written guides in `config.ts` are gone; the evaluator's stay.
 
 ### ⚡ Performance
 
@@ -19,6 +23,7 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ### 🗑️ Removed
 
 ### 📗 Docs
+- [ADR 0043](docs/adr/0043-generator-config.md) (generator config: a typed model, a catalogue, file wins, the settings salt); `docs/DESIGN.md` §8 (a row for every generator setting, the resolve order per mode, and `config/models.yml` read by nobody at runtime); [RUN_PLAYBOOK §2b](docs/RUN_PLAYBOOK.md#2b-launch-with-a-config-file) (launch with a config file); the headers of `config/models.yml` and `config/thresholds.yml` say who reads them. Article 4, the GUI's retrieval simulator and the `freetext_pools.target` column description name config keys instead of the deleted constants.
 
 ## [v0.6.1] — 2026-10-15
 

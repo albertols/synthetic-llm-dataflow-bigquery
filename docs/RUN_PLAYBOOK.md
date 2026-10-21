@@ -199,6 +199,123 @@ reason and is EXCLUDED from the total (`row_projection_total
 underivable=`) — never silently sized at `--num_rows`, which for a driven
 child is the one number certainly wrong.
 
+### 2b. Launch with a config file
+
+One sparse YAML file per environment pins what differs there (tables, model,
+dtype, tier), and every launch surface reads it. Flags and DAG params keep
+working and fill every key the file leaves out; a key the file sets wins over
+them ([ADR 0043](adr/0043-generator-config.md); the resolve order, one panel
+per mode, is in [`DESIGN.md` §8](DESIGN.md#8-configuration)).
+
+*One file, written once per environment, reaches every launch surface, and
+the launcher log says what it decided:*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  E[("📄 personal example<br/>committed")]:::store
+  L[("📄 personal.local.yaml<br/>gitignored")]:::store
+  G[("🪣 gs://bucket/<br/>synthetic/config/")]:::store
+  S["⚪ CLI · Flex · Composer<br/>Terraform · tiers.yaml"]:::data
+  LA["⚙️ launcher<br/>file > flag > default"]:::cpu
+  LOG[("📄 launcher log<br/>config_resolved<br/>config_override")]:::store
+  E -->|"1 copy, fill in"| L
+  L -->|"2 upload"| G
+  G -->|"3 config_uri"| S
+  S --> LA
+  LA -->|"4 read"| LOG
+```
+
+1. **Copy the example and fill it in.**
+
+   ```bash
+   cp config/generator.personal.example.yaml config/personal.local.yaml   # config/*.local.yaml is gitignored
+   ```
+
+   Put your project's table and bucket names in it. Keep it sparse: list only
+   the keys that differ in this environment, and look up any other key's
+   default and what raising or lowering it does in
+   [`config/generator.yaml`](../config/generator.yaml), the rendered
+   reference. Never pass the whole reference: it pins every key, so every
+   flag and DAG param becomes a no-op. Keep the quotes the reference uses
+   (`'on'`, `'false'`, `'8192'`, `''`). `run_id` stays a flag, and the
+   reference's fixed and derived entries cannot be set.
+
+   Optionally check it on your machine before a launch spends its 12 minutes
+   on it (prints `ok`, or ends with the error the launch would print):
+
+   ```bash
+   uv run python -c "import sys; from sdfb_core.config import parse_config_text, resolve; p = sys.argv[1]; resolve({}, parse_config_text(open(p).read(), source=p), config_uri=p); print(p, 'ok')" config/personal.local.yaml
+   ```
+
+2. **Upload it.**
+
+   ```bash
+   gcloud storage cp config/personal.local.yaml "gs://${BUCKET}/synthetic/config/personal.yaml"
+   ```
+
+   Only the launcher reads the file. The workers receive the resolved
+   values in the job graph, so the file can change after a job starts
+   without affecting it.
+
+3. **Pass it.**
+
+   | Surface | How |
+   |---|---|
+   | CLI | `--config_uri gs://…/personal.yaml` (a local path also works) |
+   | Flex Template | parameter `config_uri=gs://…/personal.yaml` (a `gs://` path ending `.yaml` or `.yml`) |
+   | Composer generation DAG | trigger param `config_uri`; blank (the default) means no file |
+   | Terraform (the Solution Guides copy) | variable `config_uri`: the Terraform-launched job's parameter, and `CONFIG_URI` for `scripts/04_run_dataflow.sh` |
+   | `public_cloud/deploy/gcp/tiers.yaml` | uncomment `config_uri` under `defaults.params` |
+
+   The Flex parameter and the DAG param exist only in an image and template
+   built from this release, and in a DAG re-imported from it. A DAG that is
+   not re-imported launches exactly as before.
+
+4. **Read the launcher log.** Every launch logs one `config_resolved` line
+   (`uri=-` without a file). A launch with the example file that types the
+   required flags the file does not set (`--reference_table`,
+   `--landing_table`, `--num_rows`, `--run_id`) plus `--env uat` and
+   `--vllm_dtype float16` logs (the second line at WARNING):
+
+   ```text
+   config_resolved uri=gs://my-bucket/synthetic/config/personal.yaml file=6 flag=4 default=65
+   config_override key=guardrails.env typed='uat' file='dev' (the file wins)
+   ```
+
+   - `file + flag + default` is 75, every key a launch resolves (the 47
+     flags and the 28 constants). `file` counts the keys your file set,
+     including the two typed flags it overrode in value or matched;
+     `flag` counts the typed flags the file left alone.
+   - One `config_override` WARNING per typed param whose value the file
+     replaced. `--vllm_dtype float16` gets none: the file sets the same
+     value. An override you did not expect means the file decides a key you
+     meant to set from the DAG: drop that key from the file or change it
+     there.
+   - A file the launch refuses fails it before any Dataflow work, with exit
+     status 2 and one `error:` line: `could not read --config_uri <uri>:
+     <reason>`; `unknown key '…' — did you mean '…'?`; a type or range error
+     naming the dotted key; `launch.run_id is launch identity — pass it as a
+     flag`; `<key> is not settable — <why>`; `this generator understands
+     config_version <= 1`.
+
+**A store-shaping value off its default makes that store cold.** Nineteen of
+the constants a file can set shape what a persisted store holds
+(`source_table_stats`, `freetext_pools`, `rag_chunks`, `fk_fanout_stats`;
+the list is the table in [ADR 0043](adr/0043-generator-config.md) D8). Off
+their defaults they salt that store's key (`…+cfg.<salt>`), so the first
+launch under the new value rebuilds that store's rows: expect
+`freetext_pool_store_miss` and a pool build where the store used to hit. The
+next launch with the same values is warm again, and a launch back at the
+defaults finds the original rows. For §6d this means two arms that differ in
+a pool-shaping value no longer mask each other; two arms at the same values
+still share their pools.
+
 ---
 
 ## 3. Dataflow options

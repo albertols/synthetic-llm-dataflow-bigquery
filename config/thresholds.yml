@@ -14,8 +14,8 @@
 
 # Mode A validation thresholds — env-scoped severity gates.
 #
-# Loaded by the Beam pipeline at job start (M1 §12 — wiring not yet implemented;
-# this file is the contract).
+# Loaded by the Beam pipeline at job start (read by `resolve_thresholds`;
+# `guardrails.thresholds_uri` / `--thresholds_uri` points at it).
 #
 # Severity ladder (see .claude/skills/validation-mode-a.md and the brief §8):
 #   BLOCKER  → raises BlockerThresholdExceeded → Dataflow job FAILED

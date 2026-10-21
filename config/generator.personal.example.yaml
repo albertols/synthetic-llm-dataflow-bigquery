@@ -20,9 +20,10 @@ config_version: 1
 io:
   dlq_table: my-project.synthetic_data_quality.dlq
   validation_runs_table: my-project.synthetic_data_quality.validation_runs
-  source_stats_table: my-project.synthetic_data_quality.source_table_stats
+  source_stats_table: my-project.synthetic_rag.source_table_stats
 serving:
-  model_uri: gs://my-bucket/synthetic/models/gemma4/e4b-it/v1/
+  # The T4-safe entry of config/models.yml: Gemma cannot run on a T4.
+  model_uri: gs://my-bucket/synthetic/models/qwen3/4b-instruct-2507/v1/
   vllm_dtype: float16
 guardrails:
   env: dev
