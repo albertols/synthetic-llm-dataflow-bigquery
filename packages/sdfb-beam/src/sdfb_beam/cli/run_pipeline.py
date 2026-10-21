@@ -75,6 +75,7 @@ from apache_beam.options.pipeline_options import (
 from sdfb_core.codegen import derive_bq_load_schema
 from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
 from sdfb_core.config.resolve import (
+    PROVENANCE_FILE,
     ConfigError,
     ConfigResolution,
     missing_required,
@@ -656,8 +657,18 @@ def resolve_embedder_identity(args: argparse.Namespace) -> tuple[str, str]:
                              settings_salt(config_of(args), "rag_chunks"))
 
 
+# The keys the Composer DAG's chained evaluation takes from its own params
+# (seed_table, landing_dataset, reference_dataset, relationships_uri,
+# reference_rows_limit), never from the generator's config file (ADR 0043).
+_EVALUATION_INPUT_KEYS = ("io.reference_table", "io.landing_table",
+                          "relational.relationships_uri",
+                          "relational.generate_fk_relationships",
+                          "sampling.reference_rows_limit")
+
+
 def log_config_resolution(resolution: ConfigResolution) -> None:
-  """One line for the resolution, one WARNING row per flag a file overrode."""
+  """One line for the resolution, one WARNING row per flag a file overrode,
+    and one per evaluation input the file sets."""
   counts: dict[str, int] = {}
   for origin in resolution.provenance.values():
     counts[origin] = counts.get(origin, 0) + 1
@@ -667,6 +678,11 @@ def log_config_resolution(resolution: ConfigResolution) -> None:
   for item in resolution.overridden:
     logger.warning("config_override key=%s typed=%r file=%r (the file wins)",
                    item.key, item.typed, item.file)
+  for key in _EVALUATION_INPUT_KEYS:
+    if resolution.provenance.get(key) == PROVENANCE_FILE:
+      logger.warning(
+          "config_sets_evaluation_input key=%s (a chained evaluation reads "
+          "the DAG param, not the file)", key)
 
 
 def resolve_thresholds(thresholds_uri: str, env: str) -> Thresholds:

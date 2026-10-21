@@ -68,6 +68,67 @@ def test_override_warning_lists_the_conflict(tmp_path, caplog):
   assert "0.3" in caplog.text and "0.7" in caplog.text
 
 
+_EVALUATION_INPUTS = ("io.reference_table", "io.landing_table",
+                      "relational.relationships_uri",
+                      "relational.generate_fk_relationships",
+                      "sampling.reference_rows_limit")
+
+
+def _evaluation_input_warnings(caplog) -> list[str]:
+  return [
+      r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and
+      r.getMessage().startswith("config_sets_evaluation_input")
+  ]
+
+
+def test_a_file_set_evaluation_input_warns(tmp_path, caplog):
+  uri = _write(
+      tmp_path, "io: {reference_table: p.src.u, landing_table: p.land.u}\n"
+      "relational: {relationships_uri: gs://b/rel/, "
+      "generate_fk_relationships: false}\n"
+      "sampling: {reference_rows_limit: 5000}\n"
+      "generation: {similarity: 0.7}\n")
+  args, _ = rp.parse_args([*ARGV_BASE, f"--config_uri={uri}"])
+  with caplog.at_level(logging.WARNING):
+    rp.log_config_resolution(args.config_resolution)
+  assert _evaluation_input_warnings(caplog) == [
+      f"config_sets_evaluation_input key={key} (a chained evaluation reads "
+      "the DAG param, not the file)" for key in _EVALUATION_INPUTS
+  ]
+
+
+def test_evaluation_inputs_from_flags_do_not_warn(tmp_path, caplog):
+  uri = _write(tmp_path, "generation: {similarity: 0.7}\n")
+  args, _ = rp.parse_args([
+      *ARGV_BASE, "--reference_rows_limit=5000", "--relationships_uri=",
+      f"--config_uri={uri}"
+  ])
+  with caplog.at_level(logging.WARNING):
+    rp.log_config_resolution(args.config_resolution)
+  assert not _evaluation_input_warnings(caplog)
+
+
+def test_a_reference_null_lets_the_typed_flag_fill_the_key(tmp_path):
+  # The rendered reference shows the required keys as null; a file copied
+  # from it must not make the launch blame the operator's typed flag.
+  uri = _write(
+      tmp_path, "io:\n  reference_table: null\n  landing_table: null\n"
+      "  dlq_table: null\n")
+  args, _ = rp.parse_args([*ARGV_BASE, f"--config_uri={uri}"])
+  assert args.reference_table == "p.src.t"
+  assert args.config_resolution.provenance["io.reference_table"] == "flag"
+
+
+def test_unquoted_yaml_off_and_on_are_accepted(tmp_path):
+  uri = _write(
+      tmp_path, "sampling:\n  source_stats: off\n"
+      "free_text:\n  prompt_constraints: on\n  prompt_debug: off\n"
+      "  freetext_expansion: off\n")
+  args, _ = rp.parse_args([*ARGV_BASE, f"--config_uri={uri}"])
+  assert (args.source_stats, args.prompt_constraints, args.prompt_debug,
+          args.freetext_expansion) == ("off", "on", "off", "off")
+
+
 def test_blank_config_uri_is_no_file():
   args, _ = rp.parse_args([*ARGV_BASE, "--config_uri="])
   assert args.config_uri == ""

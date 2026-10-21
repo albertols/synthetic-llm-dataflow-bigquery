@@ -765,7 +765,15 @@ default_dag_params = {
             description="gs:// path to a generator config YAML (ADR 0043). "
             "Keys it sets win over every param of this DAG; params fill "
             "the keys it leaves out. Empty = no file — the launch behaves "
-            "exactly as before.",
+            "exactly as before. The chained evaluation (run_evaluation) "
+            "does not read the file: it takes its tables, relationship "
+            "model and reference_rows_limit (10000) from this DAG, so a "
+            "file that sets io.reference_table, io.landing_table, "
+            "relational.relationships_uri, "
+            "relational.generate_fk_relationships or "
+            "sampling.reference_rows_limit generates one thing and "
+            "evaluates another (the launcher logs "
+            "config_sets_evaluation_input for each).",
         ),
     "run_evaluation":
         Param(
