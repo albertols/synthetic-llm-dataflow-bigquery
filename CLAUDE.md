@@ -70,6 +70,7 @@ Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the ot
 
 - `packages/sdfb-core/src/sdfb_core/engines/base.py` — `GenerationEngine` ABC + `ModelClient` Protocol (the seam).
 - `packages/sdfb-core/src/sdfb_core/config/` — GeneratorConfig + catalogue; `config/generator.yaml` is the rendered reference (ADR 0043).
+- `packages/sdfb-core/src/sdfb_core/record.py` — the generation record (the `validation_runs` record columns and the config snapshot, ADR 0044); `sdfb_core/version.py` — `generator_version`.
 - `packages/sdfb-beam/src/sdfb_beam/pipeline.py` — `build_pipeline()` composer.
 - `packages/sdfb-beam/src/sdfb_beam/ddl/cli.py` — DDL extractor CLI.
 - `scripts/extract_ddl.py`, `scripts/hello_synthetic_mlx.py` — runnable entry shims (image build/push live in CI, see [ADR 0008](docs/adr/0008-ci-driven-builds.md)).

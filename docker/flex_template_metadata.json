@@ -23,7 +23,7 @@
     {
       "name": "reference_rows_limit",
       "label": "Reference rows LIMIT",
-      "helpText": "Generation: cap on rows pulled by SELECT ... LIMIT N. Default 10000; a positive integer. Evaluation: the generation's reference sample size (a positive integer; empty means not given). It sizes the reference panel behind the privacy metrics, which an evaluation named by seed_table, tables or relationships_uri cannot read from the launch's records: without it those metrics are not evaluated.",
+      "helpText": "Generation: cap on rows pulled by SELECT ... LIMIT N. Default 10000; a positive integer. Evaluation: the generation's reference sample size (a positive integer; empty means not given). It sizes the reference panel behind the privacy metrics. An evaluation named by tables or relationships_uri cannot read it from the launch's records; one named by seed_table reads it from the generation record (with generation_job_id and validation_runs_table, ADR 0044), whose value wins, this one being the fallback. With a value from neither, those metrics are not evaluated.",
       "isOptional": true
     },
     {
@@ -170,7 +170,7 @@
     {
       "name": "validation_runs_table",
       "label": "validation_runs table FQN",
-      "helpText": "Generation: destination BigQuery table for the run-level summary row. project.dataset.table. Optional; empty skips the write. Evaluation: the generator's validation-runs table (project.dataset.table; empty means not given). With generation_job_id next to seed_table, this launch's rows of it, found by landing table and the job's window, give the digest that verifies the reference sample, so the metrics that compare with it are evaluated; without it, or when the job's window cannot be read, those metrics are not evaluated and the row says why.",
+      "helpText": "Generation: destination BigQuery table for the run-level summary row. project.dataset.table. Optional; empty skips the write. Evaluation: the generator's validation-runs table (project.dataset.table; empty means not given). With generation_job_id next to seed_table, this launch's rows of it, found by landing table and the job's window, give the digest that verifies the reference sample, so the metrics that compare with it are evaluated; without it, or when the job's window cannot be read, those metrics are not evaluated and the row says why. Their generation record, when present, also names the tables, datasets, relationship model and reference_rows_limit that were generated (ADR 0044).",
       "isOptional": true
     },
     {
@@ -377,7 +377,7 @@
     {
       "name": "relationships_uri",
       "label": "Relationship models URI",
-      "helpText": "Generation: where the relational models live (ADR 0032): a folder or a single YAML file, local or gs://. Default: the config/relationships folder packaged in the image. Point it at gs://... to change PK/FK/identity without rebuilding \u2014 this is the ONLY source of relational truth; table descriptions are never read for it. Evaluation: the relationship model file or directory. Given alone (with landing_dataset and reference_dataset) it names the tables: every enabled table of the model, parents first. With seed_table it names the model the seed's component is read from; a URI that holds no model file evaluates the seed alone, with a warning. By generation_job_id it is read only when the generation launch's own records name none, and the default folder is in this same image.",
+      "helpText": "Generation: where the relational models live (ADR 0032): a folder or a single YAML file, local or gs://. Default: the config/relationships folder packaged in the image. Point it at gs://... to change PK/FK/identity without rebuilding \u2014 this is the ONLY source of relational truth; table descriptions are never read for it. Evaluation: the relationship model file or directory. Given alone (with landing_dataset and reference_dataset) it names the tables: every enabled table of the model, parents first. With seed_table it names the model the seed's component is read from; a URI that holds no model file evaluates the seed alone, with a warning. By generation_job_id it is read only when the generation launch's own records name none, and the default folder is in this same image. On the seed path a generation record naming a model replaces it, and one stating relationships off overrides it when the record names the tables (ADR 0044).",
       "isOptional": true
     },
     {
@@ -449,7 +449,7 @@
     {
       "name": "generation_job_id",
       "label": "Evaluation: Generation job id",
-      "helpText": "Evaluation only. Target: the generation job's Dataflow id. Needs region. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone; the one exception is a seed_table, which generation_job_id may accompany: it is then the identity of the launch the seed names, and only the Dataflow job is read (for its window; never its log or BigQuery job labels; with validation_runs_table given and the window known, this launch's rows of that table are read as well, to verify the reference sample), a job that cannot be read costing the window and a warning. It is not called job_id because the template launcher does not pass a parameter of that name to the pipeline.",
+      "helpText": "Evaluation only. Target: the generation job's Dataflow id. Needs region. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone; the one exception is a seed_table, which generation_job_id may accompany: it is then the identity of the launch the seed names, and only the Dataflow job is read (for its window; never its log or BigQuery job labels; with validation_runs_table given and the window known, this launch's rows of that table are read as well: first for the generation record (ADR 0044), which then names the tables and inputs, and to verify the reference sample), a job that cannot be read costing the window and a warning. It is not called job_id because the template launcher does not pass a parameter of that name to the pipeline.",
       "paramType": "TEXT",
       "isOptional": true
     },
@@ -463,7 +463,7 @@
     {
       "name": "landing_dataset",
       "label": "Evaluation: Landing dataset",
-      "helpText": "Evaluation only. With tables, seed_table, or relationships_uri alone: the dataset (or project.dataset) the tables landed in.",
+      "helpText": "Evaluation only. With tables, seed_table, or relationships_uri alone: the dataset (or project.dataset) the tables landed in. On the seed path a generation record's landing dataset replaces it (ADR 0044).",
       "paramType": "TEXT",
       "isOptional": true
     },
@@ -534,7 +534,7 @@
     {
       "name": "reference_dataset",
       "label": "Evaluation: Reference dataset",
-      "helpText": "Evaluation only. With tables, seed_table, or relationships_uri alone: the dataset (or project.dataset) of their sources, same table names.",
+      "helpText": "Evaluation only. With tables, seed_table, or relationships_uri alone: the dataset (or project.dataset) of their sources, same table names. On the seed path a generation record's source dataset replaces it (ADR 0044).",
       "paramType": "TEXT",
       "isOptional": true
     },
@@ -591,7 +591,7 @@
     {
       "name": "seed_table",
       "label": "Evaluation: Seed table",
-      "helpText": "Evaluation only. Target: the table a launch targeted; evaluates what that launch generated: its enabled component in the relationship model (relationships_uri), or the table alone when no model names it or none is given. Needs landing_dataset and reference_dataset. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone; generation_job_id may accompany a seed_table (it then says which generation job the row belongs to, and the row takes the job's start and end from the Dataflow API).",
+      "helpText": "Evaluation only. Target: the table a launch targeted; evaluates what that launch generated: its enabled component in the relationship model (relationships_uri), or the table alone when no model names it or none is given; with generation_job_id and validation_runs_table, the job's generation record names the tables instead when present (ADR 0044), the seed's component being the fallback. Needs landing_dataset and reference_dataset. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone; generation_job_id may accompany a seed_table (it then says which generation job the row belongs to, and the row takes the job's start and end from the Dataflow API).",
       "paramType": "TEXT",
       "isOptional": true
     },

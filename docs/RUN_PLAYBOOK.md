@@ -338,9 +338,10 @@ flowchart LR
      value. An override you did not expect means the file decides a key you
      meant to set from the DAG: drop that key from the file or change it
      there.
-   - One `config_sets_evaluation_input key=… (a chained evaluation reads the
-     DAG param, not the file)` WARNING per evaluation input the file sets
-     (the example sets none); see the next paragraph.
+   - One `config_sets_evaluation_input key=… (no generation record is
+     written — <reason> — …)` WARNING per evaluation input the file sets,
+     **only when the launch writes no generation record** (§2c); the example
+     sets none. See the last paragraph of this section.
    - A `null` the file copied from the reference for a required key
      (`reference_table: null`) pins nothing: the typed flag fills it.
    - A file the launch refuses fails it before any Dataflow work, with exit
@@ -362,20 +363,358 @@ defaults finds the original rows. For §6d this means two arms that differ in
 a pool-shaping value no longer mask each other; two arms at the same values
 still share their pools.
 
-**The chained evaluation reads the DAG params, not the file.** With
-`run_evaluation` on, the Composer DAG builds the evaluation's inputs from its
-own params: the seed table from `table_fqn`, the reference dataset from
-`source_dataset` (or `table_fqn`), the landing dataset from the landing-table
-marker, `relationships_uri` and `generate_fk_relationships` from their params,
-and `reference_rows_limit` fixed at 10000. A file that sets
-`io.reference_table`, `io.landing_table`, `relational.relationships_uri`,
-`relational.generate_fk_relationships` or `sampling.reference_rows_limit`
-generates one thing and evaluates another, and the launcher logs a
-`config_sets_evaluation_input` WARNING for each. Until the generation record
-carries these values ([ADR 0043](adr/0043-generator-config.md),
-Consequences), keep these five keys out of the file on a launch you
-evaluate, and set the ones that are DAG params (`table_fqn`,
-`relationships_uri`, `generate_fk_relationships`) there.
+**The chained evaluation follows the file through the generation record.**
+When `validation_runs` has the [ADR 0044](adr/0044-generation-record.md)
+columns, every row carries the launch's resolved config, and the chained
+evaluation takes its tables, datasets, relationship model and
+`reference_rows_limit` from it — a file that set `io.reference_table` (its
+dataset), `io.landing_table`, `relational.relationships_uri`,
+`relational.generate_fk_relationships` or `sampling.reference_rows_limit` is
+evaluated as generated, with one warning on the evaluation per value that
+differs from the DAG's. Without the columns the evaluation falls back to the
+DAG params (the seed table from `table_fqn`, the datasets from
+`source_dataset` and the landing-table marker, the model from
+`relationships_uri` and `generate_fk_relationships`, `reference_rows_limit`
+fixed at 10000), and the launcher logs a `config_sets_evaluation_input`
+WARNING for each such key: add the columns (§2c) or keep those keys out of
+the file. The record is read in the generation job's window, so an
+evaluation that cannot read the job (no `roles/dataflow.viewer`) falls back
+the same way.
+
+### 2c. Read the generation record
+
+Every `validation_runs` row of a launch carries its generation record when the
+table has the [ADR 0044](adr/0044-generation-record.md) columns: one row per
+table per Dataflow job, each with the same record.
+
+| Column, or block of `config` | Read it as |
+| :-- | :-- |
+| `job_id`, `job_name` | the Dataflow job. `job_id` is read by a worker from the GCE metadata server; NULL on the DirectRunner or when no attribute answers (readers then match `job_name` in the job's window) |
+| `launch_run_id` | the launch's base run id, the same on every table's row (`run_id` is the base or `<base>-NN-<table>`) |
+| `generator_version` | the workers' version, `<base>-<branch>-<sha7>[-dirty]`; the launcher's is `config.launcher.version` |
+| `launched_at` | when the launcher built the job's graph (`created_at` stays the row write time) |
+| `embedder_uri`, `retrieval_method`, `similarity`, `seed`, `source_stats` | the generation settings the GUI list shows; `retrieval_method` is NULL for `b2_library`, `seed` reads `derived` when none was given |
+| `relationships_uri`, `relationships_digest` | the model as resolved and its sha12; NULL digest without a model |
+| `config_digest` | sha12 of `config.values`: same digest, same generator config |
+| `config.values` | the resolved config, every section; a valid `--config_uri` file |
+| `config.provenance`, `config.overridden` | `file` / `flag` / `default` per key; the typed params the file replaced |
+| `config.derived` | the temperature ladder, the profiler version and `cache_keys`, the key each store was read and written under |
+| `config.thresholds`, `config.relationships`, `config.beam`, `config.launcher`, `config.batch` | the gate applied; the model as declared for this launch's tables; the Dataflow options; the launcher's version; `null` (reserved for whole-model launches) |
+
+Query a launch's rows. The table is DAY-partitioned on `created_at`, so keep
+the date filter (any day at or before the launch):
+
+```sql
+SELECT run_id, job_id, job_name, launch_run_id, generator_version, launched_at,
+       config_digest, JSON_VALUE(config, '$.launcher.version') AS launcher_version,
+       JSON_VALUE(config, '$.values.generation.similarity') AS similarity,
+       JSON_QUERY(config, '$.overridden') AS overridden
+FROM `<project>.<quality_dataset>.validation_runs`
+WHERE launch_run_id = '<run id>'
+  AND created_at >= TIMESTAMP('<launch day>')
+ORDER BY run_id;
+```
+
+`<run id>` is the `run_id` the launch was given (on a Composer launch, the
+`run_id` in the job's pipeline options in the Dataflow console);
+`job_id = '<job id>'` in place of the `launch_run_id` filter finds the same
+rows when the job id was recorded.
+
+**The launcher log.** Against a migrated table it logs nothing about the
+record. Otherwise one of:
+
+```text
+generation_record_degraded table=<project>.<quality_dataset>.validation_runs reason=missing_columns missing=job_id,job_name,… — writing today's 21-column row. Add the columns once with:
+  bq update --schema config/bq_schema/synthetic_data_quality/validation_runs.schema.json <project>:<quality_dataset>.validation_runs
+generation_record_degraded table=… reason=schema_unreadable — its schema could not be read (<error>); writing today's 21-column row. …
+```
+
+and then one `config_sets_evaluation_input key=…` WARNING per evaluation input
+the file set (§2b): that launch's chained evaluation reads its DAG params.
+
+**The worker log** (Cloud Logging, the job's worker logs). Each summary DoFn
+logs, once per instance:
+
+```text
+SDFB_MILESTONE name=generation_record_job_id job_id=<job id> source=metadata:job_id
+```
+
+| `source=` | Means |
+| :-- | :-- |
+| `metadata:job_id`, `metadata:dataflow_job_id` | the GCE metadata attribute that answered; `job_id=` is the job's id |
+| `none` | neither attribute answered: `job_id` stays NULL; the evaluator matches the job's rows by `job_name` in its window, the GUI by the evaluation's run ids |
+| `not_dataflow` | the launcher did not run on Dataflow (the DirectRunner), so no metadata read is attempted; `job_id` is NULL |
+
+A worker whose generator version is not the launcher's logs one
+`SDFB_MILESTONE name=generator_version_mismatch launcher=<version> worker=<version>`
+WARNING per summary DoFn instance; the row keeps the worker's version, because
+its code wrote the rows. A launch that writes no record logs no
+`generation_record_job_id` at all.
+
+**Replay check.** A run's `values` resolve to the same config and digest.
+Download the run's config from the GUI ("Download as config.yaml" on the run's
+Parameters tab), or copy one row's `JSON_QUERY(config, '$.values')` into a
+file (JSON is YAML), then:
+
+```bash
+uv run --no-sync python scripts/config/config_digest.py <file>
+```
+
+It prints the row's `config_digest`. The same file, passed as `config_uri`,
+replays the launch (the run id stays a flag).
+
+### 2d. Corp acceptance of the generation record (A2)
+
+The end-to-end run the branch needs before release (AC-A2-5 of
+[ADR 0044](adr/0044-generation-record.md)). Runs once on the corp project,
+from a checkout of `feat/config-record-model-launch`; the laptop has no GCP
+access. Every name in angle brackets is yours and nothing here names a real
+table: `<project>`; `<quality_dataset>`, the dataset of `validation_runs`
+(`synthetic_data_quality` by default); `<evaluation_dataset>`, the
+evaluator's `output_dataset` (the same dataset by default);
+`<source_dataset>.<A_TABLE>`, the source table you usually launch (the DAG's
+`table_fqn`); `<bucket>`; `<location>`, the datasets' BigQuery location; and,
+once the launch runs, `<run id>`, `<job id>` and `<launch day>` (its date,
+`YYYY-MM-DD`). Commands run from the repository root of a checkout synced with
+`uv sync --frozen --group dev`.
+
+*Migrate before anything new is deployed, then read each surface in the order
+the launch writes it:*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  M[("🗄️ 1 migrate<br/>two tables + views")]:::store
+  B["⚙️ 2–5 workflows, image,<br/>template, DAG"]:::cpu
+  L["⚪ 6 launch<br/>with config_uri"]:::data
+  LL[("📄 7 launcher log")]:::store
+  WL[("📄 8 worker log")]:::store
+  V[("🗄️ 9 validation_runs")]:::store
+  R[("🗄️ 10 registry")]:::store
+  G["⚙️ 11 GUI"]:::cpu
+  M --> B --> L --> LL --> WL --> V --> R --> G
+```
+
+1. **Migrate the two tables, then refresh the views** — before the new image,
+   evaluator or GUI is deployed. The `validation_runs` columns are optional
+   for the generator (without them it writes today's row with one WARNING,
+   and no record); the registry's are required: the new evaluator's load jobs
+   carry them and fail on a table without them, and the new GUI's evaluation
+   list queries them.
+
+   ```bash
+   bq update --schema config/bq_schema/synthetic_data_quality/validation_runs.schema.json \
+         <project>:<quality_dataset>.validation_runs
+   bq update --schema packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_data_history.schema.json \
+         <project>:<evaluation_dataset>.evaluation_data_history
+   uv run --frozen --project packages/sdfb-evaluation sdfb-eval schemas \
+         --project <project> --dataset <evaluation_dataset> --apply   # creates nothing that exists; replaces the views
+   ```
+
+   Check:
+
+   ```bash
+   uv run --frozen python scripts/deployment_prerequisites.py --project <project> \
+         --source-table <project>.<source_dataset>.<A_TABLE> \
+         --validation-runs-table <project>.<quality_dataset>.validation_runs \
+         --evaluation-dataset <project>.<evaluation_dataset>
+   ```
+
+   Expect step 4d `BQ table · validation_runs` OK with `35 cols`, step 13c
+   `Evaluation table · evaluation_data_history` OK, and the two views (13g,
+   13h) OK.
+
+2. **Apply the workflow edits of [§0a](#0a-workflow-edits-for-the-generation-record-untracked-workflows)**
+   to workflows 1, 2, 3 and 3e, all four together.
+
+3. **Rebuild the image** (workflow 1, a build of this branch). Expect the
+   `docker build` line of the build log to carry
+   `--build-arg GIT_COMMIT_ARG=<sha>` and
+   `--build-arg SDFB_BUILD_BRANCH_ARG=feat/config-record-model-launch`.
+
+4. **Rebuild the Flex template** (workflow 2) on that image tag. This phase
+   adds no template parameter; the rebuild points the template at the new
+   image. Build the template before step 5.
+
+5. **Re-import the generation DAG** (workflow 3; and 3e if you use the
+   standalone evaluation DAG). Expect the `config_uri` param's description in
+   the trigger form to say the chained evaluation follows the generation
+   record in `validation_runs`.
+
+6. **Write a config file that changes two evaluation inputs, upload it, and
+   launch.**
+
+   ```yaml
+   # a2-acceptance.yaml
+   config_version: 1
+   generation: {similarity: 0.6}
+   sampling: {reference_rows_limit: 5000}
+   ```
+
+   ```bash
+   gcloud storage cp a2-acceptance.yaml "gs://<bucket>/synthetic/config/a2-acceptance.yaml"
+   ```
+
+   Trigger the generation DAG with `config_uri` =
+   `gs://<bucket>/synthetic/config/a2-acceptance.yaml`, `run_evaluation` true
+   (the default), your usual `table_fqn`, and `similarity` left at the DAG's
+   0.5: the DAG passes every param, so the file overrides both keys. A
+   5,000-row sample has its own reference digest, so this launch builds its
+   free-text pools and RAG chunks cold; to keep the stores warm, drop the
+   `sampling` line (steps 7, 9 and 10 then show one override and the DAG's
+   `reference_rows_limit`). Note the `run_id` and the Dataflow job id, and
+   the launch day for the queries.
+
+7. **Read the launcher log** (the DRIVER log, as in §2a). Expect:
+
+   ```text
+   SDFB_MILESTONE name=build_info commit=<sha> component=launcher version=0.6.1-feat-config-record-model-<sha7>
+   config_resolved uri=gs://<bucket>/synthetic/config/a2-acceptance.yaml file=2 flag=<n> default=<n>
+   config_override key=generation.similarity typed=0.5 file=0.6 (the file wins)
+   config_override key=sampling.reference_rows_limit typed=10000 file=5000 (the file wins)
+   ```
+
+   (`0.6.1` is the checkout's `GENERATOR_VERSION_BASE`; the branch is cut to
+   24 characters). And **no** `generation_record_degraded`, **no**
+   `config_sets_evaluation_input`.
+
+8. **Read the worker log** (Cloud Logging, the job's worker logs; search
+   `name=generation_record_job_id`). Expect at least one line per landed
+   table with `source=metadata:job_id` (or `source=metadata:dataflow_job_id`)
+   and `job_id=` the job id the console shows: this confirms which metadata
+   attribute answers on Dataflow. `source=none` means neither does:
+   `validation_runs.job_id` stays NULL and the evaluator matches `job_name`
+   instead — the run still passes the other steps; report it, so the
+   attribute list (`sdfb_beam/io/gce_metadata.py`), the column description
+   and ADR 0044 can say so. Expect **no** `generator_version_mismatch`: the
+   launcher and the workers run one image. The workers' `build_info` lines
+   carry the version of step 7.
+
+9. **Check `validation_runs`** with the §2c query (`launch_run_id =
+   '<run id>'`, `created_at >= TIMESTAMP('<launch day>')`). Expect one row
+   per landed table, and on every row: `job_id` = the Dataflow job id
+   (AC-A2-5), `job_name` = the job's name in the console, `generator_version`
+   = `launcher_version` = step 7's version, `similarity` = `0.6`, the same
+   `config_digest`, and `overridden` naming `generation.similarity` and
+   `sampling.reference_rows_limit`. Add
+   `JSON_VALUE(config, '$.values.sampling.reference_rows_limit')` to the
+   select list: `5000`. Then run the AC-A2-5 probe, which asserts every record
+   column on every row of the launch:
+
+   ```bash
+   SDFB_RECORD_TABLE=<project>.<quality_dataset>.validation_runs \
+   SDFB_RECORD_RUN_ID=<run id> \
+   uv run --frozen python -m pytest -m gcp packages/sdfb-tests/tests/integration/test_generation_record_gcp.py
+   ```
+
+   Expect `1 passed`.
+
+10. **Check the registry** — the chained evaluation's row:
+
+    ```sql
+    SELECT evaluation_id, params_source, engine, llm_model_uri, embedder_id,
+           retrieval_method, similarity, seed, num_rows_requested,
+           source_stats_tier, env, reference_rows_limit, generator_version,
+           generator_config_digest,
+           JSON_VALUE(generation_params, '$.launcher.version') AS snapshot_version,
+           warnings
+    FROM `<project>.<evaluation_dataset>.evaluation_latest`
+    WHERE generation_job_id = '<job id>';
+    ```
+
+    Expect `params_source` = `validation_runs`; `engine`, `llm_model_uri`,
+    `embedder_id`, `retrieval_method` (NULL for `b2_library`), `similarity`
+    (`0.6`), `seed`, `num_rows_requested`, `source_stats_tier` and `env` all
+    filled (AC-A2-4); `reference_rows_limit` = `5000`, the file's and not the
+    DAG's 10000; `generator_version` and `snapshot_version` = step 9's
+    version; `generator_config_digest` = step 9's `config_digest`; and among
+    the `warnings`: `the generation's record (validation_runs, job <job id>)
+    decides what is evaluated (ADR 0044): reference_rows_limit 5000 (given
+    10000)`.
+
+11. **Check the GUI**, this branch's `gui/`, read-only against the corp
+    project (it reads `validation_runs` and the registry from one dataset):
+
+    ```bash
+    cd gui
+    npm ci && npm run build
+    DATA_SOURCE=bigquery GCP_PROJECT=<project> QUALITY_DATASET=<quality_dataset> BQ_LOCATION=<location> npm start
+    ```
+
+    - **Evaluations list**, the chained evaluation's row: Engine · model,
+      Embedder · retrieval, Similarity `0.6`, Seed, Ref rows `5K`, Rows, Tier
+      and Env filled, no `—`; the Generator · job · config cell shows
+      `0.6.1 · <sha7>`, the job id (its link opens the job in the Dataflow
+      console) and the config-digest chip. The **Generator version**,
+      **Branch** (`feat-config-record-model`) and **Config digest** filters
+      list this launch's values, and each keeps the row.
+    - **The run's Parameters tab**, the Generator panel: the values by
+      section with `file` / `flag` / `default` badges (`file` on
+      `generation.similarity` and `sampling.reference_rows_limit`), the
+      warning "The config file overrode 2 typed params" listing both, **no**
+      `launcher … ≠ worker …` badge, the Relationships model card when the
+      launch loaded a model, and the job link.
+    - **Download as config.yaml** (the file is `config.<run id>.yaml`), then,
+      from the repository root in another terminal,
+      `uv run --frozen python scripts/config/config_digest.py <that file>`
+      prints step 9's `config_digest`.
+    - **Compare** this evaluation with an older one: the Generator config card
+      lists the keys that differ (`generation.similarity` and
+      `sampling.reference_rows_limit` against a record-backed launch without
+      the file), or says "No generation record for <id> (ADR 0044)" for an
+      evaluation from before the migration.
+
+12. **The degrade path** (optional; on a scratch table, with `run_evaluation`
+    false). Create a 21-column copy of the schema and a table from it, in a
+    scratch dataset `<scratch_dataset>` the job's service account can write,
+    and point one launch at it with a second config file:
+
+    ```bash
+    python3 -c "import json,sys; json.dump(json.load(open(sys.argv[1]))[:21], sys.stdout, indent=1)" \
+          config/bq_schema/synthetic_data_quality/validation_runs.schema.json > validation_runs_21.schema.json
+    bq mk --table --time_partitioning_type DAY --time_partitioning_field created_at \
+          <project>:<scratch_dataset>.validation_runs_21 validation_runs_21.schema.json
+    ```
+
+    ```yaml
+    # a2-degrade.yaml
+    config_version: 1
+    io: {validation_runs_table: <project>.<scratch_dataset>.validation_runs_21}
+    ```
+
+    Upload it as in step 6 and trigger the DAG with `config_uri` set to it and
+    `run_evaluation` false. Expect one `config_override` row for
+    `io.validation_runs_table` (the file replaces the DAG's table), one
+    `generation_record_degraded … reason=missing_columns` WARNING
+    with the `bq update` for that table, no `generation_record_job_id` on the
+    workers, a 21-column row in the scratch table, and the job landing its
+    rows as usual (the laptop test
+    `test_the_landed_rows_do_not_depend_on_the_record` pins that the rows are
+    identical).
+
+**If it degrades** — what each line means and the one fix:
+
+| You see | It means | Fix |
+| :-- | :-- | :-- |
+| `generation_record_degraded … reason=missing_columns` (launcher) | `validation_runs` lacks the record columns: today's row, no record | the `bq update` the WARNING prints (step 1) |
+| `generation_record_degraded … reason=schema_unreadable` (launcher) | the launcher could not read the table's schema: a wrong FQN, or no `bigquery.tables.get` for the job's service account | correct `validation_runs_table`, or grant `roles/bigquery.dataViewer` on `<quality_dataset>` |
+| `config_sets_evaluation_input key=…` (launcher) | this launch writes no record, so its chained evaluation reads the DAG params for that key | fix the line above, or keep the key out of the file |
+| `generation_record_job_id … source=none` (worker) | no metadata attribute gave the job id: `job_id` is NULL, readers match `job_name` | nothing to fix in the run; report it (step 8) |
+| `generation_record_job_id … source=not_dataflow` (worker) | a DirectRunner launch: no job id to read | none |
+| `generator_version_mismatch launcher=… worker=…` (worker) | the launcher's code is not the workers' image: a template on an older image, or a launch from a checkout | rebuild the template on the image (step 4) and launch from it |
+| the evaluation fails at its registry write, naming `generator_version` or `generator_config_digest` | the registry is not migrated | step 1's registry `bq update` |
+| the GUI's evaluation list fails with `Unrecognized name: generator_version` | the registry or its views are not migrated | step 1's registry `bq update` and `sdfb-eval schemas --apply` |
+| `params_source` is not `validation_runs` and the list's cells are empty | the evaluation found no record: the generation job could not be read (a "no window" warning: grant `roles/dataflow.viewer`), or its rows lack the columns | step 9 first, then the job read |
+| "No generation record" on the Parameters tab | the run's rows predate the migration or went to a table without the columns | step 1, then a new launch |
+
+Record the outcome (job id, step 8's `source=`, the step 9 and 10 query
+output, GUI screenshots) under `runs/<job id>/` as usual, and report it back
+on the branch.
 
 ---
 
@@ -752,11 +1091,11 @@ flowchart LR
 
 | Path | Do this | Use it when |
 | :-- | :-- | :-- |
-| The generation DAG | trigger it: `run_evaluation` is true by default (false launches generation alone); set `source_dataset` to the dataset of the source tables when it is not that of `table_fqn` (optionally `evaluation_mode`, `evaluation_machine_type`, `evaluation_max_workers`, `evaluation_output_dataset`) | you want the run evaluated as soon as it lands: the launched table's enabled component in the relationship model, or that table alone. The task `trigger_evaluation` submits the job and does not wait: read the result from the registry. It reads no job log. Of the three roles that read a job it needs only `roles/dataflow.viewer`, for the generation window (without it the run still works, with a warning and no window) |
+| The generation DAG | trigger it: `run_evaluation` is true by default (false launches generation alone); set `source_dataset` to the dataset of the source tables when it is not that of `table_fqn` (optionally `evaluation_mode`, `evaluation_machine_type`, `evaluation_max_workers`, `evaluation_output_dataset`) | you want the run evaluated as soon as it lands: the launched table's enabled component in the relationship model, or that table alone — or, when the generator wrote its record, the tables the record names (§2c). The task `trigger_evaluation` submits the job and does not wait: read the result from the registry. It reads no job log. Of the three roles that read a job it needs only `roles/dataflow.viewer`, for the generation window (without it the run still works, with a warning and no window) |
 | The standalone DAG `sdfb_evaluation_framework` (optional import) | trigger it with the defaults the import filled (`seed_table`, `landing_dataset`, `source_dataset`, `validation_runs_table`) and, when known, `generation_job_id` (its identity: the Dataflow job's window, no log); `seed_table` alone when the job id is unknown; `generation_job_id` alone with `seed_table` emptied for the full lookup (needs the roles that read a job's log); `run_id` or `tables` as before (a typed one beats the default seed); `generation_job_ids` for several jobs (one run and one Dataflow job per id, one after another; the seed is not handed to them, each is the full lookup of its own job) | the run already landed and you want it evaluated on its own (to re-run it, or the generation DAG ran without `run_evaluation`), or you want the launch to wait for the job and close the registry row if the job dies. It evaluates by the same seed path as the chain, reads no job log, and takes `launcher_machine_type` for the launcher VM |
 | The template, by hand | `gcloud dataflow flex-template run … --template-file-gcs-location gs://<templates>/synthetic/sdfb-<VERSION>-template.json --parameters sdfb_job=evaluation,generation_job_id=<JOB_ID>,disk_size_gb=200 --worker-machine-type e2-standard-8` | no Composer at hand |
 
-The launch has 12 minutes in all, the image pull included ("By default, the Flex Template launch process has a timeout of 12 mins", Google's troubleshooting page, "Polling timeout errors"); the pull of the multi-GB image took almost eight on a cold launcher, and planning runs on the launcher before the job exists. Both evaluation launches therefore take a launcher machine type (`evaluation_launcher_machine_type` in the generation DAG, `launcher_machine_type` in the standalone one, default `e2-standard-8`; REST field `environment.launcherMachineType`); a larger one pulls faster, but whether it is enough is known only from a launch (the planning lines in the console log show where the time goes). The public REST description has no field for the limit itself, so it cannot be set from a DAG. With `run_evaluation` true the generation DAG's run stays running until the generation job ends and then until the evaluation's launch is over (the task `wait_for_evaluation_launch`; how long that can take is in "A RUNNING row that never closes", below), and the DAG has `max_active_runs=1`: launches of that DAG then run one generation at a time, and every later trigger queues behind the waiting run. `max_active_runs` is the knob; raising it lets several generation jobs run at once (GPU quota). A chained evaluation does not look the launch up: it is given the generation job's id as the launch's identity (the evaluator reads the Dataflow job resource for its window, never its log or BigQuery job labels, plus one query on the generator's `validation_runs` table for this launch's rows), the launched table (`seed_table`, the last part of `table_fqn`), the generation's landing dataset and `source_dataset`, and evaluates what the launch generated: the table's enabled component in the model at `relationships_uri`, parents first, or the table alone when no model names it, the folder holds no model file (it says so in the plan's warnings), or `generate_fk_relationships` is false. It reads each landing table whole (`scope=manual`): with the DAG's `write_disposition` overwrite that is exactly this launch's rows, with append it includes the rows of earlier launches (the row count then differs from what this launch wrote, so the run reads `PARTIAL`; the metrics are still computed). It passes the generation's `reference_rows_limit` and `validation_runs_table` (the nearest-neighbour metrics also need the source table to hold at least twice `reference_rows_limit` rows, since the sample and its holdout must be the same size): the evaluator rebuilds the generator's reference sample and verifies it against the digest on this launch's `validation_runs` row, which is what lets the nearest-neighbour metrics (`row.dcr_train_holdout_share`, `row.dcr_p5_ratio`, `row.nndr_p5_ratio`, `row.density`, `row.coverage`) and the panel-based match rates and lifts (`row.memorization_lift` and `row.exposure_lift` among them) be evaluated. Without the table, or when the job's window cannot be read, those metrics are `not_evaluated` with the reason on the row; every other metric is unaffected. A table it cannot read is skipped by planning with a warning while the others are evaluated; only a target with no readable table fails. A landing table named differently from its source is not found: the evaluation looks for the source's name in the landing dataset. Its registry row carries the generation job's id and window, so a chained run is listed in `evaluation_latest_per_job`; that read needs `roles/dataflow.viewer` (without it: a warning and no window). The window also pins the source as of the job's create time, within the source's time-travel window, like any evaluation by job id. What stays lost: the launch's log, so a model the launch adjusted (ADR 0038) is not seen and the table list is the seed's, not the launch's own record. The service account needs read on the `validation_runs` table. For an evaluation by `--job_id` the evaluator follows the launch's relationships, three outcomes for the URI the job's record names: a model on record (`relationships_loaded` in the generation launcher log) and no readable files raises; no model on record (log read) and only sample models there evaluates without relationships and says so in the plan's warnings; the log unread does the same and the warning says it is unknown whether a model was loaded. An explicit `--relationships_uri` that resolves to nothing always raises. If you expect a model, check that log line first.
+The launch has 12 minutes in all, the image pull included ("By default, the Flex Template launch process has a timeout of 12 mins", Google's troubleshooting page, "Polling timeout errors"); the pull of the multi-GB image took almost eight on a cold launcher, and planning runs on the launcher before the job exists. Both evaluation launches therefore take a launcher machine type (`evaluation_launcher_machine_type` in the generation DAG, `launcher_machine_type` in the standalone one, default `e2-standard-8`; REST field `environment.launcherMachineType`); a larger one pulls faster, but whether it is enough is known only from a launch (the planning lines in the console log show where the time goes). The public REST description has no field for the limit itself, so it cannot be set from a DAG. With `run_evaluation` true the generation DAG's run stays running until the generation job ends and then until the evaluation's launch is over (the task `wait_for_evaluation_launch`; how long that can take is in "A RUNNING row that never closes", below), and the DAG has `max_active_runs=1`: launches of that DAG then run one generation at a time, and every later trigger queues behind the waiting run. `max_active_runs` is the knob; raising it lets several generation jobs run at once (GPU quota). A chained evaluation does not look the launch up: it is given the generation job's id as the launch's identity (the evaluator reads the Dataflow job resource for its window, never its log or BigQuery job labels, plus this launch's rows of the generator's `validation_runs` table), the launched table (`seed_table`, the last part of `table_fqn`), the generation's landing dataset and `source_dataset`, and evaluates what the launch generated. When those rows carry the generation record ([ADR 0044](adr/0044-generation-record.md), §2c), the record names it: the launch's tables in run order, their landing and source datasets, the relationship model (none when the launch generated without one) and `reference_rows_limit`, each value that differs from the DAG's a warning on the evaluation; a record whose tables span several datasets keeps the DAG's tables and datasets, with a warning. Without a record (a table without the columns, or a job the evaluator cannot read) it evaluates the table's enabled component in the model at `relationships_uri`, parents first, or the table alone when no model names it, the folder holds no model file (it says so in the plan's warnings), or `generate_fk_relationships` is false. It reads each landing table whole (`scope=manual`): with the DAG's `write_disposition` overwrite that is exactly this launch's rows, with append it includes the rows of earlier launches (the row count then differs from what this launch wrote, so the run reads `PARTIAL`; the metrics are still computed). It passes the generation's `reference_rows_limit` (10000; the record's value wins when there is one) and `validation_runs_table` (the nearest-neighbour metrics also need the source table to hold at least twice `reference_rows_limit` rows, since the sample and its holdout must be the same size): the evaluator rebuilds the generator's reference sample and verifies it against the digest on this launch's `validation_runs` row, which is what lets the nearest-neighbour metrics (`row.dcr_train_holdout_share`, `row.dcr_p5_ratio`, `row.nndr_p5_ratio`, `row.density`, `row.coverage`) and the panel-based match rates and lifts (`row.memorization_lift` and `row.exposure_lift` among them) be evaluated. Without the table, or when the job's window cannot be read, those metrics are `not_evaluated` with the reason on the row; every other metric is unaffected. A table it cannot read is skipped by planning with a warning while the others are evaluated; only a target with no readable table fails. A landing table named differently from its source is not found: the evaluation looks for the source's name in the landing dataset. Its registry row carries the generation job's id and window, so a chained run is listed in `evaluation_latest_per_job`; that read needs `roles/dataflow.viewer` (without it: a warning and no window). The window also pins the source as of the job's create time, within the source's time-travel window, like any evaluation by job id. What stays lost: the launch's log, so a model the launch adjusted (ADR 0038) is not seen; and, without a generation record, the table list is the seed's, not the launch's own. The service account needs read on the `validation_runs` table. For an evaluation by `--job_id` the evaluator follows the launch's relationships, three outcomes for the URI the job's record names: a model on record (`relationships_loaded` in the generation launcher log) and no readable files raises; no model on record (log read) and only sample models there evaluates without relationships and says so in the plan's warnings; the log unread does the same and the warning says it is unknown whether a model was loaded. An explicit `--relationships_uri` that resolves to nothing always raises. If you expect a model, check that log line first.
 
 **How the job reads, and what the launch log says about it.** The launch prints one timed line per step (`evaluation <id>: <step> <seconds>s`): the target check, the launch lookup, the relationship models, the planner's own lines, the `RUNNING` row, the prepare statements, the read path, then the four steps of the submission (`free text pools`, `pipeline options`, `graph`, `pipeline run`) and their sum, `submission`; while the pipeline is handed over, Beam's own `Starting GCS upload` / `Completed GCS upload … in N seconds` lines are relayed after `pipeline run:`. Planning scans the tables at once, up to eight: the per-table lines (`planning statistics`, `scope verification`, `reference panel`) keep their shape and their seconds now overlap, so they no longer add up; `planning <id> (all tables): scans <s>s` is the wall time of the whole phase. On Dataflow the reference panel is not in the job graph: the launch writes it as objects under `<temp_location>/sdfb-evaluation/<evaluation_id>/panel/` while it builds the graph, and `evaluation <id>: panel staging: <n> objects, <size>, <s>s (<w>s in the writes)` says what it wrote: `<s>` is everything staging took (pickling, hashing, writing), `<w>` the part spent writing to Cloud Storage, both inside `graph`'s seconds; nothing has to be set. The temp location is the one Beam settles on: `--temp_location`, or the staging location when none or an invalid one (a bucket with no path) is given. The `read path` step asks BigQuery for one read session per project of the tables the job will read. Where a project refuses, the job pages that project's tables instead of using the Storage Read API and the launch says so in one `WARNING` (§7's milestone dictionary has its row); nothing has to be set. Paging is slower and bounded by a per-project quota, so for large tables trigger the launch with `mode` = `sampled`.
 

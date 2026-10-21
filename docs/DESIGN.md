@@ -464,6 +464,51 @@ on any identical real/synthetic row. Code:
 [`dofns/pandera_batch.py`](../packages/sdfb-beam/src/sdfb_beam/dofns/pandera_batch.py),
 [`validation/summary.py`](../packages/sdfb-core/src/sdfb_core/validation/summary.py).
 
+### 7.1 The generation record
+
+**Claim: a `validation_runs` row says what generated it — job, code version and
+the whole resolved config — and a table without the columns still gets its
+row.**
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  L["⚙️ launcher<br/>ResolvedConfig + version"]:::cpu
+  W["🔀 BuildValidationRun<br/>one row per table"]:::beam
+  V[("🗄️ validation_runs<br/>+ record columns")]:::store
+  E["⚙️ evaluator<br/>fills its context"]:::cpu
+  H[("🗄️ evaluation_data_history<br/>registry")]:::store
+  G["⚙️ GUI<br/>read-only"]:::cpu
+
+  L -->|"twelve columns,<br/>once per job"| W
+  W -->|"+ job_id,<br/>worker version"| V
+  V --> E
+  E --> H
+  H -->|"list"| G
+  V -->|"Generator panel"| G
+```
+
+*The launcher writes the record once per job; the evaluator and the GUI read it
+instead of logs and DAG params.* Fourteen NULLABLE columns follow the summary's
+21: the Dataflow job, the launch's base run id, the worker's generator version
+(`<base>-<branch>-<sha7>[-dirty]`), the launch time, five generation settings,
+the relationship model's URI and digest, the config digest, and `config`, a
+JSON snapshot of the resolved config. The snapshot's `values` is itself a
+`--config_uri` file that resolves to the same config and the same digest. A
+table without the columns, or one whose schema the launcher cannot read, gets
+today's 21-column row and one `generation_record_degraded` WARNING with the
+`bq update` that adds them; nothing fails
+([ADR 0044](adr/0044-generation-record.md)). Code:
+[`sdfb_core/record.py`](../packages/sdfb-core/src/sdfb_core/record.py),
+[`sdfb_core/version.py`](../packages/sdfb-core/src/sdfb_core/version.py),
+[`pipeline.py::_BuildValidationRunDoFn`](../packages/sdfb-beam/src/sdfb_beam/pipeline.py),
+[`cli/run_pipeline.py::prepare_record_base`](../packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py).
+
 ## 8. Configuration
 
 Relational structure is configuration, in
@@ -709,6 +754,11 @@ the reference sample, and no job log). The standalone DAG evaluates an
 already-landed run on its own by the same seed path. Both launches take a
 launcher machine type, because the launch has 12 minutes in all, the image
 pull included. The DAGs stay in the source repository.
+
+Since [ADR 0044](adr/0044-generation-record.md) the evaluator reads the
+generation record first: the snapshot fills the generation parameters, the
+record's job id or name finds the job's own rows, and on the seed path the
+record names the tables it evaluates.
 
 Four tables in `synthetic_data_quality` (`evaluation_data_history`,
 `evaluation_metrics`, `evaluation_profiles`, `evaluation_row_flags`) and two
