@@ -17,7 +17,9 @@
 # a test enforces 1:1. `settings` are settable from a --config_uri file;
 # `fixed` and `derived` are documented but refused in a file.
 #   label, group, purpose (≤ 2 sentences), up, down: required everywhere
-#   unit, tip, formula (KaTeX), refs, adrs, docs: optional
+#   unit, tip, formula (KaTeX), refs, adrs, docs, null_means: optional
+#   adrs: quoted ids ('0043'): YAML reads an unquoted 0017 as the octal 15
+#   refs: kind, label and a url or a path (line optional)
 #   shapes_cache: caches whose key must change when the value does (ADR 0043 §salt)
 #   why_fixed: required under `fixed`
 # Placeholders, expanded with the model defaults by render_text():
@@ -105,9 +107,10 @@ settings:
   sampling.shape_mix_top_k:
     label: Shape masks kept
     group: Profiler (source_table_stats)
-    purpose: How many character-shape masks (9 digit, A upper, a lower) a column keeps with their shares.
-    up: Rarer shapes of identifier-like columns stay visible to the shape expander and the drift checks.
-    down: Only the dominant shapes survive; a long-tailed format loses its minority masks.
+    purpose: How many character-shape masks (9 digit, A upper, a lower) a column's source_table_stats
+      entry keeps, with their shares. The engines build their own shape mixes and never read it.
+    up: The stats entry records more of a long-tailed format's minority masks; generation does not change.
+    down: The stats entry keeps only the dominant masks; generation does not change.
     unit: masks
     tip: Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value.
     shapes_cache:
@@ -115,10 +118,13 @@ settings:
   sampling.length_percentiles:
     label: Length percentiles
     group: Profiler (source_table_stats)
-    purpose: The length quantiles the profiler records per string column; the p05–p95 band becomes the
-      pool prompt's length hint.
-    up: A wider band admits more of the tail's lengths into prompts.
-    down: A tighter band steers prompts toward typical lengths only.
+    purpose: The three length quantiles a string column's source_table_stats entry records, under the
+      fixed names len_p05, len_p50 and len_p95. The pool prompt's length hint has its own fixed p05–p95
+      band and never reads these.
+    up: A wider band records more of the length tails in the stats entry; prompts and generation do not
+      change.
+    down: A tighter band records only typical lengths in the stats entry; prompts and generation do not
+      change.
     unit: quantile
     tip: Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value.
     shapes_cache:
@@ -227,8 +233,8 @@ settings:
     tip: 'Identifiers never come from pools: shape expansion and keyspace generation carry them.'
     formula: r = \frac{M}{\min(M,\ D,\ {{tex:free_text.free_text_pool_max}})}\ \text{rows per value}
     adrs:
-    - 0018
-    - 0028
+    - '0018'
+    - '0028'
     shapes_cache:
     - freetext_pools
   free_text.pool_values_per_call:
@@ -427,7 +433,7 @@ settings:
     tip: One value for writer and reader. A chunk store written with a smaller value is topped up with
       the missing rows.
     adrs:
-    - 0019
+    - '0019'
   rag.max_free_text_values_per_column:
     label: Value chunks per free-text column
     group: Population
@@ -438,7 +444,7 @@ settings:
     unit: values
     tip: Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value.
     adrs:
-    - 0019
+    - '0019'
     shapes_cache:
     - freetext_pools
     - rag_chunks
@@ -473,7 +479,7 @@ settings:
     tip: cuda.is_available() answers “does a GPU exist”, never “is there room”.
     adrs:
     - '0014'
-    - 0019
+    - '0019'
   rag.embedder_uri:
     label: Embedder weights URI
     group: Embedders
@@ -491,7 +497,7 @@ settings:
     tip: The Composer DAG defaults it to true.
     adrs:
     - '0017'
-    - 0019
+    - '0019'
   guardrails.env:
     label: Threshold tier
     group: Gate
@@ -537,7 +543,7 @@ settings:
     down: 'Tighter: per-key sampling noise (O(1/√keys)) may flag a faithful copy.'
     unit: share
     adrs:
-    - 0038
+    - '0038'
   relational.generate_fk_relationships:
     label: Generate FK relationships
     group: Model
@@ -546,7 +552,7 @@ settings:
     up: 'true (default): referential integrity by construction.'
     down: 'false: declared edges are ignored loudly and FK columns use marginals.'
     adrs:
-    - 0029
+    - '0029'
   relational.relationships_uri:
     label: Relationship models
     group: Model
@@ -577,7 +583,7 @@ settings:
     tip: Self-contradictions and the PK-capacity gate stop under both settings.
     adrs:
     - '0035'
-    - 0038
+    - '0038'
   relational.fk_candidate_cap:
     label: Candidates per shared key (Top-M)
     group: Keys
@@ -661,6 +667,7 @@ settings:
     up: Longer prompts fit, and the KV cache takes more VRAM (262k native context killed a T4 at startup).
     down: Less VRAM for KV; 8,192 already dwarfs the synthesis prompts.
     unit: tokens
+    null_means: no cap — the checkpoint's native context (the T4 needs a cap)
   serving.autoscaling:
     label: Autoscaling
     group: Fleet
@@ -702,7 +709,7 @@ settings:
     up: More tables in the list widen the plan to their components (one job in single_job mode).
     down: Required — a launch without it is refused.
     adrs:
-    - 0029
+    - '0029'
     - '0030'
   io.dlq_table:
     label: Dead-letter table
@@ -730,7 +737,7 @@ settings:
     up: 'Set: stored vectors are read; with build_rag_layer they are also written.'
     down: 'Empty: every worker embeds its row documents in setup.'
     adrs:
-    - 0019
+    - '0019'
   io.freetext_pools_table:
     label: Free-text pool store
     group: Stores
@@ -787,7 +794,7 @@ settings:
     up: 'Set: parent keys are read from that dataset.'
     down: 'Empty: parents are assumed to land next to the child.'
     adrs:
-    - 0029
+    - '0029'
   serving.model_uri:
     label: Model URI
     group: Model

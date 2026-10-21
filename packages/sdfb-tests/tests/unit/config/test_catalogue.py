@@ -80,10 +80,32 @@ def test_cache_map_is_pinned():
     ("catalogue_version: '1'\nfixed: {a.b: {label: x, group: g, "
      "purpose: p, up: u, down: d}}\n", "why_fixed"),
     ("catalogue_version: '1'\nextra: {}\n", "top-level"),
+    ("catalogue_version: '1'\nsettings: {a.b: {label: x, group: g, "
+     "purpose: p, up: u, down: d, adrs: [0017]}}\n", "four-digit"),
+    ("catalogue_version: '1'\nsettings: {a.b: {label: x, group: g, "
+     "purpose: p, up: u, down: d, adrs: ['43']}}\n", "four-digit"),
+    ("catalogue_version: '1'\nsettings: {a.b: {label: x, group: g, "
+     "purpose: p, up: u, down: d, refs: [{kind: doc, path: x.md}]}}\n",
+     "label"),
+    ("catalogue_version: '1'\nsettings: {a.b: {label: x, group: g, "
+     "purpose: p, up: u, down: d, refs: [{kind: doc, label: L}]}}\n",
+     "url or a path"),
 ])
 def test_strict_loader(bad, message):
+  # adrs: [0017] is the octal int 15 under YAML 1.1, so ids must be quoted.
   with pytest.raises(CatalogueError, match=message):
     parse_catalogue(bad)
+
+
+def test_stats_only_settings_say_what_they_change():
+  # Neither key reaches a prompt or the shape expander: the length hint and
+  # the engines' shape mixes have their own fixed values.
+  entries = load_catalogue().entries
+  for key in ("sampling.shape_mix_top_k", "sampling.length_percentiles"):
+    entry = entries[key]
+    assert "source_table_stats" in entry.purpose, key
+    prose = " ".join((entry.purpose, entry.up, entry.down))
+    assert "expander" not in entry.up and "into prompts" not in prose, key
 
 
 def test_placeholders_render_like_the_gui():

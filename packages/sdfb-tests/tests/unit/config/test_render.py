@@ -59,6 +59,12 @@ def test_every_null_default_is_required_or_derived():
                 entries[f"{section}.{key}"].null_means), f"{section}.{key}"
 
 
+def test_a_null_max_model_len_says_it_is_no_cap():
+  # A null there is a value (no cap), not "unset": the file must say so.
+  assert ("  # null = no cap — the checkpoint's native context (the T4 needs "
+          "a cap)\n  vllm_max_model_len: '8192'\n") in render_reference()
+
+
 def test_no_word_is_split_at_a_hyphen():
   text = render_reference()
   assert "re-\n" not in text and "co-\n" not in text

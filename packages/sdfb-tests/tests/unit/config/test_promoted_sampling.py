@@ -18,6 +18,7 @@ Design: docs/DESIGN.md §8 Configuration
 """
 from sdfb_beam.io.exact_stats import build_exact_stats_sql
 from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
+from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.stats import source_stats as ss
 from sdfb_tests.fixtures import load_ddl, load_reference
 
@@ -69,3 +70,20 @@ def test_exact_stats_sql_reads_the_sampling_section():
   narrow = _with(top_values_top_k=2).sampling
   assert ", 2))" in build_exact_stats_sql(
       "p.d.t", schema, tier1, sampling=narrow)
+
+
+def test_shape_and_length_settings_change_only_the_stats_rows():
+  """What the catalogue says of these two keys: the stats entries follow
+    them, the engines' profiles do not (b1 keeps its own shape-mix cap, the
+    pool prompt's length hint its own fixed band)."""
+  custom = _with(shape_mix_top_k=1, length_percentiles=(0.25, 0.5, 0.75))
+  default, changed = _profile(), _profile(custom)
+  pairs = [(entry, changed[name])
+           for name, entry in default.items()
+           if name != ss.TABLE_PSEUDO_COLUMN]
+  assert any(
+      len(new["shape_mix"]) < len(old["shape_mix"]) for old, new in pairs)
+  assert any(new["len_p05"] != old["len_p05"] for old, new in pairs)
+  schema, rows = load_ddl("customers"), load_reference("customers")
+  assert profile_columns(
+      schema, rows, config=custom) == profile_columns(schema, rows)

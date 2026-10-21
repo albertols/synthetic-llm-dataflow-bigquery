@@ -123,6 +123,10 @@ def _ref(raw: Any, where: str) -> Ref:
   unknown = set(raw) - {"kind", "label", "url", "path", "line"}
   if unknown:
     raise CatalogueError(f"{where}: unknown ref keys {sorted(unknown)}")
+  if not raw.get("label"):
+    raise CatalogueError(f"{where}: a ref needs a label")
+  if not raw.get("url") and not raw.get("path"):
+    raise CatalogueError(f"{where}: a ref needs a url or a path")
   return Ref(
       kind=raw["kind"],
       label=str(raw["label"]),
@@ -146,6 +150,13 @@ def _entry(key: str, status: str, raw: Any) -> Entry:
     raise CatalogueError(
         f"{key}: shapes_cache names {sorted(set(caches) - CACHES)}; known: "
         f"{sorted(CACHES)}")
+  adrs = tuple(raw.get("adrs", ()))
+  for adr in adrs:
+    # YAML 1.1 reads an unquoted 0017 as the octal int 15: quote every id.
+    if not isinstance(adr, str) or not re.fullmatch(r"\d{4}", adr):
+      raise CatalogueError(
+          f"{key}: adrs ids are quoted four-digit strings ('0043'), "
+          f"got {adr!r}")
   return Entry(
       key=key,
       status=status,
@@ -158,7 +169,7 @@ def _entry(key: str, status: str, raw: Any) -> Entry:
       tip=str(raw.get("tip", "")),
       formula=str(raw.get("formula", "")),
       refs=tuple(_ref(r, key) for r in raw.get("refs", ())),
-      adrs=tuple(str(a) for a in raw.get("adrs", ())),
+      adrs=adrs,
       docs=tuple(str(d) for d in raw.get("docs", ())),
       shapes_cache=caches,
       why_fixed=str(raw.get("why_fixed", "")),

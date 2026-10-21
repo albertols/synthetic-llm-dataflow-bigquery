@@ -42,8 +42,11 @@ _HEADER = """\
 #              it can be set only in a file.
 #   raise/lower  what a higher / lower value does.
 #   null       either `required` (the entry says so: a launch needs a
-#              value from a flag or a file) or `derived` (the entry says
-#              `null = ...`: leave it null and the value is computed).
+#              value from a flag or a file; a null left in your file pins
+#              nothing, so a flag still fills it) or `derived` (the entry
+#              says `null = ...`: leave it null and the value is computed).
+#              On a key with a value, `null = ...` says what a null in
+#              your file means instead (vllm_max_model_len: no cap).
 #   Quoted values ('on', 'false', '8192', '') are string-encoded CLI
 #   values: keep them quoted.
 """
