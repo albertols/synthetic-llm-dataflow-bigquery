@@ -92,12 +92,21 @@ def parse_config_text(text: str, *,
   }
 
 
+def _section_hint(name: str) -> str:
+  """For a key written at the top level: the one section that holds it."""
+  homes = [s for s, cls in SECTION_TYPES.items() if name in cls.model_fields]
+  if len(homes) == 1:
+    return (f" — did you mean '{homes[0]}.{name}' (keys live under their "
+            "section)?")
+  return _closest(name, SECTIONS)
+
+
 def _checked_section(source: str, section: object,
                      raw: object) -> dict[str, object]:
   """One section's mapping, every key checked against the model."""
   if section not in SECTION_TYPES:
     raise ConfigError(f"{source}: unknown section '{section}'"
-                      f"{_closest(str(section), SECTIONS)}")
+                      f"{_section_hint(str(section))}")
   if raw is None:
     return {}
   if not isinstance(raw, dict):
@@ -122,7 +131,8 @@ def _describe(error: ValidationError, source: str) -> str:
   for item in error.errors():
     loc = ".".join(str(p) for p in item["loc"])
     message = item["msg"]
-    parts.append(f"{loc}: {message}")
+    # A whole-config rule has no location; its message names its keys.
+    parts.append(f"{loc}: {message}" if loc else message)
   where = f"{source}: " if source else ""
   return where + "; ".join(parts)
 
@@ -131,12 +141,20 @@ def resolve(typed: Mapping[str, object],
             file_values: Mapping[str, Mapping[str, object]] | None = None,
             *,
             config_uri: str = "") -> ConfigResolution:
-  """Merge: file > typed flag > model default."""
+  """Merge: file > typed flag > model default.
+
+  A file's `null` on a key whose default is null (the required keys, a
+  derived default) means "not pinned": the reference file shows those keys
+  as null, so a block copied from it leaves them to the flags.
+  """
   file_values = file_values or {}
   merged: dict[str, dict[str, Any]] = {s: {} for s in SECTIONS}
   provenance: dict[str, str] = {}
   for section, values in file_values.items():
+    fields = SECTION_TYPES[section].model_fields
     for key, value in values.items():
+      if value is None and key in fields and fields[key].default is None:
+        continue
       merged[section][key] = value
       provenance[f"{section}.{key}"] = PROVENANCE_FILE
   for dest, value in typed.items():

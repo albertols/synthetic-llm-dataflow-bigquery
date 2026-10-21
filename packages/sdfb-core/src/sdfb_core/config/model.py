@@ -85,6 +85,21 @@ def _csv_text(value: Any) -> Any:
   return value
 
 
+def _yaml_switch(*, on: bool) -> BeforeValidator:
+  """A choice with an `off` (and maybe `on`): YAML 1.1 reads them unquoted
+    as booleans. `false` is `off`; `true` is `on` only where `on` is a
+    choice, and stays an error elsewhere."""
+
+  def coerce(value: Any) -> Any:
+    if value is False:
+      return "off"
+    if value is True and on:
+      return "on"
+    return value
+
+  return BeforeValidator(coerce)
+
+
 _ROW_DOCS_DEFAULT = 1024
 
 
@@ -100,6 +115,8 @@ CliBoolEmpty = Annotated[str, _true_or("")]
 NumericText = Annotated[str, BeforeValidator(_numeric_text)]
 CsvText = Annotated[str, BeforeValidator(_csv_text)]
 UniquenessMode = Literal["exact", "exact_chained", "streaming"]
+_OFF = _yaml_switch(on=False)
+_ON_OFF = _yaml_switch(on=True)
 
 
 class _Section(BaseModel):
@@ -110,7 +127,8 @@ class IoSettings(_Section):
   """Where the launch reads from and writes to."""
   ddl_uri: str = _flag("")
   reference_table: str | None = _flag(None)
-  landing_table: str | None = _flag(None)
+  # A comma-separated list on the CLI; a YAML list in a file.
+  landing_table: Annotated[str | None, BeforeValidator(_csv_text)] = _flag(None)
   dlq_table: str | None = _flag(None)
   create_if_not_exists: CliBoolFalse = _flag("false")
   validation_runs_table: str = _flag("")
@@ -129,11 +147,14 @@ class LaunchSettings(_Section):
 class SamplingSettings(_Section):
   """The reference sample and the source-stats profiler."""
   reference_rows_limit: int = _flag(10_000)
-  source_stats: Literal["off", "sample", "exact"] = _flag("sample")
+  source_stats: Annotated[Literal["off", "sample", "exact"],
+                          _OFF] = _flag("sample")
   # Literal source values land in stats ONLY for enum-routed columns (the T4
   # exemplar-leak lesson): above this distinct count, a column gets shapes /
-  # entropy / lengths — never values. Mirrors the engines'
-  # _FREE_TEXT_MAX_CATEGORIES so "enum-routed" means the same thing everywhere.
+  # entropy / lengths — never values. It may not exceed
+  # free_text.free_text_max_categories (GeneratorConfig refuses it), so a
+  # column whose values reach the stats is always one the engines route as
+  # an enum, never a free-text one.
   top_values_max_distinct: int = _const(50, ge=1)
   top_values_top_k: int = _const(8, ge=1)
   shape_mix_top_k: int = _const(8, ge=1)
@@ -180,12 +201,13 @@ class GenerationSettings(_Section):
 
 class FreeTextSettings(_Section):
   """Free-text pools: how they are built, routed and expanded."""
-  freetext_expansion: Literal["off", "identifiers",
-                              "all"] = _flag("identifiers")
+  freetext_expansion: Annotated[Literal["off", "identifiers", "all"],
+                                _OFF] = _flag("identifiers")
   pool_seed_strategy: Literal["centroid", "kcenter",
                               "kcenter_rotate"] = _flag("centroid")
-  prompt_constraints: Literal["on", "off"] = _flag("on")
-  prompt_debug: Literal["off", "redacted", "full"] = _flag("off")
+  prompt_constraints: Annotated[Literal["on", "off"], _ON_OFF] = _flag("on")
+  prompt_debug: Annotated[Literal["off", "redacted", "full"],
+                          _OFF] = _flag("off")
   pool_pattern_guidance: CliBoolEmpty = _flag("")
   build_pool_layer: CliBoolEmpty = _flag("")
   # The bounded-pool ceiling shared by the engines' free-text ladders and
@@ -205,8 +227,8 @@ class FreeTextSettings(_Section):
   # Stagnation exit (2026-07-23 E2E): 2 of 3 pool columns rode the full
   # 2*ceil(target/32)=32-call budget (~30 min of T4 setup) while marginal
   # novel yield had collapsed to cross-call duplicates and prompt echoes.
-  # Once every escalation level has run, _POOL_STAGNATION_WINDOW consecutive
-  # attempts each adding fewer than _POOL_STAGNATION_MIN_NOVEL novel values
+  # Once every escalation level has run, pool_stagnation_window consecutive
+  # attempts each adding fewer than pool_stagnation_min_novel novel values
   # end the ladder — more retries at the ceiling level cannot outrun the
   # yield decay.
   pool_stagnation_window: int = _const(3, ge=1)
@@ -238,7 +260,8 @@ class FreeTextSettings(_Section):
   free_text_unique_ratio: float = _const(0.9, gt=0.0, le=1.0)
   free_text_min_mean_len: int = _const(20, ge=0)
   # Above this absolute distinct count a string column is high-cardinality and
-  # treated as free text even if short (e.g. emails, ids-as-strings).
+  # treated as free text even if short (e.g. emails, ids-as-strings). It
+  # caps sampling.top_values_max_distinct (see GeneratorConfig).
   free_text_max_categories: int = _const(50, ge=1)
 
   @property
@@ -260,7 +283,9 @@ class RagSettings(_Section):
   max_free_text_values_per_column: int = _const(1024, ge=1)
   # Top-k exemplars retrieved to condition the LLM's free-text inference.
   rag_top_k: int = _const(8, ge=1)
-  bge_max_length: int = _const(512, ge=1)
+  # bge-small-en-v1.5 has 512 position embeddings: a longer window passes
+  # here and crashes the embedder on a worker after launch, so it is capped.
+  bge_max_length: int = _const(512, ge=1, le=512)
   # bge-small-en-v1.5 is ~130 MB of fp32 weights; activations and CUDA context
   # push the real footprint higher. Require this much FREE VRAM before "auto"
   # picks CUDA. The 2026-07-26 E2E asked for 2 MiB with 2.81 MiB free and
@@ -363,6 +388,18 @@ class GeneratorConfig(BaseModel):
   guardrails: GuardrailSettings = Field(default_factory=GuardrailSettings)
   relational: RelationalSettings = Field(default_factory=RelationalSettings)
   serving: ServingSettings = Field(default_factory=ServingSettings)
+
+  @model_validator(mode="after")
+  def _literal_values_only_for_enums(self) -> GeneratorConfig:
+    literal_cap = self.sampling.top_values_max_distinct
+    enum_cap = self.free_text.free_text_max_categories
+    if literal_cap > enum_cap:
+      raise ValueError(
+          f"sampling.top_values_max_distinct ({literal_cap}) must not exceed "
+          f"free_text.free_text_max_categories ({enum_cap}): a column with "
+          "more distinct values is free text, and the stats would store its "
+          "literal source values")
+    return self
 
 
 def _keys(kind: str) -> dict[str, str]:

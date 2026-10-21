@@ -18,6 +18,8 @@ Design: docs/DESIGN.md §8 Configuration
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.config.resolve import (ConfigError, missing_required,
@@ -108,3 +110,57 @@ def test_namespace_values_cover_every_flag():
   assert values["build_rag_layer"] == ""
   assert values["vllm_max_model_len"] == "8192"
   assert len(values) == 47
+
+
+def test_a_file_null_on_a_null_default_leaves_the_key_to_the_flag():
+  # The reference shows required keys as null: copying its io block and
+  # typing the flag must not leave the key unset.
+  file = parse_config_text("io:\n  reference_table: null\n", source="t")
+  r = resolve({"reference_table": "p.s.t"}, file)
+  assert r.config.io.reference_table == "p.s.t"
+  assert r.provenance["io.reference_table"] == "flag"
+  assert not r.overridden
+
+
+def test_a_file_null_on_a_derived_default_is_the_default():
+  file = parse_config_text(
+      "free_text:\n  pool_stagnation_min_novel: null\n", source="t")
+  r = resolve({}, file)
+  assert r.provenance["free_text.pool_stagnation_min_novel"] == "default"
+  assert r.config == DEFAULT_CONFIG
+
+
+def test_a_file_null_on_a_set_default_still_wins():
+  file = parse_config_text("serving:\n  vllm_max_model_len: null\n", source="t")
+  r = resolve({"vllm_max_model_len": "4096"}, file)
+  assert r.config.serving.vllm_max_model_len == ""
+  assert r.provenance["serving.vllm_max_model_len"] == "file"
+
+
+def test_a_flat_key_names_its_section():
+  with pytest.raises(
+      ConfigError,
+      match=re.escape("unknown section 'similarity' — did you mean "
+                      "'generation.similarity' (keys live under their "
+                      "section)?")):
+    parse_config_text("similarity: 0.7\n", source="t.yaml")
+
+
+def test_bge_max_length_above_the_checkpoint_is_refused():
+  file = parse_config_text("rag:\n  bge_max_length: 513\n", source="t")
+  with pytest.raises(ConfigError, match=r"rag\.bge_max_length"):
+    resolve({}, file, config_uri="t.yaml")
+  file = parse_config_text("rag:\n  bge_max_length: 512\n", source="t")
+  assert resolve({}, file).config.rag.bge_max_length == 512
+
+
+def test_literal_top_values_above_the_enum_cap_are_refused():
+  file = parse_config_text(
+      "sampling:\n  top_values_max_distinct: 60\n", source="t")
+  with pytest.raises(ConfigError) as e:
+    resolve({}, file, config_uri="t.yaml")
+  message = str(e.value)
+  assert message.startswith("t.yaml: ")
+  assert ": : " not in message
+  assert "sampling.top_values_max_distinct (60)" in message
+  assert "free_text.free_text_max_categories (50)" in message

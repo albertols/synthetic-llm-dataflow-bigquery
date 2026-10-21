@@ -125,3 +125,63 @@ def test_min_novel_follows_per_call_unless_set():
           "pool_stagnation_min_novel": 2
       }})
   assert value_of(cfg, "free_text.pool_stagnation_min_novel") == 2
+
+
+# YAML 1.1 reads an unquoted on/off as a boolean.
+_OFF_CHOICES = (
+    ("sampling", "source_stats"),
+    ("free_text", "prompt_debug"),
+    ("free_text", "freetext_expansion"),
+    ("free_text", "prompt_constraints"),
+)
+
+
+@pytest.mark.parametrize("section, key", _OFF_CHOICES)
+def test_yaml_off_is_the_off_choice(section, key):
+  cfg = GeneratorConfig.model_validate({section: {key: False}})
+  assert value_of(cfg, f"{section}.{key}") == "off"
+
+
+def test_yaml_on_is_a_choice_only_for_prompt_constraints():
+  cfg = GeneratorConfig.model_validate(
+      {"free_text": {
+          "prompt_constraints": True
+      }})
+  assert cfg.free_text.prompt_constraints == "on"
+  for section, key in _OFF_CHOICES[:3]:
+    with pytest.raises(ValidationError):
+      GeneratorConfig.model_validate({section: {key: True}})
+
+
+def test_landing_table_takes_a_yaml_list():
+  cfg = GeneratorConfig.model_validate(
+      {"io": {
+          "landing_table": ["p.land.a", "p.land.b"]
+      }})
+  assert cfg.io.landing_table == "p.land.a,p.land.b"
+  assert DEFAULT_CONFIG.io.landing_table is None
+
+
+def test_literal_top_values_stay_within_the_enum_cap():
+  with pytest.raises(
+      ValidationError,
+      match=r"sampling\.top_values_max_distinct.*"
+      r"free_text\.free_text_max_categories"):
+    GeneratorConfig.model_validate(
+        {"sampling": {
+            "top_values_max_distinct": 51
+        }})
+  lower = GeneratorConfig.model_validate(
+      {"sampling": {
+          "top_values_max_distinct": 20
+      }})
+  assert lower.sampling.top_values_max_distinct == 20
+  both = GeneratorConfig.model_validate({
+      "sampling": {
+          "top_values_max_distinct": 80
+      },
+      "free_text": {
+          "free_text_max_categories": 80
+      }
+  })
+  assert both.sampling.top_values_max_distinct == 80
