@@ -53,9 +53,9 @@ export type MetricReadoutProps = {
   row: MetricRow;
   /** ADR 0038: the generator's verdict on this row's key (`table.pk_duplicate_rate` only), with its reading. */
   adjusted?: Pick<AdjustmentRow, "adjustment" | "reading" | "evaluatorShare"> | null;
-  /** Show the scope (table.column, edge) under the title — off inside a column drawer. */
   /** The run's repeat-share tolerance (A1 ruling R16); the default when omitted. */
   tolerance?: number;
+  /** Show the scope (table.column, edge) under the title — off inside a column drawer. */
   showScope?: boolean;
   /** Heading level of the title (default 4). */
   headingLevel?: 3 | 4 | 5;

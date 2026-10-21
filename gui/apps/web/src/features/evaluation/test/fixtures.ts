@@ -648,6 +648,7 @@ export function generationRecord(
     snapshot: {
       config_version: 1,
       values: {
+        launch: {},
         generation: { engine: "b1_rag", similarity: 0.7, seed: "" },
         free_text: { prompt_constraints: "off", pool_seed_strategy: "centroid" },
         guardrails: { env: "dev", repeat_share_tolerance: options.tolerance ?? 0.05 },

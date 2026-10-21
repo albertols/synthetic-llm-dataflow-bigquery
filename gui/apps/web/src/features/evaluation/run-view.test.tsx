@@ -782,35 +782,59 @@ describe("count breakdowns add up to their totals", () => {
     expect(breakdowns.some((el) => el !== kpi && el.querySelector('[data-bucket="info"]'))).toBe(true);
     expect(breakdowns.some((el) => el !== kpi && el.querySelector('[data-bucket="other"]'))).toBe(true);
   });
-  describe("Generator panel (ADR 0044)", () => {
-    it("shows the resolved config with a badge per value, the override warning, the model card and the job link", async () => {
-      stubRun(richDetail(), { [RECORD]: generationRecord({ overridden: true }) });
-      renderAt("/evaluation/eval-t001?tab=params");
-      const panel = await screen.findByRole("region", { name: /generator/i });
-      expect(within(panel).getAllByText("generation.similarity").length).toBeGreaterThan(0);
-      expect(within(panel).getAllByText("file").length).toBeGreaterThan(0);
-      expect(within(panel).getByText(/overrode 1 typed param/i)).toBeInTheDocument();
-      expect(within(panel).getByText(/example_retail/)).toBeInTheDocument();
-      expect(within(panel).getByRole("link", { name: /2026-10-21_01_02_03-123/ })).toHaveAttribute(
-        "href",
-        expect.stringContaining("/dataflow/jobs/"),
-      );
-      expect(within(panel).getByRole("button", { name: /download as config\.yaml/i })).toBeEnabled();
-    });
+});
 
-    it("version mismatch badge", async () => {
-      stubRun(richDetail(), { [RECORD]: generationRecord({ mismatch: true }) });
-      renderAt("/evaluation/eval-t001?tab=params");
-      const panel = await screen.findByRole("region", { name: /generator/i });
-      expect(
-        within(panel).getByText(/launcher 0\.6\.1-master-edcfdcd ≠ worker 0\.6\.1-master-1111111/),
-      ).toBeInTheDocument();
-    });
+describe("Generator panel (ADR 0044)", () => {
+  it("shows the resolved config with a badge per value, the override warning, the model card and the job link", async () => {
+    stubRun(richDetail(), { [RECORD]: generationRecord({ overridden: true }) });
+    renderAt("/evaluation/eval-t001?tab=params");
+    const panel = await screen.findByRole("region", { name: /generator/i });
+    // The config row of `similarity` carries the `file` badge; the `launch` section is empty, so no card.
+    const row = within(panel).getByText("similarity").parentElement!;
+    expect(within(row).getByText("file")).toBeInTheDocument();
+    expect(within(panel).getByText("generation.similarity", { selector: "code" })).toBeInTheDocument();
+    expect(within(panel).queryByText("launch")).toBeNull();
+    expect(within(panel).getByText(/overrode 1 typed param/i)).toBeInTheDocument();
+    expect(within(panel).getByText(/example_retail/)).toBeInTheDocument();
+    expect(within(panel).getByRole("link", { name: /2026-10-21_01_02_03-123/ })).toHaveAttribute(
+      "href",
+      expect.stringContaining("/dataflow/jobs/"),
+    );
+    expect(within(panel).getByRole("button", { name: /download as config\.yaml/i })).toBeEnabled();
+  });
 
-    it("says when the run has no record", async () => {
-      stubRun(richDetail());
-      renderAt("/evaluation/eval-t001?tab=params");
-      expect(await screen.findByText(/no generation record/i)).toBeInTheDocument();
+  it("version mismatch badge", async () => {
+    stubRun(richDetail(), { [RECORD]: generationRecord({ mismatch: true }) });
+    renderAt("/evaluation/eval-t001?tab=params");
+    const panel = await screen.findByRole("region", { name: /generator/i });
+    expect(
+      within(panel).getByText(/launcher 0\.6\.1-master-edcfdcd ≠ worker 0\.6\.1-master-1111111/),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a skeleton, not 'no record', while the record loads", async () => {
+    stubRun(richDetail());
+    const real = globalThis.fetch;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
     });
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      return url.includes("/record") ? gate.then(() => real(input, init)) : real(input, init);
+    });
+    renderAt("/evaluation/eval-t001?tab=params");
+    const panel = await screen.findByRole("region", { name: /generator/i });
+    expect(panel).toHaveAttribute("aria-busy", "true");
+    expect(screen.queryByText(/no generation record/i)).toBeNull();
+    release();
+    expect(await screen.findByText(/no generation record/i)).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /generator/i })).not.toHaveAttribute("aria-busy");
+  });
+
+  it("says when the run has no record", async () => {
+    stubRun(richDetail());
+    renderAt("/evaluation/eval-t001?tab=params");
+    expect(await screen.findByText(/no generation record/i)).toBeInTheDocument();
   });
 });

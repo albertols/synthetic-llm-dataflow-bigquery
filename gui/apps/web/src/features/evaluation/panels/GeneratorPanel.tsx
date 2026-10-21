@@ -44,7 +44,8 @@ function download(record: GenerationRecord) {
   link.href = url;
   link.download = `config.${record.snapshot_run_id ?? "run"}.yaml`;
   link.click();
-  URL.revokeObjectURL(url);
+  // After the click has started the download.
+  setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 export function GeneratorPanel({
@@ -63,14 +64,14 @@ export function GeneratorPanel({
         <p className="text-sm text-text-3">The generation record could not be read: {error}</p>
       </section>
     );
-  if (record === undefined || record === null)
+  if (record === undefined)
     return (
       <section aria-label="Generator" aria-busy="true">
         <Skeleton className="h-40 w-full" />
       </section>
     );
-  const snapshot = record.snapshot;
-  if (!snapshot)
+  const snapshot = record?.snapshot;
+  if (!record || !snapshot)
     return (
       <section aria-label="Generator">
         <p className="text-sm text-text-2">
@@ -86,7 +87,7 @@ export function GeneratorPanel({
   const sections = [
     ...SECTION_ORDER.filter((s) => s in values),
     ...Object.keys(values).filter((s) => !SECTION_ORDER.includes(s)),
-  ];
+  ].filter((s) => Object.keys(values[s] ?? {}).length > 0);
   const jobs = [...new Map(record.runs.filter((r) => r.job_id).map((r) => [r.job_id!, r])).values()];
   const worker = record.worker_versions.join(", ");
   const launched = record.runs.find((r) => r.launched_at)?.launched_at ?? null;
