@@ -16,12 +16,18 @@ resolution order, `params_source`, fallbacks and the registry filters."""
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from sdfb_evaluation import schemas
 from sdfb_evaluation.context.bq import BqApiError
 from sdfb_evaluation.context.gcp import DataflowJobs, JobNotFoundError
-from sdfb_evaluation.context.launch import LaunchContext, resolve_launch
+from sdfb_evaluation.context.launch import (
+    LaunchContext,
+    RunRecord,
+    resolve_launch,
+)
 
 PROJECT = "demo-project"
 REGION = "europe-west1"
@@ -866,3 +872,58 @@ def test_job_only_takes_the_latest_launch_when_the_window_holds_two(
   assert ctx.base_run_id == "other-0913-ffffff"
   assert all(r.run_id.startswith("other-0913-ffffff") for r in ctx.runs)
   assert [w for w in ctx.warnings if "launches" in w and "latest" in w]
+
+
+def test_a_run_record_reads_the_record_columns():
+  snapshot = {"config_version": 1, "values": {"generation": {"seed": "7"}}}
+  record = RunRecord.from_row({
+      "run_id": "r-00-users",
+      "landing_table": f"{DS}.users",
+      "engine": "b1_rag",
+      "job_id": "job-1",
+      "job_name": "n",
+      "generator_version": "0.6.1-master-edcfdcd",
+      "embedder_uri": "",
+      "relationships_uri": "",
+      "similarity": "0.5",
+      "config_digest": "0123456789ab",
+      "config": json.dumps(snapshot),
+  })
+  assert record.engine == "b1_rag" and record.job_id == "job-1"
+  assert record.embedder_uri == "" and record.relationships_uri == ""
+  assert record.similarity == 0.5
+  assert record.config == snapshot
+  assert record.written_by("job-1", None)
+  assert not record.written_by("job-2", "n")
+
+
+def test_a_legacy_row_reads_as_no_record():
+  record = RunRecord.from_row({"run_id": "r", "landing_table": f"{DS}.users"})
+  assert record.config is None and record.generator_version is None
+  assert record.embedder_uri is None and record.similarity is None
+
+
+@pytest.mark.parametrize("text", ["{not json", "[1, 2]", "42", "", "null"])
+def test_a_malformed_config_is_no_snapshot(text):
+  record = RunRecord.from_row({
+      "run_id": "r",
+      "landing_table": f"{DS}.users",
+      "config": text,
+      "similarity": "not a number",
+  })
+  assert record.config is None and record.similarity is None
+
+
+def test_a_snapshot_with_unknown_blocks_is_kept_whole():
+  snapshot = {"config_version": 9, "from_the_future": {"x": 1}}
+  record = RunRecord.from_row({
+      "run_id": "r",
+      "landing_table": f"{DS}.users",
+      "config": json.dumps(snapshot),
+  })
+  assert record.config == snapshot
+
+
+def test_the_snapshot_does_not_decide_equality():
+  row = {"run_id": "r", "landing_table": f"{DS}.users"}
+  assert RunRecord.from_row({**row, "config": "{}"}) == RunRecord.from_row(row)

@@ -66,11 +66,15 @@ manual input are still tried, and `JobNotFoundError` is raised only when
 none of them resolves a table.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §7 Validation and the dead-letter queue
+(ADR 0044).
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import math
 from collections.abc import Callable, Mapping, Sequence
@@ -92,7 +96,7 @@ from sdfb_evaluation.context.jobs import (
     parse_timestamp,
     writes_by_beam_job,
 )
-from sdfb_evaluation.context.runs import runs_for, split_run_id
+from sdfb_evaluation.context.runs import of_job, runs_for, split_run_id
 
 __all__ = [
     "LaunchContext",
@@ -168,6 +172,11 @@ def _text(value: Any) -> str | None:
   return text or None
 
 
+def _raw_text(value: Any) -> str | None:
+  """Text kept as written: "" is a value (no embedder, relationships off)."""
+  return None if value is None else str(value)
+
+
 def _dotted(table: str) -> str:
   return table.strip().replace(":", ".", 1)
 
@@ -189,6 +198,26 @@ def _as_float(value: Any) -> float:
   if not math.isfinite(number):
     raise ValueError("not finite")
   return number
+
+
+def _optional_float(value: Any) -> float | None:
+  try:
+    return None if value is None else _as_float(value)
+  except (TypeError, ValueError):
+    return None
+
+
+def _snapshot(value: Any) -> dict[str, Any] | None:
+  """`validation_runs.config` parsed: a JSON object, else None."""
+  if isinstance(value, Mapping):
+    return dict(value)
+  if not isinstance(value, str) or not value.strip():
+    return None
+  try:
+    parsed = json.loads(value)
+  except ValueError:
+    return None
+  return parsed if isinstance(parsed, dict) else None
 
 
 def _embedder_id(uri: Any) -> str:
@@ -257,7 +286,8 @@ def _typed(params: Mapping[str, Any], write_disposition: str | None,
 
 @dataclass(frozen=True)
 class RunRecord:
-  """One table's `validation_runs` row: what the generation DAG measured."""
+  """One table's `validation_runs` row: what the generation DAG measured,
+  and — since ADR 0044 — the generation record (None on older rows)."""
   landing_table: str
   run_id: str
   reference_table: str | None = None
@@ -266,6 +296,24 @@ class RunRecord:
   num_rows_requested: int | None = None
   status: str | None = None
   created_at: str | None = None
+  engine: str | None = None
+  model_uri: str | None = None
+  env: str | None = None
+  job_id: str | None = None
+  job_name: str | None = None
+  launch_run_id: str | None = None
+  generator_version: str | None = None
+  launched_at: str | None = None
+  embedder_uri: str | None = None
+  retrieval_method: str | None = None
+  similarity: float | None = None
+  seed: str | None = None
+  source_stats: str | None = None
+  relationships_uri: str | None = None
+  relationships_digest: str | None = None
+  config_digest: str | None = None
+  config: Mapping[str, Any] | None = field(
+      default=None, compare=False, hash=False, repr=False)
 
   @classmethod
   def from_row(cls, row: Mapping[str, Any]) -> RunRecord:
@@ -274,19 +322,43 @@ class RunRecord:
       value = row.get(key)
       return None if value is None else int(value)
 
+    def text(key: str) -> str | None:
+      return _text(row.get(key))
+
     return cls(
         landing_table=_dotted(str(row["landing_table"])),
         run_id=str(row["run_id"]),
-        reference_table=_text(row.get("reference_table")),
-        reference_digest=_text(row.get("reference_digest")),
+        reference_table=text("reference_table"),
+        reference_digest=text("reference_digest"),
         valid_count=count("valid_count"),
         num_rows_requested=count("num_rows_requested"),
-        status=_text(row.get("status")),
-        created_at=_text(row.get("created_at")))
+        status=text("status"),
+        created_at=text("created_at"),
+        engine=text("engine"),
+        model_uri=text("model_uri"),
+        env=text("env"),
+        job_id=text("job_id"),
+        job_name=text("job_name"),
+        launch_run_id=text("launch_run_id"),
+        generator_version=text("generator_version"),
+        launched_at=text("launched_at"),
+        embedder_uri=_raw_text(row.get("embedder_uri")),
+        retrieval_method=text("retrieval_method"),
+        similarity=_optional_float(row.get("similarity")),
+        seed=text("seed"),
+        source_stats=text("source_stats"),
+        relationships_uri=_raw_text(row.get("relationships_uri")),
+        relationships_digest=text("relationships_digest"),
+        config_digest=text("config_digest"),
+        config=_snapshot(row.get("config")))
 
   @property
   def base_and_index(self) -> tuple[str, int | None]:
     return split_run_id(self.run_id, self.landing_table)
+
+  def written_by(self, job_id: str | None, job_name: str | None) -> bool:
+    """This row's record names the Dataflow job (`runs.of_job`)."""
+    return of_job(self.job_id, self.job_name, job_id, job_name)
 
 
 def _manual(manual: Mapping[str, Any] | None) -> tuple[dict, dict]:
