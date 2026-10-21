@@ -21,7 +21,9 @@ Design: docs/DESIGN.md §8 Configuration
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import re
 
 import pytest
 from sdfb_beam.cli import run_pipeline as rp
@@ -91,3 +93,32 @@ def test_bad_file_exits_2_naming_the_key(tmp_path, capsys):
 
 def test_config_of_a_hand_built_namespace_is_the_default():
   assert rp.config_of(argparse.Namespace()) is rp.DEFAULT_CONFIG
+
+
+def test_main_reads_the_file(tmp_path, monkeypatch, capsys):
+  uri = _write(
+      tmp_path, "config_version: 1\n"
+      "generation: {similarity: 0.7}\n"
+      "free_text: {pool_values_per_call: 16}\n")
+  seen = []
+  monkeypatch.setattr(
+      rp,
+      "_run_one_table",
+      lambda a, beam_argv, registry=None: (seen.append(a) or 0))
+  rc = rp.main([
+      *ARGV_BASE, "--relationships_uri=", "--client_type=fake",
+      f"--config_uri={uri}"
+  ])
+  assert rc == 0 and len(seen) == 1
+  args = seen[0]
+  assert args.similarity == 0.7
+  assert rp.config_of(args).free_text.pool_values_per_call == 16
+  # main() reconfigures logging onto stderr, so read the launcher's log there.
+  err = capsys.readouterr().err
+  assert len(re.findall(r"config_resolved uri=", err)) == 1
+  assert f"config_resolved uri={uri} file=2" in err
+  block = err.split("name=launch_config", 1)[1]
+  body = block[block.index("{"):]
+  launch_config = json.JSONDecoder().raw_decode(body)[0]
+  assert launch_config["config_uri"] == uri
+  assert "config_resolution" not in launch_config
