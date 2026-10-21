@@ -227,6 +227,8 @@ class PipelineConfig:
   # worker `GenerationContext`.
   generator_config: GeneratorConfig = field(
       default_factory=lambda: DEFAULT_CONFIG)
+  # A1 ruling R14 — the pool store key the launcher computed once.
+  pool_store_key: str = ""
   # ADR 0044 — this job's generation record as the launcher built it.
   # None writes exactly master's 21-column summary row (the launcher passes
   # None when validation_runs lacks the record columns).
@@ -324,6 +326,7 @@ def build_pipeline(
       source_values_table=config.source_values_table,
       fanout=config.fanout,
       generator_config=config.generator_config,
+      pool_store_key=config.pool_store_key,
   )
 
   if requests is None:

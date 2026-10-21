@@ -67,7 +67,7 @@ from collections import Counter
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from sdfb_core.codegen import derive_record_model
-from sdfb_core.config.salt import pool_store_model_key, settings_salt
+from sdfb_core.config.salt import settings_salt
 from sdfb_core.engines.b1_rag._fidelity import ColumnSampler, numpy_available
 from sdfb_core.engines.b1_rag.profile import (
     ColumnKind,
@@ -1068,9 +1068,7 @@ class B1RagEngine(GenerationEngine):
     if store is None or not ctx.reference_digest:
       return {}
     try:
-      fetched = store.fetch(
-          ctx.reference_digest,
-          pool_store_model_key(ctx.model_uri, ctx.generator_config))
+      fetched = store.fetch(ctx.reference_digest, ctx.pool_key())
     except Exception as exc:  # pylint: disable=broad-exception-caught
       log_milestone("freetext_pool_store_error", error=type(exc).__name__)
       return {}

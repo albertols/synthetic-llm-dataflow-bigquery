@@ -25,8 +25,8 @@ source so a tainted warm store is rebuilt, never replayed (the 2026-08-07
 Mirrors `sdfb_beam.pools.store.BigQueryFreeTextPoolStore` deliberately —
 lazy client, pickle-safe, injectable fake for laptop tests.
 
-Design: docs/DESIGN.md §6 Throughput
-(ADR 0034).
+Design: docs/DESIGN.md §6 Throughput; §7 Validation and the dead-letter queue
+(ADR 0034, 0044).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -181,13 +181,15 @@ def pool_source_overlap(
     model_uri: str,
     *,
     config: GeneratorConfig,
+    pool_key: str | None = None,
 ) -> dict[str, int]:
   """Per-column count of persisted pool values that exist in the live
     source — nonzero means the warm store is tainted and must be rebuilt,
     not replayed. Columns with zero overlap are omitted. The pools are
-    read under the launch's pool key (``pool_store_model_key``)."""
+    read under the launch's pool key (``pool_store_model_key``), or the
+    explicit ``pool_key`` the launcher computed once (ADR 0044)."""
   pools: list[FreeTextPool] = pool_store.fetch(
-      reference_digest, pool_store_model_key(model_uri, config))
+      reference_digest, pool_key or pool_store_model_key(model_uri, config))
   overlap: dict[str, int] = {}
   for pool in pools:
     if not pool.values:

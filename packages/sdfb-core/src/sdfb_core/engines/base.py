@@ -23,9 +23,9 @@ REF: https://beam.apache.org/documentation/ml/large-language-modeling/
 REF: https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.base.html
 
 Design: docs/DESIGN.md §3 Serving; §4 Relational generation; §5 Fidelity;
-§8 Configuration
+§7 Validation and the dead-letter queue; §8 Configuration
 (ADR 0011, 0014, 0018, 0021, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0033,
-0036, 0037, 0043).
+0036, 0037, 0043, 0044).
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from typing import NamedTuple, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field
 
 from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
+from sdfb_core.config.salt import pool_store_model_key
 from sdfb_core.contracts import GeneratedRecord, TableSchema
 from sdfb_core.engines.fanout import FanoutPlan, KeyDraw, joint_key_draw
 from sdfb_core.observability import log_milestone
@@ -338,6 +339,16 @@ class GenerationContext(BaseModel):
   # promoted constants from it; the default is master's values.
   generator_config: GeneratorConfig = Field(
       default_factory=lambda: DEFAULT_CONFIG)
+  # A1 ruling R14 / ADR 0044 — the free-text pool store key the LAUNCHER
+  # computed (the same value it used for exists/taint/delete and the one
+  # the record carries as derived.cache_keys.freetext_pools). Empty for a
+  # context built by hand: `pool_key()` then derives it here.
+  pool_store_key: str = ""
+
+  def pool_key(self) -> str:
+    """The pool store key this generation reads and writes under."""
+    return self.pool_store_key or pool_store_model_key(self.model_uri,
+                                                       self.generator_config)
 
 
 class GenerationEngine(ABC):

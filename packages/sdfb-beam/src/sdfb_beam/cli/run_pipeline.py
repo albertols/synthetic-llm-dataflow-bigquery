@@ -34,9 +34,9 @@ REFs:
   - docs/MODEL_LAYOUT.md
 
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
-§6 Throughput; §8 Configuration
+§6 Throughput; §7 Validation and the dead-letter queue; §8 Configuration
 (ADR 0019, 0022, 0023, 0024, 0027, 0028, 0029, 0030, 0031, 0032, 0034, 0035,
-0036, 0037, 0038, 0039, 0043).
+0036, 0037, 0038, 0039, 0043, 0044).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -655,6 +655,35 @@ def resolve_embedder_identity(args: argparse.Namespace) -> tuple[str, str]:
   embedder_id, version = embedder_identity(args.embedder_uri)
   return embedder_id, salted(version,
                              settings_salt(config_of(args), "rag_chunks"))
+
+
+CACHES = ("freetext_pools", "rag_chunks", "source_stats", "fk_fanout_stats")
+
+
+def launch_cache_keys(args: argparse.Namespace,
+                      registry: RelationshipRegistry | None) -> dict[str, str]:
+  """The value of each store's salted key column for this launch (ADR 0044):
+    `freetext_pools.model_uri`, `rag_chunks.embedder_version`,
+    `source_table_stats.profiler_version`, `fk_fanout_stats.model_sha`.
+    Unchanged from master at the default settings (ADR 0043)."""
+  config = config_of(args)
+  _, embedder_version = resolve_embedder_identity(args)
+  sha = (registry or RelationshipRegistry()).sha12()
+  return {
+      "freetext_pools": pool_store_model_key(args.model_uri, config),
+      "rag_chunks": embedder_version,
+      "source_stats": stats_profiler_version(config),
+      "fk_fanout_stats": salted(sha, settings_salt(config, "fk_fanout_stats")),
+  }
+
+
+def cache_keys_of(
+    args: argparse.Namespace,
+    registry: RelationshipRegistry | None = None) -> dict[str, str]:
+  """The keys `main` computed for this launch, else computed now (a
+    namespace built by hand)."""
+  keys = getattr(args, "_cache_keys", None)
+  return dict(keys) if keys is not None else launch_cache_keys(args, registry)
 
 
 # The keys the Composer DAG's chained evaluation takes from its own params
@@ -1303,6 +1332,7 @@ def resolve_fanout(
       parent_landing_fqn(driving.ref, derive_fk_parent_landing(landing_table)),
       source_table,
   )
+  # Same expression as `launch_cache_keys` (fk_fanout_stats): keep in step.
   sha = salted(registry.sha12(), settings_salt(config, "fk_fanout_stats"))
   edge_label = _edge_label(driving)
   measured = _cache_read(stats_store, landing_table, source_table,
@@ -2347,8 +2377,13 @@ def _emit_source_stats(args, table_schema, reference_rows,
   return source_distinct
 
 
-def warm_pools_trusted(pool_store, source_value_store, reference_digest: str,
-                       model_uri: str, *, config: GeneratorConfig) -> bool:
+def warm_pools_trusted(pool_store,
+                       source_value_store,
+                       reference_digest: str,
+                       model_uri: str,
+                       *,
+                       config: GeneratorConfig,
+                       pool_key: str | None = None) -> bool:
   """False ⇒ the persisted pools overlap the live source and were
     deleted for a clean rebuild; True ⇒ keep the warm path.
 
@@ -2359,13 +2394,15 @@ def warm_pools_trusted(pool_store, source_value_store, reference_digest: str,
     (pools are an optimisation) and an append-rebuild without a clean
     delete would leave stale rows racing the rebuilt ones in `fetch`.
     """
+  key = pool_key or pool_store_model_key(model_uri, config)
   try:
     overlap = pool_source_overlap(
         pool_store,
         source_value_store,
         reference_digest,
         model_uri,
-        config=config)
+        config=config,
+        pool_key=key)
   except Exception as exc:  # pylint: disable=broad-exception-caught
     log_milestone(
         "pool_taint_check_error",
@@ -2385,7 +2422,7 @@ def warm_pools_trusted(pool_store, source_value_store, reference_digest: str,
       },
   )
   try:
-    pool_store.delete(reference_digest, pool_store_model_key(model_uri, config))
+    pool_store.delete(reference_digest, key)
   except Exception as exc:  # pylint: disable=broad-exception-caught
     log_milestone(
         "pool_taint_delete_error",
@@ -2409,6 +2446,7 @@ def resolve_pool_layer(args, reference_rows: list[dict]) -> tuple:
   config = config_of(args)
   digest = compute_reference_digest(reference_rows)
   pool_store = BigQueryFreeTextPoolStore(args.freetext_pools_table)
+  pool_key = cache_keys_of(args)["freetext_pools"]
   # Full-domain novelty rejection for the build branch, and the
   # taint preflight for the warm path (2026-08-05/07 E2E findings).
   source_value_store = BigQuerySourceValueStore(
@@ -2420,8 +2458,7 @@ def resolve_pool_layer(args, reference_rows: list[dict]) -> tuple:
   # say what to run. The READ path degrades silently and correctly on
   # its own; only an explicit --build_pool_layer reaches here.
   try:
-    already_built = pool_store.exists(
-        digest, pool_store_model_key(args.model_uri, config))
+    already_built = pool_store.exists(digest, pool_key)
   except Exception as exc:
     proj, ds, tbl = args.freetext_pools_table.split(".", 2)
     raise SystemExit(
@@ -2437,7 +2474,12 @@ def resolve_pool_layer(args, reference_rows: list[dict]) -> tuple:
     # memorized 2026-08-05 pools; a warm store must also prove it
     # holds no live source values before it is trusted.
     already_built = warm_pools_trusted(
-        pool_store, source_value_store, digest, args.model_uri, config=config)
+        pool_store,
+        source_value_store,
+        digest,
+        args.model_uri,
+        config=config,
+        pool_key=pool_key)
   if already_built:
     log_milestone(
         "pool_build_skipped",
@@ -2476,6 +2518,8 @@ def main(argv: list[str] | None = None) -> int:
   registry = load_relationship_registry(args.relationships_uri)
   plan = plan_launch(targets, args.reference_table, generate_fk, registry,
                      args.run_id)
+  # A1 ruling R14 / ADR 0044: every cache key of the launch, computed once.
+  args._cache_keys = launch_cache_keys(args, registry)  # pylint: disable=protected-access
   for warning in plan.warnings:
     logger.warning("launch plan: %s", warning)
   log_milestone(
@@ -3072,6 +3116,7 @@ def _prepare_table_spec(
   config = PipelineConfig(
       table_schema=table_schema,
       generator_config=config_of(args),
+      pool_store_key=cache_keys_of(args, registry)["freetext_pools"],
       engine_name=args.engine,
       model_client=model_client,
       num_rows=num_rows,

@@ -260,6 +260,7 @@ def _launch_args(config: GeneratorConfig) -> argparse.Namespace:
       freetext_pools_table="p.d.freetext_pools",
       reference_table="p.d.source",
       model_uri=_URI,
+      embedder_uri="",  # launch_cache_keys resolves every store's key
       config_resolution=resolution,
   )
 
@@ -332,6 +333,19 @@ def test_the_pool_branch_writes_under_the_key(config, key):
   reader.setup(_NoClient(), _ctx(config, pool_store=store))
   assert reader._pool_sources["notes"] == "store"
   reader.teardown()
+
+
+def test_the_pool_branch_writes_under_the_key_the_launcher_carried():
+  from sdfb_beam.dofns.pools import BuildFreeTextPoolsDoFn
+
+  carried = "gs://m/x+cfg.carried00000"
+  store = _KeyedPoolStore()
+  dofn = BuildFreeTextPoolsDoFn(
+      "b1_rag", _ArrayClient(), _ctx(pool_store_key=carried), store=store)
+  dofn.setup()
+  rows = list(dofn.process(None))
+  assert rows and {r["model_uri"] for r in rows} == {carried}
+  dofn.teardown()
 
 
 # --- (b) the source-value store's cap is the config's ------------------------
