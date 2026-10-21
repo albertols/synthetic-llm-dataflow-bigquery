@@ -354,7 +354,7 @@ const statsConcepts: Concept[] = [
         url: blob("docs/adr/0033-pool-ladder-integrity-at-scale.md", 58),
         kind: "adr",
       },
-      code("_pool_target (b1 engine)", "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py", 1569),
+      code("_pool_target (b1 engine)", "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py", 1554),
       P.hurlbert,
       doc("Source-table stats — why two tiers", STATS_DOC),
     ],
@@ -542,7 +542,7 @@ const configConcepts: Concept[] = [
       P.pydantic,
       P.pandera,
       P.beamDlq,
-      code("sdfb_beam/pipeline.py", "packages/sdfb-beam/src/sdfb_beam/pipeline.py", 376),
+      code("sdfb_beam/pipeline.py", "packages/sdfb-beam/src/sdfb_beam/pipeline.py", 377),
     ],
   },
   {
@@ -571,7 +571,7 @@ const configConcepts: Concept[] = [
       tip: "An ADR 0038 adjusted table excludes pk.duplicate from both sides of the ratio.",
     },
     links: [
-      code("sdfb_core/validation/summary.py", "packages/sdfb-core/src/sdfb_core/validation/summary.py", 182),
+      code("sdfb_core/validation/summary.py", "packages/sdfb-core/src/sdfb_core/validation/summary.py", 186),
       adr("0038"),
     ],
   },

@@ -1264,7 +1264,7 @@ export const knobs: KnobsFile = {
         "config"
       ],
       "config_key": "relational.fk_key_sample_floor",
-      "comment": "The ADR 0030 side-input cap: a child samples at most this many parent key tuples unless its PK needs more. Mirrored by `io/fk_pools._DEFAULT_LIMIT`.",
+      "comment": "The ADR 0030 side-input cap: a child samples at most this many parent key tuples unless its PK needs more; `io/fk_pools` defaults to it too.",
       "source": "packages/sdfb-core/src/sdfb_core/config/model.py:308",
       "source_token": "fk_key_sample_floor",
       "related_adrs": [
@@ -1894,7 +1894,7 @@ export const knobs: KnobsFile = {
       "settable_via": [
         "constant"
       ],
-      "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:132",
+      "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:136",
       "source_token": "dim: int = 384",
       "related_adrs": [],
       "docs": []
@@ -1909,7 +1909,7 @@ export const knobs: KnobsFile = {
       "settable_via": [
         "constant"
       ],
-      "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:215",
+      "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:219",
       "source_token": "dim: int = 384",
       "related_adrs": [],
       "docs": []
@@ -1927,7 +1927,7 @@ export const knobs: KnobsFile = {
       "settable_via": [
         "constant"
       ],
-      "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:347",
+      "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:353",
       "source_token": "_DEFAULT_EMBEDDER_IDENTITY",
       "related_adrs": [],
       "docs": []
@@ -2021,7 +2021,7 @@ export const knobs: KnobsFile = {
         "constant"
       ],
       "comment": "rule_ids whose failures count toward the BLOCKER gate. Mirrors the BLOCKER-severity rows in config/thresholds.yml.",
-      "source": "packages/sdfb-core/src/sdfb_core/validation/summary.py:44",
+      "source": "packages/sdfb-core/src/sdfb_core/validation/summary.py:45",
       "source_token": "BLOCKER_RULE_IDS",
       "related_adrs": [],
       "docs": []
@@ -2412,12 +2412,12 @@ export const knobs: KnobsFile = {
           "excerpt": "in-range and novel-by-interpolation; `similarity` is unused here."
         },
         {
-          "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py:909",
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py:888",
           "role": "code",
           "excerpt": "del similarity  # Unused: pool, routed and expansion draws ignore it."
         },
         {
-          "source": "packages/sdfb-core/src/sdfb_core/engines/b2_library/engine.py:406",
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b2_library/engine.py:409",
           "role": "code",
           "excerpt": "return round(2.0 * (1.0 - s), 4)"
         },
@@ -2448,7 +2448,7 @@ export const knobs: KnobsFile = {
           "excerpt": "grid = np.linspace(0.0, 1.0, obs.size)"
         },
         {
-          "source": "packages/sdfb-core/src/sdfb_core/engines/b2_library/fidelity.py:209",
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b2_library/fidelity.py:208",
           "role": "code",
           "excerpt": "return tuple(ordered[round(i * last / 10)] for i in range(11))"
         },
@@ -2474,12 +2474,12 @@ export const knobs: KnobsFile = {
       "code_does": "BgeEmbedder mean-pools the last hidden state over the attention mask, then L2-normalizes. Whether [CLS] picks better exemplars here is unmeasured.",
       "evidence": [
         {
-          "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:176",
+          "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:180",
           "role": "docs",
           "excerpt": "Mean-pooled, L2-normalized CLS-free"
         },
         {
-          "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:336",
+          "source": "packages/sdfb-core/src/sdfb_core/rag/embedding.py:342",
           "role": "code",
           "excerpt": "# bge uses mean pooling over the last hidden state."
         },
@@ -2520,7 +2520,7 @@ export const knobs: KnobsFile = {
           "excerpt": "severity: BLOCKER"
         },
         {
-          "source": "packages/sdfb-core/src/sdfb_core/validation/summary.py:44",
+          "source": "packages/sdfb-core/src/sdfb_core/validation/summary.py:45",
           "role": "code",
           "excerpt": "BLOCKER_RULE_IDS = frozenset({"
         }
@@ -3591,7 +3591,7 @@ export const knobs: KnobsFile = {
     }
   ],
   "exported_from": {
-    "commit": "6856c5d0c8d8f107baef056d80c59e64ff05a7b6",
+    "commit": "0ca55ab55a5d61e88903e01e5dd525af68e9edfe",
     "dirty": []
   }
 };
