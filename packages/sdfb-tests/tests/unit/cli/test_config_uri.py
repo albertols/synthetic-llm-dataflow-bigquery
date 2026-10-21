@@ -23,7 +23,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import re
 
 import pytest
 from sdfb_beam.cli import run_pipeline as rp
@@ -101,13 +100,15 @@ def test_main_reads_the_file(tmp_path, monkeypatch, capsys):
       "generation: {similarity: 0.7}\n"
       "free_text: {pool_values_per_call: 16}\n")
   seen = []
-  monkeypatch.setattr(
-      rp,
-      "_run_one_table",
-      lambda a, beam_argv, registry=None: (seen.append(a) or 0))
+
+  def fake_run_one_table(a, *_unused, **_kwargs):
+    seen.append(a)
+    return 0
+
+  monkeypatch.setattr(rp, "_run_one_table", fake_run_one_table)
   rc = rp.main([
-      *ARGV_BASE, "--relationships_uri=", "--client_type=fake",
-      f"--config_uri={uri}"
+      *ARGV_BASE, "--similarity=0.3", "--relationships_uri=",
+      "--client_type=fake", f"--config_uri={uri}"
   ])
   assert rc == 0 and len(seen) == 1
   args = seen[0]
@@ -115,7 +116,8 @@ def test_main_reads_the_file(tmp_path, monkeypatch, capsys):
   assert rp.config_of(args).free_text.pool_values_per_call == 16
   # main() reconfigures logging onto stderr, so read the launcher's log there.
   err = capsys.readouterr().err
-  assert len(re.findall(r"config_resolved uri=", err)) == 1
+  assert err.count("config_resolved uri=") == 1
+  assert "config_override key=generation.similarity" in err
   assert f"config_resolved uri={uri} file=2" in err
   block = err.split("name=launch_config", 1)[1]
   body = block[block.index("{"):]
