@@ -8,6 +8,38 @@ const PROMOTED_TIP = "Set it in a config file (--config_uri); a cache it shapes 
 /** The tip those constants carried on master. */
 const MASTER_TIP = "A constant: changing it is a code edit, a test run and an image rebuild.";
 
+type ProseField = "purpose" | "up" | "down";
+
+/**
+ * Prose rewritten since master because it promised effects the code does not have: both keys
+ * change only the source_table_stats rows (A1 final review F4). Exactly these ids and fields;
+ * each reads as master's in the snapshot only while it equals the text here.
+ */
+const REWRITTEN_PROSE: Record<string, Record<ProseField, string>> = {
+  shape_mix_top_k: {
+    purpose:
+      "How many character-shape masks (9 digit, A upper, a lower) a column's source_table_stats entry " +
+      "keeps, with their shares. The engines build their own shape mixes and never read it.",
+    up: "The stats entry records more of a long-tailed format's minority masks; generation does not change.",
+    down: "The stats entry keeps only the dominant masks; generation does not change.",
+  },
+  length_percentiles: {
+    purpose:
+      "The three length quantiles a string column's source_table_stats entry records, under the fixed " +
+      "names len_p05, len_p50 and len_p95. The pool prompt's length hint has its own fixed p05–p95 band " +
+      "and never reads these.",
+    up: "A wider band records more of the length tails in the stats entry; prompts and generation do not change.",
+    down: "A tighter band records only typical lengths in the stats entry; prompts and generation do not change.",
+  },
+};
+
+/** A rewritten field reads as master's while it equals the allowlisted text. */
+function asOnMaster(id: string, field: ProseField, text: string): string {
+  const rewritten = REWRITTEN_PROSE[id]?.[field];
+  const onMaster = (master as Record<string, Partial<Record<ProseField, string>>>)[id]?.[field];
+  return rewritten !== undefined && text === rewritten && onMaster !== undefined ? onMaster : text;
+}
+
 /**
  * Commit-free view of the guides master had, in the snapshot's order: code/doc links
  * lose the exported sha, and a promoted constant's tip reads as it did on master.
@@ -19,6 +51,9 @@ function serialise(): unknown {
     const guide = knobGuides[id as keyof typeof knobGuides];
     out[id] = {
       ...guide,
+      purpose: asOnMaster(id, "purpose", guide.purpose),
+      up: asOnMaster(id, "up", guide.up),
+      down: asOnMaster(id, "down", guide.down),
       tip: guide.tip === PROMOTED_TIP ? MASTER_TIP : guide.tip,
       refs: guide.refs?.map((r) => ({ ...r, url: r.url.replace(/\/blob\/[0-9a-f]{40}\//, "/blob/<ref>/") })),
     };
@@ -35,5 +70,14 @@ describe("knob guides", () => {
 
   it("promotes exactly 18 constant tips", () => {
     expect(Object.values(knobGuides).filter((g) => g.tip === PROMOTED_TIP)).toHaveLength(18);
+  });
+
+  it("rewrites only the prose the allowlist names, and all of it (A1 final review F4)", () => {
+    for (const [id, fields] of Object.entries(REWRITTEN_PROSE)) {
+      const guide = knobGuides[id as keyof typeof knobGuides];
+      for (const [field, text] of Object.entries(fields)) {
+        expect(guide[field as ProseField]).toBe(text);
+      }
+    }
   });
 });

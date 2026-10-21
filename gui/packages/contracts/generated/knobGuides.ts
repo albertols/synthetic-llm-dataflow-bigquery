@@ -175,15 +175,15 @@ export const generatorGuides: Readonly<Record<GeneratorKnobId, GeneratedGuide>> 
     "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
   },
   "shape_mix_top_k": {
-    "purpose": "How many character-shape masks (9 digit, A upper, a lower) a column keeps with their shares.",
-    "up": "Rarer shapes of identifier-like columns stay visible to the shape expander and the drift checks.",
-    "down": "Only the dominant shapes survive; a long-tailed format loses its minority masks.",
+    "purpose": "How many character-shape masks (9 digit, A upper, a lower) a column's source_table_stats entry keeps, with their shares. The engines build their own shape mixes and never read it.",
+    "up": "The stats entry records more of a long-tailed format's minority masks; generation does not change.",
+    "down": "The stats entry keeps only the dominant masks; generation does not change.",
     "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
   },
   "length_percentiles": {
-    "purpose": "The length quantiles the profiler records per string column; the p05–p95 band becomes the pool prompt's length hint.",
-    "up": "A wider band admits more of the tail's lengths into prompts.",
-    "down": "A tighter band steers prompts toward typical lengths only.",
+    "purpose": "The three length quantiles a string column's source_table_stats entry records, under the fixed names len_p05, len_p50 and len_p95. The pool prompt's length hint has its own fixed p05–p95 band and never reads these.",
+    "up": "A wider band records more of the length tails in the stats entry; prompts and generation do not change.",
+    "down": "A tighter band records only typical lengths in the stats entry; prompts and generation do not change.",
     "tip": "Set it in a config file (--config_uri); a cache it shapes is rebuilt under the new value."
   },
   "null_pattern_max_cols": {
