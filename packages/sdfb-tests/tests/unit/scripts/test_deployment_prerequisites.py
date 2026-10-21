@@ -1030,6 +1030,55 @@ def test_4d_is_ok_with_every_column(monkeypatch):
   assert f"{len(_vr_schema_names())} cols" in row.resource
 
 
+def _run4_args(monkeypatch, fake, *extra):
+  _patch_bq(monkeypatch, fake)
+  ctx = _mod.Ctx(args=_mod.parse_args([*_BASE_ARGV, *extra]))
+  _mod.step4_bq_tables(ctx)
+  return {r.step: r for r in ctx.results}
+
+
+def test_4d_without_a_readable_schema_file_does_not_crash(
+    monkeypatch, tmp_path):
+  """A custom --schemas-dir without the file: the table exists, so 4d is OK
+    and says the columns were not compared (as step 13 does)."""
+  fake = _FakeBQ(
+      tables={_VR_FQN: SimpleNamespace(schema=[SimpleNamespace(name="x")])})
+  row = _run4_args(monkeypatch, fake, "--schemas-dir", str(tmp_path))["4d"]
+  assert row.status == _mod.OK
+  assert "columns not compared (schema file unusable)" in row.resource
+
+
+def test_4d_with_malformed_schema_json_does_not_crash(monkeypatch, tmp_path):
+  d = tmp_path / "synthetic_data_quality"
+  d.mkdir()
+  (d / "validation_runs.schema.json").write_text("{not json")
+  fake = _FakeBQ(
+      tables={_VR_FQN: SimpleNamespace(schema=[SimpleNamespace(name="x")])})
+  row = _run4_args(monkeypatch, fake, "--schemas-dir", str(tmp_path))["4d"]
+  assert row.status == _mod.OK
+  assert "columns not compared (schema file unusable)" in row.resource
+
+
+def test_4d_reports_a_missing_table_as_an_action(monkeypatch):
+  row = _run4_args(monkeypatch, _FakeBQ(tables={}))["4d"]
+  assert row.status == _mod.ACTION
+  assert "not found" in row.resource
+
+
+def test_4d_skips_when_get_table_raises(monkeypatch):
+
+  class _Boom(_FakeBQ):
+
+    def get_table(self, fqn):
+      if fqn == _VR_FQN:
+        raise RuntimeError("denied")
+      return super().get_table(fqn)
+
+  row = _run4_args(monkeypatch, _Boom())["4d"]
+  assert row.status == _mod.SKIP
+  assert "denied" in row.resource
+
+
 def test_13_names_the_exact_update_when_only_columns_are_missing(monkeypatch):
   """A registry table missing only columns gets the one `bq update` that
     appends them: the evaluator's load jobs carry the committed schema and

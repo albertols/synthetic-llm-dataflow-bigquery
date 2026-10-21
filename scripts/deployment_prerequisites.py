@@ -431,6 +431,7 @@ def step4_bq_tables(ctx: Ctx) -> None:
     except NotFound:
       ctx.add(step, f"BQ table · {label}", ACTION,
               f"{bq_table_link(fqn)} — not found", _table_action(label, fqn))
+      continue
     except Exception as e:  # pylint: disable=broad-exception-caught
       ctx.add(step, f"BQ table · {label}", SKIP,
               f"{bq_table_link(fqn)} — {short(f'{type(e).__name__}: {e}')}")
@@ -452,9 +453,14 @@ def _validation_runs_contract(ctx: Ctx, live, fqn: str) -> None:
   schema_file = (
       Path(ctx.args.schemas_dir) / "synthetic_data_quality" /
       "validation_runs.schema.json")
-  want = [
-      f["name"] for f in json.loads(schema_file.read_text(encoding="utf-8"))
-  ]
+  try:
+    want = [
+        f["name"] for f in json.loads(schema_file.read_text(encoding="utf-8"))
+    ]
+  except (OSError, ValueError, TypeError, KeyError):
+    ctx.add("4d", label, OK,
+            f"{link} — columns not compared (schema file unusable)")
+    return
   have = {f.name for f in live.schema}
   missing = [c for c in want if c not in have]
   if not missing:
