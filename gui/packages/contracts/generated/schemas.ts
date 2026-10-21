@@ -55,8 +55,8 @@ export const evaluationDataHistoryRowSchema = z.object({
   base_run_id: z.string().nullable(),
   /** Every run_id this evaluation covers, one per table in a relational launch. */
   run_ids: z.array(z.string()),
-  /** jobs_labels+logs | logs | dataflow_params | manual */
-  params_source: z.enum(["jobs_labels+logs","logs","dataflow_params","manual"]).nullable(),
+  /** jobs_labels+logs | logs | dataflow_params | validation_runs | manual */
+  params_source: z.enum(["jobs_labels+logs","logs","dataflow_params","validation_runs","manual"]).nullable(),
   /** Name of the relationship model (config/relationships/*.yaml) the generation run applied. */
   relationship_model: z.string().nullable(),
   /** SHA of the relationship model file the generation run applied. */
@@ -186,6 +186,10 @@ export const evaluationDataHistoryRowSchema = z.object({
   warnings: z.array(z.string()),
   /** GCS URI of the HTML/JSON evaluation artifacts for this run. */
   artifacts_uri: z.string().nullable(),
+  /** ADR 0044 — validation_runs.generator_version of the evaluated generation, <base>-<branch>-<sha7>[-dirty]; NULL when the generation wrote no record. */
+  generator_version: z.string().nullable(),
+  /** ADR 0044 — validation_runs.config_digest of the evaluated generation: same digest, same generator config; NULL when the generation wrote no record. */
+  generator_config_digest: z.string().nullable(),
 });
 export type EvaluationDataHistoryRow = z.infer<typeof evaluationDataHistoryRowSchema>;
 
@@ -515,7 +519,7 @@ export const vocabularies = {
   "evaluation_data_history.status": ["RUNNING","SUCCEEDED","SUCCEEDED_WITH_WARNINGS","PARTIAL","SKIPPED","FAILED"],
   "evaluation_data_history.trigger": ["cli","composer","chained","agent"],
   "evaluation_data_history.mode": ["exact","sampled"],
-  "evaluation_data_history.params_source": ["jobs_labels+logs","logs","dataflow_params","manual"],
+  "evaluation_data_history.params_source": ["jobs_labels+logs","logs","dataflow_params","validation_runs","manual"],
   "evaluation_data_history.tables.role": ["root","driven","side_input","isolated","standalone","external"],
   "evaluation_data_history.tables.scope_mode": ["table","as_of","appends","as_of_diff","manual"],
   "evaluation_data_history.tables.scope_status": ["ok","count_mismatch","contaminated","expired","empty","unknown"],
@@ -976,6 +980,16 @@ export const bqTables = {
       },
       {
         "name": "artifacts_uri",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "generator_version",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "generator_config_digest",
         "type": "STRING",
         "mode": "NULLABLE"
       }

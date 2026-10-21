@@ -115,6 +115,8 @@ export function evaluation(overrides: Partial<EvaluationRecord> = {}): Evaluatio
     predicted_shuffle_gb: 1,
     warnings: [],
     artifacts_uri: null,
+    generator_version: null,
+    generator_config_digest: null,
     ...overrides,
   };
 }

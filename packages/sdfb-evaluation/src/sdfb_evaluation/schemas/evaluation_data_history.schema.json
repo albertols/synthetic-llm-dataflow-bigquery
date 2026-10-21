@@ -21,7 +21,7 @@
   {"name": "generation_finished_at", "type": "TIMESTAMP", "mode": "NULLABLE", "description": "Finish time of the generation job being evaluated."},
   {"name": "base_run_id", "type": "STRING", "mode": "NULLABLE", "description": "Root run id shared by every table in a relational launch."},
   {"name": "run_ids", "type": "STRING", "mode": "REPEATED", "description": "Every run_id this evaluation covers, one per table in a relational launch."},
-  {"name": "params_source", "type": "STRING", "mode": "NULLABLE", "description": "jobs_labels+logs | logs | dataflow_params | manual"},
+  {"name": "params_source", "type": "STRING", "mode": "NULLABLE", "description": "jobs_labels+logs | logs | dataflow_params | validation_runs | manual"},
   {"name": "relationship_model", "type": "STRING", "mode": "NULLABLE", "description": "Name of the relationship model (config/relationships/*.yaml) the generation run applied."},
   {"name": "relationship_model_sha", "type": "STRING", "mode": "NULLABLE", "description": "SHA of the relationship model file the generation run applied."},
   {"name": "relationship_model_uri", "type": "STRING", "mode": "NULLABLE", "description": "gs:// URI of the pinned relationship model."},
@@ -86,5 +86,7 @@
   {"name": "bq_bytes_processed", "type": "INT64", "mode": "NULLABLE", "description": "Total bytes processed by the BigQuery queries this evaluation issued."},
   {"name": "predicted_shuffle_gb", "type": "FLOAT64", "mode": "NULLABLE", "description": "Predicted Beam shuffle volume in GB for this evaluation job."},
   {"name": "warnings", "type": "STRING", "mode": "REPEATED", "description": "Non-fatal warnings raised during evaluation."},
-  {"name": "artifacts_uri", "type": "STRING", "mode": "NULLABLE", "description": "GCS URI of the HTML/JSON evaluation artifacts for this run."}
+  {"name": "artifacts_uri", "type": "STRING", "mode": "NULLABLE", "description": "GCS URI of the HTML/JSON evaluation artifacts for this run."},
+  {"name": "generator_version", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 — validation_runs.generator_version of the evaluated generation, <base>-<branch>-<sha7>[-dirty]; NULL when the generation wrote no record."},
+  {"name": "generator_config_digest", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 — validation_runs.config_digest of the evaluated generation: same digest, same generator config; NULL when the generation wrote no record."}
 ]

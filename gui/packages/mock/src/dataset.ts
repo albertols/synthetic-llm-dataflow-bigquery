@@ -254,6 +254,8 @@ function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
     predicted_shuffle_gb: null,
     warnings: [],
     artifacts_uri: `gs://synthetic-platform-demo/synthetic/evaluations/${spec.id}/`,
+    generator_version: null,
+    generator_config_digest: null,
   };
 }
 

@@ -64,6 +64,15 @@ the GUI shows it as **Stale**.
 "A RUNNING row that never closes", lists the open evaluations and has the
 statement that closes one by hand.
 
+Every row also says which generation it evaluated, and with what:
+
+| Column | Read it as |
+| :-- | :-- |
+| `params_source` | where the generation parameters came from: `jobs_labels+logs`, `logs`, `dataflow_params`, `validation_runs` (the generation's own record, ADR 0044) or `manual` |
+| `generation_params` | the generation's config snapshot (`validation_runs.config`) when it wrote one; otherwise the flat launch parameters |
+| `generator_version` | `validation_runs.generator_version` of the evaluated generation, `<base>-<branch>-<sha7>[-dirty]`; NULL when the generation wrote no record |
+| `generator_config_digest` | `validation_runs.config_digest` of the evaluated generation: same digest, same generator config; NULL when the generation wrote no record |
+
 ## How to read a metric row
 
 A row of `evaluation_metrics` carries everything needed to judge it without

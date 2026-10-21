@@ -13,33 +13,37 @@
 #  limitations under the License.
 """`job_id` → "what did generation job X write, with which parameters".
 
-Five sources, each answering what it can, in this order of precedence:
+Five sources, each answering what it can:
 
     source                       answers                                 lost when
     ───────────────────────────  ──────────────────────────────────────  ─────────────────────
-    1 BigQuery JOBS labels       tables written + commit windows + rows  no resourceViewer
-    2 launch_config log entry    every launch argument, table order,     log retention, or a
+    1 validation_runs record     the resolved config snapshot, job id,   a table or launch
+      (ADR 0044)                 generator version, run ids, digests      before ADR 0044
+    2 BigQuery JOBS labels       tables written + commit windows + rows  no resourceViewer
+    3 launch_config log entry    every launch argument, table order,     log retention, or a
                                  run ids (+ relationships_loaded sha,    launch predating it
                                  model_adjustment_model uri)
-    3 Dataflow job parameters    the launch arguments (display data)     job retention (~30 d)
-    4 validation_runs            run ids, reference digests, valid rows  --validation_runs_table ""
+    4 Dataflow job parameters    the launch arguments (display data)     job retention (~30 d)
     5 manual                     anything still missing                  —
 
-`params` (→ the registry's `generation_params`) comes from the first of
-2 → 3 → 5 that has any; `params_source` records which, in the registry's
-vocabulary: `jobs_labels+logs` (2, with 1 resolved), `logs` (2 without
-1), `dataflow_params` (3), `manual` (5). Manual input only FILLS gaps: a
-manual value that disagrees with a resolved one is ignored and warned
-about. Every fallback taken is a warning on the context — nothing is
-dropped silently.
+`params` (→ the registry's typed filters) is filled in that order, each
+source filling only the keys still missing: the record (its snapshot's
+`values`, or its typed columns on a row without a snapshot) → the
+`launch_config` log, else the Dataflow display data → manual. A manual value
+that disagrees with a resolved one is ignored and warned about. The
+caller's tables are never replaced here. `params_source` names the first
+source that supplied the params: `validation_runs`, `jobs_labels+logs`,
+`logs`, `dataflow_params` or `manual`. With a snapshot, `generation_params`
+is the snapshot itself. Every fallback taken is a warning on the context —
+nothing is dropped silently.
 
 One path reads less: `resolve_launch(job_only=True)`, for a job id given
 next to hand-named tables (`--seed_table T --generation_job_id J`), reads
-only source 3's job resource for the job's id, name, region and window — no
-log, no JOBS labels — and takes the rest from `manual`. Given the
-generator's `validation_runs_table` and with the window known, it also reads
-this launch's rows of that table (source 4, one query), which carry the
-reference digests.
+only source 4's job resource for the job's id, name, region and window — no
+log, no JOBS labels — and takes the rest from the job's `validation_runs`
+record and from `manual`. Given the generator's `validation_runs_table` and
+with the window known, it reads this launch's rows of that table (one
+query), which carry the reference digests and, since ADR 0044, the record.
 
 `tables_in_order` never silently narrows a relational launch to its
 `--landing_table` target:
@@ -67,8 +71,9 @@ none of them resolves a table.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
-Design: docs/DESIGN.md §7 Validation and the dead-letter queue
-(ADR 0044).
+Design: docs/DESIGN.md §7 Validation and the dead-letter queue;
+§8 Configuration
+(ADR 0043, 0044).
 """
 
 from __future__ import annotations
@@ -99,9 +104,12 @@ from sdfb_evaluation.context.jobs import (
 from sdfb_evaluation.context.runs import of_job, runs_for, split_run_id
 
 __all__ = [
+    "GenerationRecord",
     "LaunchContext",
     "RunRecord",
     "UnresolvedLaunchError",
+    "record_of",
+    "record_params",
     "resolve_launch",
 ]
 
@@ -361,6 +369,126 @@ class RunRecord:
     return of_job(self.job_id, self.job_name, job_id, job_name)
 
 
+_TRUTHY = frozenset({"true", "1", "yes"})
+
+
+def _truthy(value: Any) -> bool:
+  return value is not None and str(value).strip().lower() in _TRUTHY
+
+
+@dataclass(frozen=True)
+class GenerationRecord:
+  """A generation job's own `validation_runs` rows that carry the config
+  snapshot (ADR 0044), in run order; every table of one job carries the
+  same snapshot."""
+  runs: tuple[RunRecord, ...]
+  snapshot: Mapping[str, Any] = field(compare=False, hash=False, repr=False)
+
+  def value(self, section: str, key: str) -> Any:
+    values = self.snapshot.get("values")
+    block = values.get(section) if isinstance(values, Mapping) else None
+    return block.get(key) if isinstance(block, Mapping) else None
+
+  @property
+  def generates_relationships(self) -> bool:
+    return _truthy(self.value("relational", "generate_fk_relationships"))
+
+  @property
+  def relationships_uri(self) -> str | None:
+    """The model the launch generated with; None when relationships were
+    off (an isolated generation is evaluated as one)."""
+    if not self.generates_relationships:
+      return None
+    return _text(self.value("relational", "relationships_uri"))
+
+  @property
+  def reference_rows_limit(self) -> int | None:
+    value = self.value("sampling", "reference_rows_limit")
+    try:
+      return None if value is None else _as_int(value)
+    except (TypeError, ValueError):
+      return None
+
+  @property
+  def landing_tables(self) -> tuple[str, ...]:
+    return tuple(r.landing_table for r in self.runs)
+
+  def cache_key(self, cache: str) -> str | None:
+    """The key the launch read and wrote that store under (A1 ruling R11)."""
+    derived = self.snapshot.get("derived")
+    keys = derived.get("cache_keys") if isinstance(derived, Mapping) else None
+    return _text(keys.get(cache)) if isinstance(keys, Mapping) else None
+
+
+def record_of(runs: Sequence[RunRecord]) -> GenerationRecord | None:
+  """The record these runs carry: the first snapshot in run order."""
+  ordered = sorted(
+      runs, key=lambda r: (r.base_and_index[1] or 0, r.created_at or ""))
+  for run in ordered:
+    if run.config is not None:
+      return GenerationRecord(runs=tuple(ordered), snapshot=run.config)
+  return None
+
+
+# Which tables a launch generated is said by the record's ROWS (each one's
+# landing_table and reference_table) and, on the job-only path, by the
+# caller — never by the launch-level flags, which name only the targets of a
+# relational closure. Left out of the record's params so `_order` and the
+# caller's tables decide exactly as before.
+_RECORD_PARAM_EXCLUDED = frozenset({"landing_table", "reference_table"})
+
+
+def record_params(runs: Sequence[RunRecord],
+                  notes: list[str] | None = None) -> dict[str, Any]:
+  """The generation parameters the record states, under launch-argument
+  names: the snapshot's `values` flattened (a key keeps its CLI name inside
+  its section, ADR 0043) minus the two table-naming flags, plus
+  `derived.profiler_version`, with `relationships_uri` "" when relationships
+  were off. A null value is a derived default the snapshot does not pin
+  (ADR 0043), so it states nothing and a later source may fill the key.
+  Without a snapshot, the first run's typed columns. A row that has a
+  `config_digest` but no parseable `config` is a note."""
+  record = record_of(runs)
+  if record is not None:
+    params: dict[str, Any] = {}
+    values = record.snapshot.get("values")
+    if isinstance(values, Mapping):
+      for block in values.values():
+        if isinstance(block, Mapping):
+          params.update({
+              k: v
+              for k, v in block.items()
+              if k not in _RECORD_PARAM_EXCLUDED and v is not None
+          })
+    derived = record.snapshot.get("derived")
+    if isinstance(derived, Mapping) and derived.get("profiler_version"):
+      params["profiler_version"] = derived["profiler_version"]
+    if not record.generates_relationships:
+      params["relationships_uri"] = ""
+    return params
+  if notes is not None:
+    notes.extend(
+        f"{r.landing_table}: validation_runs has a config_digest but its "
+        "config could not be parsed; the record's typed columns are used"
+        for r in runs
+        if r.config_digest and r.config is None)
+  ordered = sorted(runs, key=lambda r: (r.base_and_index[1] or 0))
+  if not ordered:
+    return {}
+  first = ordered[0]
+  typed = {
+      "engine": first.engine,
+      "model_uri": first.model_uri,
+      "env": first.env,
+      "embedder_uri": first.embedder_uri,
+      "pool_seed_strategy": first.retrieval_method,
+      "similarity": first.similarity,
+      "seed": first.seed,
+      "source_stats": first.source_stats,
+  }
+  return {k: v for k, v in typed.items() if v is not None}
+
+
 def _manual(manual: Mapping[str, Any] | None) -> tuple[dict, dict]:
   """(field values, params) of a manual mapping, strictly validated."""
   if not manual:
@@ -491,11 +619,14 @@ class LaunchContext:
   reference_table: str | None
   write_disposition: str | None
   relationships_uri: str | None
-  params: dict[str, Any] = field(hash=False)  # → generation_params
+  # → the typed filters; also generation_params when the record has no
+  # snapshot
+  params: dict[str, Any] = field(hash=False)
   model_sha: str | None
   model_name: str | None
   adjusted_model_uri: str | None
-  params_source: str  # jobs_labels+logs | logs | dataflow_params | manual
+  # validation_runs | jobs_labels+logs | logs | dataflow_params | manual
+  params_source: str
   writes: tuple[JobWrite, ...]
   runs: tuple[RunRecord, ...] = ()
   model_adjusted: bool | None = None
@@ -519,6 +650,24 @@ class LaunchContext:
     wanted = _dotted(landing_table)
     return next((r for r in self.runs if r.landing_table == wanted), None)
 
+  @property
+  def record(self) -> GenerationRecord | None:
+    """The generation record of this launch's runs (ADR 0044), if any."""
+    return record_of(self.runs)
+
+  @property
+  def generator_version(self) -> str | None:
+    return next((r.generator_version for r in self.runs if r.generator_version),
+                None)
+
+  @property
+  def config_digest(self) -> str | None:
+    return next((r.config_digest for r in self.runs if r.config_digest), None)
+
+  def cache_key(self, cache: str) -> str | None:
+    record = self.record
+    return record.cache_key(cache) if record is not None else None
+
   @classmethod
   def from_sources(
       cls,
@@ -530,6 +679,7 @@ class LaunchContext:
       runs: Sequence[Mapping[str, Any]] = (),
       milestones: Mapping[str, Sequence[Mapping[str, str]]] | None = None,
       warnings: Sequence[str] = (),
+      record_runs: Sequence[RunRecord] | None = None,
   ) -> LaunchContext:
     """Assemble a context from whatever the sources returned.
 
@@ -543,6 +693,8 @@ class LaunchContext:
         `model_adjustment_model` entries; None when the launch log was not
         read (then `model_adjusted` stays unknown).
       warnings: notes already collected by the caller.
+      record_runs: the runs whose record fills the params first; default:
+        this launch's own runs, picked from `runs`.
 
     Raises:
       ValueError: a malformed manual mapping (the message names the
@@ -563,12 +715,19 @@ class LaunchContext:
           "reordered in Cloud Logging; falling back to the Dataflow job "
           "parameters, validation_runs and labelled writes")
       launch_config = None
-    params, source = _params(job, launch_config, bool(writes_t), manual_params,
-                             notes)
+    launch_params, source = _launch_params(job, launch_config, bool(writes_t))
+    # the launch's run id, else manual's (manual fills only a missing key)
+    run_id = (launch_params
+              if "run_id" in launch_params else manual_params).get("run_id")
+    base, own = _pick_runs([RunRecord.from_row(r) for r in runs], _text(run_id),
+                           notes)
+    filled_from = own if record_runs is None else list(record_runs)
+    params, source = _params(
+        record_params(filled_from, notes),
+        record_of(filled_from) is not None, launch_params, source,
+        manual_params, notes)
     resolved = (launch_config or {}).get("resolved")
     resolved = resolved if isinstance(resolved, Mapping) else {}
-    base, own = _pick_runs([RunRecord.from_row(r) for r in runs],
-                           _text(params.get("run_id")), notes)
     tables, own, run_ids = _order(resolved, own, params, writes_t, notes)
 
     window = DataflowJobs.window(job) if job is not None else (None, None)
@@ -613,24 +772,35 @@ class LaunchContext:
         **values)
 
 
-def _params(job: Mapping[str, Any] | None,
-            launch_config: Mapping[str, Any] | None, has_writes: bool,
-            manual_params: Mapping[str, Any],
-            notes: list[str]) -> tuple[dict[str, Any], str]:
-  """(generation params, params_source): launch_config → Dataflow display
-  data → manual, then manual FILLS missing keys (never overrides)."""
+def _launch_params(job: Mapping[str, Any] | None,
+                   launch_config: Mapping[str, Any] | None,
+                   has_writes: bool) -> tuple[dict[str, Any], str]:
+  """(params, source) of the launch's own records: the `launch_config` log,
+  else the Dataflow display data; ({}, "manual") when neither answers."""
   job_params = DataflowJobs.params(job) if job is not None else {}
   if launch_config is not None:
-    params = dict(launch_config)
-    source = "jobs_labels+logs" if has_writes else "logs"
-  elif job_params:
-    params, source = job_params, "dataflow_params"
-  else:
-    params, source = {}, "manual"
-    if not manual_params:
-      notes.append("no generation parameters resolved from any source; "
-                   "the registry's generation filters stay NULL")
-  for key, value in manual_params.items():
+    return dict(launch_config), ("jobs_labels+logs" if has_writes else "logs")
+  if job_params:
+    return dict(job_params), "dataflow_params"
+  return {}, "manual"
+
+
+def _params(record: Mapping[str, Any], full_record: bool,
+            launch: Mapping[str, Any], source: str, manual: Mapping[str, Any],
+            notes: list[str]) -> tuple[dict[str, Any], str]:
+  """(generation params, params_source), filled in order (ADR 0044): the
+  record → the launch's own records → manual, each only where a key is
+  still missing. The record names the source when it carried the snapshot,
+  or when nothing but manual input would have."""
+  params = dict(record)
+  for key, value in launch.items():
+    params.setdefault(key, value)
+  if record and (full_record or source == "manual"):
+    source = "validation_runs"
+  if not params and not manual:
+    notes.append("no generation parameters resolved from any source; "
+                 "the registry's generation filters stay NULL")
+  for key, value in manual.items():
     if key not in params:
       params[key] = value
     elif params[key] != value:
@@ -919,9 +1089,13 @@ def _job_identity(bq: Any, jobs: DataflowJobs, job_id: str, region: str,
   window known, this launch's rows of that table are read too — the one
   query, `runs_for` over the landing tables and the window, no run-id base
   — and carry the reference digests the privacy panel is verified against.
-  They are attached to the context, not given to `from_sources`: the run
-  rows must not decide the table list (`_order` would narrow it to the
-  tables that have a row); the caller's tables stay the tables."""
+  Rows whose record names this job are kept over another launch's in the
+  same window (ADR 0044). They are attached to the context, and given to
+  `from_sources` only as `record_runs`, whose record fills the params
+  first: the run rows must not decide the table list (`_order` would
+  narrow it to the tables that have a row); the caller's tables stay the
+  tables. `params_source` is then `validation_runs` when the job's rows
+  carry a record, else `manual`."""
   notes: list[str] = []
   job: dict[str, Any] = {"id": job_id, "location": region}
   window: tuple[str | None, str | None] = (None, None)
@@ -944,12 +1118,21 @@ def _job_identity(bq: Any, jobs: DataflowJobs, job_id: str, region: str,
         RunRecord.from_row(r)
         for r in _read_runs(bq, params, tables, window, None, notes)
     ]
+    # ADR 0044: rows whose record names this job are certainly its own —
+    # another launch that wrote the same tables in the window is dropped.
+    mine = [r for r in records if r.written_by(job_id, _text(job.get("name")))]
+    records = mine or records
   base, own = _pick_runs(records, None, notes)
   position = {t: i for i, t in enumerate(tables)}
   own.sort(key=lambda r: position.get(r.landing_table, len(tables)))
   _check_positions(own, len(tables), notes)
   context = LaunchContext.from_sources(
-      job=job, launch_config=None, writes=(), manual=manual, warnings=notes)
+      job=job,
+      launch_config=None,
+      writes=(),
+      manual=manual,
+      warnings=notes,
+      record_runs=own)
   return dataclasses.replace(
       context,
       base_run_id=base,
@@ -973,7 +1156,8 @@ def resolve_launch(*,
   BigQuery JOBS labels (tables written, windows, rows) → `validation_runs`
   (run ids, digests, valid counts; matched by landing table and by the
   launch's run-id base) → `manual`; assembled by
-  `LaunchContext.from_sources`, which records `params_source`. Every
+  `LaunchContext.from_sources`, which fills the params record-first (the
+  module docstring) and records `params_source`. Every
   BigQuery source failure (403, 404, 400, 5xx) degrades to a warning.
 
   Args:
@@ -990,10 +1174,12 @@ def resolve_launch(*,
       JOBS labels, not even as calls that may fail — and take everything
       else from `manual`. The one exception: with `validation_runs_table`
       in the manual params and the window known, this launch's rows of that
-      table are read (one query) for the reference digests. A job that
-      cannot be read is a warning and no window (and no `validation_runs`
-      read). Needs `job_id` and tables in `manual`; `params_source` is
-      then `manual`.
+      table are read (one query) for the reference digests and the
+      generation record, whose params come before `manual`'s (ADR 0044).
+      A job that cannot be read is a warning and no window (and no
+      `validation_runs` read). Needs `job_id` and tables in `manual`;
+      `params_source` is then `validation_runs` when the job's rows carry
+      a record, else `manual`.
 
   Raises:
     JobNotFoundError: the job is not in `region` (or past Dataflow's

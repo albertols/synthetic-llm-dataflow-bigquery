@@ -162,6 +162,21 @@ The same `landing_ddl.json` also documents exactly what the pipeline will write 
 > [ADR 0041](adr/0041-evaluation-standalone-package.md) · [`packages/sdfb-evaluation/README.md`](../packages/sdfb-evaluation/README.md). **Not yet run on Google Cloud**: the list below is what the code is written to need, taken from the design and BigQuery's documentation, not confirmed by a run. Nothing here is needed to generate, but a run of the generation DAG evaluates by default since 2026-10-14: provision this layer, or trigger with `run_evaluation` false.
 
 - **Tables and views** — create once with `uv run sdfb-eval schemas --project <PROJECT> --apply` (run from `packages/sdfb-evaluation`; it creates the four `evaluation_*` tables in `synthetic_data_quality` that are missing and replaces the views `evaluation_latest` and `evaluation_latest_per_job`; it never alters an existing table). The dataset must already exist. Step 13 of the preflight checks all of this (`--require-evaluation` makes an unprovisioned layer an ACTION).
+
+  An **existing** `evaluation_data_history` predating ADR 0044 needs its two
+  new columns (`generator_version`, `generator_config_digest`) **before the new
+  evaluator runs** — unlike `validation_runs`, this is required: the
+  evaluator's load jobs carry the committed schema and fail on a table without
+  them. Append them, then refresh the views — both **before deploying the new
+  evaluator or the new GUI** (the GUI's evaluation list reads both columns):
+
+  ```bash
+  bq update --schema packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_data_history.schema.json \
+        project:<evaluation_dataset>.evaluation_data_history
+  uv run sdfb-eval schemas --project <project> --dataset <evaluation_dataset> --apply   # from packages/sdfb-evaluation; replaces the views
+  ```
+
+  Preflight step 13 flags a registry that lacks them, with this command.
 - **Image and template: nothing of its own.** One image and one template serve generation and evaluation ([ADR 0041, amendment of 2026-10-06](adr/0041-evaluation-standalone-package.md#amendment-2026-10-06-one-image-one-template)). The image built from `docker/Dockerfile` carries the evaluator's source, and the template built from it with `docker/flex_template_metadata.json` launches the evaluator when a launch passes `sdfb_job=evaluation` (and `disk_size_gb=200`: the evaluation job's workers unpack the same multi-GB image, and the evaluator pins no boot disk). The deployment's own build and template steps are therefore all it takes; neither has been run with the evaluator in the image yet. `docker/flex_template_metadata.json` is the one file that declares the template's parameters, the evaluator's among them: the evaluator's own image, template metadata and template build script were removed ([ADR 0041, note of 2026-10-15](adr/0041-evaluation-standalone-package.md#amendment-2026-10-06-one-image-one-template)).
 
 ```mermaid

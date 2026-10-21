@@ -220,8 +220,9 @@ planned as scope `unknown` with that reason — unplanned.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
-Design: docs/DESIGN.md §4 Relational generation
-(ADR 0038).
+Design: docs/DESIGN.md §4 Relational generation;
+§7 Validation and the dead-letter queue
+(ADR 0038, 0044).
 """
 
 from __future__ import annotations
@@ -1303,6 +1304,11 @@ def _free_text_pools(
     return None, []
   pools: dict[str, dict[str, FreeTextPool]] = {}
   notes = []
+  # A1 ruling R11 / ADR 0044: a non-default pool setting salts the store key;
+  # the record carries the one the generator used.
+  model_key = (
+      planned.launch.cache_key("freetext_pools") or
+      str(params.get("model_uri") or ""))
   for entry in planned.tables:
     if not entry.evaluated or not entry.reference_digest:
       continue
@@ -1311,7 +1317,7 @@ def _free_text_pools(
           bq,
           pools_table=table,
           reference_digest=entry.reference_digest,
-          model_uri=str(params.get("model_uri") or ""),
+          model_uri=model_key,
           max_bytes=planned.budget.max_bytes_billed)
     except (*_BQ_ERRORS, ValueError) as exc:
       # ValueError: the launch names a table that is no table reference

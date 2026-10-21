@@ -144,8 +144,8 @@ distance is 0), then schema order — and every pair among them.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
-Design: docs/DESIGN.md §5 Fidelity
-(ADR 0022).
+Design: docs/DESIGN.md §5 Fidelity; §7 Validation and the dead-letter queue
+(ADR 0022, 0044).
 """
 
 from __future__ import annotations
@@ -1237,6 +1237,11 @@ class EvaluationPlan:  # pylint: disable=too-many-instance-attributes  # one fie
     counts = 0 if skipped else None
     fields = load_schema("evaluation_data_history")
     record = next(f for f in fields if f["name"] == "tables")
+    # ADR 0044: the record's snapshot when the launch wrote one
+    generation_record = launch.record
+    generation_params = (
+        dict(generation_record.snapshot)
+        if generation_record is not None else dict(launch.params))
     row: dict[str, Any] = {
         "evaluation_id":
             self.evaluation_id,
@@ -1274,7 +1279,7 @@ class EvaluationPlan:  # pylint: disable=too-many-instance-attributes  # one fie
         ],
         **launch.typed_filters(),
         "generation_params":
-            json.loads(json.dumps(json_safe(dict(launch.params)), default=str)),
+            json.loads(json.dumps(json_safe(generation_params), default=str)),
         "evaluation_params": {
             **self.knobs.to_dict(),
             "temp_dataset": self.temp_dataset,
@@ -1346,6 +1351,10 @@ class EvaluationPlan:  # pylint: disable=too-many-instance-attributes  # one fie
             adjusted or launch.relationships_uri,
         "model_adjusted":
             launch.model_adjusted,
+        "generator_version":
+            launch.generator_version,
+        "generator_config_digest":
+            launch.config_digest,
     }
 
 

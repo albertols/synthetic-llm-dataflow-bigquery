@@ -12,7 +12,12 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 """`job_id` → `LaunchContext` (`sdfb_evaluation.context.launch`): the
-resolution order, `params_source`, fallbacks and the registry filters."""
+resolution order, `params_source`, fallbacks and the registry filters.
+
+Design: docs/DESIGN.md §7 Validation and the dead-letter queue;
+§8 Configuration
+(ADR 0043, 0044).
+"""
 
 from __future__ import annotations
 
@@ -931,3 +936,226 @@ def test_the_snapshot_does_not_decide_equality():
   assert with_snapshot.config == {"values": {"a": 1}}
   assert with_snapshot == without
   assert hash(with_snapshot) == hash(without)
+
+
+# --------------------------------------------------------------------------
+# the generation record fills the context first (ADR 0044)
+# --------------------------------------------------------------------------
+_VERSION = "0.6.1-master-edcfdcd"
+_POOL_KEY = "gs://b/synthetic/models/m/v1/+cfg.abc123abc123"
+
+
+def _snapshot(**relational) -> dict:
+  return {
+      "config_version": 1,
+      "values": {
+          "io": {
+              # the launch's own target: never allowed to name the tables
+              "landing_table":
+                  f"{DS}.order_items",
+              "reference_table":
+                  "bigquery-public-data.thelook_ecommerce.order_items",
+              "validation_runs_table":
+                  _RUNS_TABLE,
+              "freetext_pools_table":
+                  f"{QDS}.freetext_pools",
+          },
+          "launch": {},
+          "sampling": {
+              "reference_rows_limit": 5000,
+              "source_stats": "exact"
+          },
+          "generation": {
+              "engine": "b1_rag",
+              "num_rows": 5000,
+              "similarity": 0.7,
+              "seed": ""
+          },
+          "free_text": {
+              "pool_seed_strategy": "kcenter",
+              "freetext_expansion": "identifiers"
+          },
+          "rag": {
+              "embedder_uri": "gs://b/synthetic/models/embedders/bge-small/v1/"
+          },
+          "guardrails": {
+              "env": "uat",
+              "uniqueness_mode": "exact",
+              "write_disposition": "append"
+          },
+          "relational": {
+              "generate_fk_relationships": "true",
+              "relationships_uri": "config/relationships",
+              **relational
+          },
+          "serving": {
+              "model_uri": "gs://b/synthetic/models/m/v1/",
+              "client_type": "vllm",
+              "vllm_dtype": "auto"
+          },
+      },
+      "derived": {
+          "profiler_version": "2",
+          "cache_keys": {
+              "freetext_pools": _POOL_KEY
+          }
+      },
+      "launcher": {
+          "version": _VERSION
+      },
+      "batch": None,
+  }
+
+
+def _record_rows(fixture_data, snapshot=None, **extra) -> list[dict]:
+  """The fixture's rows; this launch's (BASE) carry the record."""
+  text = json.dumps(snapshot or _snapshot())
+  return [
+      dict(
+          r,
+          job_id=JOB_ID,
+          generator_version=_VERSION,
+          config_digest="0123456789ab",
+          config=text,
+          **extra) if r["run_id"].startswith(BASE) else r
+      for r in fixture_data("validation_runs")
+  ]
+
+
+def test_job_only_fills_the_generation_cells_from_the_record(
+    fake_session, fake_bq, fixture_data):
+  """AC-A2-4: the seed path's registry cells come from validation_runs."""
+  bq = fake_bq(responses=[("validation_runs", _record_rows(fixture_data))])
+  ctx = _resolve(
+      fake_session(),
+      bq,
+      job_id=JOB_ID,
+      manual=_with_runs_table(),
+      job_only=True)
+  assert ctx.params_source == "validation_runs"
+  assert ctx.tables_in_order == TABLES  # the caller's tables stay the caller's
+  assert not [w for w in ctx.warnings if "tables_in_order" in w]
+  assert "landing_table" not in ctx.params  # the record's target list is not a table list
+  typed = ctx.typed_filters()
+  assert typed["engine"] == "b1_rag"
+  assert typed["llm_model_uri"] == "gs://b/synthetic/models/m/v1/"
+  assert typed["embedder_id"] == "bge-small"
+  assert typed["retrieval_method"] == "kcenter"
+  assert typed["similarity"] == 0.7
+  assert typed["seed"] == "derived"
+  assert typed["num_rows_requested"] == 5000
+  assert typed["source_stats_tier"] == "exact"
+  assert typed["env"] == "uat"
+  assert typed["profiler_version"] == "2"
+  assert typed["reference_rows_limit"] == 5000  # the record beats the DAG's
+  assert any("manual params.reference_rows_limit=10000 ignored: the "
+             "validation_runs value 5000 is kept" in w for w in ctx.warnings)
+  assert ctx.generator_version == _VERSION
+  assert ctx.config_digest == "0123456789ab"
+  assert ctx.cache_key("freetext_pools") == _POOL_KEY
+  assert ctx.relationships_uri == "config/relationships"
+
+
+def test_an_isolated_record_turns_relationships_off(fake_session, fake_bq,
+                                                    fixture_data):
+  rows = _record_rows(
+      fixture_data, snapshot=_snapshot(generate_fk_relationships="false"))
+  ctx = _resolve(
+      fake_session(),
+      fake_bq(responses=[("validation_runs", rows)]),
+      job_id=JOB_ID,
+      manual=_with_runs_table(),
+      job_only=True)
+  assert ctx.relationships_uri is None
+  assert ctx.params["relationships_uri"] == ""
+
+
+def test_a_null_in_the_snapshot_leaves_the_key_to_the_next_source(
+    fake_session, fake_bq, fixture_data):
+  """A null in `values` is a derived default the snapshot does not pin
+  (ADR 0043): it states nothing, so manual input still fills the key."""
+  snapshot = _snapshot()
+  snapshot["values"]["free_text"]["pool_stagnation_min_novel"] = None
+  rows = _record_rows(fixture_data, snapshot=snapshot)
+  ctx = _resolve(
+      fake_session(),
+      fake_bq(responses=[("validation_runs", rows)]),
+      job_id=JOB_ID,
+      manual=_with_runs_table(pool_stagnation_min_novel=4),
+      job_only=True)
+  assert ctx.params_source == "validation_runs"
+  assert ctx.params["pool_stagnation_min_novel"] == 4
+  assert not [w for w in ctx.warnings if "pool_stagnation_min_novel" in w]
+
+
+def test_job_only_prefers_the_jobs_own_rows(fake_session, fake_bq,
+                                            fixture_data):
+  """Another launch wrote the same tables later in the window: without the
+    record the latest launch would win (`_pick_runs`); with it, the job's."""
+  rows = _record_rows(fixture_data)
+  later = [
+      dict(
+          r,
+          run_id=f"other-0913-ffffff-{i:02d}-{_table_name(r)}",
+          created_at="2026-09-13T14:01:00.000000Z",
+          job_id="another-job",
+          config=None)
+      for i, r in enumerate(rows)
+      if r["run_id"].startswith(BASE)
+  ]
+  ctx = _resolve(
+      fake_session(),
+      fake_bq(responses=[("validation_runs", rows + later)]),
+      job_id=JOB_ID,
+      manual=_with_runs_table(),
+      job_only=True)
+  assert ctx.base_run_id == BASE
+  assert all(r.run_id.startswith(BASE) for r in ctx.runs)
+
+
+def test_a_digest_without_a_parseable_config_is_noted(fake_session, fake_bq,
+                                                      fixture_data):
+  rows = [
+      dict(
+          r,
+          job_id=JOB_ID,
+          config_digest="0123456789ab",
+          config="{not json",
+          engine="b2_library",
+          model_uri="gs://b/synthetic/models/m/v1/",
+          env="dev") if r["run_id"].startswith(BASE) else r
+      for r in fixture_data("validation_runs")
+  ]
+  ctx = _resolve(
+      fake_session(),
+      fake_bq(responses=[("validation_runs", rows)]),
+      job_id=JOB_ID,
+      manual=_with_runs_table(),
+      job_only=True)
+  assert ctx.typed_filters()["engine"] == "b2_library"
+  assert ctx.params_source == "validation_runs"
+  assert any("could not be parsed" in w for w in ctx.warnings)
+  assert ctx.record is None
+
+
+def test_the_record_comes_first_on_the_full_path(fake_session, fake_bq,
+                                                 fixture_data):
+  """record → launch_config → display data → manual, each filling only
+    what is missing (ADR 0044)."""
+  rows = _record_rows(fixture_data)
+  bq = fake_bq(
+      responses=[("JOBS_BY_PROJECT", fixture_data("jobs_by_project")),
+                 ("validation_runs", rows)],
+      job_stats=fixture_data("job_stats"))
+  ctx = _resolve(fake_session(), bq, job_id=JOB_ID)
+  assert ctx.params_source == "validation_runs"
+  assert ctx.typed_filters()["similarity"] == 0.7
+  # a key only the launch log has still fills in
+  assert ctx.params["run_id"] == BASE
+
+
+def test_legacy_rows_keep_todays_sources(fake_session, fake_bq):
+  """The fixture's rows predate the record: nothing changes."""
+  ctx = _resolve(fake_session(), fake_bq(), job_id=JOB_ID)
+  assert ctx.params_source == "jobs_labels+logs"
+  assert ctx.record is None and ctx.generator_version is None
