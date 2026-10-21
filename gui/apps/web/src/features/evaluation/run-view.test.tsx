@@ -5,6 +5,7 @@
  * reason — and that profiles load only when a drawer opens.
  */
 import type { RowFlag } from "@contracts/api";
+import type { GeneratorSnapshot } from "@contracts/record";
 import { configure, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -836,5 +837,32 @@ describe("Generator panel (ADR 0044)", () => {
     stubRun(richDetail());
     renderAt("/evaluation/eval-t001?tab=params");
     expect(await screen.findByText(/no generation record/i)).toBeInTheDocument();
+  });
+
+  // Final review M3: the panel never trusts the snapshot's block types.
+  it("reads a snapshot whose values is not an object as no record", async () => {
+    const snapshot = { config_version: 1, values: 42, overridden: [null] } as unknown as GeneratorSnapshot;
+    stubRun(richDetail(), { [RECORD]: { ...generationRecord(), snapshot } });
+    renderAt("/evaluation/eval-t001?tab=params");
+    expect(await screen.findByText(/no generation record/i)).toBeInTheDocument();
+  });
+
+  it("skips a block, a badge or an override of the wrong type and shows the rest", async () => {
+    const record = generationRecord();
+    const snapshot = {
+      ...record.snapshot!,
+      values: { generation: 5, guardrails: { env: "dev" } },
+      provenance: { "guardrails.env": { nested: true } },
+      overridden: [null, 7, { key: "generation.similarity", typed: 0.3, file: 0.7 }],
+      relationships: { model: { odd: 1 }, uri: 5, sha12: null, tables: "users" },
+    } as unknown as GeneratorSnapshot;
+    stubRun(richDetail(), { [RECORD]: { ...record, snapshot } });
+    renderAt("/evaluation/eval-t001?tab=params");
+    const panel = await screen.findByRole("region", { name: /generator/i });
+    expect(within(panel).getByText("guardrails")).toBeInTheDocument();
+    expect(within(panel).getByText("env")).toBeInTheDocument();
+    expect(within(panel).queryByText("generation")).toBeNull();
+    expect(within(panel).getByText(/overrode 1 typed param/i)).toBeInTheDocument();
+    expect(within(panel).getByText("Relationships model")).toBeInTheDocument();
   });
 });

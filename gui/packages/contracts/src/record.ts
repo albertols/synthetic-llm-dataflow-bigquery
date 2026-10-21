@@ -94,7 +94,11 @@ const isObject = (value: unknown): value is Record<string, unknown> =>
 const distinct = (values: readonly (string | null)[]): string[] =>
   [...new Set(values.filter((v): v is string => !!v))].sort();
 
-/** The snapshot of a `config` column, or null when it is absent or not a JSON object. */
+/**
+ * The snapshot of a `config` column, or null when it is absent, not a JSON object, or carries a `values` that is
+ * not an object. `overridden` keeps only its entries that are objects with a string `key` (dropped when it is not
+ * a list). Only the generator writes `config`, but a reader never trusts its block types (ADR 0044).
+ */
 export function parseSnapshot(text: string | null | undefined): GeneratorSnapshot | null {
   if (!text) return null;
   let value: unknown;
@@ -103,7 +107,11 @@ export function parseSnapshot(text: string | null | undefined): GeneratorSnapsho
   } catch {
     return null;
   }
-  return isObject(value) ? value : null;
+  if (!isObject(value) || ("values" in value && !isObject(value.values))) return null;
+  if (!("overridden" in value)) return value;
+  const { overridden, ...rest } = value;
+  if (!Array.isArray(overridden)) return rest;
+  return { ...rest, overridden: overridden.filter((o) => isObject(o) && typeof o.key === "string") };
 }
 
 /** A row of this evaluation's launch: its job id, a run id it lists, or its base run id. */
@@ -119,14 +127,19 @@ export function isLaunchRow(
 
 /**
  * The record an evaluation's generation wrote, from the `validation_runs` rows `runs.forEvaluation` returned
- * (newest first). Rows of another launch are dropped; the first snapshot in run-id order is the launch's
- * (every table of one job carries the same one).
+ * (newest first). Rows of another launch are dropped, and — once any row names the evaluation's Dataflow job —
+ * so is a row that names another job, even under a run id the evaluation lists (a reused `--run_id`). The first
+ * snapshot in run-id order is the launch's (every table of one job carries the same one).
  */
 export function buildGenerationRecord(evaluation: LaunchKeys, rows: readonly ValidationRunsRow[]): GenerationRecord {
+  const job = evaluation.generation_job_id;
+  const candidates = rows.filter((row) => isLaunchRow(row, evaluation));
+  const ownJob = !!job && candidates.some((row) => row.job_id === job);
   const seen = new Set<string>();
   const latest: ValidationRunsRow[] = [];
-  for (const row of rows) {
-    if (seen.has(row.run_id) || !isLaunchRow(row, evaluation)) continue;
+  for (const row of candidates) {
+    if (ownJob && row.job_id && row.job_id !== job) continue;
+    if (seen.has(row.run_id)) continue;
     seen.add(row.run_id);
     latest.push(row);
   }

@@ -20,6 +20,12 @@ import { dataflowJobUrl, projectOf, SECTION_ORDER, shortVersion } from "../lib/r
 
 const PROVENANCE_VARIANT = { file: "accent", flag: "info", default: "neutral" } as const;
 
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** The text a snapshot field holds, or null for anything that is not a string. */
+const text = (value: unknown): string | null => (typeof value === "string" ? value : null);
+
 /** A value as text: strings as they are ("" shown as (empty)), anything else as JSON. */
 function shown(value: unknown): string {
   if (value === "") return "(empty)";
@@ -71,7 +77,9 @@ export function GeneratorPanel({
       </section>
     );
   const snapshot = record?.snapshot;
-  if (!record || !snapshot)
+  // The snapshot's block types are never trusted (ADR 0044): a `values` that is not an object is no snapshot,
+  // and any other block or entry of the wrong type is skipped.
+  if (!record || !snapshot || !(snapshot.values === undefined || isObject(snapshot.values)))
     return (
       <section aria-label="Generator">
         <p className="text-sm text-text-2">
@@ -81,18 +89,21 @@ export function GeneratorPanel({
       </section>
     );
 
-  const values = snapshot.values ?? {};
-  const provenance = snapshot.provenance ?? {};
-  const overridden = Array.isArray(snapshot.overridden) ? snapshot.overridden : [];
+  const values: Record<string, unknown> = snapshot.values ?? {};
+  const blocks = new Map(Object.entries(values).filter((e): e is [string, Record<string, unknown>] => isObject(e[1])));
+  const provenance: Record<string, unknown> = isObject(snapshot.provenance) ? snapshot.provenance : {};
+  const overridden = (Array.isArray(snapshot.overridden) ? snapshot.overridden : []).filter(
+    (o) => isObject(o) && typeof o.key === "string",
+  );
   const sections = [
-    ...SECTION_ORDER.filter((s) => s in values),
-    ...Object.keys(values).filter((s) => !SECTION_ORDER.includes(s)),
-  ].filter((s) => Object.keys(values[s] ?? {}).length > 0);
+    ...SECTION_ORDER.filter((s) => blocks.has(s)),
+    ...[...blocks.keys()].filter((s) => !SECTION_ORDER.includes(s)),
+  ].filter((s) => Object.keys(blocks.get(s)!).length > 0);
   const jobs = [...new Map(record.runs.filter((r) => r.job_id).map((r) => [r.job_id!, r])).values()];
   const worker = record.worker_versions.join(", ");
   const launched = record.runs.find((r) => r.launched_at)?.launched_at ?? null;
-  const model = snapshot.relationships;
-  const tables = model?.tables ? Object.entries(model.tables) : [];
+  const model = isObject(snapshot.relationships) ? snapshot.relationships : null;
+  const tables = isObject(model?.tables) ? Object.entries(model.tables) : [];
 
   return (
     <section aria-label="Generator" className="grid gap-3">
@@ -150,8 +161,8 @@ export function GeneratorPanel({
             </CardHeader>
             <CardContent>
               <div className="grid">
-                {Object.entries(values[section] ?? {}).map(([key, value]) => {
-                  const source = provenance[`${section}.${key}`];
+                {Object.entries(blocks.get(section)!).map(([key, value]) => {
+                  const source = text(provenance[`${section}.${key}`]);
                   return (
                     <div
                       key={key}
@@ -180,9 +191,9 @@ export function GeneratorPanel({
             </CardHeader>
             <CardContent className="grid gap-2 font-mono text-xs">
               <p className="text-text-1">
-                {model.model ?? MISSING} <span className="text-text-3">({model.sha12 ?? "no sha"})</span>
+                {text(model.model) ?? MISSING} <span className="text-text-3">({text(model.sha12) ?? "no sha"})</span>
               </p>
-              <p className="break-all text-text-2">{model.uri ?? MISSING}</p>
+              <p className="break-all text-text-2">{text(model.uri) ?? MISSING}</p>
               <ul className="grid">
                 {tables.map(([name, declaration]) => {
                   const { pk, fks } = tableSummary(declaration);

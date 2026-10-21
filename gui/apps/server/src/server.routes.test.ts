@@ -234,7 +234,24 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
     await get("/api/compare", apiErrorSchema, 400);
   });
 
-  it("does not flatten a generation_params that is a record snapshot (ADR 0044)", () => {
+  it("lines a pre-record evaluation up with a record-backed one by the flat key (final review M2)", () => {
+    const [first, second] = latestPerEvaluation(getMockDataset().registry);
+    const engine = String((second!.generation_params as Record<string, unknown>).engine);
+    const snapshot = {
+      config_version: 1,
+      values: { generation: { engine, similarity: 0.7 }, sampling: { reference_rows_limit: 5000 } },
+      provenance: { "generation.similarity": "file" },
+    };
+    const a = { ...first!, generation_params: snapshot };
+    const comparison = buildComparison([a.evaluation_id, second!.evaluation_id], [a, second!], []);
+    const param = (path: string) => comparison.params.find((p) => p.path === path);
+    // The record's inner keys are the old flat CLI names: the same key, one row, not two half-empty ones.
+    expect(param("generation_params.engine")).toMatchObject({ values: [engine, engine], differs: false });
+    expect(param("generation_params.similarity")?.values[0]).toBe(0.7);
+    expect(param("generation_params.reference_rows_limit")?.values[0]).toBe(5000);
+  });
+
+  it("flattens a record snapshot's values by key, never its blocks (ADR 0044)", () => {
     const [first, second] = latestPerEvaluation(getMockDataset().registry);
     const snapshot = { config_version: 1, values: { generation: { similarity: 0.7 } }, provenance: {} };
     const a = { ...first!, generation_params: snapshot };

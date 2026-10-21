@@ -71,6 +71,20 @@ describe("parseSnapshot", () => {
   it("keeps unknown blocks", () => {
     expect(parseSnapshot(JSON.stringify(SNAPSHOT))?.future_block).toEqual({ anything: true });
   });
+  // Final review M3: a `values` that is not an object is no snapshot; an `overridden` entry that is not one is skipped.
+  it.each(['{"values": 42}', '{"values": "text"}', '{"values": [1]}', '{"values": null}'])("is null for %s", (text) => {
+    expect(parseSnapshot(text)).toBeNull();
+  });
+  it("keeps only the overridden entries that are objects with a key", () => {
+    const text = JSON.stringify({
+      values: {},
+      overridden: [null, 5, "x", { key: 7 }, { key: "a.b", typed: 1, file: 2 }],
+    });
+    expect(parseSnapshot(text)?.overridden).toEqual([{ key: "a.b", typed: 1, file: 2 }]);
+  });
+  it("drops an overridden that is not a list", () => {
+    expect(parseSnapshot(JSON.stringify({ values: {}, overridden: { key: "a.b" } }))?.overridden).toBeUndefined();
+  });
 });
 
 describe("buildGenerationRecord", () => {
@@ -108,6 +122,25 @@ describe("buildGenerationRecord", () => {
     ]);
     expect(record.runs).toEqual([]);
     expect(record.snapshot).toBeNull();
+  });
+  it("drops another job's row under a reused run id, keeping the job's own (final review M1)", () => {
+    const foreign = { ...SNAPSHOT, values: { generation: { similarity: 0.3, seed: "" } }, launcher: { version: "x" } };
+    // Newest first: the foreign job relaunched under the same --run_id after this evaluation's job.
+    const record = buildGenerationRecord(EVALUATION, [
+      row({ run_id: "B-00-users", job_id: "K", config_digest: "dK", config: JSON.stringify(foreign) }),
+      row({ run_id: "B-01-orders", job_id: "K", config_digest: "dK", config: JSON.stringify(foreign) }),
+      row({ run_id: "B-00-users", job_id: "J", config_digest: "dJ", config: JSON.stringify(SNAPSHOT) }),
+    ]);
+    expect(record.runs.map((r) => [r.run_id, r.job_id])).toEqual([["B-00-users", "J"]]);
+    expect(record.snapshot?.values).toEqual(SNAPSHOT.values);
+    expect(record.config_digests).toEqual(["dJ"]);
+  });
+  it("keeps a listed run without a job id beside the job's own rows", () => {
+    const record = buildGenerationRecord(EVALUATION, [
+      row({ run_id: "B-01-orders", job_id: null }),
+      row({ run_id: "B-00-users", job_id: "J", config: JSON.stringify(SNAPSHOT) }),
+    ]);
+    expect(record.runs.map((r) => r.run_id)).toEqual(["B-00-users", "B-01-orders"]);
   });
   it("keeps a row by its job id alone", () => {
     const record = buildGenerationRecord(EVALUATION, [row({ run_id: "X-00-users", job_id: "J" })]);

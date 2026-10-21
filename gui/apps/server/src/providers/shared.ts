@@ -249,13 +249,26 @@ const PARAM_COLUMNS = [
   "generator_config_digest",
 ] as const;
 
-/** A record snapshot (ADR 0044): the Config diff card owns its keys; the parameter diff skips it. */
-const isSnapshot = (value: unknown): boolean =>
-  typeof value === "object" &&
-  value !== null &&
-  !Array.isArray(value) &&
-  typeof (value as Record<string, unknown>).config_version === "number" &&
-  typeof (value as Record<string, unknown>).values === "object";
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** A record snapshot (ADR 0044): the parameter diff reads only its `values`, by key (`flattenSnapshot`). */
+const isSnapshot = (value: unknown): value is Record<string, unknown> =>
+  isObject(value) && typeof value.config_version === "number" && typeof value.values === "object";
+
+/**
+ * A snapshot's `values` as `generation_params.<key>`: the inner keys are the flat CLI names a pre-record
+ * `generation_params` holds, so a record-backed evaluation and an older one line up key by key. Its other blocks
+ * (provenance, derived, …) stay out; the Config diff card is the provenance-aware view.
+ */
+function flattenSnapshot(snapshot: Record<string, unknown>, out: Map<string, Json>) {
+  const values = snapshot.values;
+  if (!isObject(values)) return;
+  for (const block of Object.values(values)) {
+    if (!isObject(block)) continue;
+    for (const [key, value] of Object.entries(block)) flatten(value, `generation_params.${key}`, out);
+  }
+}
 
 export function buildComparison(
   ids: readonly string[],
@@ -292,7 +305,8 @@ export function buildComparison(
   ordered.forEach((e, i) => {
     const flat = new Map<string, Json>();
     for (const column of PARAM_COLUMNS) flat.set(column, e[column] ?? null);
-    if (!isSnapshot(e.generation_params)) flatten(e.generation_params, "generation_params", flat);
+    if (isSnapshot(e.generation_params)) flattenSnapshot(e.generation_params, flat);
+    else flatten(e.generation_params, "generation_params", flat);
     flatten(e.evaluation_params, "evaluation_params", flat);
     for (const [path, value] of flat) {
       const list = params.get(path) ?? ordered.map(() => null as Json);
