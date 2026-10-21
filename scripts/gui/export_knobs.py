@@ -1084,14 +1084,21 @@ def build_relationships() -> dict[str, Any]:
             "drawn_cols": list(drawn.cols),
             "note": edge.note,
         })
-      tables.append({
+      table: dict[str, Any] = {
           "name": name,
           "pk": list(relations.pk),
           "identity": list(relations.identity),
           "enabled": relations.enabled,
           "note": relations.note,
           "fk": edges,
-      })
+      }
+      # ADR 0045 — only when the model sets them, so a model without them
+      # exports exactly as before.
+      if relations.source_table is not None:
+        table["source_table"] = relations.source_table
+      if relations.num_rows is not None:
+        table["num_rows"] = relations.num_rows
+      tables.append(table)
     order: list[str] = []
     for name in model.tables:
       for table in registry.generation_order(registry.component(name)):

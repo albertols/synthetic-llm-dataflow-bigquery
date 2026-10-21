@@ -3,6 +3,7 @@
 import type { RelationshipsFile } from "../src/relational";
 
 export type RelationshipModelId =
+  | "isolated_forest_example"
   | "example_retail"
   | "example_star_diamond"
   | "gcp_public_thelook";
@@ -11,6 +12,56 @@ export const relationships: RelationshipsFile = {
   "generated_by": "scripts/gui/export_knobs.py",
   "note": "The committed sample relationship models, parsed by sdfb_core.contracts.relationships. Real models are gitignored and never exported.",
   "models": [
+    {
+      "model": "isolated_forest_example",
+      "description": "Unrelated landing tables, generated together.",
+      "source": "config/relationships/example_isolated_forest.yaml",
+      "sha12": "26f856926997",
+      "generation_order": [
+        "T_ACCOUNTS",
+        "T_EVENTS_LOG",
+        "T_RATES",
+        "T_LEGACY"
+      ],
+      "tables": [
+        {
+          "name": "T_ACCOUNTS",
+          "pk": [
+            "ACC_ID"
+          ],
+          "identity": [],
+          "enabled": true,
+          "note": "",
+          "fk": []
+        },
+        {
+          "name": "T_EVENTS_LOG",
+          "pk": [],
+          "identity": [],
+          "enabled": true,
+          "note": "",
+          "fk": []
+        },
+        {
+          "name": "T_RATES",
+          "pk": [],
+          "identity": [],
+          "enabled": true,
+          "note": "",
+          "fk": [],
+          "source_table": "other_ds.RATES_V2",
+          "num_rows": 5000
+        },
+        {
+          "name": "T_LEGACY",
+          "pk": [],
+          "identity": [],
+          "enabled": false,
+          "note": "",
+          "fk": []
+        }
+      ]
+    },
     {
       "model": "example_retail",
       "description": "accounts -> orders -> order lines, plus an unrelated ledger",
@@ -500,7 +551,7 @@ export const relationships: RelationshipsFile = {
     }
   ],
   "exported_from": {
-    "commit": "9b2be0f4079c8cf58275b3496d9199ac3f85b511",
+    "commit": "9c0abd784820413cc5272f8d7fa0eb74b37665a0",
     "dirty": []
   }
 };

@@ -581,3 +581,17 @@ def test_guides_are_the_catalogue_rendered(outputs):
   for knob in outputs["knobs.json"]["knobs"]:
     for path in knob["docs"]:
       assert (_REPO / path).is_file(), (knob["id"], path)
+
+
+def test_the_relationships_export_carries_the_model_launch_keys(outputs):
+  """ADR 0045: a table's source_table / num_rows reach the GUI when the
+    model sets them, and only then: every other export is as before."""
+  models = {m["model"]: m for m in outputs["relationships.json"]["models"]}
+  forest = {t["name"]: t for t in models["isolated_forest_example"]["tables"]}
+  assert forest["T_RATES"]["source_table"] == "other_ds.RATES_V2"
+  assert forest["T_RATES"]["num_rows"] == 5000
+  assert "source_table" not in forest["T_ACCOUNTS"]
+  assert forest["T_LEGACY"]["enabled"] is False
+  for name in ("example_retail", "example_star_diamond", "gcp_public_thelook"):
+    for table in models[name]["tables"]:
+      assert "source_table" not in table and "num_rows" not in table

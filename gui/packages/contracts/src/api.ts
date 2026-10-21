@@ -755,6 +755,8 @@ export const relationshipModelSchema = z.object({
       enabled: z.boolean(),
       note: z.string(),
       fk: z.array(relationEdgeSchema),
+      source_table: z.string().optional(),
+      num_rows: z.int().positive().optional(),
     }),
   ),
 }) satisfies z.ZodType<RelationshipModel>;

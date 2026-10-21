@@ -1881,7 +1881,7 @@ export const knobs: KnobsFile = {
       "settable_via": [
         "constant"
       ],
-      "source": "packages/sdfb-core/src/sdfb_core/engines/base.py:179",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/base.py:180",
       "source_token": "max_retries",
       "related_adrs": [],
       "docs": []
@@ -2039,7 +2039,7 @@ export const knobs: KnobsFile = {
         "composer"
       ],
       "composer_param": "gpu",
-      "source": "composer/synthetic_beam_bigquery.py:530",
+      "source": "composer/synthetic_beam_bigquery.py:540",
       "source_token": "\"gpu\"",
       "related_adrs": [],
       "docs": []
@@ -2055,7 +2055,7 @@ export const knobs: KnobsFile = {
         "composer"
       ],
       "composer_param": "sdk_containers",
-      "source": "composer/synthetic_beam_bigquery.py:604",
+      "source": "composer/synthetic_beam_bigquery.py:614",
       "source_token": "\"sdk_containers\"",
       "related_adrs": [
         "0034"
@@ -2077,7 +2077,7 @@ export const knobs: KnobsFile = {
         "derived"
       ],
       "comment": "Sampling temperatures for free-text pool retries, ascending from ``start`` up to 1.3. An LLM pool call whose NOVEL yield is empty (every value a verbatim copy of a reference value — the 2026-07-16 corp run, where Qwen3-4B echoed the seed exemplars on all 32 choices) is retried at each successive temperature before the engine gives up. Higher temperature diversifies sampling away from the exemplar echoes; 1.3 is the ceiling B.2 already uses for maximum divergence (`similarity_to_temperature`).",
-      "source": "packages/sdfb-core/src/sdfb_core/engines/base.py:73",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/base.py:74",
       "source_token": "def escalating_temperatures",
       "related_adrs": [],
       "docs": []
@@ -2109,7 +2109,7 @@ export const knobs: KnobsFile = {
         "derived"
       ],
       "comment": "Sampling configurations for free-text pool retries. Temperature alone is NOT enough: a served model can pin sampling truncation via its shipped ``generation_config.json`` (Qwen3-4B: ``top_k=20, top_p=0.8`` — vLLM logs an override warning). When the model is confident in echoing an exemplar, that nucleus collapses to the echo token and temperature has nothing left to diversify — the 2026-07-16 corp run produced 96/96 verbatim copies at 0.7, 1.0 AND 1.3. So the first attempt keeps the vendor-tuned defaults, and every retry escalates temperature (via `escalating_temperatures`) with the truncation fully unclamped: ``top_p=1.0`` and ``top_k=0`` (vLLM: consider all tokens). A ``start`` already at the temperature ceiling still gets one unclamped retry — that is the retry that can actually change the outcome.",
-      "source": "packages/sdfb-core/src/sdfb_core/engines/base.py:103",
+      "source": "packages/sdfb-core/src/sdfb_core/engines/base.py:104",
       "source_token": "def escalating_sampling",
       "related_adrs": [],
       "docs": []
@@ -2132,7 +2132,7 @@ export const knobs: KnobsFile = {
         "sampled"
       ],
       "help": "read every row, or a salted sample above --sample_rows (default: sampled on the DirectRunner, exact on Dataflow)",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:300",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:310",
       "source_token": "\"--mode\"",
       "related_adrs": [
         "0041"
@@ -2155,7 +2155,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--sample_rows",
       "flex_param": "sample_rows",
       "help": "sampled mode: rows read per side of a table larger than this",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:146",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:147",
       "source_token": "\"--sample_rows\"",
       "related_adrs": [
         "0041"
@@ -2178,7 +2178,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--privacy_sample_rows",
       "flex_param": "privacy_sample_rows",
       "help": "rows of the nearest-neighbour privacy sample",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:148",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:149",
       "source_token": "\"--privacy_sample_rows\"",
       "related_adrs": [
         "0041"
@@ -2201,7 +2201,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--detection_sample_rows",
       "flex_param": "detection_sample_rows",
       "help": "rows per side in the detection (C2ST) sample",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:150",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:151",
       "source_token": "\"--detection_sample_rows\"",
       "related_adrs": [
         "0041"
@@ -2224,7 +2224,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--pair_max_columns",
       "flex_param": "pair_max_columns",
       "help": "columns whose pairs are compared, per table",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:152",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:153",
       "source_token": "\"--pair_max_columns\"",
       "related_adrs": [
         "0041"
@@ -2247,7 +2247,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--row_flags_top_k",
       "flex_param": "row_flags_top_k",
       "help": "row flags kept per check and table",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:153",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:154",
       "source_token": "\"--row_flags_top_k\"",
       "related_adrs": [
         "0041"
@@ -2273,7 +2273,7 @@ export const knobs: KnobsFile = {
         "hashed"
       ],
       "help": "row flags carry the matched source key as a keyed hash only (raw keys are never written)",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:318",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:328",
       "source_token": "\"--row_flags_source_keys\"",
       "related_adrs": [
         "0041"
@@ -2296,7 +2296,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--max_bytes_billed",
       "flex_param": "max_bytes_billed",
       "help": "BigQuery bytes the evaluation may process (default 1 TiB)",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:324",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:334",
       "source_token": "\"--max_bytes_billed\"",
       "related_adrs": [
         "0041"
@@ -2319,7 +2319,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--max_shuffle_gb",
       "flex_param": "max_shuffle_gb",
       "help": "shuffle the value census may use before it is value-sampled",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:329",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:339",
       "source_token": "\"--max_shuffle_gb\"",
       "related_adrs": [
         "0041"
@@ -2350,7 +2350,7 @@ export const knobs: KnobsFile = {
         "manual"
       ],
       "help": "how the job's landing rows are isolated (default auto)",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:305",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:315",
       "source_token": "\"--scope\"",
       "related_adrs": [
         "0041"
@@ -2373,7 +2373,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--allow_contaminated",
       "flex_param": "allow_contaminated",
       "help": "evaluate a scope another writer touched; it stays `contaminated`",
-      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:309",
+      "source": "packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py:319",
       "source_token": "\"--allow_contaminated\"",
       "related_adrs": [
         "0041"
@@ -2394,7 +2394,7 @@ export const knobs: KnobsFile = {
       "code_does": "b1 uses it only to blend temporal draws (anchored vs uniform); numeric and categorical draws and every free-text pool ignore it. b2 maps it to a categorical sampling temperature 2(1 - s) and an LLM temperature 1.3 - 1.2 s.",
       "evidence": [
         {
-          "source": "packages/sdfb-core/src/sdfb_core/engines/base.py:171",
+          "source": "packages/sdfb-core/src/sdfb_core/engines/base.py:172",
           "role": "docs",
           "excerpt": "B.1 maps it to a retrieval-vs-perturbation balance"
         },
@@ -3593,7 +3593,7 @@ export const knobs: KnobsFile = {
     }
   ],
   "exported_from": {
-    "commit": "9b2be0f4079c8cf58275b3496d9199ac3f85b511",
+    "commit": "9c0abd784820413cc5272f8d7fa0eb74b37665a0",
     "dirty": []
   }
 };
