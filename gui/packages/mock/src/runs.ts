@@ -15,6 +15,7 @@
  */
 import {
   dlqRuleById,
+  EMPTY_RECORD_COLUMNS,
   knobs,
   type DlqRow,
   type FkFanoutStatsRow,
@@ -231,6 +232,7 @@ export function buildRuns(storyline: readonly EvalSpec[], seed: number) {
         repeat_share_within_tolerance:
           repeatSource === null || repeatLanding === null ? null : Math.abs(repeatLanding - repeatSource) <= 0.05,
         created_at: launch.createdAt,
+        ...EMPTY_RECORD_COLUMNS,
       });
       for (const [rule, count] of Object.entries(byRule)) {
         const { errorType, step, stage } = ruleShape(rule);

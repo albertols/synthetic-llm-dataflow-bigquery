@@ -225,6 +225,12 @@ export const ADRS: readonly AdrRef[] = [
     title: "Generator config: a typed model, a catalogue, file wins",
     file: "0043-generator-config.md",
   },
+  {
+    number: "0044",
+    section: 7,
+    title: "The generation record",
+    file: "0044-generation-record.md",
+  },
 ];
 
 const BY_NUMBER = new Map(ADRS.map((adr) => [adr.number, adr]));

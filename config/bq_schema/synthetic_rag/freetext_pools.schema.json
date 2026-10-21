@@ -1,6 +1,6 @@
 [
   {"name": "reference_digest", "type": "STRING", "mode": "REQUIRED", "description": "SHA-256 over the whole reference sample (ADR 0005). Together with model_uri this is the pool's identity: a new sample or a different LLM is a different pool."},
-  {"name": "model_uri", "type": "STRING", "mode": "REQUIRED", "description": "LLM weights URI that produced these values. NOT an embedder identity — that is what makes this a sibling of rag_chunks rather than a chunk_kind of it (ADR 0020)."},
+  {"name": "model_uri", "type": "STRING", "mode": "REQUIRED", "description": "LLM weights URI that produced these values. NOT an embedder identity — that is what makes this a sibling of rag_chunks rather than a chunk_kind of it (ADR 0020). A non-default pool-shaping setting suffixes it with +cfg.<salt> (ADR 0043); the launch records the effective key in validation_runs.config derived.cache_keys.freetext_pools (ADR 0044)."},
   {"name": "column", "type": "STRING", "mode": "REQUIRED", "description": "Free-text column the pool belongs to."},
   {"name": "target", "type": "INT64", "mode": "REQUIRED", "description": "Requested pool size: min(num_rows, column_distinct, free_text.free_text_pool_max)."},
   {"name": "values", "type": "STRING", "mode": "REPEATED", "description": "Deduped generated values in insertion order. REPEATED (not a JSON blob) so pools stay queryable with UNNEST. NOTE: `values` is a BigQuery RESERVED keyword — always backtick it in SQL."},

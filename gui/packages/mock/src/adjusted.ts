@@ -35,6 +35,7 @@
  *              evaluator's — so nothing else joins (verdict `unknown`).
  */
 import {
+  EMPTY_RECORD_COLUMNS,
   EVALUATOR_JOB_NAME_PREFIXES,
   formatEdge,
   knobs,
@@ -349,6 +350,7 @@ function validationRuns(base: string, runIds: Map<string, string>, finishedAt: s
       repeat_share_within_tolerance: delta === null ? null : Math.abs(delta) <= tolerance,
       // Each table's summary lands as its branch finishes, the last a few minutes before the job ends.
       created_at: isoMicros(Date.parse(finishedAt) - (LAUNCH.length - i) * 90_000, 300 + i),
+      ...EMPTY_RECORD_COLUMNS,
     };
   });
 }

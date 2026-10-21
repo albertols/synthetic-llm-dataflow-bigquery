@@ -3,6 +3,7 @@
  * verdict pill the EVALUATION run view shows, next to `excluded_blocker_rules`.
  */
 import type { ValidationRun } from "@contracts/api";
+import { EMPTY_RECORD_COLUMNS } from "@contracts/record";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { configure, render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -40,6 +41,7 @@ function run(table: string, overrides: Partial<ValidationRun> = {}): ValidationR
     repeat_share_delta: null,
     repeat_share_within_tolerance: null,
     created_at: "2026-09-13T08:30:00.000000Z",
+    ...EMPTY_RECORD_COLUMNS,
     dlq_by_rule_map: {},
     ...overrides,
   };

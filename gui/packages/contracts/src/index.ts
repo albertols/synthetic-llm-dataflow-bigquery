@@ -29,6 +29,7 @@ export * from "./vectors";
 export * from "./relational";
 export * from "./adjustments";
 export * from "./timestamps";
+export * from "./record";
 export * from "../generated/schemas";
 export { catalogue, catalogueById, catalogueFamilies, catalogueLevels, catalogueVersion } from "../generated/catalogue";
 export type {
