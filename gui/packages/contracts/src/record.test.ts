@@ -1,6 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { bqTables } from "../generated/schemas";
-import { EMPTY_RECORD_COLUMNS, RECORD_COLUMNS } from "./record";
+import { bqTables, type ValidationRunsRow } from "../generated/schemas";
+import {
+  EMPTY_RECORD_COLUMNS,
+  RECORD_COLUMNS,
+  buildGenerationRecord,
+  configDiff,
+  flattenValues,
+  parseGeneratorVersion,
+  parseSnapshot,
+} from "./record";
 
 describe("record columns", () => {
   it("are the last fourteen columns of validation_runs, in order", () => {
@@ -9,5 +17,146 @@ describe("record columns", () => {
   });
   it("empty means every one null", () => {
     expect(Object.values(EMPTY_RECORD_COLUMNS).every((v) => v === null)).toBe(true);
+  });
+});
+
+const SNAPSHOT = {
+  config_version: 1,
+  values: { generation: { similarity: 0.7, seed: "" }, guardrails: { repeat_share_tolerance: 0.08 } },
+  provenance: { "generation.similarity": "file", "generation.seed": "default" },
+  overridden: [{ key: "generation.similarity", typed: 0.3, file: 0.7 }],
+  launcher: { version: "0.6.1-master-edcfdcd" },
+  future_block: { anything: true },
+};
+
+function row(over: Partial<ValidationRunsRow>): ValidationRunsRow {
+  return {
+    run_id: "B-00-users",
+    reference_digest: null,
+    reference_table: null,
+    landing_table: "p.d.users",
+    engine: null,
+    model_uri: null,
+    env: null,
+    num_rows_requested: null,
+    valid_count: null,
+    dlq_count: null,
+    blocker_count: null,
+    dlq_by_rule: null,
+    blocker_failure_ratio: null,
+    observed_blocker_ratio: null,
+    status: null,
+    excluded_blocker_rules: null,
+    source_repeat_share: null,
+    landing_repeat_share: null,
+    repeat_share_delta: null,
+    repeat_share_within_tolerance: null,
+    created_at: "2026-10-21T10:00:00.000000Z",
+    ...EMPTY_RECORD_COLUMNS,
+    ...over,
+  };
+}
+
+const EVALUATION = {
+  evaluation_id: "e1",
+  run_ids: ["B-00-users", "B-01-orders"],
+  base_run_id: "B",
+  generation_job_id: "J",
+};
+
+describe("parseSnapshot", () => {
+  it.each(["", "{not json", "[1,2]", "42", "null"])("is null for %j", (text) => {
+    expect(parseSnapshot(text)).toBeNull();
+  });
+  it("keeps unknown blocks", () => {
+    expect(parseSnapshot(JSON.stringify(SNAPSHOT))?.future_block).toEqual({ anything: true });
+  });
+});
+
+describe("buildGenerationRecord", () => {
+  it("reads the snapshot, the versions and the digests of this launch's rows", () => {
+    const record = buildGenerationRecord(EVALUATION, [
+      row({
+        run_id: "B-01-orders",
+        generator_version: "0.6.1-master-edcfdcd",
+        config_digest: "d1",
+        config: JSON.stringify(SNAPSHOT),
+      }),
+      row({
+        run_id: "B-00-users",
+        generator_version: "0.6.1-master-edcfdcd",
+        config_digest: "d1",
+        config: JSON.stringify(SNAPSHOT),
+      }),
+    ]);
+    expect(record.runs.map((r) => r.run_id)).toEqual(["B-00-users", "B-01-orders"]);
+    expect(record.snapshot_run_id).toBe("B-00-users");
+    expect(record.launcher_version).toBe("0.6.1-master-edcfdcd");
+    expect(record.version_mismatch).toBe(false);
+    expect(record.config_digests).toEqual(["d1"]);
+  });
+  it("flags a worker that ran other code than the launcher", () => {
+    const record = buildGenerationRecord(EVALUATION, [
+      row({ generator_version: "0.6.1-master-1111111", config: JSON.stringify(SNAPSHOT) }),
+    ]);
+    expect(record.version_mismatch).toBe(true);
+    expect(record.worker_versions).toEqual(["0.6.1-master-1111111"]);
+  });
+  it("drops another launch's rows", () => {
+    const record = buildGenerationRecord(EVALUATION, [
+      row({ run_id: "OTHER-00-users", job_id: "K", config: JSON.stringify(SNAPSHOT) }),
+    ]);
+    expect(record.runs).toEqual([]);
+    expect(record.snapshot).toBeNull();
+  });
+  it("keeps a row by its job id alone", () => {
+    const record = buildGenerationRecord(EVALUATION, [row({ run_id: "X-00-users", job_id: "J" })]);
+    expect(record.runs.map((r) => r.run_id)).toEqual(["X-00-users"]);
+  });
+  it("keeps the newest row of a run id (rows arrive newest first)", () => {
+    const record = buildGenerationRecord(EVALUATION, [row({ config_digest: "new" }), row({ config_digest: "old" })]);
+    expect(record.config_digests).toEqual(["new"]);
+  });
+  it("is empty, not an error, for rows written before the record", () => {
+    const record = buildGenerationRecord(EVALUATION, [row({})]);
+    expect(record.snapshot).toBeNull();
+    expect(record.launcher_version).toBeNull();
+    expect(record.version_mismatch).toBe(false);
+  });
+});
+
+describe("config diff", () => {
+  it("flattens values to dotted keys", () => {
+    expect(flattenValues(SNAPSHOT)).toEqual({
+      "generation.similarity": 0.7,
+      "generation.seed": "",
+      "guardrails.repeat_share_tolerance": 0.08,
+    });
+  });
+  it("lists only the keys that differ, with provenance", () => {
+    const other = { ...SNAPSHOT, values: { ...SNAPSHOT.values, generation: { similarity: 0.5, seed: "" } } };
+    expect(configDiff([SNAPSHOT, other])).toEqual([
+      { key: "generation.similarity", values: [0.7, 0.5], provenance: ["file", "file"] },
+    ]);
+  });
+  it("needs two snapshots", () => {
+    expect(configDiff([SNAPSHOT, null])).toEqual([]);
+  });
+});
+
+describe("parseGeneratorVersion", () => {
+  it.each([
+    ["0.6.1-master-edcfdcd", { base: "0.6.1", branch: "master", sha: "edcfdcd", dirty: false }],
+    [
+      "0.6.1-feat-config-record-model-1a2b3c4-dirty",
+      { base: "0.6.1", branch: "feat-config-record-model", sha: "1a2b3c4", dirty: true },
+    ],
+    ["0.6.1-unknown-unknown", { base: "0.6.1", branch: "unknown", sha: "unknown", dirty: false }],
+  ])("%s", (text, parsed) => {
+    expect(parseGeneratorVersion(text)).toEqual(parsed);
+  });
+  it("is null for anything else", () => {
+    expect(parseGeneratorVersion("0.1.0")).toBeNull();
+    expect(parseGeneratorVersion(null)).toBeNull();
   });
 });

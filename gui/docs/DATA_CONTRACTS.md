@@ -319,6 +319,17 @@ read-only. `runs.forEvaluation` returns the candidate rows: a row matches
 treats an unset parameter as "all". It scans `validation_runs` whole (one row
 per table per launch), as `runs.list` does.
 
+**The generation record (ADR 0044).** `GET /api/evaluations/:id/record` →
+`GenerationRecord` (`generationRecordSchema`, `src/api.ts`; built by the
+zod-free `buildGenerationRecord`, `src/record.ts`). It is read through
+`runs.forEvaluation`, the adjustments join's query, and the snapshot
+(`validation_runs.config`) is tolerant: every block optional, unknown keys pass
+through, and a malformed or missing `config` is the "no snapshot" state. The
+record route reads the same rows and keeps only this launch's (`isLaunchRow`:
+the generation job id, a listed run id, or the base run id), so a neighbouring
+launch's snapshot never appears. A 404 means an unknown evaluation id; a launch
+written before the record is a 200 with `snapshot: null`.
+
 ## How to add a metric
 
 ```mermaid

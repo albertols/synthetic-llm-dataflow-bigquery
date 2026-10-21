@@ -36,6 +36,7 @@ import {
   LIFT_COUNT_KEYS,
   isCanonicalTimestamp,
   parseEdge,
+  parseSnapshot,
   snapshotKey,
 } from "@synthetic-platform/contracts";
 
@@ -725,5 +726,37 @@ describe("the adjusted-keys launch (ADR 0038)", { timeout: 60_000 }, () => {
     // The launch's rows were written before that "generation" window opened.
     for (const run of launchRuns()) expect(run.created_at < miswired.generation_started_at!).toBe(true);
     expect(miswired.status).toBe("SUCCEEDED_WITH_WARNINGS");
+  });
+});
+
+describe("the generation record (ADR 0044)", { timeout: 60_000 }, () => {
+  it("records every storyline launch, consistently with its registry row", () => {
+    const recorded = data.registry.filter((r) => r.generator_version);
+    expect(recorded.length).toBeGreaterThan(0);
+    for (const e of recorded) {
+      const runs = data.validationRuns.filter((r) => e.run_ids.includes(r.run_id));
+      expect(runs.length).toBeGreaterThan(0);
+      for (const r of runs) {
+        expect(r.job_id).toBe(e.generation_job_id);
+        expect(r.config_digest).toBe(e.generator_config_digest);
+        const values = parseSnapshot(r.config)!.values!;
+        expect(values.generation!.engine).toBe(e.engine);
+        expect(values.generation!.similarity).toBe(e.similarity);
+        expect(values.serving!.model_uri).toBe(e.llm_model_uri);
+      }
+    }
+  });
+
+  it("keeps launches without a record (the extra launches)", () => {
+    expect(data.validationRuns.some((r) => r.config === null)).toBe(true);
+    expect(data.registry.some((r) => r.generator_version === null)).toBe(true);
+  });
+
+  it("has one launch whose worker version differs from its launcher's", () => {
+    const mismatched = data.validationRuns.filter((r) => {
+      const launcher = parseSnapshot(r.config)?.launcher?.version;
+      return typeof launcher === "string" && launcher !== r.generator_version;
+    });
+    expect(mismatched.length).toBeGreaterThan(0);
   });
 });

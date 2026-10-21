@@ -33,6 +33,7 @@ import {
   validationRunsRowSchema,
 } from "../generated/schemas";
 import { adjustmentJoins, adjustmentVerdicts, type TableModelAdjustment } from "./adjustments";
+import type { GenerationRecord } from "./record";
 import type { RelationshipModel } from "./relational";
 import { profilerStatsSchema } from "./sourceStats";
 import { canonicalBound } from "./timestamps";
@@ -283,6 +284,45 @@ export const evaluationAdjustmentsSchema = z.object({
   generation_job_evaluation_id: z.string().nullable(),
 });
 export type EvaluationAdjustments = z.infer<typeof evaluationAdjustmentsSchema>;
+
+// ----------------------------------------------------------------- record --
+
+/** `validation_runs.config` (ADR 0044) — tolerant: every block optional, unknown keys pass through. */
+export const generatorSnapshotSchema = z.looseObject({
+  config_version: z.number().optional(),
+  values: z.record(z.string(), z.unknown()).optional(),
+  provenance: z.record(z.string(), z.unknown()).optional(),
+  overridden: z.array(z.looseObject({ key: z.string() })).optional(),
+  derived: z.looseObject({}).optional(),
+  thresholds: z.looseObject({}).optional(),
+  relationships: z.looseObject({}).optional(),
+  beam: z.looseObject({}).optional(),
+  launcher: z.looseObject({ version: z.string().optional() }).optional(),
+  batch: z.unknown().optional(),
+});
+
+/** `GET /api/evaluations/:id/record` — the generation record (contracts `buildGenerationRecord`). */
+export const generationRecordSchema = z.object({
+  evaluation_id: z.string(),
+  runs: z.array(
+    validationRunsRowSchema.pick({
+      run_id: true,
+      landing_table: true,
+      job_id: true,
+      job_name: true,
+      launch_run_id: true,
+      generator_version: true,
+      launched_at: true,
+      config_digest: true,
+    }),
+  ),
+  snapshot: generatorSnapshotSchema.nullable(),
+  snapshot_run_id: z.string().nullable(),
+  launcher_version: z.string().nullable(),
+  worker_versions: z.array(z.string()),
+  version_mismatch: z.boolean(),
+  config_digests: z.array(z.string()),
+});
 
 // ------------------------------------------------------------------ trend --
 
@@ -741,4 +781,5 @@ export const clientTypesMatchSchemas: [
   SameKeys<SourceStatsQuery, z.output<typeof sourceStatsQuerySchema>>,
   SameKeys<RagChunksQuery, z.output<typeof ragChunksQuerySchema>>,
   SameKeys<FreetextPoolsQuery, z.output<typeof freetextPoolsQuerySchema>>,
-] = [true, true, true, true, true, true, true];
+  SameKeys<GenerationRecord, z.output<typeof generationRecordSchema>>,
+] = [true, true, true, true, true, true, true, true];

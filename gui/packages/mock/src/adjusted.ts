@@ -546,6 +546,9 @@ export function buildAdjustedLaunch(
     running.relationship_model_uri = RELATIONSHIPS_URI;
     // NULL = unknown: neither evaluation read the launch log's model_adjustment milestones.
     running.model_adjusted = null;
+    // ADR 0038 launches keep no generation record: the mock's "no record" evaluations.
+    running.generator_version = null;
+    running.generator_config_digest = null;
     const params = running.generation_params;
     running.generation_params = {
       ...(params && typeof params === "object" && !Array.isArray(params) ? params : {}),

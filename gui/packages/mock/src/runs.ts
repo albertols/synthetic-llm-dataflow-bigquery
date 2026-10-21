@@ -23,8 +23,17 @@ import {
 } from "@synthetic-platform/contracts";
 import { Random, seedFrom, sha256Hex } from "@synthetic-platform/stats";
 
-import { baseRunId, isoMicros, launchDigest, rowsFor, tableRunIds } from "./ids";
-import { MODEL_URIS, type EvalSpec } from "./storyline";
+import { baseRunId, isoMicros, launchDigest, mockGenerationJobId, rowsFor, tableRunIds } from "./ids";
+import {
+  mockConfigDigest,
+  mockGenerationJobName,
+  mockSnapshot,
+  mockValues,
+  mockVersions,
+  RELATIONSHIPS_URI,
+  type RecordSpec,
+} from "./record";
+import { EMBEDDER_URIS, MODEL_URIS, type EvalSpec } from "./storyline";
 import { EDGES, landingFqn, MOCK_RELATIONSHIP_MODEL, sourceFqn, TABLES } from "./thelook";
 
 const knobValue = (id: string) => knobs.knobs.find((k) => k.id === id)?.value;
@@ -93,23 +102,11 @@ function envelope(rule: string, record: Record<string, unknown>, i: number) {
 }
 
 interface Launch {
-  spec: Pick<
-    EvalSpec,
-    | "id"
-    | "evaluatedAt"
-    | "engine"
-    | "llm"
-    | "env"
-    | "numRows"
-    | "referenceRowsLimit"
-    | "sourceStatsTier"
-    | "uniquenessMode"
-    | "tables"
-    | "relational"
-    | "quality"
-  >;
+  spec: RecordSpec & Pick<EvalSpec, "evaluatedAt" | "tables" | "quality">;
   base: string;
   createdAt: string;
+  /** The launch wrote the generation record (ADR 0044); the extra launches predate it. */
+  record: boolean;
   forceBlocker?: { table: string; rule: string; share: number };
 }
 
@@ -153,6 +150,7 @@ export function buildRuns(storyline: readonly EvalSpec[], seed: number) {
     spec,
     base: baseRunId(spec),
     createdAt: isoMicros(Date.parse(spec.evaluatedAt) - 30 * 60_000, 412),
+    record: true,
   }));
   EXTRA_LAUNCHES.forEach((extra, i) => {
     const template = storyline[0]!;
@@ -168,6 +166,7 @@ export function buildRuns(storyline: readonly EvalSpec[], seed: number) {
       spec,
       base: `sdfb-${extra.day.slice(0, 16).replace(/[-:]/g, "").replace("T", "-")}-${sha256Hex(spec.id).slice(0, 4)}`,
       createdAt: isoMicros(Date.parse(extra.day), 250),
+      record: false,
       ...(extra.blocker ? { forceBlocker: extra.blocker } : {}),
     });
   });
@@ -179,6 +178,25 @@ export function buildRuns(storyline: readonly EvalSpec[], seed: number) {
     const rng = new Random(seedFrom(seed, "runs", spec.id));
     const tables = spec.relational ? ["users", "orders", "order_items"] : spec.tables;
     const runIds = tableRunIds(launch.base, tables);
+    const values = mockValues(spec, tables);
+    const record = launch.record
+      ? {
+          job_id: mockGenerationJobId(spec),
+          job_name: mockGenerationJobName(spec),
+          launch_run_id: launch.base,
+          generator_version: mockVersions(spec).worker,
+          launched_at: launch.createdAt,
+          embedder_uri: EMBEDDER_URIS[spec.embedder],
+          retrieval_method: spec.engine === "b1_rag" ? spec.retrieval : null,
+          similarity: spec.similarity,
+          seed: spec.seed,
+          source_stats: spec.sourceStatsTier,
+          relationships_uri: spec.relational ? RELATIONSHIPS_URI : "",
+          relationships_digest: spec.relational ? MOCK_RELATIONSHIP_MODEL.sha12 : null,
+          config_digest: mockConfigDigest(values),
+          config: JSON.stringify(mockSnapshot(spec, values)),
+        }
+      : EMPTY_RECORD_COLUMNS;
     for (const name of tables) {
       const table = TABLES[name]!;
       const rows = rowsFor(spec, table);
@@ -232,7 +250,7 @@ export function buildRuns(storyline: readonly EvalSpec[], seed: number) {
         repeat_share_within_tolerance:
           repeatSource === null || repeatLanding === null ? null : Math.abs(repeatLanding - repeatSource) <= 0.05,
         created_at: launch.createdAt,
-        ...EMPTY_RECORD_COLUMNS,
+        ...record,
       });
       for (const [rule, count] of Object.entries(byRule)) {
         const { errorType, step, stage } = ruleShape(rule);

@@ -20,6 +20,8 @@ import {
   evaluationProfilesRowSchema,
   facetsSchema,
   freetextPoolSchema,
+  GENERATOR_VERSION_RE,
+  generationRecordSchema,
   healthSchema,
   knobsFileSchema,
   relationshipsResponseSchema,
@@ -38,6 +40,7 @@ import { z } from "zod";
 import { buildApp } from "./app";
 import { loadConfig } from "./config";
 import { MockProvider } from "./providers/mock";
+import { latestPerEvaluation } from "./providers/shared";
 
 let app: FastifyInstance;
 let staticDir: string;
@@ -53,6 +56,14 @@ beforeAll(async () => {
   facets = facetsSchema.parse((await inject("/api/facets")).json());
   // Building the seeded mock dataset is CPU-bound: 120 s ran out once at load average ~450.
 }, 300_000);
+
+function mockEvaluationWithRecord(): string {
+  return latestPerEvaluation(getMockDataset().registry).find((r) => r.generator_version)!.evaluation_id;
+}
+
+function mockEvaluationWithoutRecord(): string {
+  return latestPerEvaluation(getMockDataset().registry).find((r) => r.generator_version === null)!.evaluation_id;
+}
 
 /** Requests arrive with the Host a browser on this machine sends (the guard refuses others). */
 function inject(url: string, headers: Record<string, string> = {}, method: "GET" | "POST" = "GET") {
@@ -370,6 +381,27 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
     const wide = await get("/api/evaluations/eval-0032/adjustments", evaluationAdjustmentsSchema);
     expect(wide.model_adjustments.map((t) => [t.table, t.verdict])).toEqual([["user_features", "not_adjusted"]]);
     await get("/api/evaluations/nope/adjustments", apiErrorSchema, 404);
+  });
+
+  it("/api/evaluations/:id/record returns the generation record (ADR 0044)", async () => {
+    const withRecord = mockEvaluationWithRecord(); // the first storyline evaluation whose launch carries a record
+    const res = await inject(`/api/evaluations/${withRecord}/record`);
+    expect(res.statusCode).toBe(200);
+    const record = generationRecordSchema.parse(res.json());
+    expect(record.snapshot?.values?.generation).toBeDefined();
+    expect(record.launcher_version).toMatch(GENERATOR_VERSION_RE);
+    expect(record.config_digests).toHaveLength(1);
+  });
+
+  it("/api/evaluations/:id/record is an empty record for a launch written before it", async () => {
+    const res = await inject(`/api/evaluations/${mockEvaluationWithoutRecord()}/record`);
+    expect(res.statusCode).toBe(200);
+    expect(generationRecordSchema.parse(res.json()).snapshot).toBeNull();
+  });
+
+  it("/api/evaluations/:id/record is a 404 for an unknown id", async () => {
+    const res = await inject("/api/evaluations/nope/record");
+    expect(res.statusCode).toBe(404);
   });
 
   it("the adjustments join falls back from run id to launch base to generation window, never across launches", async () => {

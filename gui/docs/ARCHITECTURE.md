@@ -454,6 +454,7 @@ BigQuery mode._
 | `/api/evaluations/:id[?profiles=all]`                                         | `EvaluationDetail` — `evaluation` (latest event), `events` (RUNNING→FINAL), `metrics`, `flags`; `profiles` **empty by default** (`?profiles=all` embeds them)    | `useEvaluation(id, { profiles })` |
 | `/api/evaluations/:id/profiles?table&column&kind&side`                        | `ProfileRow[]` — how a detail page loads profiles: per drawer, table, column or kind                                                                             | `useProfiles(id, query)`          |
 | `/api/evaluations/:id/adjustments`                                            | `EvaluationAdjustments` — each generated table joined to its `validation_runs` row, with the generator's verdict on its declared key (ADR 0038)                  | `useEvaluationAdjustments(id)`    |
+| `/api/evaluations/:id/record`                                                 | `GenerationRecord` — the launch's `validation_runs` rows, the parsed config snapshot, launcher/worker versions and config digests (ADR 0044)                     | —                                 |
 | `/api/compare?ids=a,b`                                                        | `Comparison` — aligned `metrics[].cells[i]` (null = absent), `params` diffs, `comparability.not_comparable` (catalogue, evaluator and encoding-plan differences) | `useCompare(ids)`                 |
 | `/api/trend?metric_id&table&column&column_2&edge&…filters&limit`              | `TrendPoint[]` — the **newest** `limit` points (default 500), ordered oldest first, with the generation parameters to colour by                                  | `useTrend(query)`                 |
 | `/api/runs?run_ids&base_run_id&landing_table&engine&status&env&from&to&limit` | `ValidationRun[]` (+ `dlq_by_rule_map`); `base_run_id` matches a launch's `<base>-NN-<table>` rows (a one-table launch's row is `<base>`)                        | `useRuns(filter)`                 |
@@ -481,19 +482,19 @@ The only SQL the GUI runs. The BigQuery provider runs a query by its name
 (`QueryName` is the type of `QUERIES`' keys, so an unknown name does not
 compile), and a route reaches BigQuery only through the provider.
 
-| Name                                                                                              | Reads                                                                 | Serves                               |
-| :------------------------------------------------------------------------------------------------ | :-------------------------------------------------------------------- | :----------------------------------- |
-| `evaluations.list`, `evaluations.count`                                                           | `evaluation_latest` (filtered, sorted, one page, and its total)       | `/api/evaluations`                   |
-| `evaluations.events`                                                                              | `evaluation_data_history` (every event of one evaluation)             | `/api/evaluations/:id` and `…/:id/*` |
-| `runs.forEvaluation`, `evaluations.byJobId`                                                       | `validation_runs` joined to one evaluation; a same-job evaluation     | `/api/evaluations/:id/adjustments`   |
-| `evaluations.latestByIds`, `metrics.byEvaluations`                                                | the latest row and the metrics of several evaluations                 | `/api/compare`                       |
-| `evaluations.slim`, `metrics.ids`, `runs.count`, `sourceStats.tables`, `rag.sets`, `rag.poolSets` | what the filters offer                                                | `/api/facets`                        |
-| `metrics.byEvaluation`, `flags.byEvaluation`                                                      | one evaluation's metrics and flagged rows (keys only)                 | `/api/evaluations/:id`               |
-| `profiles.byEvaluation`                                                                           | one evaluation's profiles, narrowed by table, column, kind, side      | `/api/evaluations/:id/profiles`      |
-| `trend`                                                                                           | one metric across evaluations                                         | `/api/trend`                         |
-| `runs.list`, `dlq.summary`                                                                        | `validation_runs`; `dlq` grouped by run, rule, type, step, stage      | `/api/runs`, `/api/dlq`              |
-| `sourceStats.tables`, `sourceStats.byTable`                                                       | `source_table_stats`: the profiled tables, then one table's snapshots | `/api/source-stats`                  |
-| `rag.chunks`, `rag.pools`                                                                         | `rag_chunks` (≤ 3,000 vectors), `freetext_pools`                      | `/api/rag/chunks`, `/api/rag/pools`  |
+| Name                                                                                              | Reads                                                                 | Serves                                        |
+| :------------------------------------------------------------------------------------------------ | :-------------------------------------------------------------------- | :-------------------------------------------- |
+| `evaluations.list`, `evaluations.count`                                                           | `evaluation_latest` (filtered, sorted, one page, and its total)       | `/api/evaluations`                            |
+| `evaluations.events`                                                                              | `evaluation_data_history` (every event of one evaluation)             | `/api/evaluations/:id` and `…/:id/*`          |
+| `runs.forEvaluation`, `evaluations.byJobId`                                                       | `validation_runs` joined to one evaluation; a same-job evaluation     | `/api/evaluations/:id/adjustments`, `/record` |
+| `evaluations.latestByIds`, `metrics.byEvaluations`                                                | the latest row and the metrics of several evaluations                 | `/api/compare`                                |
+| `evaluations.slim`, `metrics.ids`, `runs.count`, `sourceStats.tables`, `rag.sets`, `rag.poolSets` | what the filters offer                                                | `/api/facets`                                 |
+| `metrics.byEvaluation`, `flags.byEvaluation`                                                      | one evaluation's metrics and flagged rows (keys only)                 | `/api/evaluations/:id`                        |
+| `profiles.byEvaluation`                                                                           | one evaluation's profiles, narrowed by table, column, kind, side      | `/api/evaluations/:id/profiles`               |
+| `trend`                                                                                           | one metric across evaluations                                         | `/api/trend`                                  |
+| `runs.list`, `dlq.summary`                                                                        | `validation_runs`; `dlq` grouped by run, rule, type, step, stage      | `/api/runs`, `/api/dlq`                       |
+| `sourceStats.tables`, `sourceStats.byTable`                                                       | `source_table_stats`: the profiled tables, then one table's snapshots | `/api/source-stats`                           |
+| `rag.chunks`, `rag.pools`                                                                         | `rag_chunks` (≤ 3,000 vectors), `freetext_pools`                      | `/api/rag/chunks`, `/api/rag/pools`           |
 
 `/api/health`, `/api/knobs`, `/api/catalogue` and `/api/relationships` run no
 query: they answer from the configuration and the generated contracts.

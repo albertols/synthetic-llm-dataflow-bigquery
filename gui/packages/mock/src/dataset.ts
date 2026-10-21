@@ -36,12 +36,14 @@ import {
   dataflowJobId,
   isoMicros,
   launchDigest,
+  mockGenerationJobId,
   referenceDigest,
   rowsFor,
   snapshotEra,
   tableRunIds,
 } from "./ids";
 import { buildRagSets, type RagSet } from "./rag";
+import { mockConfigDigest, mockGenerationJobName, mockValues, mockVersions, RELATIONSHIPS_URI } from "./record";
 import { buildRuns } from "./runs";
 import { buildSourceStats } from "./sourceStats";
 import { EMBEDDER_URIS, MODEL_URIS, STORYLINE, type EvalSpec } from "./storyline";
@@ -66,7 +68,6 @@ export const WIDE_SAMPLE_ROWS = 400;
 const EVALUATOR_VERSIONS = ["0.1.0", "0.2.0"];
 /** The catalogue moved 0.9.0 → 1.0.0 after the first ten evaluations (not_comparable across it). */
 export const catalogueVersionOf = (spec: Pick<EvalSpec, "index">) => (spec.index <= 10 ? "0.9.0" : "1.0.0");
-const RELATIONSHIPS_URI = `gs://synthetic-platform-demo/synthetic/relationships/${RELATIONSHIP_MODEL}.yaml`;
 
 /** Every TIMESTAMP (recursively through RECORD / REPEATED) in the canonical wire form. */
 function canonicalize<T extends object>(rows: T[], table: BqTableName): T[] {
@@ -151,7 +152,6 @@ function sampleRowsOf(spec: EvalSpec): number {
 }
 
 function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
-  const jobRng = new Random(seedFrom("generation-job", spec.id));
   const evaluatorVersion = spec.index <= 20 ? EVALUATOR_VERSIONS[0]! : EVALUATOR_VERSIONS[1]!;
   const catalogueVersion = catalogueVersionOf(spec);
   const eval_ = Object.fromEntries(
@@ -185,8 +185,8 @@ function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
         ? dataflowJobId(Date.parse(spec.evaluatedAt), (lo, hi) => rng.int(lo, hi))
         : null,
     image: `europe-west3-docker.pkg.dev/${PROJECT}/sdfb/sdfb-evaluation:${evaluatorVersion}`,
-    generation_job_id: dataflowJobId(Date.parse(spec.evaluatedAt) - 150 * 60_000, (lo, hi) => jobRng.int(lo, hi)),
-    generation_job_name: `synthetic-sdfb-v0-5-3-${spec.llm.replace(/[^a-z0-9]+/g, "-")}`.slice(0, 63),
+    generation_job_id: mockGenerationJobId(spec),
+    generation_job_name: mockGenerationJobName(spec),
     generation_region: "europe-west3",
     generation_started_at: minutes(spec.evaluatedAt, -150),
     generation_finished_at: minutes(spec.evaluatedAt, -30),
@@ -254,8 +254,8 @@ function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
     predicted_shuffle_gb: null,
     warnings: [],
     artifacts_uri: `gs://synthetic-platform-demo/synthetic/evaluations/${spec.id}/`,
-    generator_version: null,
-    generator_config_digest: null,
+    generator_version: mockVersions(spec).worker,
+    generator_config_digest: mockConfigDigest(mockValues(spec, tables)),
   };
 }
 

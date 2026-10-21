@@ -3,16 +3,19 @@
  * (seeded, self-consistent, invented thelook-shaped data) with the same
  * shared logic the BigQuery provider uses. Nothing is fetched; nothing is written.
  */
+import { buildGenerationRecord } from "@synthetic-platform/contracts";
 import type {
   ChunkMeta,
   Comparison,
   DlqSummary,
   EvaluationAdjustments,
   EvaluationDetail,
+  EvaluationRecord,
   EvaluationFilterParsed,
   EvaluationSummary,
   Facets,
   FreetextPool,
+  GenerationRecord,
   Page,
   ProfileRow,
   RelationshipModel,
@@ -21,6 +24,7 @@ import type {
   TrendPoint,
   TrendQueryParsed,
   ValidationRun,
+  ValidationRunsRow,
 } from "@synthetic-platform/contracts";
 import {
   ADJUSTED_RELATIONSHIP_MODEL,
@@ -133,16 +137,20 @@ export class MockProvider implements DataProvider {
     );
   }
 
+  /** As runs.forEvaluation: the candidate rows of the evaluation's launch, newest first. */
+  private candidateRuns(evaluation: EvaluationRecord): ValidationRunsRow[] {
+    const filter = adjustmentRunsFilter(evaluation);
+    return this.dataset.validationRuns
+      .filter((r) => matchesAdjustmentRuns(r, filter))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at) || a.run_id.localeCompare(b.run_id))
+      .slice(0, ADJUSTMENT_RUNS_LIMIT);
+  }
+
   evaluationAdjustments(id: string): Promise<EvaluationAdjustments | null> {
     const latest = this.latest();
     const evaluation = latest.find((r) => r.evaluation_id === id);
     if (!evaluation) return Promise.resolve(null);
-    const filter = adjustmentRunsFilter(evaluation);
-    // As runs.forEvaluation: the candidate rows, newest first.
-    const runs = this.dataset.validationRuns
-      .filter((r) => matchesAdjustmentRuns(r, filter))
-      .sort((a, b) => b.created_at.localeCompare(a.created_at) || a.run_id.localeCompare(b.run_id))
-      .slice(0, ADJUSTMENT_RUNS_LIMIT);
+    const runs = this.candidateRuns(evaluation);
     // As evaluations.byJobId: another evaluation that ran as this row's "generation" job.
     const sameJob = evaluation.generation_job_id
       ? latest
@@ -151,6 +159,12 @@ export class MockProvider implements DataProvider {
           .sort()[0]
       : undefined;
     return Promise.resolve(buildAdjustments(evaluation, runs, sameJob ?? null));
+  }
+
+  evaluationRecord(id: string): Promise<GenerationRecord | null> {
+    const evaluation = this.latest().find((r) => r.evaluation_id === id);
+    if (!evaluation) return Promise.resolve(null);
+    return Promise.resolve(buildGenerationRecord(evaluation, this.candidateRuns(evaluation)));
   }
 
   metricTrend(q: TrendQueryParsed): Promise<TrendPoint[]> {
