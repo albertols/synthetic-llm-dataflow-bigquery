@@ -194,10 +194,25 @@ def test_build_image_cloudbuild_yaml_builds_mainline_dockerfile_unmodified():
   build_args = " ".join(cfg["steps"][0]["args"])
   assert "-f=docker/Dockerfile" in build_args
   assert "SDFB_SDK_CONTAINER_IMAGE_ARG=${_IMAGE_URI}" in build_args
+  assert "SDFB_BUILD_BRANCH_ARG=${_GIT_BRANCH}" in build_args
+  assert "GIT_COMMIT_ARG=${_GIT_COMMIT}" in build_args
+  assert cfg["substitutions"]["_GIT_BRANCH"] == "unknown"
   assert cfg["images"] == ["${_IMAGE_URI}"]
   # The Dockerfile defaults already target public registries.
   dockerfile = (REPO_ROOT / "docker" / "Dockerfile").read_text()
   assert 'ARG BEAM_SDK_IMAGE="apache/beam_python3.14_sdk:2.76.0"' in dockerfile
+
+
+def test_the_dsg_build_passes_the_branch_too():
+  cfg = yaml.safe_load(
+      (REPO_ROOT / "dsg" / "pipeline" / "cloudbuild.yaml").read_text())
+  build_args = " ".join(cfg["steps"][0]["args"])
+  assert "SDFB_BUILD_BRANCH_ARG=${_GIT_BRANCH}" in build_args
+  assert cfg["substitutions"]["_GIT_BRANCH"] == "unknown"
+  script = (REPO_ROOT / "dsg" / "pipeline" / "scripts" /
+            "01_build_and_push_container.sh").read_text()
+  assert "_GIT_BRANCH=${GIT_BRANCH}" in script
+  assert "rev-parse --abbrev-ref HEAD" in script
 
 
 def test_build_and_template_scripts_dry_run():
@@ -206,6 +221,7 @@ def test_build_and_template_scripts_dry_run():
   assert "builds submit" in r.stdout and "build_image.yaml" in r.stdout
   assert ("_IMAGE_URI=us-central1-docker.pkg.dev/sdfb-e2e-test123/sdfb/"
           "sdfb-python:testtag") in r.stdout
+  assert "_GIT_COMMIT=" in r.stdout and "_GIT_BRANCH=" in r.stdout
 
   r = run_script("07_build_flex_template.sh")
   assert r.returncode == 0, r.stderr

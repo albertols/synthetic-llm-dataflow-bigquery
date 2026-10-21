@@ -50,6 +50,45 @@ python scripts/deployment_prerequisites.py --project ${PROJECT} \
   --source-stats-table ${PROJECT}.synthetic_rag.source_table_stats
 ```
 
+### 0a. Workflow edits for the generation record (untracked workflows)
+
+Four deploy workflows are not in git. Since ADR 0044 the generator's version
+lives in `packages/sdfb-core/src/sdfb_core/version.py`
+(`GENERATOR_VERSION_BASE = "X.Y.Z"`); the pyprojects stay at `0.1.0`. A
+Release build must name the image, the template and the DAGs after that base,
+and every build passes its branch. Apply all four edits together: workflows 3
+and 3e substitute the version that selects `sdfb-<version>-template.json`, so
+changing only 1 and 2 points a Release DAG at a template no build writes.
+
+| Workflow | Step | Edit |
+|---|---|---|
+| `1_build_python_beam.yaml` | after "Set PROJECT_VERSION" | add a step "Set GENERATOR_VERSION" (below) |
+| `1_build_python_beam.yaml` | "Set RELEASE_VERSION" | Release branch: `echo "RELEASE_VERSION=${{ env.GENERATOR_VERSION }}" >> $GITHUB_ENV` (was `env.PROJECT_VERSION`); keep `PROJECT_VERSION` — the wheel path uses it |
+| `1_build_python_beam.yaml` | the `docker build` | add `--build-arg SDFB_BUILD_BRANCH_ARG=${GITHUB_REF_NAME} \` after the `GIT_COMMIT_ARG` line |
+| `2_deploy_flex_template_python_beam.yaml` | "Resolve RELEASE_VERSION" | Release branch: the `VER=` line below |
+| `3_import_dag.yaml` | "Resolve PROJECT_VERSION + DAG_VERSION" | Release branch: the `VER=` line below |
+| `3_import_eval_dag.yaml` | "Resolve PROJECT_VERSION" | Release branch: the `VER=` line below |
+
+The new step in workflow 1:
+
+```yaml
+      - name: "Set GENERATOR_VERSION"
+        run: |
+          VER=$(grep -m1 '^GENERATOR_VERSION_BASE' packages/sdfb-core/src/sdfb_core/version.py | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "GENERATOR_VERSION=$VER" >> $GITHUB_ENV
+```
+
+The `VER=` line for workflows 2, 3 and 3e (it replaces the one that greps
+`packages/sdfb-beam/pyproject.toml`):
+
+```bash
+VER=$(grep -m1 '^GENERATOR_VERSION_BASE' packages/sdfb-core/src/sdfb_core/version.py | sed -E 's/.*"([^"]+)".*/\1/')
+```
+
+Run Release builds from the release tag: the release Action stamps the tag's
+version into `version.py` in the commit it tags, so a Release build of an
+earlier commit carries the previous release's base.
+
 ---
 
 ## 1. GPU verdict — Gemma cannot run on T4

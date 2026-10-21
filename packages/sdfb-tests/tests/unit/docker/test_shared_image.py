@@ -42,8 +42,9 @@ range, and while the extras the image installs still reach each of them
 of the generator). The last tests here turn that into a checked fact; they
 skip in a tree without the evaluator.
 
-Design: docs/DESIGN.md §11 Evaluation (sdfb-evaluation)
-(ADR 0041).
+Design: docs/DESIGN.md §7 Validation and the dead-letter queue;
+§11 Evaluation (sdfb-evaluation)
+(ADR 0041, 0044).
 """
 
 from __future__ import annotations
@@ -376,6 +377,18 @@ def test_both_worker_image_variables_read_the_one_build_argument():
   assert "SDFB_SDK_CONTAINER_IMAGE_ARG" in arguments
   assert not [a for a in arguments if "EVAL" in a.upper()]
   assert _env("SDFB_SDK_CONTAINER_IMAGE") == "$SDFB_SDK_CONTAINER_IMAGE_ARG"
+
+
+def test_the_build_identity_is_declared_after_the_dependency_layer():
+  """ADR 0044: the commit and branch a build was made from reach
+    sdfb_core.version through two env vars. Declared after `uv sync`, so a
+    per-commit value never invalidates the cached dependency layer."""
+  final = _final()
+  sync = _index(final, r"^RUN uv sync ")
+  assert sync < _index(final, r"^ARG GIT_COMMIT_ARG")
+  assert sync < _index(final, r"^ARG SDFB_BUILD_BRANCH_ARG")
+  assert _env("SDFB_BUILD_COMMIT") == "$GIT_COMMIT_ARG"
+  assert _env("SDFB_BUILD_BRANCH") == "$SDFB_BUILD_BRANCH_ARG"
   assert _env(
       "SDFB_EVAL_SDK_CONTAINER_IMAGE") == "$SDFB_SDK_CONTAINER_IMAGE_ARG"
   final = _final()

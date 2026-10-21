@@ -25,6 +25,9 @@ name: Release tag + report
 # [release-report] commit) and that exact text becomes the release body, so
 # the file and the releases page cannot drift. An empty block falls back to
 # the commit subjects — a release is never published noteless.
+#
+# It also stamps the tag's version into `sdfb_core/version.py` (ADR 0044), so
+# the tagged commit carries its own version.
 
 on:
   push:
@@ -85,12 +88,17 @@ jobs:
             --head-ref "${{ github.sha }}" \
             --repo "${{ github.repository }}" \
             --out "$RUNNER_TEMP/release_notes.md"
+      - name: Stamp the generator version
+        if: steps.ver.outputs.skip != 'true'
+        run: |
+          uv run --no-sync python3 scripts/release/bump_generator_version.py \
+            --version "${{ steps.ver.outputs.version }}"
       - name: Tag, commit report, push
         if: steps.ver.outputs.skip != 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/releases CHANGELOG.md
+          git add docs/releases CHANGELOG.md packages/sdfb-core/src/sdfb_core/version.py
           # Check if tag already exists (re-run safety)
           if git rev-parse -q --verify "refs/tags/${{ steps.ver.outputs.version }}" >/dev/null; then
             echo "tag already exists; nothing to do"

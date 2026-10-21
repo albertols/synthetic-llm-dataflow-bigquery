@@ -18,8 +18,9 @@ Loaded via importlib (the script is not a package module). Offline-only: the
 BigQuery surface is a fake injected through the module's `bq_client`
 indirection — no GCP credentials, no network.
 
-Design: docs/DESIGN.md §5 Fidelity; §11 Evaluation (sdfb-evaluation)
-(ADR 0020, 0041).
+Design: docs/DESIGN.md §5 Fidelity; §7 Validation and the dead-letter queue;
+§11 Evaluation (sdfb-evaluation)
+(ADR 0020, 0041, 0044).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
@@ -653,20 +654,20 @@ def _run13j(monkeypatch, *names, extra=("--templates-bucket", "b"), gcs=None):
 
 def _main_template():
   version = _mod.generator_version(_REPO_ROOT)
-  assert version, "packages/sdfb-beam/pyproject.toml names no version"
+  assert version, "sdfb_core/version.py names no base version"
   return f"sdfb-{version}-template.json"
 
 
 def test_generator_version_is_the_one_the_template_is_named_after(tmp_path):
-  """The template build names the object after the sdfb-beam package's
-    version (a release) or `latest` (a development build)."""
-  package = tmp_path / "packages" / "sdfb-beam"
-  package.mkdir(parents=True)
-  (package / "pyproject.toml"
-  ).write_text('[project]\nname = "sdfb-beam"\nversion = "1.2.3"\n')
+  """A release names its template after sdfb_core.version's base
+    (ADR 0044), read from the file without importing it."""
+  module = tmp_path / "packages" / "sdfb-core" / "src" / "sdfb_core"
+  module.mkdir(parents=True)
+  (module / "version.py").write_text('GENERATOR_VERSION_BASE = "1.2.3"\n')
   assert _mod.generator_version(tmp_path) == "1.2.3"
   assert _mod.generator_version(tmp_path / "nowhere") is None
-  assert _mod.generator_version(_REPO_ROOT)
+  from sdfb_core.version import GENERATOR_VERSION_BASE
+  assert _mod.generator_version(_REPO_ROOT) == GENERATOR_VERSION_BASE
 
 
 @needs_evaluator

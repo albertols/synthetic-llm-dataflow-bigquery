@@ -102,9 +102,10 @@ Usage:
     #   --require-evaluation \\
     #   --evaluation-label-key-uri projects/my-proj/secrets/eval-key/versions/1
 
-Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuration;
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity;
+§7 Validation and the dead-letter queue; §8 Configuration;
 §11 Evaluation (sdfb-evaluation)
-(ADR 0020, 0021, 0032, 0041).
+(ADR 0020, 0021, 0032, 0041, 0044).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -1215,15 +1216,14 @@ def eval_constants(pkg: Path) -> dict:
 
 
 def generator_version(root: Path = REPO_ROOT) -> str | None:
-  """The version the template build names a release template after: the
-    `version` of packages/sdfb-beam/pyproject.toml. None when unreadable."""
-  try:
-    text = (root / "packages" / "sdfb-beam" /
-            "pyproject.toml").read_text(encoding="utf-8")
-  except OSError:
-    return None
-  match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
-  return match.group(1) if match else None
+  """The version a release names its template after
+    (`sdfb-<version>-template.json`): `GENERATOR_VERSION_BASE` in
+    packages/sdfb-core/src/sdfb_core/version.py (ADR 0044), read without
+    importing it. None when unreadable."""
+  value = _read_literal(
+      root / "packages" / "sdfb-core" / "src" / "sdfb_core" / "version.py",
+      "GENERATOR_VERSION_BASE")
+  return value if isinstance(value, str) and value else None
 
 
 def step13_evaluation(ctx: Ctx) -> None:
@@ -1522,7 +1522,8 @@ def _eval_retention(part, want_days: int, issues: list[str],
 
 def _template_candidates() -> list[tuple[str, str]]:
   """(object name, what it is) for the names 13j knows the deployment's
-    one template by, the release's first."""
+    one template by, the release's first (named after the generator version
+    base, `sdfb_core/version.py`)."""
   named = []
   version = generator_version()
   if version:
@@ -1540,7 +1541,8 @@ def _eval_template(ctx: Ctx) -> None:
     One image and one template serve generation and evaluation (ADR 0041,
     amendment of 2026-10-06), and there is no other: the evaluator's own
     image and template were removed (the note of 2026-10-15). The script
-    knows two names for it (the sdfb-beam version, and `latest`) and cannot
+    knows two names for it (the generator version base,
+    `sdfb_core/version.py`, and `latest`) and cannot
     know a development build's (`sdfb-<branch>-<commit>`): when no known name
     is there it lists the prefix and names what it found. Existence only:
     the object does not say whether its image was built with the evaluator.
