@@ -383,8 +383,8 @@ the snapshot.
   generator_config_digest`, then `sdfb-eval schemas --apply` to refresh the
   views; the values written in them are lost). To confirm the rejection, an
   operator appends one row to a migrated scratch copy of the registry with
-  `bq load --noreplace --schema=<master's schema file>`; RUN_PLAYBOOK §2d
-  step 1 has the commands.
+  `bq load --noreplace --schema=<v0.6.1's schema file>` (the last release
+  before this ADR); RUN_PLAYBOOK §2d step 1 has the commands.
 - **The job-id attribute is unconfirmed on Dataflow.** The worker tries
   `job_id`, then `dataflow_job_id`; the milestone
   `generation_record_job_id source=metadata:<attribute>` names the one that

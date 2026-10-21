@@ -201,8 +201,11 @@ The same `landing_ddl.json` also documents exactly what the pipeline will write 
   ```
 
   To confirm the rejection on a scratch copy: copy the registry (`bq cp`),
-  migrate the copy, and append one row with `bq load --noreplace
-  --schema=<master's evaluation_data_history.schema.json>`; BigQuery rejects
+  migrate the copy, and append one row to it with `bq load --noreplace
+  --source_format=NEWLINE_DELIMITED_JSON --schema=<old schema file>
+  <scratch_dataset>.evaluation_data_history <one_row.jsonl>`, the old schema
+  file being the registry schema of v0.6.1, the last release before ADR 0044
+  (not master's once this lands: it has the two columns); BigQuery rejects
   it naming `generator_version`, or accepts it (then an old image can write).
   [RUN_PLAYBOOK §2d](RUN_PLAYBOOK.md#2d-corp-acceptance-of-the-generation-record-a2)
   step 1 has the full sequence.

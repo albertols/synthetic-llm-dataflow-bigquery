@@ -553,10 +553,11 @@ flowchart LR
    To confirm the rejection first, on a scratch copy: `bq cp` the registry
    into a scratch dataset, migrate the copy with the registry `bq update`
    above, then append one row to it with `bq load --noreplace
-   --source_format=NEWLINE_DELIMITED_JSON --schema=<old schema file>`, the
-   old schema file being master's
+   --source_format=NEWLINE_DELIMITED_JSON --schema=<old schema file>
+   <scratch_dataset>.evaluation_data_history <one_row.jsonl>`, the old schema
+   file being v0.6.1's (the last release before ADR 0044)
    `packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_data_history.schema.json`
-   (`git show master:<that path>`). BigQuery either rejects the load, naming
+   (`git show v0.6.1:<that path>`). BigQuery either rejects the load, naming
    `generator_version`, or accepts it (then an old image can write). Delete
    the copy afterwards.
 
