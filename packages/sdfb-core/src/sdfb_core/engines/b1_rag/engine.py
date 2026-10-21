@@ -2100,8 +2100,9 @@ def _pool_llm_yield(
 
     No request seed: a pinned seed with n>1 collapses all n vLLM choices
     into one completion (2026-07-15 run). Unseeded, the n choices sample
-    independently, so one round trip carries n distinct 32-value arrays —
-    the call budget scales down by the same factor (`per_round`).
+    independently, so one round trip carries n distinct arrays of
+    `ladder.pool_values_per_call` values each — the call budget scales down
+    by the same factor (`per_round`).
     """
   # Rejection set: the profiled sample PLUS (when a SourceValueStore is
   # attached) the column's full source domain — a candidate equal to ANY

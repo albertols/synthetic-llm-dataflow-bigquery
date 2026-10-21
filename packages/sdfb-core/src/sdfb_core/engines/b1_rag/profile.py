@@ -83,7 +83,8 @@ _STRINGY_BQ_TYPES = frozenset({"STRING", "JSON", "GEOGRAPHY", "BYTES"})
 _FREE_TEXT_HEAD_MIN_SHARE = 0.05
 _FREE_TEXT_HEAD_MIN_COUNT = 10
 _FREE_TEXT_HEAD_MAX = 8
-# Shape-mix cap for the engines (the stats module keeps 8 for display):
+# Shape-mix cap for the engines; the stats profiler keeps its own,
+# sampling.shape_mix_top_k (8), for the source_table_stats rows only:
 # 2026-08-11 B_TABLE R1, COL_019 — dozens of source shapes, the top-8 mix
 # left ~62% of row mass uncovered (shape recall 0.24).
 _SHAPE_MIX_TOP_K = 32

@@ -75,8 +75,9 @@ _FREE_TEXT_MIN_LEN = 40  # mean string length above this ⇒ likely prose
 # observed range, genuinely high-cardinality strings go to the LLM hook.
 #
 # The temporal cap mirrors b1_rag/profile.py's `_TEMPORAL_MAX_CATEGORIES`
-# (20). The STRING cap mirrors b1's `_FREE_TEXT_MAX_CATEGORIES` (50), NOT
-# the numeric/temporal 20: WS1 originally set 20 here, which routed
+# (20). The STRING cap mirrors the default of b1's config key
+# `free_text.free_text_max_categories` (50), NOT the numeric/temporal 20:
+# WS1 originally set 20 here, which routed
 # mid-cardinality enums (COL_901, 41 distinct) to the LLM — a
 # saturated domain the model cannot generate novel values for, so under
 # strict_freetext every batch died on FreeTextEmptyYieldError and the
