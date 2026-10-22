@@ -111,6 +111,7 @@ from sdfb_core.contracts.row_projection import (
 from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.engines.base import escalating_temperatures
 from sdfb_core.engines.fanout import conditional_edge_id
+from sdfb_core.launch.tables import TABLES_ALL, source_fqn, table_rows
 from sdfb_core.observability import (
     log_build_info,
     log_milestone,
@@ -1508,6 +1509,7 @@ def resolve_fanout(
     bq_client,
     effective_pk: tuple[str, ...] = (),
     config: GeneratorConfig = DEFAULT_CONFIG,
+    source_dataset: str | None = None,
 ) -> tuple[dict | None, dict[FkEdge, str]]:
   """``(FanoutPlan payload or None, edge roles)`` for one table (ADR
     0036). Measures (or reads the cache) for the driving edge only when
@@ -1518,7 +1520,10 @@ def resolve_fanout(
     schema (P2) before any BigQuery call, and a measurement failure is
     reported as a preflight ``SystemExit`` (never an escaping traceback)
     so the relational runner's collect-then-fail loop can report it
-    alongside every other table's stop."""
+    alongside every other table's stop. With ``source_dataset`` (ADR
+    0045) the driving parent is measured on its own source, override
+    included; without it, on the child's source dataset under the
+    parent's name — the two agree for a model without overrides."""
   roles = registry.edge_roles(landing_table)  # RelationshipError propagates
   driving = next((e for e, r in roles.items() if r == "driving"), None)
   if driving is None or driving.ref.rsplit(".", 1)[-1] not in in_set_names:
@@ -1549,10 +1554,16 @@ def resolve_fanout(
       known=edge_supplied_members(
           pk, roles, conditional_rest_of(registry, landing_table, roles)).known,
   )
-  source_parent = derive_source_fqn(
-      parent_landing_fqn(driving.ref, derive_fk_parent_landing(landing_table)),
-      source_table,
-  )
+  if source_dataset is None:
+    source_parent = derive_source_fqn(
+        parent_landing_fqn(driving.ref,
+                           derive_fk_parent_landing(landing_table)),
+        source_table,
+    )
+  else:
+    # ADR 0045: the parent's own source, `source_table` override included.
+    source_parent = source_fqn(driving.ref, registry.relations(driving.ref),
+                               source_dataset)
   # Same expression as `launch_cache_keys` (fk_fanout_stats): keep in step.
   sha = salted(registry.sha12(), settings_salt(config, "fk_fanout_stats"))
   edge_label = _edge_label(driving)
@@ -1691,6 +1702,9 @@ class TableRun:
   source_table: str
   run_id: str
   fk_parent_landing: str
+  # ADR 0045 — the model's own row count for this table; None = the
+  # launch's --num_rows (and always None for a driven child).
+  num_rows: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1706,6 +1720,9 @@ def plan_launch(
     generate_fk_relationships: bool,
     registry: RelationshipRegistry,
     run_id: str,
+    *,
+    source_dataset: str | None = None,
+    model_launch: bool = False,
 ) -> LaunchPlan:
   """The launch scenarios, resolved to an ordered per-table plan.
 
@@ -1723,6 +1740,13 @@ def plan_launch(
        concurrent isolated generation, no relationships anywhere.
        many tables + true  → the union of their components. Rare and
        expensive, so it says so.
+
+    Each run's source is the model's `source_table` for that table when it
+    sets one, else `source_dataset` (default: the reference table's
+    dataset) plus the table's name, and its rows the model's `num_rows`,
+    else the launch's (ADR 0045). A whole-model batch (`model_launch`)
+    suffixes every run id — `<run_id>-MM-<table>` for a one-table batch too
+    — and gets no many-targets advice: the planner chose its tables.
     """
   warnings: list[str] = []
   if generate_fk_relationships:
@@ -1739,7 +1763,7 @@ def plan_launch(
       warnings.append(
           f"the relational model expanded this launch to {expanded} "
           f"(declared in config/relationships; parents generate first)")
-    if len(landing_tables) > 1:
+    if len(landing_tables) > 1 and not model_launch:
       warnings.append(f"{len(landing_tables)} targets WITH relationships: the "
                       f"launch covers {len(ordered)} tables in one job. Pass "
                       f"--generate_fk_relationships=false for independent "
@@ -1758,16 +1782,18 @@ def plan_launch(
           f"UNVERIFIED for this run")
     scenario = "isolated" if len(ordered) == 1 else "multi_isolated"
 
-  multi = len(ordered) > 1
+  dataset = source_dataset or reference_table.rsplit(".", 1)[0]
+  multi = len(ordered) > 1 or model_launch
   runs = tuple(
       TableRun(
           landing_table=t,
-          source_table=derive_source_fqn(t, reference_table),
+          source_table=source_fqn(t, registry.relations(t), dataset),
           run_id=(
               f"{run_id}-{i:02d}-{t.rsplit('.', 1)[-1]}" if multi else run_id),
           fk_parent_landing=(
               derive_fk_parent_landing(t) if generate_fk_relationships and
               registry.enforced_edges(t) else ""),
+          num_rows=table_rows(registry.relations(t)),
       ) for i, t in enumerate(ordered))
   return LaunchPlan(scenario=scenario, runs=runs, warnings=tuple(warnings))
 
@@ -1950,6 +1976,7 @@ def table_projections(
     launch_rows: int,
     rows_by_landing: Mapping[str, int] | None = None,
     keys_by_landing: Mapping[str, int] | None = None,
+    root_rows: Mapping[str, int] | None = None,
 ) -> tuple[TableProjection, ...]:
   """Each resolved spec's projected record count, in generation order
     (ADR 0039).
@@ -1963,6 +1990,7 @@ def table_projections(
     """
   rows_by_landing = rows_by_landing or {}
   keys_by_landing = keys_by_landing or {}
+  root_rows = root_rows or {}
   projections: list[TableProjection] = []
   for spec in specs:
     driving = next((e for e in spec.parent_edges if e.mode == "fanout"), None)
@@ -1976,7 +2004,8 @@ def table_projections(
       projections.append(
           project_table(
               spec.config.landing_table,
-              launch_rows=launch_rows,
+              # ADR 0045: a root the model gives its own num_rows.
+              launch_rows=root_rows.get(spec.config.landing_table, launch_rows),
               adjusted=bool(spec.adjustments),
               repeat_share=repeat_share,
           ))
@@ -2009,6 +2038,7 @@ def report_row_projection(
     launch_rows: int,
     rows_by_landing: Mapping[str, int] | None = None,
     keys_by_landing: Mapping[str, int] | None = None,
+    root_rows: Mapping[str, int] | None = None,
 ) -> tuple[TableProjection, ...]:
   """How many rows this launch will generate, announced ONCE, before
     the graph is built (ADR 0039).
@@ -2027,6 +2057,7 @@ def report_row_projection(
       launch_rows=launch_rows,
       rows_by_landing=rows_by_landing,
       keys_by_landing=keys_by_landing,
+      root_rows=root_rows,
   )
   if not projections:
     return ()
@@ -2085,6 +2116,138 @@ def report_row_projection(
         consequence=warning.consequence,
     )
   return projections
+
+
+def warn_unused_launch_keys(args: argparse.Namespace) -> None:
+  """One WARNING per key the launch's `launch.tables` mode does not read
+    (ADR 0045, Ruling 10)."""
+  if getattr(args, "tables", "explicit") == TABLES_ALL:
+    unused = (("io.reference_table", getattr(args, "reference_table", None)),
+              ("io.landing_table", getattr(args, "landing_table", None)),
+              ("io.ddl_uri", getattr(args, "ddl_uri", "")))
+    reason = ("launch.tables all reads each table from io.source_dataset "
+              "(or its source_table), lands it in io.landing_dataset and "
+              "extracts every schema live")
+  else:
+    unused = (("io.source_dataset", getattr(args, "source_dataset", "")),
+              ("io.landing_dataset", getattr(args, "landing_dataset", "")))
+    reason = "launch.tables explicit reads io.reference_table and io.landing_table"
+  for key, value in unused:
+    if value:
+      log_milestone(
+          "launch_option_unused",
+          level=logging.WARNING,
+          key=key,
+          value=value,
+          reason=reason)
+
+
+def _run_overrides(plan: LaunchPlan,
+                   registry: RelationshipRegistry) -> dict[str, dict[str, Any]]:
+  """Each planned table the model overrides (ADR 0045): its resolved
+    source when the model names one, its rows when the model sets them."""
+  out: dict[str, dict[str, Any]] = {}
+  for run in plan.runs:
+    relations = registry.relations(run.landing_table)
+    values: dict[str, Any] = {}
+    if relations is not None and relations.source_table is not None:
+      values["source_table"] = run.source_table
+    if run.num_rows is not None:
+      values["num_rows"] = run.num_rows
+    if values:
+      out[run.landing_table.rsplit(".", 1)[-1]] = values
+  return out
+
+
+def log_launch_plan(args: argparse.Namespace,
+                    plan: LaunchPlan,
+                    generate_fk: bool,
+                    registry: RelationshipRegistry,
+                    *,
+                    extra: Mapping[str, Any] | None = None) -> None:
+  """What a launch will generate, stated before any table is prepared:
+    the plan's warnings, `launch_scenario`, one `table_override` per table
+    the model overrides (ADR 0045) and the `launch_config` block (ADR 0030),
+    whose `resolved` gains `extra` (a whole-model batch's identity)."""
+  for warning in plan.warnings:
+    logger.warning("launch plan: %s", warning)
+  log_milestone(
+      "launch_scenario",
+      scenario=plan.scenario,
+      tables=len(plan.runs),
+      order=",".join(r.landing_table.rsplit(".", 1)[-1] for r in plan.runs),
+      generate_fk_relationships=generate_fk,
+  )
+  overrides = _run_overrides(plan, registry)
+  for name, values in overrides.items():
+    log_milestone("table_override", table=name, **values)
+  resolved: dict[str, Any] = {
+      "scenario": plan.scenario,
+      "generate_fk_relationships": generate_fk,
+      "multi_table_mode": args.multi_table_mode,
+      "tables_in_order": [r.landing_table for r in plan.runs],
+      "run_ids": [r.run_id for r in plan.runs],
+      "fk_parent_landing_derived": [
+          r.fk_parent_landing or "(none)" for r in plan.runs
+      ],
+      "warnings": list(plan.warnings),
+  }
+  if overrides:
+    resolved["overrides"] = overrides
+  resolved.update(extra or {})
+  # ONE human-readable block stating every enabled/disabled config of
+  # this execution (ADR 0030): pasted _full_report.md +
+  # worker_logs.jsonl answer "what was on?" without arg archaeology.
+  log_milestone_pretty(
+      "launch_config",
+      {
+          **{
+              k: v
+              for k, v in sorted(vars(args).items())
+              if not k.startswith("_") and k not in ("model_client",
+                                                     "config_resolution")
+          },
+          "resolved": resolved,
+      },
+      scenario=plan.scenario,
+  )
+
+
+def _execute_plan(plan: LaunchPlan, args: argparse.Namespace,
+                  beam_argv: list[str], registry: RelationshipRegistry,
+                  targets: Sequence[str]) -> int:
+  """Run a resolved plan: a multi-table `single_job` plan as ONE Dataflow
+    job (ADR 0030), anything else one job per table, parents first,
+    stopping at the first failure (children never run without parents)."""
+  if len(plan.runs) > 1 and args.multi_table_mode == "single_job":
+    return _run_relational_job(plan, args, beam_argv, registry=registry)
+  for i, run in enumerate(plan.runs):
+    table_args = argparse.Namespace(**vars(args))
+    # Underscored on purpose: an internal Namespace channel read back via
+    # getattr(), never a CLI flag.
+    table_args._multi_table_plan = len(plan.runs) > 1  # pylint: disable=protected-access
+    table_args.landing_table = run.landing_table
+    table_args.reference_table = run.source_table
+    table_args.run_id = run.run_id
+    table_args.fk_parent_landing = (
+        args.fk_parent_landing or run.fk_parent_landing)
+    if run.num_rows is not None:
+      table_args.num_rows = run.num_rows  # ADR 0045: the model's rows
+    # The --ddl_uri pin describes the FIRST target only; siblings
+    # extract live (authoritative per ADR 0027 D2).
+    if run.landing_table != targets[0]:
+      table_args.ddl_uri = ""
+    rc = _run_one_table(table_args, beam_argv, registry=registry)
+    if rc != 0:
+      logger.error(
+          "table %s failed (rc=%d) — aborting the remaining %d "
+          "planned tables (children never run without parents)",
+          run.landing_table,
+          rc,
+          len(plan.runs) - i - 1,
+      )
+      return rc
+  return 0
 
 
 def resolve_landing_dispositions(write_disposition: str,
@@ -2253,6 +2416,7 @@ def _resolve_table_fanout(
         bq_client=None,
         effective_pk=effective_pk_of(registry, args.landing_table, args),
         config=config_of(args),
+        source_dataset=getattr(args, "_source_dataset", None),
     )
   except RelationshipError as exc:
     raise SystemExit(f"[preflight P2] {args.landing_table}: {exc}") from exc
@@ -2743,73 +2907,18 @@ def main(argv: list[str] | None = None) -> int:
   args._cache_keys = launch_cache_keys(args, registry)  # pylint: disable=protected-access
   # ADR 0044 — one schema check per launch; None writes today's row.
   args._record_base = prepare_record_base(args, registry, plan)  # pylint: disable=protected-access
-  for warning in plan.warnings:
-    logger.warning("launch plan: %s", warning)
-  log_milestone(
-      "launch_scenario",
-      scenario=plan.scenario,
-      tables=len(plan.runs),
-      order=",".join(r.landing_table.rsplit(".", 1)[-1] for r in plan.runs),
-      generate_fk_relationships=generate_fk,
-  )
-  # ONE human-readable block stating every enabled/disabled config of
-  # this execution (ADR 0030): pasted _full_report.md +
-  # worker_logs.jsonl answer "what was on?" without arg archaeology.
-  log_milestone_pretty(
-      "launch_config",
-      {
-          **{
-              k: v
-              for k, v in sorted(vars(args).items())
-              if not k.startswith("_") and k not in ("model_client",
-                                                     "config_resolution")
-          },
-          "resolved": {
-              "scenario": plan.scenario,
-              "generate_fk_relationships": generate_fk,
-              "multi_table_mode": args.multi_table_mode,
-              "tables_in_order": [r.landing_table for r in plan.runs],
-              "run_ids": [r.run_id for r in plan.runs],
-              "fk_parent_landing_derived":
-                  [r.fk_parent_landing or "(none)" for r in plan.runs],
-              "warnings": list(plan.warnings),
-          },
-      },
-      scenario=plan.scenario,
-  )
+  # ADR 0045 — the dataset a sibling's and a driving parent's source is
+  # read from (a model's source_table overrides it per table).
+  args._source_dataset = args.reference_table.rsplit(".", 1)[0]  # pylint: disable=protected-access
+  warn_unused_launch_keys(args)
+  log_launch_plan(args, plan, generate_fk, registry)
   for target in targets:
     log_relationship_model(
         target,
         registry,
         mode="relational" if generate_fk else "isolated",
     )
-  if len(plan.runs) > 1 and args.multi_table_mode == "single_job":
-    return _run_relational_job(plan, args, beam_argv, registry=registry)
-  for i, run in enumerate(plan.runs):
-    table_args = argparse.Namespace(**vars(args))
-    # Underscored on purpose: an internal Namespace channel read back via
-    # getattr(), never a CLI flag.
-    table_args._multi_table_plan = len(plan.runs) > 1  # pylint: disable=protected-access
-    table_args.landing_table = run.landing_table
-    table_args.reference_table = run.source_table
-    table_args.run_id = run.run_id
-    table_args.fk_parent_landing = (
-        args.fk_parent_landing or run.fk_parent_landing)
-    # The --ddl_uri pin describes the FIRST target only; siblings
-    # extract live (authoritative per ADR 0027 D2).
-    if run.landing_table != targets[0]:
-      table_args.ddl_uri = ""
-    rc = _run_one_table(table_args, beam_argv, registry=registry)
-    if rc != 0:
-      logger.error(
-          "table %s failed (rc=%d) — aborting the remaining %d "
-          "planned tables (children never run without parents)",
-          run.landing_table,
-          rc,
-          len(plan.runs) - i - 1,
-      )
-      return rc
-  return 0
+  return _execute_plan(plan, args, beam_argv, registry, targets)
 
 
 def nullability_schema(landing_schema, source_schema):
@@ -3623,6 +3732,8 @@ def _run_relational_job(
     table_args.run_id = run.run_id
     table_args.fk_parent_landing = (
         args.fk_parent_landing or run.fk_parent_landing)
+    if run.num_rows is not None:
+      table_args.num_rows = run.num_rows  # ADR 0045: the model's rows
     # Underscored on purpose: an internal Namespace channel read back via
     # getattr(), never a CLI flag.
     # pylint: disable-next=protected-access
@@ -3685,6 +3796,11 @@ def _run_relational_job(
       launch_rows=args.num_rows,
       rows_by_landing=rows_by_landing,
       keys_by_landing=distinct_keys_by_landing,
+      root_rows={
+          r.landing_table: r.num_rows
+          for r in plan.runs
+          if r.num_rows is not None
+      },
   )
   total_edges = sum(len(s.parent_edges) for s in specs)
   log_milestone(

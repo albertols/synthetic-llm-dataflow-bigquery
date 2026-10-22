@@ -36,7 +36,7 @@ and the 2.0099 mean that turns B_TABLE's 210,958 rows into E_TABLE's
 423,999.
 
 Design: docs/DESIGN.md §4 Relational generation
-(ADR 0038, 0039).
+(ADR 0038, 0039, 0045).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
@@ -619,3 +619,17 @@ def test_the_fanout_payload_carries_the_source_parent_count():
       "children": 200,
   }
   assert fanout_payload(measured, ("D_COL_001",), False)["parents"] == 52_545
+
+
+def test_a_roots_own_rows_size_its_projection():
+  """ADR 0045 Ruling 23: a root's model `num_rows` (`root_rows`) is what it
+    generates; without the mapping the projection is today's."""
+  from sdfb_beam.cli.run_pipeline import table_projections
+
+  spec = _spec("B_TABLE", 40)
+  (today,) = table_projections([spec], launch_rows=10)
+  assert today.rows == 10
+  (own,) = table_projections([spec],
+                             launch_rows=10,
+                             root_rows={spec.config.landing_table: 40})
+  assert own.rows == 40
