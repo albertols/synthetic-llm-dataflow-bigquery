@@ -168,8 +168,8 @@ def _tables(model_text: str) -> dict[str, tuple[bool, tuple[str, ...]]]:
   # After every table's shape, as the core validates the refs after it.
   _check_refs(raw.get("model"), refs)
   return {
-      name: (enabled[name], tuple(r for r in refs[name] if "." not in r))
-      for name in enabled
+      name: (on, tuple(r for r in refs[name] if "." not in r))
+      for name, on in enabled.items()
   }
 
 
