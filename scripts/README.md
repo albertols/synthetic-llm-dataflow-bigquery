@@ -9,6 +9,7 @@ root. Current scopes:
 | `config/` | generator-config tools (master goldens capture: `capture_master_goldens.py`; `config_digest.py` prints a config file's digest — ADR 0044) |
 | `e2e/` | integration-test analysis, GCP probes, sample fetch, crosschecks, redaction |
 | `evaluation/` | tooling for the standalone `packages/sdfb-evaluation/` project: `make_parity_goldens.py` (root env; regenerates `packages/sdfb-evaluation/tests/fixtures/parity/goldens.json`, the two-sided golden file that pins the eval project's `sdfb_core`/`sdfb_beam` mirrors — `--check` verifies without writing) |
+| `launch/` | orchestrating launches from a checkout: `run_model.py` plans a whole relationships model into batch jobs exactly as the launcher does and runs them at most `launch.max_parallel_jobs` at a time (ADR 0045); `--dry_run` prints the plan |
 | `release/` | post-merge versioning + release reports (see `.github/workflows/release_tag_report.yaml`) |
 | `relationships/` | reading/rendering `config/relationships/` models offline (`card.py` prints exactly what a launch would plan — ADR 0032) |
 | `dsg/` | the Dataflow Solution Guides replica: `precheck.py` (sensitive-content gate, also in CI), `headers.py` (Apache-2.0 licence header on every source file, also in CI; the sync rewrites its holder line) and `sync.py` (golden source → DSG PR; ADR 0040, skill `.claude/skills/dsg-sync/`) |

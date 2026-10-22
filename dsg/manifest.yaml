@@ -113,6 +113,7 @@ exclude:
   - packages/sdfb-tests/tests/unit/scripts/test_make_release_*.py
   - packages/sdfb-tests/tests/unit/scripts/test_redact*.py
   - packages/sdfb-tests/tests/unit/scripts/test_redaction.py
+  - packages/sdfb-tests/tests/unit/scripts/test_run_model.py
   # Renders the evaluator's metric catalogue (which ships) into its design
   # document with scripts/doc/; the document and the script stay here.
   - packages/sdfb-tests/tests/unit/scripts/test_render_eval_catalogue.py
