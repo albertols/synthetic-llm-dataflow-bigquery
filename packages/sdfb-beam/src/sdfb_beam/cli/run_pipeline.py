@@ -3049,9 +3049,11 @@ class PrepReadAhead:
     return self._futures[index].result()
 
   def close(self) -> None:
-    """Cancel the reads that have not started and wait for the running
-    ones: no prep thread outlives the launch's prep, and a read whose table
-    was never reached is dropped unseen, as it was never read before."""
+    """`shutdown(wait=True, cancel_futures=True)`: the reads not yet started
+    are cancelled and the ones in flight are waited for, so no prep thread is
+    left alive. A read that already finished for a table the prep never
+    reached (an earlier table failed first) was paid for and is dropped
+    unseen, its result or its error with it."""
     if self._pool is not None:
       self._pool.shutdown(wait=True, cancel_futures=True)
 

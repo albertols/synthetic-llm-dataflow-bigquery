@@ -21,6 +21,8 @@ Design: docs/DESIGN.md §4 Relational generation
 """
 from __future__ import annotations
 
+import argparse
+import json
 import logging
 import threading
 
@@ -28,6 +30,7 @@ import apache_beam as beam
 import pytest
 from apache_beam.options.pipeline_options import SetupOptions
 from sdfb_beam.cli import run_pipeline as rp
+from sdfb_beam.cli.preflight import PreflightResult
 from sdfb_core.contracts.relationships import RelationshipRegistry
 from sdfb_tests.fixtures import load_ddl, load_reference
 
@@ -56,17 +59,29 @@ class _Reads:
       self.events.append(event)
       self.threads[event] = threading.current_thread().name
 
+  def schema_of(self, table: str):
+    """`table`'s own schema: the fixture, under the table's own id."""
+    name = table.rsplit(".", 1)[-1]
+    info = self._schema.table_info.model_copy(
+        update={"table_id": f"proj.src.{name}"})
+    return self._schema.model_copy(update={"table_info": info})
+
+  def rows_of(self, table: str) -> list[dict]:
+    """`table`'s own sample: one row fewer per table, in plan order."""
+    drop = _TABLES.index(table.rsplit(".", 1)[-1])
+    return self._rows[:len(self._rows) - drop]
+
   def schemas(self, ddl_uri, reference_table, landing_table=""):
     del ddl_uri, reference_table
     self.note("schema", landing_table)
     if landing_table.endswith(self.fail_schema_of or "\0"):
       raise RuntimeError(f"schema read failed for {landing_table}")
-    return self._schema, None
+    return self.schema_of(landing_table), None
 
   def reference(self, table, limit):
     del limit
     self.note("rows", table)
-    return list(self._rows)
+    return self.rows_of(table)
 
   def cross(self, args, *a, **kw):
     del a, kw
@@ -162,6 +177,21 @@ def test_the_specs_do_not_depend_on_the_thread_count(monkeypatch):
 
 
 @pytest.mark.parametrize("workers", [1, 4])
+def test_each_spec_is_built_from_its_own_tables_reads(reads, monkeypatch,
+                                                      workers):
+  # the fake reads differ per table, so a spec handed another table's reads
+  # cannot compare equal
+  assert len({len(reads.rows_of(t)) for t in _TABLES}) == len(_TABLES)
+  assert len({reads.schema_of(t).fqn for t in _TABLES}) == len(_TABLES)
+  specs = _run(monkeypatch, workers)
+  assert [s.config.landing_table for s in specs
+         ] == [f"proj.land.{t}" for t in _TABLES]
+  for spec, table in zip(specs, _TABLES, strict=True):
+    assert spec.reference_rows == reads.rows_of(table)
+    assert spec.config.table_schema == reads.schema_of(table)
+
+
+@pytest.mark.parametrize("workers", [1, 4])
 def test_a_failed_read_surfaces_at_its_tables_turn(reads, monkeypatch, workers):
   reads.fail_schema_of = "T_B"
   with pytest.raises(
@@ -189,10 +219,96 @@ def test_a_preflight_stop_aborts_the_same_way_at_any_thread_count(
   assert crosses == [("cross", t) for t in _TABLES] * 2
 
 
-@pytest.mark.usefixtures("reads")
 def test_source_stats_are_written_after_preflight_as_before(
-    monkeypatch, caplog):
+    reads, monkeypatch, caplog):
+  real_preflight = rp.preflight
+  real_write = rp.write_source_stats
+
+  def preflight(table_schema, *a, **kw):
+    reads.note("preflight", table_schema.fqn)  # each table's own fqn
+    return real_preflight(table_schema, *a, **kw)
+
+  def write(args, *a, **kw):
+    reads.note("write", args.landing_table)
+    return real_write(args, *a, **kw)
+
+  monkeypatch.setattr(rp, "preflight", preflight)
+  monkeypatch.setattr(rp, "write_source_stats", write)
   with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
     _run(monkeypatch, 4)
   assert "name=launch_prep_parallel " in caplog.text
   assert caplog.text.count("name=source_table_stats ") == 3
+  # each table's stats are written after ITS preflight, on the launcher's
+  # thread, once, in plan order — though they were computed on a prep thread
+  for table in _TABLES:
+    assert (reads.events.index(("preflight", table)) < reads.events.index(
+        ("write", table)))
+    assert reads.threads[("write", table)] == "MainThread"
+  assert [e for e in reads.events if e[0] == "write"
+         ] == [("write", t) for t in _TABLES]
+
+
+def test_read_ahead_exact_stats_write_what_the_inline_path_writes(
+    reads, monkeypatch, tmp_path):
+  """`--source_stats=exact` through a prep thread (`prepared`) writes the
+    JSON artifact and the store rows, and returns the exact distinct counts,
+    exactly as the inline path does for the same inputs."""
+  written: dict[str, list] = {}
+
+  def exact(unused_table, unused_schema, stats, **kwargs):
+    del kwargs
+    merged = {name: dict(entry) for name, entry in stats.items()}
+    for i, name in enumerate(sorted(n for n in merged if n != "__table__")):
+      merged[name].update(stats_tier="exact", distinct=1000 + i)
+    return merged
+
+  class _Store:
+
+    def __init__(self, table_fqn):
+      self.key = table_fqn.rsplit(".", 1)[-1]
+
+    def exists(self, *a, **kw):
+      del a
+      written.setdefault(f"{self.key}.exists", []).append(kw)
+      return False
+
+    def write_rows(self, rows):
+      written.setdefault(self.key, []).extend({
+          k: v for k, v in row.items() if k != "computed_at"
+      } for row in rows)
+
+  monkeypatch.setattr("sdfb_beam.io.exact_stats.compute_exact_stats", exact)
+  monkeypatch.setattr(rp, "BigQuerySourceStatsStore", _Store)
+  base, _ = rp.parse_args([
+      "--reference_table=proj.src.T_B", "--landing_table=proj.land.T_B",
+      "--dlq_table=proj.q.dlq", "--num_rows=20", "--run_id=r1",
+      "--model_uri=gs://b/synthetic/models/m/v1/", "--client_type=fake",
+      "--source_stats=exact", "--relationships_uri="
+  ])
+  pf = PreflightResult((), (), _REG.relations("proj.land.T_B"))
+  out: dict[str, dict] = {}
+  for path in ("inline", "prepared"):
+    args = argparse.Namespace(**vars(base))
+    args.source_stats_json = str(tmp_path / f"{path}.json")
+    args.source_stats_table = f"proj.ds.{path}"
+    if path == "inline":
+      out[path] = rp._emit_source_stats(  # pylint: disable=protected-access
+          args, reads.schema_of("T_B"), reads.rows_of("T_B"), pf)
+      continue
+    read_ahead = rp.PrepReadAhead([args], _REG, 2)
+    try:
+      prepared = read_ahead.prep(0)
+    finally:
+      read_ahead.close()
+    out[path] = rp._emit_source_stats(  # pylint: disable=protected-access
+        args,
+        prepared.schemas[0],
+        prepared.reference_rows,
+        pf,
+        prepared=prepared)
+  assert out["inline"] and out["prepared"] == out["inline"]
+  assert (json.loads((tmp_path / "prepared.json").read_text()) == json.loads(
+      (tmp_path / "inline.json").read_text()))
+  assert written["prepared"] and written["prepared"] == written["inline"]
+  assert written["prepared.exists"] == written["inline.exists"]
+  assert written["inline.exists"][0]["stats_tier"] == "exact"
