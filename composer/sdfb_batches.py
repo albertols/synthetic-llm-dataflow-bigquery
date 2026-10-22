@@ -340,9 +340,9 @@ def plan_banner(batches: Sequence[Mapping[str, Any]],
   ]
   for batch in batches:
     flag = ("   [OVERSIZED — one component]" if batch["oversized"] else "")
-    joined = ", ".join(batch["tables"])
-    lines.append(f"  {batch['label']} | {len(batch['tables']):>3} tables | "
-                 f"{joined}{flag}")
+    label, tables = batch["label"], batch["tables"]
+    joined = ", ".join(tables)
+    lines.append(f"  {label} | {len(tables):>3} tables | {joined}{flag}")
   return "\n".join(lines)
 
 

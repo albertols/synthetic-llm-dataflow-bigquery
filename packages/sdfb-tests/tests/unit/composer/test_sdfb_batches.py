@@ -166,6 +166,37 @@ def test_the_mirror_plans_a_generated_forest_like_the_core(shape, k):
   assert M.plan_batches(text, k) == _core(text, k)
 
 
+_BRIDGED = """model: m
+tables:
+  T_A:
+    pk: [A_ID]
+  T_B:
+    enabled: false
+    pk: [B_ID]
+    fk:
+      - {cols: [A_ID], ref: T_A, ref_cols: [A_ID]}
+  T_C:
+    pk: [C_ID]
+    fk:
+      - {cols: [B_ID], ref: T_B, ref_cols: [B_ID]}
+      - {cols: [X_ID], ref: other_ds.T_X, ref_cols: [X_ID]}
+  T_D:
+    pk: [D_ID]
+    fk:
+      - {cols: [A_ID, A_ID2], ref: T_A, ref_cols: [A_ID, A_ID2]}
+      - {cols: [C_ID], ref: T_C, ref_cols: [C_ID], enforced: false}
+  T_E:
+    pk: [E_ID]
+"""
+
+
+@pytest.mark.parametrize("k", [1, 2, 3, 10])
+def test_the_mirror_plans_a_disabled_bridge_like_the_core(k):
+  """A disabled table between two enabled ones, an edge to it, a dotted
+    external ref, a composite FK and a documented edge (review of Task 8)."""
+  assert M.plan_batches(_BRIDGED, k) == _core(_BRIDGED, k)
+
+
 def test_enabled_reads_like_the_core():
   text = ("model: m\ntables:\n  T_A: {enabled: 'false'}\n  T_B: {enabled: 0}\n"
           "  T_C: {enabled: 'on'}\n  T_D: {}\n")
