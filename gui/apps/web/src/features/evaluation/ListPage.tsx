@@ -478,7 +478,10 @@ function EvaluationsTable({
                     {shortVersion(e.generator_version)}
                   </span>
                   {" · "}
-                  {e.generation_job_id ? (
+                  {e.generation_job_id && !e.generation_region ? (
+                    // A `--run_id` evaluation records no region (ADR 0045); the run view reads the record's.
+                    <span className="font-mono text-text-2">{e.generation_job_id}</span>
+                  ) : e.generation_job_id ? (
                     <a
                       className="font-mono text-text-2 underline-offset-2 hover:underline"
                       href={dataflowJobUrl(

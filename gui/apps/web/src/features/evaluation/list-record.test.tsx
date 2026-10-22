@@ -90,6 +90,18 @@ describe("the list shows the generation record (ADR 0044)", () => {
     );
   });
 
+  it("shows the job id as text when the registry records no region (a --run_id evaluation)", async () => {
+    stubApi({
+      "/api/facets": facets(null),
+      "/api/evaluations": pageOf({ ...RECORDED, evaluation_id: "eval-run-id", generation_region: null }),
+    });
+    renderAt("/evaluation");
+    const row = await listItem("eval-run-id");
+    const job = within(row).getByText("2026-10-21_01_02_03-123");
+    expect(job.closest("a")).toBeNull();
+    expect(job).toHaveClass("font-mono");
+  });
+
   it("shows — for a run without a record", async () => {
     stubApi({
       "/api/facets": facets(null),

@@ -344,7 +344,9 @@ layered._
   "disabled: not recorded". The evaluation list's job cell and the Parameters
   tab's `generation_job` row keep the registry's `generation_job_id`, the
   first batch job; the card lists them all, and the list's search finds any of
-  them.
+  them. The list reads no snapshot, so it links its job only with the
+  registry's region: a `--run_id` evaluation's job id shows there as text, and
+  the run's card links it.
 - **The Relational tab** of a launch that declared no foreign key says
   "Isolated tables — no relationships declared. Integrity is scored per
   table: columns, row count, keys where declared."
