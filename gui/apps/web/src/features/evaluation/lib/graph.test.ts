@@ -122,6 +122,45 @@ describe("buildGraph: components keep their layout, isolated tables become tiles
     expect(g.resolvedFrom).toBe("model");
   });
 
+  it("draws a disabled model table that has a foreign key as an ordinary node, as before", () => {
+    const model: RelationshipModel = {
+      model: "m",
+      description: "",
+      source: "",
+      sha12: "",
+      generation_order: [],
+      tables: [
+        { name: "A_TABLE", pk: ["COL_001"], identity: [], enabled: true, note: "", fk: [] },
+        {
+          name: "D_TABLE",
+          pk: [],
+          identity: [],
+          enabled: false,
+          note: "",
+          fk: [
+            {
+              cols: ["COL_002"],
+              ref: "A_TABLE",
+              ref_cols: ["COL_001"],
+              enforced: true,
+              drives: true,
+              external: false,
+              role: "driving",
+              drawn_cols: ["COL_002"],
+              note: "",
+            },
+          ],
+        },
+        { name: "E_TABLE", pk: [], identity: [], enabled: false, note: "", fk: [] },
+      ],
+    };
+    const g = buildGraph({ evaluation: evaluation({ tables: [tableEntry("A_TABLE")] }), metrics: [] }, model);
+    const d = g.nodes.find((n) => n.name === "D_TABLE")!;
+    expect([d.placement, d.external, d.role]).toEqual(["layer", false, "external"]);
+    // A disabled table with no edge and no facts is still not a tile (the model card counts it).
+    expect(g.tiles).toEqual([]);
+  });
+
   it("keeps an uncovered model table that has a foreign key in the layers", () => {
     const model: RelationshipModel = {
       model: "m",

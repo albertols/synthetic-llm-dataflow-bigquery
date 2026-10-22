@@ -79,7 +79,13 @@ describe("a forest of isolated tables (ADR 0036)", () => {
   it("the Tables in scope frame scrolls inside itself above twelve tables", async () => {
     stubForest();
     renderAt(`/evaluation/${ID}`);
-    expect(await screen.findByRole("region", { name: "Tables in scope" })).toHaveClass("max-h-96");
+    const frame = await screen.findByRole("region", { name: "Tables in scope" });
+    expect(frame).toHaveClass("max-h-96");
+    expect(frame).toHaveAttribute("tabindex", "0");
+    // The frame holds every table of the run (sticky header row + 120 rows) and scrolls inside itself.
+    expect(within(frame).getByRole("columnheader", { name: "Table" })).toBeInTheDocument();
+    expect(within(frame).getAllByRole("row")).toHaveLength(121);
+    expect(within(frame).getByRole("cell", { name: "T_120" })).toBeInTheDocument();
   });
 
   it("an isolated table whose key the launch adjusted keeps its ADR 0038 reading on the tile", async () => {

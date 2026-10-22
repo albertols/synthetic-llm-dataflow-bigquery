@@ -103,10 +103,8 @@ export function buildGraph(
   // What the evaluation covers: a table with facts or a score. A model table outside it is not a tile (below).
   const covered = new Set(tables.keys());
   for (const m of metrics) if (m.level !== "model") covered.add(m.table_name);
-  // A disabled table was never generated: the model summary counts it, the graph does not.
-  for (const t of model?.tables ?? [])
-    if (!tables.has(t.name) && t.enabled !== false) tables.set(t.name, { role: null });
-  for (const t of recorded) if (!tables.has(t.name) && t.enabled !== false) tables.set(t.name, { role: null });
+  for (const t of model?.tables ?? []) if (!tables.has(t.name)) tables.set(t.name, { role: null });
+  for (const t of recorded) if (!tables.has(t.name)) tables.set(t.name, { role: null });
   for (const m of metrics)
     if (m.level !== "model" && !tables.has(m.table_name)) tables.set(m.table_name, { role: null });
 

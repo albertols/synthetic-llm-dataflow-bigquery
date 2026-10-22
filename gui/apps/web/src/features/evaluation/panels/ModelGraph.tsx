@@ -66,6 +66,18 @@ function adjustmentChip(adjustment: NonNullable<GraphNode["adjustment"]>): { tex
   };
 }
 
+/** The accessible name of a table node or tile: score, status, the ADR 0038 key reading and what pressing does. */
+function nodeLabel(node: GraphNode, selected: boolean): string {
+  const adjusted = node.adjustment
+    ? `, primary key: ${node.adjustment.kind === "disagree" ? "measures disagree" : node.adjustment.label} (ADR 0038)`
+    : "";
+  const status = node.status ? `, ${node.status}` : "";
+  const action = selected
+    ? "Showing only this table; press to show all tables."
+    : "Press to scope the views to this table.";
+  return `${node.name}${node.external ? " (external)" : ""}: overall score ${fmtScore(node.score)}${status}${adjusted}. ${action}`;
+}
+
 function seqForScore(score: number | null): string {
   if (score === null) return "var(--slate)";
   const step = Math.min(7, Math.max(2, Math.round(2 + score * 5)));
@@ -173,15 +185,12 @@ function NodeBox({
   const barWidth = (NODE_W - 20) * Math.max(0, Math.min(1, score ?? 0));
   const glyph = STATUS_GLYPH[node.status ?? ""] ?? "";
   const chip = node.adjustment ? adjustmentChip(node.adjustment) : null;
-  const adjusted = node.adjustment
-    ? `, primary key: ${node.adjustment.kind === "disagree" ? "measures disagree" : node.adjustment.label} (ADR 0038)`
-    : "";
   return (
     <g
       role="button"
       tabIndex={0}
       aria-pressed={selected}
-      aria-label={`${node.name}${node.external ? " (external)" : ""}: overall score ${fmtScore(score)}${node.status ? `, ${node.status}` : ""}${adjusted}. ${selected ? "Showing only this table; press to show all tables." : "Press to scope the views to this table."}`}
+      aria-label={nodeLabel(node, selected)}
       data-table={node.name}
       data-adjustment={node.adjustment?.verdict}
       onClick={() => onSelect(node.name)}
@@ -267,9 +276,6 @@ function NodeBox({
 function Tile({ node, selected, onSelect }: { node: GraphNode; selected: boolean; onSelect: (name: string) => void }) {
   const glyph = STATUS_GLYPH[node.status ?? ""] ?? "";
   const chip = node.adjustment ? adjustmentChip(node.adjustment) : null;
-  const adjusted = node.adjustment
-    ? `, primary key: ${node.adjustment.kind === "disagree" ? "measures disagree" : node.adjustment.label} (ADR 0038)`
-    : "";
   return (
     <button
       type="button"
@@ -278,9 +284,7 @@ function Tile({ node, selected, onSelect }: { node: GraphNode; selected: boolean
       data-status={node.status ?? "not_evaluated"}
       data-adjustment={node.adjustment?.verdict}
       aria-pressed={selected}
-      aria-label={`${node.name}: overall score ${fmtScore(node.score)}${node.status ? `, ${node.status}` : ""}${adjusted}. ${
-        selected ? "Showing only this table; press to show all tables." : "Press to scope the views to this table."
-      }`}
+      aria-label={nodeLabel(node, selected)}
       onClick={() => onSelect(node.name)}
       className={cn(
         "flex w-full cursor-pointer flex-col justify-between rounded-md border bg-surface-2 py-1 pr-2 pl-2.5 text-left",
@@ -334,7 +338,7 @@ function TileGrid({
         style={{ maxHeight: `${TILE_GRID_MAX_REM}rem` }}
       >
         <ul
-          aria-label="Isolated tables"
+          aria-label={`${tiles.length} tables`}
           className="m-0 grid list-none p-0"
           style={{
             gridTemplateColumns: `repeat(auto-fill, minmax(${TILE_MIN_REM}rem, 1fr))`,
