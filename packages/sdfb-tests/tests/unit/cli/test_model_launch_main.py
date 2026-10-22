@@ -82,6 +82,16 @@ def _main(model_uri: str, *extra: str) -> int:
     return rp.main([*_ARGV, f"--relationships_uri={model_uri}", *extra])
 
 
+def _milestones(text: str, name: str) -> list[list[str]]:
+  """Each `name` milestone line of a captured log, as its tokens: the level
+    reads `[ERROR]`, each field `key=value`."""
+  return [
+      line.split()
+      for line in text.splitlines()
+      if f"name={name}" in line.split()
+  ]
+
+
 # -- parse-time rules ------------------------------------------------------
 @pytest.mark.parametrize("drop, add, message", [
     ("--source_dataset=p.src", (), "--tables=all needs io.source_dataset"),
@@ -162,6 +172,11 @@ def test_two_batches_run_in_sequence_on_the_cli(model_uri, jobs, capsys):
   assert second.reference_table == "p.other_ds.RATES_V2"
   assert second.num_rows == 7
   assert second._record_batch["index"] == 1  # pylint: disable=protected-access
+  # Each batch's identity names its own tables, never another batch's.
+  first_tables = first._record_batch["tables"]  # pylint: disable=protected-access
+  second_tables = second._record_batch["tables"]  # pylint: disable=protected-access
+  assert first_tables == ["T_ACCOUNTS", "T_EVENTS_LOG"]
+  assert second_tables == ["T_RATES"]
   assert "model_batches_in_sequence" in capsys.readouterr().err
 
 
@@ -178,11 +193,23 @@ def test_a_batch_index_runs_only_that_batch(model_uri, jobs):
   }
 
 
-def test_a_batch_count_that_disagrees_stops_the_launch(model_uri, jobs):
-  with pytest.raises(SystemExit, match=r"now plans 2 batch\(es\)"):
+def test_a_batch_count_that_disagrees_stops_the_launch(model_uri, jobs,
+                                                       monkeypatch, capsys):
+  reads: list[str] = []
+  # The first BigQuery read a batch makes is its validation_runs schema.
+  monkeypatch.setattr(rp, "read_table_columns", lambda fqn:
+                      (reads.append(fqn) or frozenset()))
+  with pytest.raises(SystemExit, match=r"now plans 2 batch\(es\)") as exc:
     _main(model_uri, "--max_tables_per_job=2", "--batch_index=0",
-          "--batch_count=3")
+          "--batch_count=3", "--validation_runs_table=p.q.validation_runs")
+  assert "planned as batch 0 of 3" in str(exc.value)
+  lines = _milestones(capsys.readouterr().err, "model_batch_count_mismatch")
+  assert len(lines) == 1
+  assert "[ERROR]" in lines[0]
+  assert "planned=3" in lines[0] and "replanned=2" in lines[0]
+  # Stopped before any BigQuery read: no table job, no schema read.
   assert not jobs
+  assert not reads
 
 
 def test_flex_refuses_more_than_one_batch_without_an_index(
@@ -221,6 +248,28 @@ def test_a_failed_batch_does_not_stop_the_next_on_the_cli(
     _main(model_uri, "--max_tables_per_job=2")
   assert "b00: SystemExit: [preflight P4]" in str(exc.value)
   assert ran == ["p.land.T_RATES"]
+
+
+def test_a_batch_that_returns_non_zero_does_not_stop_the_next_on_the_cli(
+    model_uri, monkeypatch, capsys):
+  ran = []
+  # b00 (T_ACCOUNTS, T_EVENTS_LOG) is the single-job run and returns 1;
+  # b01 (T_RATES) is a one-table run and returns 0.
+  monkeypatch.setattr(
+      rp, "_run_relational_job", lambda plan, a, beam_argv, registry=None: 1)
+  monkeypatch.setattr(
+      rp,
+      "_run_one_table",
+      lambda a, beam_argv, registry=None: (ran.append(a.landing_table) or 0))
+  monkeypatch.delenv(_FLEX, raising=False)
+  with pytest.raises(SystemExit, match="1 of 2 batches failed") as exc:
+    _main(model_uri, "--max_tables_per_job=2")
+  assert "- b00: rc=1" in str(exc.value)
+  assert ran == ["p.land.T_RATES"]
+  lines = _milestones(capsys.readouterr().err, "model_batch_failed")
+  assert len(lines) == 1
+  assert "[ERROR]" in lines[0]
+  assert "batch=b00" in lines[0] and "rc=1" in lines[0]
 
 
 def test_an_oversized_batch_is_announced_and_runs_whole(tmp_path, jobs, capsys):
@@ -340,3 +389,5 @@ def test_every_batch_records_its_tables_sources_rows_and_one_digest(
   assert snapshot["values"]["launch"]["tables"] == "all"
   assert "batch_index" not in snapshot["values"]["launch"]
   assert snapshot["relationships"]["tables"]["T_RATES"]["num_rows"] == 7
+  # b01's record declares b01's tables only, never b00's.
+  assert set(snapshot["relationships"]["tables"]) == {"T_RATES"}
