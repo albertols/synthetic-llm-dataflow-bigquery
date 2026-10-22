@@ -111,7 +111,19 @@ from sdfb_core.contracts.row_projection import (
 from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.engines.base import escalating_temperatures
 from sdfb_core.engines.fanout import conditional_edge_id
-from sdfb_core.launch.tables import TABLES_ALL, source_fqn, table_rows
+from sdfb_core.launch.batches import (
+    ModelLaunch,
+    ModelLaunchError,
+    batch_run_id,
+    launch_banner,
+    plan_model_launch,
+)
+from sdfb_core.launch.tables import (
+    TABLES_ALL,
+    model_launch_problems,
+    source_fqn,
+    table_rows,
+)
 from sdfb_core.observability import (
     log_build_info,
     log_milestone,
@@ -693,6 +705,10 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
   if missing:
     p.error("the following arguments are required: " +
             ", ".join(f"--{dest}" for dest in missing))
+  # ADR 0045 — what the launch modes refuse, before any BigQuery read.
+  problems = model_launch_problems(resolution.config)
+  if problems:
+    p.error("; ".join(problems))
   args = argparse.Namespace(
       **namespace_values(resolution),
       config_uri=config_uri,
@@ -2251,6 +2267,181 @@ def _execute_plan(plan: LaunchPlan, args: argparse.Namespace,
   return 0
 
 
+# The image's Flex Template entry (docker/Dockerfile) — set in every process
+# of the image, never in a checkout's shell: it tells a Flex launcher, which
+# runs ONE Dataflow job, from the CLI (ADR 0045, Ruling 16).
+_FLEX_ENTRY_ENV = "FLEX_TEMPLATE_PYTHON_PY_FILE"
+
+
+def on_flex() -> bool:
+  """Whether this launcher runs as the image's Flex Template entry."""
+  return bool(os.environ.get(_FLEX_ENTRY_ENV))
+
+
+def log_model_launch(launch: ModelLaunch) -> None:
+  """The whole plan, once per launcher (ADR 0045): one text block, and a
+    WARNING for each component larger than K."""
+  log_milestone_text(
+      "model_launch_plan",
+      launch_banner(launch),
+      model=launch.model,
+      tables=len(launch.selected),
+      skipped=len(launch.skipped),
+      batches=len(launch.batches),
+      max_tables_per_job=launch.max_tables_per_job,
+  )
+  for batch in launch.batches:
+    if batch.oversized:
+      log_milestone(
+          "model_batch_oversized",
+          level=logging.WARNING,
+          batch=batch.label,
+          tables=len(batch.tables),
+          max_tables_per_job=launch.max_tables_per_job,
+          note="one connected component is larger than max_tables_per_job: "
+          "it runs whole, as one job, never split (ADR 0045)",
+      )
+
+
+def chosen_batches(args: argparse.Namespace, launch: ModelLaunch) -> list[int]:
+  """The batches this launcher runs (ADR 0045 §orchestration): the one the
+    orchestrator named, after checking its count; the only one; or, on the
+    CLI, every batch in sequence. A Flex launch runs one job, so it refuses
+    a multi-batch plan without --batch_index."""
+  count = len(launch.batches)
+  if args.batch_index is not None:
+    if args.batch_count != count:
+      log_milestone(
+          "model_batch_count_mismatch",
+          level=logging.ERROR,
+          planned=args.batch_count,
+          replanned=count,
+          max_tables_per_job=launch.max_tables_per_job,
+      )
+      raise SystemExit(
+          f"[model launch] this job was planned as batch {args.batch_index} "
+          f"of {args.batch_count}, but {launch.source} now plans {count} "
+          f"batch(es) at max_tables_per_job={launch.max_tables_per_job}: the "
+          f"model or K changed between planning and launch. Re-plan: "
+          f"trigger the model DAG again, or rerun scripts/launch/run_model.py.")
+    return [args.batch_index]
+  if count == 1:
+    return [0]
+  if on_flex():
+    raise SystemExit(
+        f"[model launch] {len(launch.selected)} enabled tables of "
+        f"{launch.model} plan {count} batch jobs of at most "
+        f"{launch.max_tables_per_job} tables, and a Flex launch runs one "
+        f"Dataflow job. Launch the model DAG "
+        f"(composer/synthetic_model_launch.py) or "
+        f"scripts/launch/run_model.py, which give each batch its "
+        f"--batch_index, or raise launch.max_tables_per_job to "
+        f"{len(launch.selected)} for one job.")
+  log_milestone(
+      "model_batches_in_sequence",
+      level=logging.WARNING,
+      batches=count,
+      note="no --batch_index on the CLI: the batches run one after another; "
+      "scripts/launch/run_model.py runs them in parallel",
+  )
+  return list(range(count))
+
+
+def _run_model(args: argparse.Namespace, beam_argv: list[str]) -> int:
+  """`launch.tables: all` (ADR 0045): plan every enabled table of the one
+    model into batches and run the batches this launcher owns. On the CLI
+    a failed batch does not stop the next one (Ruling 15); the launch then
+    ends naming every failed batch."""
+  registry = load_relationship_registry(args.relationships_uri)
+  try:
+    launch = plan_model_launch(registry, args.max_tables_per_job)
+  except ModelLaunchError as exc:
+    raise SystemExit(f"[model launch] {exc}") from exc
+  warn_unused_launch_keys(args)
+  log_model_launch(launch)
+  # A1 ruling R14 / ADR 0044: the launch's cache keys, once — every batch
+  # reads and writes the same stores.
+  args._cache_keys = launch_cache_keys(args, registry)  # pylint: disable=protected-access
+  # ADR 0045: the dataset each table's (and a driving parent's) source is
+  # read from, unless the model names another.
+  args._source_dataset = args.source_dataset  # pylint: disable=protected-access
+  chosen = chosen_batches(args, launch)
+  if len(chosen) == 1:
+    return _run_batch(args, beam_argv, registry, launch, chosen[0])
+  failures: list[str] = []
+  for index in chosen:
+    label = launch.batches[index].label
+    try:
+      rc = _run_batch(args, beam_argv, registry, launch, index)
+    except (Exception, SystemExit) as exc:  # pylint: disable=broad-exception-caught  # batches are independent (ADR 0045)
+      logger.exception("batch %s failed", label)
+      log_milestone("model_batch_failed", level=logging.ERROR, batch=label)
+      failures.append(f"{label}: {type(exc).__name__}: {exc}")
+      continue
+    if rc != 0:
+      log_milestone(
+          "model_batch_failed", level=logging.ERROR, batch=label, rc=rc)
+      failures.append(f"{label}: rc={rc}")
+  if failures:
+    raise SystemExit(f"{len(failures)} of {len(chosen)} batches failed; the "
+                     f"others ran:\n" + "\n".join(f"- {f}" for f in failures))
+  return 0
+
+
+def _run_batch(args: argparse.Namespace, beam_argv: list[str],
+               registry: RelationshipRegistry, launch: ModelLaunch,
+               index: int) -> int:
+  """One batch of a whole-model launch as a launch of its own (ADR 0045):
+    job run id `<base>-bNN`, table run ids `<base>-bNN-MM-<table>`, the
+    generation record's `launch_run_id` the base (A2's
+    `prepare_record_base` reads `args.run_id` before the batch id replaces
+    it) and its snapshot's `batch` block."""
+  batch = launch.batches[index]
+  base = args.run_id
+  generate_fk = parse_bool_flag(args.generate_fk_relationships)
+  targets = [f"{args.landing_dataset}.{name}" for name in batch.tables]
+  plan = plan_launch(
+      targets,
+      args.reference_table or "",
+      generate_fk,
+      registry,
+      batch_run_id(base, index),
+      source_dataset=args.source_dataset,
+      model_launch=True)
+  batch_args = argparse.Namespace(**vars(args))
+  # The batch's targets: the single-job runner reads its pin owners here.
+  batch_args.landing_table = ",".join(targets)
+  # A pin describes one table; a model launch extracts every schema live.
+  batch_args.ddl_uri = ""
+  batch_args._record_batch = {  # pylint: disable=protected-access
+      "index": index,
+      "count": len(launch.batches),
+      "tables": list(batch.tables),
+  }
+  # ADR 0044 — one record per batch job, its launch_run_id the base.
+  batch_args._record_base = prepare_record_base(batch_args, registry, plan)  # pylint: disable=protected-access
+  batch_args.run_id = batch_run_id(base, index)
+  log_milestone(
+      "model_batch",
+      batch=batch.label,
+      index=index,
+      count=len(launch.batches),
+      tables=len(batch.tables),
+      run_id=batch_args.run_id,
+      launch_run_id=base,
+  )
+  log_launch_plan(
+      batch_args,
+      plan,
+      generate_fk,
+      registry,
+      extra={
+          "launch_run_id": base,
+          "batch": batch_args._record_batch,  # pylint: disable=protected-access
+      })
+  return _execute_plan(plan, batch_args, beam_argv, registry, targets)
+
+
 def resolve_landing_dispositions(write_disposition: str,
                                  create_if_not_exists: bool) -> tuple[str, str]:
   """Landing-sink ``(write, create)`` dispositions (WS4 §6a/§6c).
@@ -2892,6 +3083,9 @@ def main(argv: list[str] | None = None) -> int:
   log_build_info("launcher")
   args, beam_argv = parse_args(argv or sys.argv[1:])
   log_config_resolution(args.config_resolution)
+  if args.tables == TABLES_ALL:
+    # ADR 0045 — every enabled table of one model, batch by batch.
+    return _run_model(args, beam_argv)
 
   # ADR 0029 rev B — resolve the launch scenario BEFORE any per-table
   # work: minimal inputs (landing table(s) + one flag), everything
@@ -3657,7 +3851,11 @@ def _run_one_table(
   record_base = getattr(args, "_record_base", None)
   if record_base is not None:
     (spec,) = attach_record([spec],
-                            finish_record(record_base, options, runner=runner))
+                            finish_record(
+                                record_base,
+                                options,
+                                runner=runner,
+                                batch=getattr(args, "_record_batch", None)))
 
   with beam.Pipeline(options=options) as p:
     result = build_pipeline(
@@ -3841,8 +4039,13 @@ def _run_relational_job(
     )
   record_base = getattr(args, "_record_base", None)
   if record_base is not None:
-    specs = attach_record(specs,
-                          finish_record(record_base, options, runner=runner))
+    specs = attach_record(
+        specs,
+        finish_record(
+            record_base,
+            options,
+            runner=runner,
+            batch=getattr(args, "_record_batch", None)))
   with beam.Pipeline(options=options) as p:
     results = build_relational_pipeline(p, specs)
     logger.info(

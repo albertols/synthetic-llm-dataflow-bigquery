@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 
 import pytest
-from sdfb_core.config.model import DEFAULT_CONFIG
+from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
 from sdfb_core.config.resolve import (ConfigError, missing_required,
                                       namespace_values, parse_config_text,
                                       resolve)
@@ -164,3 +164,13 @@ def test_literal_top_values_above_the_enum_cap_are_refused():
   assert ": : " not in message
   assert "sampling.top_values_max_distinct (60)" in message
   assert "free_text.free_text_max_categories (50)" in message
+
+
+def test_a_model_launch_needs_no_reference_or_landing_table():
+  """ADR 0045: with launch.tables all the model names every table."""
+  config = GeneratorConfig.model_validate({"launch": {"tables": "all"}})
+  assert missing_required(config) == [
+      "dlq_table", "num_rows", "run_id", "model_uri"
+  ]
+  assert missing_required(
+      GeneratorConfig())[:2] == ["reference_table", "landing_table"]

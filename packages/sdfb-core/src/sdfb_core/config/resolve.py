@@ -17,8 +17,8 @@ A key set in the file wins over the same key typed as a flag, which wins over
 the model default (ADR 0043: file wins). Every key's provenance is recorded,
 and every flag the file overrode is listed so the launcher can say so.
 
-Design: docs/DESIGN.md §8 Configuration
-(ADR 0043).
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
+(ADR 0043, 0045).
 """
 from __future__ import annotations
 
@@ -185,11 +185,17 @@ def resolve(typed: Mapping[str, object],
       config_uri=config_uri)
 
 
+# ADR 0045 — with launch.tables all the model names every table: no
+# reference or landing table is read.
+_UNUSED_UNDER_ALL = frozenset({"reference_table", "landing_table"})
+
+
 def missing_required(config: GeneratorConfig) -> list[str]:
   """Required flag dests still unset, in argparse order."""
+  skip = _UNUSED_UNDER_ALL if config.launch.tables == "all" else frozenset()
   return [
       dest for dest in REQUIRED_FLAGS
-      if value_of(config, _DEST_KEYS[dest]) is None
+      if dest not in skip and value_of(config, _DEST_KEYS[dest]) is None
   ]
 
 
