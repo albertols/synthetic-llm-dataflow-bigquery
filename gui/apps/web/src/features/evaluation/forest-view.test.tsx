@@ -132,4 +132,20 @@ describe("a forest of isolated tables (ADR 0036)", () => {
     expect(within(only).getByText(/^PK adj\. /)).toBeInTheDocument();
     expect(only.getAttribute("aria-label")).toMatch(/, primary key: .+ \(ADR 0038\)\./);
   });
+
+  it("a PK-less table's key checks read Not applicable, never empty or FAIL", async () => {
+    stubForest();
+    renderAt(`/evaluation/${ID}`);
+    const integrity = await screen.findByRole("region", { name: /^Integrity/ });
+    const row = integrity.querySelector<HTMLElement>('li[data-metric="table.identity_duplicate_rate"]')!;
+    expect(within(row).getByText("Not applicable")).toHaveAttribute("data-tone", "neutral");
+    expect(row).toHaveTextContent("Not applicable — no identity columns declared");
+    expect(within(row).queryByText("Not evaluated")).toBeNull();
+    const findingsList = screen.getByRole("list", { name: "Findings, most severe first" });
+    const finding = within(findingsList)
+      .getByText(/^40 tables declare no primary key/)
+      .closest("li")!;
+    expect(within(finding).getByText("Not applicable")).toBeInTheDocument();
+    expect(screen.getByText(/160 not applicable \(no key declared\)/)).toBeInTheDocument();
+  });
 });

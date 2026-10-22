@@ -89,7 +89,13 @@ export function InterpretationPanel({
                 >
                   {/* Only a finding with a reading wraps: every other finding keeps its one row of pills. */}
                   <div className={cn("flex items-center gap-1.5", reading && "flex-wrap sm:max-w-60")}>
-                    {replaced ? null : (
+                    {finding.notApplicable ? (
+                      <>
+                        {/* No `title`: the finding's sentence already says which key is missing. */}
+                        <StatusPill status="not_evaluated" label="Not applicable" tone="neutral" size="sm" />
+                        <InfoHint concept="eval:not-applicable" />
+                      </>
+                    ) : replaced ? null : (
                       <StatusPill status={finding.severity === "info" ? "info" : finding.severity} size="sm" />
                     )}
                     {reading ? (
@@ -103,15 +109,18 @@ export function InterpretationPanel({
                     {isLevel(finding.level) ? <LevelChip level={finding.level} size="sm" /> : null}
                   </div>
                   <p className="text-sm leading-relaxed text-text-2">{finding.text}</p>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={() => onOpen(finding.target)}
-                    className="justify-self-start"
-                  >
-                    Open {TAB_LABEL[finding.target.tab] ?? finding.target.tab}
-                    <ArrowRight aria-hidden="true" />
-                  </Button>
+                  {/* A grouped N/A finding names no single table: "Open" would reopen the overview it sits on. */}
+                  {finding.notApplicable && !finding.target.table ? null : (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => onOpen(finding.target)}
+                      className="justify-self-start"
+                    >
+                      Open {TAB_LABEL[finding.target.tab] ?? finding.target.tab}
+                      <ArrowRight aria-hidden="true" />
+                    </Button>
+                  )}
                 </li>
               );
             })}

@@ -5,6 +5,7 @@
  * default branch because live rows may carry values newer than the contract.
  */
 import type { EvaluationDetail, EvaluationRecord, MetricRow } from "@contracts/api";
+import { inapplicableKey } from "@contracts/applicability";
 
 import {
   catalogueIndex,
@@ -266,9 +267,13 @@ function rankScore(row: MetricRow): number {
   return metricMeta(row.metric_id)?.score === "none" ? 2 : row.score;
 }
 
-/** "Look first" order: fail, warn, not evaluated, unknown, then passes by lowest score; INFO rows last. */
-function lookRank(status: string): number {
-  return status === "info" ? 6 : statusRank(status);
+/**
+ * "Look first" order: fail, warn, not evaluated, unknown, then passes by lowest score; INFO rows,
+ * then key checks with no key declared (nothing to check, ADR 0042) last.
+ */
+function lookRank(row: MetricRow): number {
+  if (inapplicableKey(row)) return 7;
+  return row.status === "info" ? 6 : statusRank(row.status);
 }
 
 /** The `n` rows to look at first, one per metric id (three Pearson Δ rows teach less than three different metrics). */
@@ -276,10 +281,7 @@ export function worstRows(rows: readonly MetricRow[], n: number): MetricRow[] {
   const sorted = [...rows]
     .filter((row) => !isRollup(row.metric_id))
     .sort(
-      (a, b) =>
-        lookRank(a.status) - lookRank(b.status) ||
-        rankScore(a) - rankScore(b) ||
-        metricKey(a).localeCompare(metricKey(b)),
+      (a, b) => lookRank(a) - lookRank(b) || rankScore(a) - rankScore(b) || metricKey(a).localeCompare(metricKey(b)),
     );
   const seen = new Set<string>();
   const out: MetricRow[] = [];

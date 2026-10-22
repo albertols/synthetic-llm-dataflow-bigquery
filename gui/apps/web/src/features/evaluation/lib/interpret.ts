@@ -7,12 +7,14 @@
  *
  * Findings are ranked (FAIL, WARN, NOT EVALUATED, documented INFO, then the
  * PASS rows the evaluator downgraded as sampling noise — "≈ within noise, was
- * FAIL", Ruling R40) and point at the view that holds the evidence. A PK
+ * FAIL", Ruling R40, and last the key checks with no key declared, grouped:
+ * not applicable, ADR 0042) and point at the view that holds the evidence. A PK
  * duplicate rate on a key the launch adjusted reads the generator's verdict
  * instead (ADR 0038, lib/adjustment.ts), between the real FAILs and the INFO.
  */
 import type { TableModelAdjustment } from "@contracts/adjustments";
 import type { EvaluationDetail, MetricRow } from "@contracts/api";
+import { inapplicableKey, type InapplicableKey } from "@contracts/applicability";
 
 import { isStale, STALE_AFTER_HOURS } from "@/lib/runState";
 
@@ -38,6 +40,8 @@ export interface Finding {
    * evaluator's own status: `severity` above is the finding's, not the stored row's.
    */
   adjusted: AdjustedReading | null;
+  /** A key check with no key declared, for these tables (ADR 0042): one finding per kind, ranked last. */
+  notApplicable?: { key: InapplicableKey; tables: string[] };
   /** Where the evidence lives. */
   target: { tab: RunTab; column?: string; table?: string };
 }
@@ -176,13 +180,40 @@ function referenceNFor(detail: Pick<EvaluationDetail, "evaluation">, table: stri
   return detail.evaluation.tables.find((t) => t.name === table)?.reference_n ?? null;
 }
 
+const NA_SUBJECT: Record<InapplicableKey, { one: string; many: string; check: string }> = {
+  pk: { one: "declares no primary key", many: "declare no primary key", check: "uniqueness check" },
+  identity: { one: "declares no identity columns", many: "declare no identity columns", check: "identity check" },
+};
+
+/** The tables whose key check has nothing to check, as one finding (never "Not evaluated is not a pass"). */
+function notApplicableFinding(key: InapplicableKey, tables: readonly string[]): Finding {
+  const sorted = [...new Set(tables)].sort();
+  const n = sorted.length;
+  const subject = NA_SUBJECT[key];
+  const named = `${sorted.slice(0, 5).join(", ")}${n > 5 ? ` and ${n - 5} more` : ""}`;
+  return {
+    key: `not_applicable|${key}`,
+    severity: "not_evaluated",
+    level: "table",
+    family: "integrity",
+    metricId: key === "pk" ? PK_METRIC : "table.identity_duplicate_rate",
+    text: `${n} ${n === 1 ? "table" : "tables"} ${n === 1 ? subject.one : subject.many} (${named}): the ${subject.check} is not applicable — nothing to check, not a gap. Integrity is scored over the units ${n === 1 ? "it has" : "they have"}.`,
+    downgradedFrom: null,
+    adjusted: null,
+    notApplicable: { key, tables: sorted },
+    target: { tab: "overview", table: n === 1 ? sorted[0] : undefined },
+  };
+}
+
 /**
  * Where a finding ranks. ADR 0038: an adjusted key is neither the FAIL the evaluator stored nor
  * an ordinary WARN or INFO, so its findings sit after the real FAILs and before the documented
  * INFO — a copy that missed directly after the FAILs it replaced, a faithful one just before
- * the documented edges. A question keeps the evaluator's own rank.
+ * the documented edges. A question keeps the evaluator's own rank. Key checks with no key
+ * declared rank last (ADR 0042).
  */
 function findingRank(finding: Finding): number {
+  if (finding.notApplicable) return 7;
   if (finding.adjusted?.kind !== "adjusted") return statusRank(finding.severity);
   return finding.severity === "warn" ? 0.5 : 2.75;
 }
@@ -202,8 +233,15 @@ export function findings(
     if (row.metric_id === "relationship.orphan_rate_source" && row.edge) orphanSource.set(row.edge, row.value);
   const out: Finding[] = [];
   const pkTables = new Set<string>();
+  const inapplicable = new Map<InapplicableKey, string[]>();
   for (const row of detail.metrics) {
     if (isRollup(row.metric_id)) continue;
+    const na = inapplicableKey(row);
+    if (na) {
+      if (row.metric_id === PK_METRIC) pkTables.add(row.table_name);
+      inapplicable.set(na, [...(inapplicable.get(na) ?? []), row.table_name]);
+      continue;
+    }
     const reading = readingOf(row);
     // ADR 0038: the generator's verdict on this table's declared key, layered on the row.
     const adjusted =
@@ -263,6 +301,7 @@ export function findings(
       target: { tab: "relational", table: adjustment.table },
     });
   }
+  for (const [key, tables] of inapplicable) out.push(notApplicableFinding(key, tables));
   const levelOrder = ["row", "table", "relationship", "field", "column", "pair", "model"];
   const familyOrder = ["privacy", "integrity", "fidelity", "diversity"];
   const familyRank = (f: string) => (familyOrder.includes(f) ? familyOrder.indexOf(f) : familyOrder.length);

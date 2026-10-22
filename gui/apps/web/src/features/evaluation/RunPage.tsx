@@ -12,6 +12,7 @@ import { useCallback, useMemo } from "react";
 
 import { isEvaluatorJobName } from "@contracts/adjustments";
 import type { EvaluationDetail } from "@contracts/api";
+import { inapplicableKey } from "@contracts/applicability";
 
 import { Callout } from "@/components/Callout";
 import { EmptyState } from "@/components/EmptyState";
@@ -239,6 +240,7 @@ function RunPageContent() {
   const running = evaluation.status === "RUNNING" && !stale;
   // No metric row in the whole evaluation (not the table scope): "yet" only while its last event is a live RUNNING.
   const noMetrics = hasMetrics ? undefined : evaluation.event === "RUNNING" && !stale ? "yet" : "at-all";
+  const notApplicable = detail.metrics.filter((m) => inapplicableKey(m) !== null).length;
   const rowsSynthetic = evaluation.tables.reduce((acc, t) => acc + (t.rows_synthetic ?? 0), 0);
   // The registry row names an evaluator job as its generation job: by that job's name, or because
   // another evaluation ran as it. Scope and adjustments are then joined to the wrong job.
@@ -398,7 +400,11 @@ function RunPageContent() {
                   label="Not evaluated"
                   value={derived.counts.not_evaluated}
                   format={formatCount}
-                  footnote="Not evaluated is not a pass: see the reasons below."
+                  footnote={
+                    notApplicable
+                      ? `${formatCount(notApplicable)} not applicable (no key declared): nothing to check. The rest is not a pass.`
+                      : "Not evaluated is not a pass: see the reasons below."
+                  }
                 />
                 <StatTile
                   label="Synthetic rows in scope"

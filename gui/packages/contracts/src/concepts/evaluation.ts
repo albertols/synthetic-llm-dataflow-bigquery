@@ -371,6 +371,18 @@ export const concepts = defineConcepts([
     ],
   },
   {
+    id: "eval:not-applicable",
+    title: "Not applicable (no key declared)",
+    purpose:
+      "The relationship model declares no primary key (or no identity columns) for this table, so there is no key whose duplicates could be counted: the evaluator writes the check as not evaluated with that reason, and the GUI shows it as not applicable — not a gap, never a FAIL. The table's integrity score is then the mean over the units it has: its columns and its row count.",
+    pitfalls:
+      "Any other reason (sampled mode, no synthetic rows) stays Not evaluated: that one is a gap in the evaluation, and not a pass.",
+    links: [
+      { label: "Metric catalogue — table.pk_duplicate_rate", url: CATALOGUE, kind: "code" },
+      { label: "Relationship models — README", url: RELATIONSHIPS, kind: "docs" },
+    ],
+  },
+  {
     id: "eval:documented-edge",
     title: "Documented edge",
     purpose:

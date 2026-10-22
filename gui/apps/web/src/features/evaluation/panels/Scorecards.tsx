@@ -9,6 +9,7 @@
  * evaluator's, with the number of them on adjusted keys under it.
  */
 import type { MetricRow } from "@contracts/api";
+import { inapplicableKey, NOT_APPLICABLE_LABEL } from "@contracts/applicability";
 
 import { AdjustmentPill } from "@/components/AdjustmentPill";
 import { InfoHint } from "@/components/InfoHint";
@@ -69,11 +70,24 @@ function WorstRow({
   const tab = adjusted ? "relational" : tabFor(row);
   const concept = metricConcept(row.metric_id);
   const replaced = adjusted?.reading?.kind === "adjusted";
+  // ADR 0042: a key check the model gave no key for is nothing to check, not a gap.
+  const na = inapplicableKey(row);
   return (
-    <li className="grid min-w-0 gap-0.5 border-t border-border pt-2" data-adjusted={adjusted ? "true" : undefined}>
+    <li
+      className="grid min-w-0 gap-0.5 border-t border-border pt-2"
+      data-adjusted={adjusted ? "true" : undefined}
+      data-metric={row.metric_id}
+    >
       {/* Only a row with a reading wraps: every other row keeps its one line, truncated. */}
       <div className={cn("flex min-w-0 items-center gap-1.5", adjusted && "flex-wrap")}>
-        {replaced ? null : <StatusPill status={row.status} size="sm" />}
+        {replaced ? null : na ? (
+          <>
+            <StatusPill status="not_evaluated" label="Not applicable" tone="neutral" size="sm" />
+            <InfoHint concept="eval:not-applicable" />
+          </>
+        ) : (
+          <StatusPill status={row.status} size="sm" />
+        )}
         {adjusted?.reading ? (
           <AdjustmentPill
             verdict={adjusted.adjustment.verdict}
@@ -98,7 +112,9 @@ function WorstRow({
         {concept ? <InfoHint concept={concept} /> : null}
       </div>
       <p className="font-mono text-[11px] break-words text-text-2 tabular-nums">
-        {row.status === "not_evaluated" ? (
+        {na ? (
+          <span>{NOT_APPLICABLE_LABEL[na]}</span>
+        ) : row.status === "not_evaluated" ? (
           <span>not evaluated</span>
         ) : row.value === null ? (
           // No finite point value, graded on its CI bound (Ruling R38): the reading names the gate.
