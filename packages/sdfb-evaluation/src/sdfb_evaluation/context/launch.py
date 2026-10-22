@@ -597,14 +597,12 @@ def _resolved_mismatch(launch_config: Mapping[str, Any]) -> str | None:
     return f"{len(tables)} tables but {len(run_ids)} run ids"
   base = _text(launch_config.get("run_id"))
   if len(tables) == 1:
-    if base is None:
-      return None
     short = tables[0].rsplit(".", 1)[-1]
-    batch = f"{base}-00-{short}"
-    if run_ids[0] not in (base, batch):
-      return (f"the single run id {run_ids[0]!r} is not the run_id {base!r} "
-              f"(nor a one-table batch's {batch!r})")
-    return None
+    batch = f"{base}-00-{short}"  # a whole-model batch of one table
+    if base is None or run_ids[0] in (base, batch):
+      return None
+    return (f"the single run id {run_ids[0]!r} is not the run_id {base!r} "
+            f"(nor a one-table batch's {batch!r})")
   for index, (table, run_id) in enumerate(zip(tables, run_ids, strict=True)):
     short = table.rsplit(".", 1)[-1]
     suffix = f"-{index:02d}-{short}"
@@ -623,14 +621,19 @@ _BATCH = re.compile(r"(?P<launch>.+)-b(?P<batch>\d{2,})")
 def _launch_of(record: RunRecord, base: str | None) -> str:
   """The launch a validation_runs row belongs to (Ruling 3 of ADR 0045).
   With the asked `base`: that base when the row's recorded `launch_run_id`
-  (ADR 0044), its run id's base, or that base without a whole-model batch
-  suffix names it — else the row's own base. Without one: the recorded
-  launch, else the run id's base."""
+  (ADR 0044) or its run id's base names it, or — only on a row without a
+  record — when its run id's base is that base with a whole-model batch
+  suffix (`<base>-bNN`); else the row's own base. A recorded batch row
+  names its launch itself, and a row that records another launch (one
+  whose own run id merely ends like a batch, `<base>-b12`) is that
+  launch's. A row without a record cannot tell the two apart, so the
+  suffix decides for it. Without a base: the recorded launch, else the run
+  id's base."""
   split = record.base_and_index[0]
   if base is not None:
     if base in (record.launch_run_id, split):
       return base
-    match = _BATCH.fullmatch(split)
+    match = _BATCH.fullmatch(split) if record.launch_run_id is None else None
     if match is not None and match.group("launch") == base:
       return base
     return split
@@ -1013,17 +1016,24 @@ def _check_positions(own: Sequence[RunRecord], n_tables: int,
                      notes: list[str]) -> None:
   """Warn when the launch's run positions (NN) have gaps, or point past
   the tables resolved — both mean tables of the launch are unaccounted
-  for."""
-  indices = sorted({
-      index for index in (r.base_and_index[1] for r in own) if index is not None
-  })
-  if not indices:
+  for. Positions are checked per run-id base: a whole-model launch's
+  batches (`<base>-bNN`, ADR 0045) each number their tables from 00, so a
+  gap is named by its batch, and past-the-tables cannot be told across
+  batches (checked only for one base, as before)."""
+  groups: dict[str, set[int]] = {}
+  for record in own:
+    split, index = record.base_and_index
+    if index is not None:
+      groups.setdefault(split, set()).add(index)
+  for split, indices in sorted(groups.items()):
+    gaps = sorted(set(range(max(indices) + 1)) - indices)
+    if gaps:
+      where = "this launch" if len(groups) == 1 else f"batch {split}"
+      notes.append(f"validation_runs has no row for position(s) {gaps} of "
+                   f"{where} (run ids …-NN-<table>): those tables' runs "
+                   "failed, expired or were never recorded")
+  if len(groups) != 1:
     return
-  gaps = sorted(set(range(indices[-1] + 1)) - set(indices))
-  if gaps:
-    notes.append(f"validation_runs has no row for position(s) {gaps} of this "
-                 "launch (run ids …-NN-<table>): those tables' runs failed, "
-                 "expired or were never recorded")
   beyond = sorted(
       r.run_id for r in own if (r.base_and_index[1] or 0) >= n_tables)
   if beyond:

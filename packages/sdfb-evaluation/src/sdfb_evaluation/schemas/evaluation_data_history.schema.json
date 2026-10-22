@@ -89,5 +89,5 @@
   {"name": "artifacts_uri", "type": "STRING", "mode": "NULLABLE", "description": "GCS URI of the HTML/JSON evaluation artifacts for this run."},
   {"name": "generator_version", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 — validation_runs.generator_version of the evaluated generation, <base>-<branch>-<sha7>[-dirty]; NULL when the generation wrote no record."},
   {"name": "generator_config_digest", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 — validation_runs.config_digest of the evaluated generation: same digest, same generator config; NULL when the generation wrote no record."},
-  {"name": "generation_job_ids", "type": "STRING", "mode": "REPEATED", "description": "ADR 0045 — the Dataflow job ids of the generation this evaluation covers: each batch job of a whole-model launch that landed (generation_job_id is the first), else the one generation job; empty when the evaluation names no job."}
+  {"name": "generation_job_ids", "type": "STRING", "mode": "REPEATED", "description": "ADR 0045 — the Dataflow job ids of the generation this evaluation covers: each batch job of a whole-model launch that landed (generation_job_id is the first), else the one generation job; empty when the evaluation names no job, or when the row was written before the column existed (read generation_job_id then)."}
 ]

@@ -224,7 +224,8 @@ def rows_of_jobs(rows: Sequence[Mapping[str, Any]], job_ids: Sequence[str],
   """A whole-model launch's rows written by the listed batch jobs
   (ADR 0045): a row whose recorded `job_id` is not listed is dropped; a row
   with no `job_id` (the worker could not read it, ADR 0044) is kept —
-  nothing says which job wrote it. Each case is a note.
+  nothing says which job wrote it, so it may be an unlisted batch's. Each
+  case is a note.
 
   By id only, unlike `of_job`, which falls back to the row's `job_name`:
   the callers (the model DAG, `scripts/launch/run_model.py`) know only the
@@ -240,5 +241,7 @@ def rows_of_jobs(rows: Sequence[Mapping[str, Any]], job_ids: Sequence[str],
                  f"were not evaluated: {dropped}")
   if unattributed:
     notes.append(f"validation_runs rows that carry no job id were evaluated "
-                 f"(nothing says which job wrote them): {unattributed}")
+                 f"(nothing says which job wrote them; they may include "
+                 f"batches not listed in --generation_job_ids): "
+                 f"{unattributed}")
   return [r for r in rows if not r.get("job_id") or r["job_id"] in wanted]

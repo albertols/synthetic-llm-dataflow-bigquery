@@ -19,10 +19,15 @@ Design: docs/DESIGN.md §4 Relational generation
 """
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 
+from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.cli import driver
 from sdfb_evaluation.cli.main import main, parse_args
+from sdfb_evaluation.version import EVALUATOR_VERSION
 
 from .helpers import REGISTRY, check_row, make_env
 
@@ -91,6 +96,58 @@ def test_an_unresolved_model_launch_names_its_jobs_on_the_failed_row(
   assert (failed["status"], failed["base_run_id"]) == ("FAILED", _BASE)
   assert failed["generation_job_id"] == "job-7"
   assert failed["generation_job_ids"] == ["job-7", "job-8"]
+
+
+def test_rows_without_a_job_id_are_kept_whichever_batch_wrote_them(
+    bq, monkeypatch):
+  """No worker could read its job id (`generation_record_job_id …
+  source=none`): the rows of the listed batch and of an unlisted one are
+  both evaluated, and the note says they may include unlisted batches."""
+  rows = [_row(0, 0, "T_A", None), _row(1, 0, "T_C", None)]
+  monkeypatch.setattr(driver, "runs_for", lambda bq_, **kwargs: rows)
+  ctx = driver._resolve(  # pylint: disable=protected-access
+      _args("--generation_job_ids=job-0"), make_env(bq), bq)
+  assert sorted(ctx.tables_in_order) == [f"{_LANDING}.T_A", f"{_LANDING}.T_C"]
+  assert any(
+      "they may include batches not listed in --generation_job_ids" in w and
+      f"{_BASE}-b01-00-T_C" in w for w in ctx.warnings)
+
+
+def _key(args) -> str:
+  knobs = driver.knobs_from_args(args, "eval-20261021T100000Z-00000001")
+  return driver._request_key(args, knobs)  # pylint: disable=protected-access
+
+
+def test_an_unresolved_requests_key_names_its_jobs():
+  """Two unresolved requests for one base with different batch jobs are
+  not one evaluation."""
+  assert _key(_args("--generation_job_ids=job-0,job-1")) != _key(
+      _args("--generation_job_ids=job-0"))
+
+
+def test_a_request_without_job_ids_keeps_its_key():
+  """`job_ids` joins the request only when given: every earlier key is
+  the recipe's over the same request as before."""
+  args = _args()
+  knobs = driver.knobs_from_args(args, "eval-20261021T100000Z-00000001")
+  payload = {
+      "unresolved_request": {
+          "job_id": None,
+          "run_id": _BASE,
+          "tables": [],
+          "landing_dataset": None,
+          "reference_dataset": None,
+          "relationships_uri": None,
+          "fixture_dir": None,
+      },
+      "catalogue_version": load_catalogue().version,
+      "evaluator_version": EVALUATOR_VERSION,
+      "mode": args.mode,
+      "knobs": knobs.key_dict(),
+  }
+  text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+  assert _key(args) == hashlib.blake2b(
+      text.encode(), digest_size=16).hexdigest()
 
 
 def test_without_job_ids_the_launch_is_every_batch(bq, monkeypatch):

@@ -557,6 +557,11 @@ flowchart LR
          --project <project> --dataset <evaluation_dataset> --apply   # replaces the views
    ```
 
+   Rolling back to an image from after ADR 0044 but before ADR 0045 (an
+   image this section's acceptance ran on) drops only `generation_job_ids`
+   (`DROP COLUMN generation_job_ids` alone, then the views): that image
+   writes ADR 0044's two columns, so dropping all three breaks it as well.
+
    To confirm the rejection first, on a scratch copy: `bq cp` the registry
    into a scratch dataset, migrate the copy with the registry `bq update`
    above, then append one row to it with `bq load --noreplace
@@ -763,7 +768,7 @@ flowchart LR
 | `generation_record_job_id … source=not_dataflow` (worker) | a DirectRunner launch: no job id to read | none |
 | `generator_version_mismatch launcher=… worker=…` (worker) | the launcher's code is not the workers' image: a template on an older image, or a launch from a checkout | rebuild the template on the image (step 4) and launch from it |
 | the evaluation fails at its registry write, naming `generator_version`, `generator_config_digest` or `generation_job_ids` | the registry is not migrated | step 1's registry `bq update` |
-| the evaluation fails at its registry write with `Provided Schema does not match Table … Field generator_version is missing in new schema` (or `generation_job_ids`) | an evaluator image from before ADR 0044 (or ADR 0045) wrote to the migrated registry | steps 3–4 (the new image and template), or step 1's rollback |
+| the evaluation fails at its registry write with `Provided Schema does not match Table … Field generator_version is missing in new schema` (or `generation_job_ids`) | an evaluator image from before ADR 0044 (or ADR 0045) wrote to the migrated registry | steps 3–4 (the new image and template), or step 1's rollback (for an image between ADR 0044 and ADR 0045, drop only `generation_job_ids`) |
 | the GUI's evaluation list fails with `Unrecognized name: generator_version` | the registry or its views are not migrated | step 1's registry `bq update` and `sdfb-eval schemas --apply` |
 | `params_source` is not `validation_runs` and the list's cells are empty | the evaluation found no record: the generation job could not be read (a "no window" warning: grant `roles/dataflow.viewer`), or its rows lack the columns | step 9 first, then the job read |
 | "No generation record" on the Parameters tab | the run's rows predate the migration or went to a table without the columns | step 1, then a new launch |

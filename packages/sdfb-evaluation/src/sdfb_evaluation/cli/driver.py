@@ -1102,6 +1102,9 @@ def _request_key(args: argparse.Namespace, knobs: Knobs) -> str:
   # absent unless given: the key of every earlier request is unchanged
   if getattr(args, "seed_table", None):
     request["seed_table"] = args.seed_table
+  if getattr(args, "job_ids", None):
+    # ADR 0045: a whole-model launch's batch jobs
+    request["job_ids"] = list(args.job_ids)
   payload = {
       "unresolved_request": request,
       "catalogue_version": load_catalogue().version,

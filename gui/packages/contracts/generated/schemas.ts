@@ -190,7 +190,7 @@ export const evaluationDataHistoryRowSchema = z.object({
   generator_version: z.string().nullable(),
   /** ADR 0044 — validation_runs.config_digest of the evaluated generation: same digest, same generator config; NULL when the generation wrote no record. */
   generator_config_digest: z.string().nullable(),
-  /** ADR 0045 — the Dataflow job ids of the generation this evaluation covers: each batch job of a whole-model launch that landed (generation_job_id is the first), else the one generation job; empty when the evaluation names no job. */
+  /** ADR 0045 — the Dataflow job ids of the generation this evaluation covers: each batch job of a whole-model launch that landed (generation_job_id is the first), else the one generation job; empty when the evaluation names no job, or when the row was written before the column existed (read generation_job_id then). */
   generation_job_ids: z.array(z.string()),
 });
 export type EvaluationDataHistoryRow = z.infer<typeof evaluationDataHistoryRowSchema>;

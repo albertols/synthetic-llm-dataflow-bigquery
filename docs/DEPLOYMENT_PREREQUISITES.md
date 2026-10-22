@@ -206,6 +206,11 @@ The same `landing_ddl.json` also documents exactly what the pipeline will write 
         --project <project> --dataset <evaluation_dataset> --apply   # replaces the views
   ```
 
+  A rollback to an image from after ADR 0044 but before ADR 0045 drops only
+  `generation_job_ids` (`DROP COLUMN generation_job_ids` alone, then the
+  views): that image writes ADR 0044's two columns, so dropping all three
+  breaks it as well.
+
   To confirm the rejection on a scratch copy: copy the registry (`bq cp`),
   migrate the copy, and append one row to it with `bq load --noreplace
   --source_format=NEWLINE_DELIMITED_JSON --schema=<old schema file>

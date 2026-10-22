@@ -63,6 +63,7 @@ from .plan_fakes import (
     BASE,
     DS,
     EXTERNAL,
+    JOB_ID,
     MODEL_URI,
     NOW,
     QDS,
@@ -1647,5 +1648,15 @@ def test_the_registry_row_records_every_generation_job():
 def test_a_single_job_evaluation_records_its_one_job():
   plan, _ = _plan()
   seed = plan.registry_seed()
-  expected = [seed["generation_job_id"]] if seed["generation_job_id"] else []
-  assert seed["generation_job_ids"] == expected
+  assert seed["generation_job_id"] == JOB_ID
+  assert seed["generation_job_ids"] == [JOB_ID]
+
+
+def test_an_evaluation_that_names_no_job_records_none():
+  bq = thelook_bq()
+  plan, _ = _plan(
+      bq, dataclasses.replace(thelook_launch(bq), generation_job_id=None))
+  seed = plan.registry_seed()
+  _check_row(seed)
+  assert seed["generation_job_id"] is None
+  assert seed["generation_job_ids"] == []

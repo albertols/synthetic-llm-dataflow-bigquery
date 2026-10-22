@@ -420,5 +420,6 @@ def test_rows_without_a_job_id_are_kept_with_a_note():
   assert rows_of_jobs(rows, ["job-0"], notes) == rows
   assert notes == [
       "validation_runs rows that carry no job id were evaluated (nothing "
-      "says which job wrote them): ['B-b00-00-T_A']"
+      "says which job wrote them; they may include batches not listed in "
+      "--generation_job_ids): ['B-b00-00-T_A']"
   ]

@@ -1689,3 +1689,64 @@ def test_a_one_table_run_id_of_another_run_is_still_discarded(run_id):
       manual={"tables_in_order": [f"{_LANDING}.T_A"]})
   assert ctx.params_source == "manual"
   assert any("launch_config discarded" in w for w in ctx.warnings)
+
+
+def _row_of(run_id: str, table: str, created: str, launch: str | None):
+  return {
+      "run_id": run_id,
+      "landing_table": f"{_LANDING}.{table}",
+      "created_at": created,
+      "launch_run_id": launch,
+  }
+
+
+def test_a_recorded_launch_named_like_a_batch_is_not_claimed():
+  """`runs_for(base_run_id="exp")` also returns a separate, later launch
+  whose own run id is `exp-b12`: its record says so, so its rows are not
+  batch 12 of `exp` but another launch's, dropped with the contamination
+  note — as before ADR 0045."""
+  rows = [
+      _row_of("exp-00-T_A", "T_A", "2026-10-21T10:00:00.000000Z", "exp"),
+      _row_of("exp-01-T_B", "T_B", "2026-10-21T10:00:01.000000Z", "exp"),
+      _row_of("exp-b12-00-T_A", "T_A", "2026-10-21T11:00:00.000000Z",
+              "exp-b12"),
+  ]
+  ctx = _by_base(rows, "exp")
+  assert ctx.run_ids == ("exp-00-T_A", "exp-01-T_B")
+  assert any(
+      "another launch" in w and "'exp-b12-00-T_A'" in w for w in ctx.warnings)
+  assert not [w for w in ctx.warnings if "several validation_runs rows" in w]
+
+
+_GAP_NOTE = ("validation_runs has no row for position(s) [1] of {where} "
+             "(run ids …-NN-<table>): those tables' runs failed, expired or "
+             "were never recorded")
+
+
+def test_a_gap_in_one_batch_is_not_masked_by_another_batch():
+  """Every batch numbers its tables from 00: position 01 of b01 is missing
+  although b00 has a row there."""
+  rows = [
+      _batch_row(0, 0, "T_A"),
+      _batch_row(0, 1, "T_B"),
+      _batch_row(0, 2, "T_C"),
+      _batch_row(1, 0, "U_A"),
+      _batch_row(1, 2, "U_C"),
+  ]
+  ctx = _by_base(rows, _LAUNCH)
+  assert len(ctx.tables_in_order) == 5
+  assert [w for w in ctx.warnings if "position" in w
+         ] == [_GAP_NOTE.format(where=f"batch {_LAUNCH}-b01")]
+
+
+def test_a_single_launchs_positions_are_checked_as_before():
+  rows = [
+      _row_of("nightly-00-T_A", "T_A", "2026-10-21T10:00:00.000000Z", None),
+      _row_of("nightly-02-T_C", "T_C", "2026-10-21T10:00:02.000000Z", None),
+  ]
+  ctx = _by_base(rows, "nightly")
+  assert [w for w in ctx.warnings if "position" in w] == [
+      _GAP_NOTE.format(where="this launch"),
+      "run ids ['nightly-02-T_C'] sit at positions beyond the 2 table(s) "
+      "resolved: the launch covered more tables than are known",
+  ]

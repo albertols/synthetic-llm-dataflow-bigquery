@@ -2,7 +2,7 @@
   "generator": "gui/packages/contracts/gen.mjs",
   "note": "sha256 of every input; contracts:check fails when an input changed without a re-sync.",
   "inputs": {
-    "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_data_history.schema.json": "93acc449e7a3a412c644c88afe0037c1c98b4d9ce9180fda5e5634c7d5a99b35",
+    "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_data_history.schema.json": "e8d00bc04ca0a4427ec318be542161732ff1c66306407cdcb0870bb5e2a59c18",
     "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_metrics.schema.json": "d447c144f2dafc85b7cc9bdd321d1008bcb9388bc5f989749ebe73f0321aadac",
     "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_profiles.schema.json": "74dddf3533e705e4c48d78a7913b3e650cc753661df2451e303c498a425ffe9f",
     "packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_row_flags.schema.json": "b0856371bcf15ef4d9b313e020ca71f84dd30421907b66812b220a75a598bc8d",
