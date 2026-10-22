@@ -48,7 +48,11 @@ Design: docs/DESIGN.md §4 Relational generation
 
 from __future__ import annotations
 
+import logging
+
 import pytest
+from sdfb_beam.cli import run_pipeline as rp
+from sdfb_core.contracts.relationships import RelationshipRegistry
 from sdfb_core.contracts.row_projection import (
     MATCHED_SHARE_FLOOR,
     PROJECTION_FACTOR_CEILING,
@@ -624,12 +628,134 @@ def test_the_fanout_payload_carries_the_source_parent_count():
 def test_a_roots_own_rows_size_its_projection():
   """ADR 0045 Ruling 23: a root's model `num_rows` (`root_rows`) is what it
     generates; without the mapping the projection is today's."""
-  from sdfb_beam.cli.run_pipeline import table_projections
-
   spec = _spec("B_TABLE", 40)
-  (today,) = table_projections([spec], launch_rows=10)
+  projections = rp.table_projections([spec], launch_rows=10)
+  assert len(projections) == 1
+  today = projections[0]
   assert today.rows == 10
-  (own,) = table_projections([spec],
+  projections = rp.table_projections([spec],
+                                     launch_rows=10,
+                                     root_rows={spec.config.landing_table: 40})
+  assert len(projections) == 1
+  own = projections[0]
+  assert own.rows == 40
+
+
+def test_a_root_sized_by_its_model_says_so():
+  """ADR 0045: the label names the model's `num_rows` when that sized
+    the root; without an override it is today's `--num_rows` text."""
+  spec = _spec("B_TABLE", 40)
+  today = rp.table_projections([spec], launch_rows=10)
+  own = rp.table_projections([spec],
                              launch_rows=10,
                              root_rows={spec.config.landing_table: 40})
-  assert own.rows == 40
+  assert [p.basis for p in today] == ["root — sized by --num_rows=10"]
+  assert [p.basis for p in own] == ["root — sized by its model num_rows=40"]
+  assert "sized by its model num_rows=40" in projection_banner(
+      own, launch_rows=10)
+
+
+def _root_and_child(root_rows: int, child_rows: int) -> tuple[list, dict]:
+  """A root and one driven child at `child_rows / root_rows` x fan-out,
+    with the root's landed rows as `_run_relational_job` records them."""
+  root = _spec("B_TABLE", root_rows)
+  child = _spec(
+      "C_TABLE",
+      child_rows,
+      parent="B_TABLE",
+      histogram=_histogram(root_rows, child_rows))
+  return [root, child], {"p.d.B_TABLE": root_rows}
+
+
+def _explosions(root_rows: int, child_rows: int, *, launch_rows: int,
+                own: bool) -> list:
+  """The `projection_explodes` warnings of `_root_and_child`, the root
+    sized by its model's own rows (`own`) or by `launch_rows`."""
+  specs, landed = _root_and_child(root_rows, child_rows)
+  projections = rp.table_projections(
+      specs,
+      launch_rows=launch_rows,
+      rows_by_landing=landed,
+      keys_by_landing=landed,
+      root_rows=landed if own else None)
+  assert [p.rows for p in projections] == [root_rows, child_rows]
+  return [
+      w for w in projection_warnings(projections, launch_rows=launch_rows)
+      if w.code == "projection_explodes"
+  ]
+
+
+def test_a_root_with_its_own_rows_is_the_base_of_its_chain(caplog):
+  """ADR 0045: a 2x child of a root whose model `num_rows` is 5,000,000
+    is an ordinary chain, not 1,000,000x a 10-row smoke `--num_rows`."""
+  assert not _explosions(5_000_000, 10_000_000, launch_rows=10, own=True)
+  specs, landed = _root_and_child(5_000_000, 10_000_000)
+  with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+    rp.report_row_projection(
+        specs,
+        launch_rows=10,
+        rows_by_landing=landed,
+        keys_by_landing=landed,
+        root_rows=landed)
+  assert "row_projection_total" in caplog.text
+  assert "projection_explodes" not in caplog.text
+
+
+def test_a_small_root_of_its_own_still_warns_and_names_its_rows():
+  """The guard is not lost when the model's root is SMALLER than
+    `--num_rows`: 100x a 5-row root warns, naming the root's own rows and
+    the knob that lowers them."""
+  warnings = _explosions(5, 500, launch_rows=1_000_000, own=True)
+  assert len(warnings) == 1
+  warning = warnings[0]
+  assert warning.table_name == "C_TABLE"
+  assert "100.0x the root B_TABLE's model num_rows=5 " in warning.measurement
+  assert "--num_rows" not in warning.measurement
+  assert "Lower B_TABLE's num_rows in the model, or take" in (
+      warning.consequence)
+
+
+def test_without_an_override_the_explosion_reads_as_today():
+  warnings = _explosions(5, 500, launch_rows=5, own=False)
+  assert len(warnings) == 1
+  warning = warnings[0]
+  assert "100.0x the launch's --num_rows=5 (over the" in warning.measurement
+  assert "compounded. Lower --num_rows, or take the table out" in (
+      warning.consequence)
+
+
+@pytest.mark.parametrize("model, num_rows, label", [
+    ("model: m\ntables:\n  B_TABLE: {num_rows: 40}\n", "40",
+     "root — sized by its model num_rows=40"),
+    ("model: m\ntables:\n  B_TABLE: {pk: [D_COL_001]}\n", "10",
+     "root — sized by --num_rows=10"),
+])
+def test_a_one_table_run_labels_its_root(monkeypatch, caplog, model, num_rows,
+                                         label):
+  """`_run_one_table` gets the model's rows already in `args.num_rows`
+    (`_execute_plan`); its block still says which knob sized the root."""
+
+  class _StopError(Exception):
+    """Ends the run once the block is logged: nothing after it is tested."""
+
+  real_report = rp.report_row_projection
+
+  def report_then_stop(*args, **kwargs):
+    real_report(*args, **kwargs)
+    raise _StopError
+
+  monkeypatch.setattr(
+      rp, "_prepare_table_spec",
+      lambda args, client, **kw: _spec("B_TABLE", args.num_rows))
+  monkeypatch.setattr(rp, "report_model_adjustments", lambda *a, **k: ())
+  monkeypatch.setattr(rp, "report_row_projection", report_then_stop)
+  args, _ = rp.parse_args([
+      "--reference_table=p.src.B_TABLE", "--landing_table=p.d.B_TABLE",
+      "--dlq_table=p.dq.dlq", f"--num_rows={num_rows}", "--run_id=one",
+      "--client_type=fake", "--model_uri=gs://b/models/m/v/"
+  ])
+  registry = RelationshipRegistry.from_sources([("m.yaml", model)])
+  with (caplog.at_level(logging.INFO,
+                        logger="sdfb.milestone"), pytest.raises(_StopError)):
+    rp._run_one_table(args, ["--runner=DirectRunner"], registry=registry)
+  assert label in caplog.text

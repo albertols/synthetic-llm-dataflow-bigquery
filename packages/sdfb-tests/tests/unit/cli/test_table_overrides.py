@@ -70,6 +70,24 @@ def test_a_three_part_override_is_kept():
   assert [r.source_table for r in plan.runs] == ["p2.ds.T_X_V2"]
 
 
+def test_the_source_dataset_sources_a_table_without_an_override():
+  """`source_dataset` wins over the reference table's dataset: a table
+    the model does not override reads `<source_dataset>.<table>`, and a
+    two-part override takes the source dataset's project."""
+  plan = rp.plan_launch(["p.land.T_C"],
+                        "q.ref.T_C",
+                        True,
+                        _REG,
+                        "r1",
+                        source_dataset="p.src")
+  assert {
+      r.landing_table: r.source_table for r in plan.runs
+  } == {
+      "p.land.T_P": "p.other_ds.T_P_V2",
+      "p.land.T_C": "p.src.T_C",
+  }
+
+
 def test_a_model_launch_suffixes_a_single_run_and_skips_the_advice():
   plan = rp.plan_launch(["p.land.T_X"],
                         "",
@@ -247,3 +265,25 @@ def test_without_an_override_the_parent_source_is_unchanged(monkeypatch):
         bq_client=None,
         source_dataset=source_dataset)
   assert sources == ["p.src.T_P", "p.src.T_P"]
+
+
+def test_the_namespace_hands_the_source_dataset_to_the_fanout(monkeypatch):
+  """`main` sets `args._source_dataset`; `_resolve_table_fanout` must pass
+    it on, or the driving parent is silently measured by the old rule."""
+  measured = []
+  monkeypatch.setattr(
+      rp, "measure_fanout",
+      lambda **kw: measured.append(kw["source_parent"]) or {
+          "histogram": {
+              "1": 3
+          },
+          "parents": 3,
+          "children": 3
+      })
+  monkeypatch.setattr(rp, "fanout_payload",
+                      lambda m, cols, exact: {"histogram": m["histogram"]})
+  monkeypatch.setattr(rp, "log_fanout_measured", lambda *a, **k: None)
+  args, _ = rp.parse_args([*_ARGV, "--landing_table=p.land.T_C"])
+  args._source_dataset = "p.src"  # pylint: disable=protected-access
+  rp._resolve_table_fanout(args, _CHILD_SCHEMA, _REG, {"T_P", "T_C"}, [])  # pylint: disable=protected-access
+  assert measured == ["p.other_ds.T_P_V2"]

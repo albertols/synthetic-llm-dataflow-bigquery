@@ -2004,8 +2004,9 @@ def table_projections(
       projections.append(
           project_table(
               spec.config.landing_table,
+              launch_rows=launch_rows,
               # ADR 0045: a root the model gives its own num_rows.
-              launch_rows=root_rows.get(spec.config.landing_table, launch_rows),
+              model_rows=root_rows.get(spec.config.landing_table),
               adjusted=bool(spec.adjustments),
               repeat_share=repeat_share,
           ))
@@ -3643,8 +3644,16 @@ def _run_one_table(
   # ADR 0039 — one root table, so the projection is `--num_rows` and
   # nothing else. It is printed anyway: the block is where an operator
   # reads what a launch will generate, and a single-table launch must
-  # not be the one shape that stays silent.
-  report_row_projection([spec], launch_rows=args.num_rows)
+  # not be the one shape that stays silent. ADR 0045: the model's own
+  # num_rows is already in `args.num_rows` (`_execute_plan`); `root_rows`
+  # makes the block say the model sized the root.
+  model_rows = table_rows(
+      (registry or RelationshipRegistry()).relations(args.landing_table))
+  report_row_projection([spec],
+                        launch_rows=args.num_rows,
+                        root_rows=(None if model_rows is None else {
+                            spec.config.landing_table: model_rows
+                        }))
   record_base = getattr(args, "_record_base", None)
   if record_base is not None:
     (spec,) = attach_record([spec],
