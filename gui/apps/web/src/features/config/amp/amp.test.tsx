@@ -68,7 +68,7 @@ describe("the pipeline amp", { timeout: 30_000 }, () => {
     expect(shown()).toEqual(["free_text"]);
   });
 
-  it("starts a phone on the first channel with a knob to turn, past the IO jacks", () => {
+  it("starts a phone on the first generation channel with a knob to turn, past the IO and launch jacks", () => {
     vi.spyOn(window, "matchMedia").mockImplementation(
       (query: string) =>
         ({
@@ -88,7 +88,7 @@ describe("the pipeline amp", { timeout: 30_000 }, () => {
       </ScenarioProvider>,
     );
     expect([...document.querySelectorAll("[data-channel]")].map((el) => el.getAttribute("data-channel"))).toEqual([
-      "launch",
+      "sampling",
     ]);
   });
 

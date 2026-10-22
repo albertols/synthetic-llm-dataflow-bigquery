@@ -19,14 +19,20 @@ import { KnobControl } from "./KnobControl";
 
 const ALL = "all";
 
+/** How a job runs, not what it generates: a phone does not open on them. */
+const LAUNCH_JACKS = new Set(["io", "launch"]);
+
 /**
- * Phones start on one channel (every knob is a long scroll at 390 px): the first with a knob to
- * turn, not the IO jacks that lead the list. Wider screens see the whole console.
+ * Phones start on one channel (every knob is a long scroll at 390 px): the first generation channel
+ * with a knob to turn, past the IO and launch jacks that lead the list (launch has dials since
+ * ADR 0045, K and the thread counts). Wider screens see the whole console.
  */
 function defaultChannel(): string {
   const narrow = typeof window !== "undefined" && window.matchMedia?.("(max-width: 639px)").matches;
   if (!narrow) return ALL;
-  const turnable = CHANNELS.find((c) => channelKnobs(c.id).some((k) => ["dial", "selector"].includes(kindOf(k))));
+  const turnable = CHANNELS.find(
+    (c) => !LAUNCH_JACKS.has(c.id) && channelKnobs(c.id).some((k) => ["dial", "selector"].includes(kindOf(k))),
+  );
   return (turnable ?? CHANNELS[0])?.id ?? ALL;
 }
 
