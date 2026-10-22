@@ -369,6 +369,18 @@ how many jobs the launch planned, which is how the model summary card says
 narrowing above applies to both fields: a batch job the evaluation does not
 list contributes no declared table and no batch.
 
+**The region of a job link.** The snapshot's `beam` block (the Dataflow
+options the job ran with, `run_pipeline.beam_block`) holds `region`, the
+job's `GoogleCloudOptions.region`; rows written by an image from before that
+key have none. An evaluation by `--run_id` (every whole-model
+launch's) records no `generation_region` in the registry, so the batch-job
+links of the model summary card and the Generator panel read
+`generationRegion` (`features/evaluation/lib/record.ts`): the registry's
+region, else `beam.region` of the record's snapshot. As with every snapshot
+block, nothing is trusted: a `beam` that is not an object, or a region that is
+not a non-empty string, is no region, and with no region the job id is shown
+as text, never as a console URL without its location.
+
 ## Key checks with nothing to check
 
 `src/applicability.ts` holds the evaluator's two reasons, verbatim
@@ -562,7 +574,11 @@ Fetched rows are cached in memory (LRU) and never persisted.
   `source_table` and five `num_rows` overrides — generated as 112 tables in 12
   batch jobs (`<base>-bNN-MM-<table>`, one snapshot per job with its `batch`
   block), evaluated once by the chained evaluation whose registry row lists
-  the twelve `generation_job_ids`; so the mock holds 43 evaluations. A batch
+  the twelve `generation_job_ids`; so the mock holds 43 evaluations. As a
+  `--run_id` evaluation writes it, that row has no generation job name,
+  region or window and every table's scope is `manual`; each snapshot's
+  `beam` block carries the region (`europe-west3`), which the batch-job links
+  read. A batch
   job runs as `<job_name>-bNN` (`sdfb_batches.batch_job_name`), to which the
   Composer provider appends `-<8 hex>`; the mock writes
   `synthetic-sdfb-model-v0-5-3-gemma4-e4b-bNN`, without the suffix, as its

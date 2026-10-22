@@ -295,9 +295,11 @@ node is `layer` when an edge names it as child or parent, else `tile`. A
 component is laid out as if the tiles were not there (`graph.test.ts` pins the
 thelook coordinates with and without isolated tables); a table that references
 itself, and an external parent, stay in the layers. A table the evaluation
-does not cover and with no foreign key (a served model's disabled table) is
-not drawn at all: the model card counts it. From ten tiles the model graph
-takes the full row._
+does not cover and with no foreign key, disabled or not, is not drawn at all:
+it has no score, and the model card counts it among the declared tables when
+it can read the whole model. From ten tiles the model graph takes the full
+row; the legends of arrows and external parents show only when something is
+layered._
 
 - **A tile** is a button that scopes the run view to its table: name, `PK` /
   `no PK` / `PK ?`, the status glyph and overall score, `⇄` for a
@@ -316,18 +318,27 @@ takes the full row._
   integrity units; one grouped finding per kind, ranked last in the
   Interpretation ("N tables declare no primary key (…): the uniqueness check
   is not applicable — nothing to check, not a gap."); `no PK` on the tile. The
-  Not evaluated tile's footnote says how many of its rows are not applicable.
-  Any other reason (sampled mode, no rows) stays "Not evaluated". Stored
-  statuses and counts are the evaluator's.
+  Not evaluated tile's footnote says how many of its rows are not applicable
+  (and "The rest is not a pass." only when other rows were not evaluated), and
+  the headline names them apart: "160 not evaluated (160 not applicable: no
+  key declared)". Any other reason (sampled mode, no rows) stays "Not
+  evaluated". Stored statuses and counts are the evaluator's.
 - **The model summary card** (from two tables, above the scorecards): tables,
   primary keys declared and none, edges, isolated tables, source overrides and
-  batch jobs, each job linked to the Dataflow console (`b00 ↗`). It says
+  batch jobs, each job linked to the Dataflow console (`b00 ↗`) in the
+  generation's region: the registry's, else the one the launch recorded
+  (`beam.region` of its snapshot; an evaluation by `--run_id`, which every
+  whole-model launch gets, records none). With neither, the job id shows as text
+  (`b00 <job id>`), never a link without its region; the Generator panel's
+  job links follow the same rule. It says
   whether it reads the generation record
   ([ADR 0044](../../docs/adr/0044-generation-record.md)) or the registry and
   the metric rows; without a record, source overrides and batch jobs read
   `—`. Under Batch jobs it says `N recorded` when the record holds fewer batch
   jobs than the launch planned (a job wrote no row, or the evaluation does not
-  list it), else `b00 … bNN`. Disabled tables are counted only
+  list it), else `b00 … bNN` (`b00` for one); the Parameters tab's
+  relationships card says the same ("12 batch jobs · 11 recorded") and frames
+  its declared tables above twelve. Disabled tables are counted only
   when the GUI can read the whole model with the record's `sha12`: a launch
   records only what it generated, so a real model (never served) reads
   "disabled: not recorded". The evaluation list's job cell and the Parameters
@@ -343,16 +354,24 @@ takes the full row._
   · Warn · Fail · Not evaluated), **Batch job** (when the tables have one) and
   the order (Worst first · By name). They narrow the tiles and the per-table
   scorecard rows only; roll-ups, findings and counts stay the whole run's, and
-  the bar says "N of M tables". A filter that matches nothing says "No table
+  the bar says "N of M tables" (the tables it matches). The table the view is
+  scoped to stays shown, first, when a filter would hide it ("· plus T_001,
+  selected"), and beside a layered graph the bar adds "· the K in the layered
+  graph are not filtered". A filter that matches nothing says "No table
   matches the filters."; **Clear filters** resets all but the order, and a
   stale value in a shared link is dropped.
 - **Per-table scorecards** render only their visible rows above twelve tables,
   inside a focusable frame (keyboard scrolling; the selected table scrolls into
-  view). Each table's integrity score opens the units it averages: those that
-  counted and those that were not applicable (and any not scored).
+  view). A row is 1.5 rem tall at the root's font size, so a larger default
+  font grows the rows and never overlaps them, and a row that holds focus stays
+  rendered when it scrolls out of the window. Each table's integrity score
+  opens the units it averages: those that counted and those that were not
+  applicable (and any not scored); its accessible name starts with the score
+  it shows ("0.93 — integrity units of T_003: …").
 - **Without a served model** the graph is drawn from the declared tables of
   the launch's generation record, and its description says so. The run
-  header's Tables in scope scrolls inside its frame above twelve tables.
+  header's Tables in scope scrolls inside its frame above twelve tables, as
+  does the Parameters tab's list of declared tables.
 
 ## Data on screen
 

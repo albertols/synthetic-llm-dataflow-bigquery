@@ -10,7 +10,7 @@ Dataflow Solution Guides copy. The rule that allows it is
 [ADR 0042](../docs/adr/0042-self-hosted-platform-gui.md); the system view is
 [`docs/DESIGN.md` §12](../docs/DESIGN.md#12-platform-gui).
 
-![The EVALUATION run view of eval-0039 in mock mode: the tables in scope, the headline numbers and the four family scorecards](docs/assets/evaluation-run-1440.png)
+![The EVALUATION run view of eval-0039 in mock mode: the tables in scope, the headline numbers, the model summary card and the family scorecards](docs/assets/evaluation-run-1440.png)
 
 _One evaluation at a glance: which tables were in scope, what failed, and which
 family each failure belongs to. Mock mode, 1440 px; every screenshot's
@@ -238,7 +238,7 @@ explorer and the guardrails.
 
 Every view also works at 390 px, where tables scroll inside their own frame:
 
-<img src="docs/assets/evaluation-run-390.png" alt="The EVALUATION run view at 390 px: the same header, tables and headline numbers stacked for a phone" width="320">
+<img src="docs/assets/evaluation-run-390.png" alt="The EVALUATION run view at 390 px: the same header, tables, headline numbers and model summary card stacked for a phone" width="320">
 
 `/kit` shows the design system (tokens, components, chart and 3-D frames) live,
 in both themes.
