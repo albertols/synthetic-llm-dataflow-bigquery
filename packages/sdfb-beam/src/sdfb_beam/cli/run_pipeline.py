@@ -36,7 +36,7 @@ REFs:
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
 §6 Throughput; §7 Validation and the dead-letter queue; §8 Configuration
 (ADR 0019, 0022, 0023, 0024, 0027, 0028, 0029, 0030, 0031, 0032, 0034, 0035,
-0036, 0037, 0038, 0039, 0043, 0044).
+0036, 0037, 0038, 0039, 0043, 0044, 0045).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -618,6 +618,53 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "EngineCore at startup). 8192 fits every registry "
       "model/GPU pairing and dwarfs the synthesis prompts. "
       "Empty = no cap (native context).")
+  p.add_argument(
+      "--tables",
+      choices=["explicit", "all"],
+      help="Which tables the launch generates (ADR 0045). explicit "
+      "(default): --landing_table and every table its components pull in. "
+      "all: every enabled table of the ONE model file --relationships_uri "
+      "names, read from --source_dataset and landed in --landing_dataset, "
+      "in batch jobs of at most --max_tables_per_job tables.")
+  p.add_argument(
+      "--source_dataset",
+      help="With --tables=all: the project.dataset every table's source is "
+      "read from under its own name, unless the model gives it a "
+      "source_table (ADR 0045).")
+  p.add_argument(
+      "--landing_dataset",
+      help="With --tables=all: the project.dataset every table lands in "
+      "(ADR 0045).")
+  p.add_argument(
+      "--max_tables_per_job",
+      type=int,
+      help="With --tables=all: the most tables one Dataflow job generates; "
+      "a connected component is never split, so a larger one gets a job of "
+      "its own (ADR 0045).")
+  p.add_argument(
+      "--max_parallel_jobs",
+      type=int,
+      help="Batch jobs scripts/launch/run_model.py runs at once (ADR 0045). "
+      "A launcher runs one job; the Composer model DAG reads the Airflow "
+      "Variable SDFB_MAX_PARALLEL_JOBS.")
+  p.add_argument(
+      "--prep_workers",
+      type=int,
+      help="Threads a multi-table launcher reads schemas, reference "
+      "samples and source stats on (ADR 0045). 1 = one table after "
+      "another, as before.")
+  p.add_argument(
+      "--batch_index",
+      type=int,
+      help="With --tables=all: the batch this job generates (b00 is 0). "
+      "Set by the model DAG and scripts/launch/run_model.py; a flag only "
+      "(ADR 0045).")
+  p.add_argument(
+      "--batch_count",
+      type=int,
+      help="With --batch_index: how many batches the orchestrator planned; "
+      "the launcher plans again and stops when its own count differs "
+      "(ADR 0045).")
   p.add_argument(
       "--config_uri",
       help="gs:// or local path to a generator config file (ADR 0043). "

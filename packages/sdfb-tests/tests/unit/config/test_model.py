@@ -15,8 +15,8 @@
 
 The model is specified by ADR 0043.
 
-Design: docs/DESIGN.md §8 Configuration
-(ADR 0043).
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
+(ADR 0043, 0045).
 """
 from __future__ import annotations
 
@@ -32,11 +32,20 @@ from sdfb_tests import config_parity as cp
 _PARSER = json.loads((cp.GOLDENS_DIR / "parser.json").read_text())
 _CONSTANTS = json.loads((cp.GOLDENS_DIR / "constants.json").read_text())
 
+# ADR 0045 — the whole-model launch keys, new since master.
+_MODEL_LAUNCH_FLAGS = {
+    "source_dataset", "landing_dataset", "tables", "max_tables_per_job",
+    "max_parallel_jobs", "prep_workers"
+}
+_MODEL_LAUNCH_IDENTITY = {"batch_index", "batch_count"}
+
 
 def test_every_master_flag_has_one_field():
   master = set(_PARSER) - {"help"}
-  assert set(FLAG_KEYS) | set(IDENTITY_KEYS) == master
-  assert len(FLAG_KEYS) == 46 and set(IDENTITY_KEYS) == {"run_id"}
+  assert set(FLAG_KEYS) | set(IDENTITY_KEYS) == (
+      master | _MODEL_LAUNCH_FLAGS | _MODEL_LAUNCH_IDENTITY)
+  assert len(FLAG_KEYS) == 52
+  assert set(IDENTITY_KEYS) == {"run_id"} | _MODEL_LAUNCH_IDENTITY
 
 
 @pytest.mark.parametrize("dest", sorted(set(_PARSER) - {"help"}))

@@ -51,7 +51,8 @@ io:
   # Reference table — The source table the reference sample is SELECTed from
   # and the schema is extracted from.
   # raise: Point it at another table to generate from a different source.
-  # lower: Required — a launch without it is refused.
+  # lower: Required with launch.tables explicit (the default) — a launch
+  # without it is refused; unused with all.
   # flag --reference_table · ADR 0005 · required
   reference_table: null
 
@@ -59,7 +60,8 @@ io:
   # plans several tables at once.
   # raise: More tables in the list widen the plan to their components (one
   # job in single_job mode).
-  # lower: Required — a launch without it is refused.
+  # lower: Required with launch.tables explicit (the default) — a launch
+  # without it is refused; unused with all.
   # flag --landing_table · ADR 0029, 0030 · required
   landing_table: null
 
@@ -122,8 +124,25 @@ io:
   # flag --source_stats_json
   source_stats_json: ''
 
+  # Source dataset — With launch.tables all, the project.dataset every
+  # table's source is read from under the table's own name, unless the model
+  # gives the table a source_table.
+  # raise: Set: a whole-model launch reads each source from this dataset.
+  # lower: Empty: required with launch.tables all; an explicit launch reads
+  # io.reference_table instead.
+  # flag --source_dataset · ADR 0045
+  source_dataset: ''
+
+  # Landing dataset — With launch.tables all, the project.dataset every table
+  # lands in, under its own name.
+  # raise: Set: a whole-model launch writes each table there.
+  # lower: Empty: required with launch.tables all; an explicit launch writes
+  # to io.landing_table instead.
+  # flag --landing_dataset · ADR 0045
+  landing_dataset: ''
+
 # =========================================================================
-# LAUNCH — identity (flags only)
+# LAUNCH — which tables, how many jobs, and the launch identity
 # =========================================================================
 launch:
   # Run id — The launch's identity — it seeds batch draws when seed is empty
@@ -133,7 +152,61 @@ launch:
   # lower: Required, and a flag only — a config file may not set it.
   # flag --run_id · required
   # run_id: null
-  {}
+
+  # Tables — Which tables a launch generates: explicit takes io.landing_table
+  # and its components; all takes every enabled table of the one model file
+  # relational.relationships_uri names.
+  # raise: all: one launch generates the whole model, in batch jobs of at
+  # most max_tables_per_job tables.
+  # lower: explicit (the default): the targets and the tables their
+  # components pull in, as before.
+  # flag --tables · ADR 0045
+  tables: explicit
+
+  # Tables per job (K) — With launch.tables all, the most tables one Dataflow
+  # job generates. A connected component is never split, so a larger one gets
+  # a job of its own.
+  # raise: Fewer, larger jobs; each launcher preps more tables inside the
+  # Flex Template's 12-minute window.
+  # lower: More, smaller jobs; each one pays the image pull and the vLLM
+  # ignition again.
+  # flag --max_tables_per_job · ADR 0045
+  max_tables_per_job: 10
+
+  # Parallel batch jobs — How many batch jobs scripts/launch/run_model.py
+  # runs at once. The Composer model DAG takes its cap from the Airflow
+  # Variable SDFB_MAX_PARALLEL_JOBS instead.
+  # raise: The batches finish sooner; each job holds its workers' GPUs, so
+  # stay inside the GPU quota.
+  # lower: One at a time (the default): never more GPUs than one job asks
+  # for.
+  # flag --max_parallel_jobs · ADR 0045
+  max_parallel_jobs: 1
+
+  # Prep threads — Threads a multi-table launcher reads schemas, reference
+  # samples and source stats on, before the cross-table steps run in plan
+  # order.
+  # raise: More tables read at once, and more concurrent BigQuery reads from
+  # the launcher.
+  # lower: 1: each table is read in turn, exactly as before ADR 0045.
+  # flag --prep_workers · ADR 0045
+  prep_workers: 8
+
+  # Batch index — The batch of a whole-model launch this job generates (b00
+  # is 0). The model DAG and scripts/launch/run_model.py set it.
+  # raise: A later batch of the same plan.
+  # lower: Unset: the launcher runs every batch itself, in sequence on the
+  # CLI (refused on Flex above one batch).
+  # flag --batch_index
+  # batch_index: null
+
+  # Batch count — How many batches the orchestrator planned. The launcher
+  # plans again and stops when its own count differs, because the model or K
+  # changed in between.
+  # raise: Must equal the launcher's own plan.
+  # lower: Unset: only together with batch_index unset.
+  # flag --batch_count
+  # batch_count: null
 
 # =========================================================================
 # SAMPLING — the reference sample and the source-stats profiler

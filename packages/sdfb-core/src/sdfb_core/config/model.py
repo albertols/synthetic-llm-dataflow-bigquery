@@ -27,7 +27,7 @@ sdfb_core: everything else may import it.
 
 Design: docs/DESIGN.md §3 Serving; §4 Relational generation; §5 Fidelity;
 §8 Configuration
-(ADR 0014, 0028, 0030, 0031, 0033, 0037, 0038, 0043).
+(ADR 0014, 0028, 0030, 0031, 0033, 0037, 0038, 0043, 0045).
 """
 from __future__ import annotations
 
@@ -137,11 +137,38 @@ class IoSettings(_Section):
   fk_fanout_stats_table: str = _flag("")
   source_stats_table: str = _flag("")
   source_stats_json: str = _flag("")
+  # ADR 0045 — a whole-model launch (`launch.tables: all`) reads every
+  # table's source from `source_dataset` under the table's own name (unless
+  # the model gives it a source_table) and lands it in `landing_dataset`.
+  # Both project.dataset; an explicit launch reads neither.
+  source_dataset: str = _flag("")
+  landing_dataset: str = _flag("")
 
 
 class LaunchSettings(_Section):
-  """Launch identity: set by flags only, never by a file."""
+  """Which tables a launch generates and how they split into Dataflow jobs,
+  plus the launch's identity, which only flags set (never a file)."""
   run_id: str | None = _identity()
+  # ADR 0045 — explicit: io.landing_table and the tables its components pull
+  # in (every launch before). all: every enabled table of the one model file
+  # relational.relationships_uri names.
+  tables: Literal["explicit", "all"] = _flag("explicit")
+  # Under `all`, at most this many tables per Dataflow job; a connected
+  # component is never split. An estimate (ADR 0045): each batch launch's
+  # margin inside the Flex Template's 12-minute window measures it.
+  max_tables_per_job: int = _flag(10, ge=1)
+  # Batch jobs scripts/launch/run_model.py runs at once: each holds its
+  # workers' GPUs. The Composer model DAG reads the Airflow Variable
+  # SDFB_MAX_PARALLEL_JOBS instead (Airflow fixes a mapped task's
+  # concurrency when it parses the DAG file); a launcher runs one job.
+  max_parallel_jobs: int = _flag(1, ge=1)
+  # Threads a multi-table launcher reads schemas, reference samples and
+  # source stats on before the cross-table steps run in plan order.
+  # 1 = one table after another, exactly as before ADR 0045.
+  prep_workers: int = _flag(8, ge=1)
+  # The batch this job generates and the count its orchestrator planned.
+  batch_index: int | None = _identity()
+  batch_count: int | None = _identity()
 
 
 class SamplingSettings(_Section):

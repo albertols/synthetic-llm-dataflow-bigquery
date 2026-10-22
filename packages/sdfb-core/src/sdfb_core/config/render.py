@@ -55,7 +55,7 @@ _RULE = "# " + "=" * 73
 
 _SECTION_TITLES = {
     "io": "IO — where a launch reads from and writes to",
-    "launch": "LAUNCH — identity (flags only)",
+    "launch": "LAUNCH — which tables, how many jobs, and the launch identity",
     "sampling": "SAMPLING — the reference sample and the source-stats profiler",
     "generation": "GENERATION — what is generated, and how close to the source",
     "free_text": "FREE TEXT — pools, routing and expansion",
@@ -107,6 +107,4 @@ def render_reference() -> str:
       line = f"{key}: {_value(getattr(getattr(DEFAULT_CONFIG, section), key))}"
       out.append(f"  # {line}" if key in IDENTITY_KEYS else f"  {line}")
       out.append("")
-    if section == "launch":
-      out[-1:] = ["  {}", ""]
   return "\n".join(out).rstrip() + "\n"

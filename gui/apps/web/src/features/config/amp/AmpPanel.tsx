@@ -21,7 +21,7 @@ const ALL = "all";
 
 /**
  * Phones start on one channel (every knob is a long scroll at 390 px): the first with a knob to
- * turn, not the IO and launch jacks that lead the list. Wider screens see the whole console.
+ * turn, not the IO jacks that lead the list. Wider screens see the whole console.
  */
 function defaultChannel(): string {
   const narrow = typeof window !== "undefined" && window.matchMedia?.("(max-width: 639px)").matches;

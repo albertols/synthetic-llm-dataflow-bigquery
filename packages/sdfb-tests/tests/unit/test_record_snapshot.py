@@ -13,6 +13,9 @@
 #  limitations under the License.
 """The config snapshot: `values` replays through --config_uri to the same
 config and the same digest; the record's launcher columns derive from it.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0045).
 """
 from __future__ import annotations
 
@@ -82,7 +85,14 @@ def _snapshot(**overrides):
 def test_values_hold_every_settable_key_and_no_launch_identity():
   values = config_values(_resolution().config)
   assert set(values) == set(SECTION_TYPES)
-  assert values["launch"] == {}
+  # The four settable launch keys (ADR 0045, F18) are in the values and the
+  # digest; the identity keys (run_id, batch_index, batch_count) are not.
+  assert values["launch"] == {
+      "tables": "explicit",
+      "max_tables_per_job": 10,
+      "max_parallel_jobs": 1,
+      "prep_workers": 8
+  }
   for section, cls in SECTION_TYPES.items():
     if section != "launch":
       assert set(values[section]) == set(cls.model_fields), section

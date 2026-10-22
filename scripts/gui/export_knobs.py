@@ -142,7 +142,9 @@ _BLOCK_HEADER = re.compile(r"^# --- ")
 
 CHANNELS = (
     ("io", "IO", "Where a launch reads from and writes to."),
-    ("launch", "LAUNCH", "A launch's identity."),
+    ("launch", "LAUNCH",
+     "Which tables a launch generates, how they split into jobs, and its "
+     "identity."),
     ("sampling", "SAMPLING",
      "How much of the source the generator reads, and what the profiler "
      "keeps from it."),
@@ -373,6 +375,40 @@ def _composer_params() -> dict[str, tuple[str, int]]:
         except ValueError:
           continue
   return params
+
+
+# A generation-DAG param only its chained evaluation reads says so first in
+# its description. It is no surface of a generator flag, even under the
+# flag's name: the DAG's `source_dataset` names the evaluation's sources,
+# never the generator's io.source_dataset (ADR 0045).
+_EVALUATION_ONLY_PARAM = "Only with run_evaluation"
+
+
+def _composer_descriptions() -> dict[str, str]:
+  """DAG param → its description, as written."""
+  out: dict[str, str] = {}
+  for node in _tree(_COMPOSER).body:
+    if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and
+            isinstance(node.targets[0], ast.Name) and node.targets[0].id
+            == "default_dag_params" and isinstance(node.value, ast.Dict)):
+      continue
+    for key, value in zip(node.value.keys, node.value.values, strict=True):
+      if not (isinstance(key, ast.Constant) and isinstance(value, ast.Call)):
+        continue
+      for keyword in value.keywords:
+        if keyword.arg == "description":
+          out[str(key.value)] = str(ast.literal_eval(keyword.value))
+  return out
+
+
+def _generation_composer_params() -> dict[str, tuple[str, int]]:
+  """`_composer_params`, without the params only the evaluation reads."""
+  descriptions = _composer_descriptions()
+  return {
+      name: param
+      for name, param in _composer_params().items()
+      if not descriptions.get(name, "").startswith(_EVALUATION_ONLY_PARAM)
+  }
 
 
 def _param_default(call: ast.expr, literals: dict[str, Any]) -> str:
@@ -685,7 +721,8 @@ def _generator_knobs() -> list[dict[str, Any]]:
     raise LookupError(
         "the catalogue's fixed and derived entries and _FIXED_BUILDERS "
         f"differ: {sorted(unbuilt ^ set(_FIXED_BUILDERS))}")
-  actions, composer, flex = _cli_actions(), _composer_params(), _flex_params()
+  actions, composer, flex = (_cli_actions(), _generation_composer_params(),
+                             _flex_params())
   knobs = []
   for entry in entries:
     if entry.status == "settable":

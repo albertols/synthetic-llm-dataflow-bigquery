@@ -396,12 +396,12 @@
     "reference_table": {
       "purpose": "The source table the reference sample is SELECTed from and the schema is extracted from.",
       "up": "Point it at another table to generate from a different source.",
-      "down": "Required — a launch without it is refused."
+      "down": "Required with launch.tables explicit (the default) — a launch without it is refused; unused with all."
     },
     "landing_table": {
       "purpose": "Where valid synthetic rows land; a comma-separated list plans several tables at once.",
       "up": "More tables in the list widen the plan to their components (one job in single_job mode).",
-      "down": "Required — a launch without it is refused."
+      "down": "Required with launch.tables explicit (the default) — a launch without it is refused; unused with all."
     },
     "dlq_table": {
       "purpose": "Where rejected records land with their rule id and full error context.",
@@ -443,10 +443,52 @@
       "up": "Set: the stats are kept next to the run's other artifacts.",
       "down": "Empty: no JSON artifact."
     },
+    "source_dataset": {
+      "purpose": "With launch.tables all, the project.dataset every table's source is read from under the table's own name, unless the model gives the table a source_table.",
+      "up": "Set: a whole-model launch reads each source from this dataset.",
+      "down": "Empty: required with launch.tables all; an explicit launch reads io.reference_table instead."
+    },
+    "landing_dataset": {
+      "purpose": "With launch.tables all, the project.dataset every table lands in, under its own name.",
+      "up": "Set: a whole-model launch writes each table there.",
+      "down": "Empty: required with launch.tables all; an explicit launch writes to io.landing_table instead."
+    },
     "run_id": {
       "purpose": "The launch's identity — it seeds batch draws when seed is empty and names every summary row.",
       "up": "A fresh id per trigger keeps retriggers from replaying the same rows.",
       "down": "Required, and a flag only — a config file may not set it."
+    },
+    "tables": {
+      "purpose": "Which tables a launch generates: explicit takes io.landing_table and its components; all takes every enabled table of the one model file relational.relationships_uri names.",
+      "up": "all: one launch generates the whole model, in batch jobs of at most max_tables_per_job tables.",
+      "down": "explicit (the default): the targets and the tables their components pull in, as before.",
+      "tip": "Read the MODEL LAUNCH block before paying for a launch; scripts/launch/run_model.py --dry_run prints it."
+    },
+    "max_tables_per_job": {
+      "purpose": "With launch.tables all, the most tables one Dataflow job generates. A connected component is never split, so a larger one gets a job of its own.",
+      "up": "Fewer, larger jobs; each launcher preps more tables inside the Flex Template's 12-minute window.",
+      "down": "More, smaller jobs; each one pays the image pull and the vLLM ignition again.",
+      "tip": "The default is an estimate; read each batch launch's margin to the 12-minute window and adjust."
+    },
+    "max_parallel_jobs": {
+      "purpose": "How many batch jobs scripts/launch/run_model.py runs at once. The Composer model DAG takes its cap from the Airflow Variable SDFB_MAX_PARALLEL_JOBS instead.",
+      "up": "The batches finish sooner; each job holds its workers' GPUs, so stay inside the GPU quota.",
+      "down": "One at a time (the default): never more GPUs than one job asks for."
+    },
+    "prep_workers": {
+      "purpose": "Threads a multi-table launcher reads schemas, reference samples and source stats on, before the cross-table steps run in plan order.",
+      "up": "More tables read at once, and more concurrent BigQuery reads from the launcher.",
+      "down": "1: each table is read in turn, exactly as before ADR 0045."
+    },
+    "batch_index": {
+      "purpose": "The batch of a whole-model launch this job generates (b00 is 0). The model DAG and scripts/launch/run_model.py set it.",
+      "up": "A later batch of the same plan.",
+      "down": "Unset: the launcher runs every batch itself, in sequence on the CLI (refused on Flex above one batch)."
+    },
+    "batch_count": {
+      "purpose": "How many batches the orchestrator planned. The launcher plans again and stops when its own count differs, because the model or K changed in between.",
+      "up": "Must equal the launcher's own plan.",
+      "down": "Unset: only together with batch_index unset."
     },
     "identity_cols": {
       "purpose": "Columns synthesized fresh for every row (PK, UUID), never sampled from the reference.",
@@ -554,7 +596,7 @@
     }
   },
   "exported_from": {
-    "commit": "9c0abd784820413cc5272f8d7fa0eb74b37665a0",
+    "commit": "4a73804a49d9a456c65d986482825df33a307e04",
     "dirty": []
   }
 }

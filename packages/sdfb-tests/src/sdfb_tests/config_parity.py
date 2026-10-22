@@ -19,8 +19,8 @@ of argv shapes, the launcher's error for a set of bad argv, every promoted
 constant's value, and DirectRunner output for b1_rag, b2_library and a
 two-table relational launch with fixed seeds.
 
-Design: docs/DESIGN.md §8 Configuration
-(ADR 0043).
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
+(ADR 0043, 0045).
 """
 from __future__ import annotations
 
@@ -34,8 +34,16 @@ GOLDENS_DIR = (
     Path(__file__).resolve().parents[2] / "tests" / "fixtures" /
     "config_parity")
 
-# Attributes the refactor adds to the namespace on purpose (ADR 0043).
-EXCLUDED_ATTRS = frozenset({"config_uri", "config_resolution"})
+# Attributes the refactor adds to the namespace on purpose: the config file
+# (ADR 0043) and the whole-model launch keys (ADR 0045). The namespace golden
+# does not compare them; test_model_launch_keys.py pins the latter's
+# defaults on every master argv instead.
+MODEL_LAUNCH_ATTRS = frozenset({
+    "source_dataset", "landing_dataset", "tables", "max_tables_per_job",
+    "max_parallel_jobs", "prep_workers", "batch_index", "batch_count"
+})
+EXCLUDED_ATTRS = frozenset({"config_uri", "config_resolution"
+                           }) | MODEL_LAUNCH_ATTRS
 
 ARGV_BASE = [
     "--reference_table=p.src.t",

@@ -13,8 +13,8 @@
 #  limitations under the License.
 """File > flag > default, with provenance and named errors (ADR 0043).
 
-Design: docs/DESIGN.md §8 Configuration
-(ADR 0043).
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
+(ADR 0043, 0045).
 """
 from __future__ import annotations
 
@@ -109,7 +109,7 @@ def test_namespace_values_cover_every_flag():
   assert values["run_id"] == "r1"
   assert values["build_rag_layer"] == ""
   assert values["vllm_max_model_len"] == "8192"
-  assert len(values) == 47
+  assert len(values) == 55  # master's 47 + the eight ADR 0045 keys
 
 
 def test_a_file_null_on_a_null_default_leaves_the_key_to_the_flag():

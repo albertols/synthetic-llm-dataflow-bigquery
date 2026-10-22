@@ -32,8 +32,8 @@ describe("the knob model (knobs.json is the truth)", () => {
       ).toBeDefined();
     }
     for (const id of Object.keys(knobGuides)) expect(ids.has(id), id).toBe(true);
-    // 89 generator knobs (the setting catalogue) + 11 evaluator flags.
-    expect(Object.keys(knobGuides)).toHaveLength(100);
+    // 97 generator knobs (the setting catalogue) + 11 evaluator flags.
+    expect(Object.keys(knobGuides)).toHaveLength(108);
   });
 
   it("generator guides are the setting catalogue's, links included; evaluator guides are written in config.ts", () => {

@@ -63,6 +63,7 @@ export const ADRS: Readonly<Record<string, { file: string; title: string }>> = {
     file: "0041-evaluation-standalone-package.md",
     title: "Evaluation is a standalone package and a separate job",
   },
+  "0045": { file: "0045-whole-model-launches.md", title: "Whole-model launches" },
 };
 
 export const adrLink = (number: string): ConceptLink | null => {

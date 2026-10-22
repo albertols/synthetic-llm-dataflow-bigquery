@@ -536,7 +536,7 @@ def test_every_generator_knob_has_a_guide(outputs):
       if k["channel"] != "evaluation"
   }
   assert set(outputs["knob_guides.json"]["guides"]) == ids
-  assert len(ids) == 89
+  assert len(ids) == 97
 
 
 def test_knob_values_are_unchanged(knobs_module, outputs):
@@ -595,3 +595,22 @@ def test_the_relationships_export_carries_the_model_launch_keys(outputs):
   for name in ("example_retail", "example_star_diamond", "gcp_public_thelook"):
     for table in models[name]["tables"]:
       assert "source_table" not in table and "num_rows" not in table
+
+
+def test_the_model_launch_knobs(outputs):
+  """ADR 0045: the six settable keys are flags and config keys; the two
+    batch keys are launch identity; the generation DAG's evaluation-only
+    `source_dataset` param is no surface of the generator's key."""
+  knobs = _by_id(outputs["knobs.json"])
+  assert knobs["tables"]["channel"] == "launch"
+  assert knobs["tables"]["choices"] == ["explicit", "all"]
+  assert knobs["max_tables_per_job"]["config_key"] == (
+      "launch.max_tables_per_job")
+  assert "flex" not in knobs["max_parallel_jobs"]["settable_via"]
+  assert knobs["source_dataset"]["channel"] == "io"
+  assert "composer" not in knobs["source_dataset"]["settable_via"]
+  assert "composer_param" not in knobs[
+      "source_dataset"]  # `_knob` drops empties
+  for key in ("batch_index", "batch_count"):
+    assert "config_key" not in knobs[key]
+    assert knobs[key]["settable_via"] == ["cli", "flex"]

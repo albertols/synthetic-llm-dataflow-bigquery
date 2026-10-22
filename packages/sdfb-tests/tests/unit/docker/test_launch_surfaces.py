@@ -74,13 +74,16 @@ _FLEX_ENTRY = _REPO_ROOT / "docker" / "flex_entry.py"
 
 # Flags the generator's CLI accepts and the template never declared: they
 # stay reachable only from a direct launch (ADR 0024 §3c precedent).
+# `max_parallel_jobs` is an orchestrator's setting: a Flex launch runs one
+# job (ADR 0045).
 _UNDECLARED = frozenset({
+    "max_parallel_jobs",
     "pool_pattern_guidance",
 })
 # The names both jobs use. Each appears once in the template.
 _SHARED = frozenset({
-    "reference_rows_limit", "relationships_uri", "run_id", "thresholds_uri",
-    "validation_runs_table"
+    "landing_dataset", "reference_rows_limit", "relationships_uri", "run_id",
+    "tables", "thresholds_uri", "validation_runs_table"
 })
 _SELECTOR = "sdfb_job"
 # How a parameter only the evaluation job reads begins its help text. The
@@ -495,3 +498,25 @@ def test_config_uri_reaches_every_surface():
   assert re.search(param["regexes"][0], "")
   assert "config_uri" in _composer_params()
   assert _composer_forwarded()["config_uri"] == "{{ params.config_uri }}"
+
+
+def test_the_model_launch_parameters_accept_what_the_cli_accepts():
+  """ADR 0045: the batch and sizing parameters are the CLI's positive
+    integers, the source dataset is project.dataset; `tables` and
+    `landing_dataset` are names both jobs read, so they carry no pattern."""
+  cases = {
+      "batch_index": (["0", "11"], ["", "-1", "a"]),
+      "batch_count": (["1", "12"], ["", "0"]),
+      "max_tables_per_job": (["1", "10"], ["", "0"]),
+      "prep_workers": (["1", "8"], ["", "0"]),
+      "source_dataset": (["", "p.src", "p-1.src_2"], ["src", "p.src.t"]),
+  }
+  for name, (good, bad) in cases.items():
+    (regex,) = _metadata_param(name)["regexes"]
+    for value in good:
+      assert re.fullmatch(regex, value), (name, value)
+    for value in bad:
+      assert not re.fullmatch(regex, value), (name, value)
+  for name in ("tables", "landing_dataset"):
+    assert "regexes" not in _metadata_param(name)
+  assert "max_parallel_jobs" not in _parameters()
