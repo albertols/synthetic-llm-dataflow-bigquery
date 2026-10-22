@@ -500,7 +500,8 @@ uv run --no-sync python3 -m sdfb_beam.cli.run_pipeline --tables=all \
   --relationships_uri=<the model file> --source_dataset=<P>.<SRC> \
   --landing_dataset=<P>.<LAND> --dlq_table=<P>.synthetic_data_quality.dlq \
   --num_rows=1000 --run_id=<run id> --model_uri=gs://<B>/synthetic/models/<f>/<m>/<v>/ \
-  <Beam's options>
+  --validation_runs_table=<P>.synthetic_data_quality.validation_runs \
+  --sdk_container_image=<the GPU image> <Beam's other options>
 ```
 
 A Flex Template launch runs one Dataflow job, so it takes a plan of one

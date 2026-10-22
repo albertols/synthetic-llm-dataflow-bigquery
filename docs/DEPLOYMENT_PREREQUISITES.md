@@ -160,7 +160,7 @@ The same `landing_ddl.json` also documents exactly what the pipeline will write 
 ### Whole-model launches (optional; [ADR 0045](adr/0045-whole-model-launches.md))
 
 - **Composer imports two more files**: the model DAG `composer/synthetic_model_launch.py` (a template with a subset of the generation DAG's markers: run the same substitution on it) and `composer/sdfb_batches.py` (its planner, imported unchanged) — [RUN_PLAYBOOK §0b](RUN_PLAYBOOK.md#0b-workflow-edits-for-whole-model-launches-untracked-workflows).
-- **The Composer environment's service account reads GCS**: the model DAG's `plan` task reads the model file and the config file itself (`GCSHook`, the environment's own account; the generation DAG reads nothing from Airflow), so grant it `roles/storage.objectViewer` (`storage.objects.get`) on the bucket or prefix that holds them.
+- **The Composer environment's service account reads GCS**: the model DAG's `plan` task reads the model file and the config file itself (`GCSHook`, the environment's own account; the generation DAG reads nothing from GCS in Airflow), so grant it `roles/storage.objectViewer` (`storage.objects.get`) on the bucket or prefix that holds them.
 - **The Airflow Variable `SDFB_MAX_PARALLEL_JOBS`** (optional, default `1`): how many batch jobs run at once; each holds up to four GPU workers, so keep it within the regional GPU quota divided by 4.
 - **The Dataflow worker SA reads every source the model names**: a table's `source_table` in another dataset or project needs `bigquery.dataViewer` there too.
 
