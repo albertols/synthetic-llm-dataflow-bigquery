@@ -319,7 +319,11 @@ class TestMainPlansAndLoops:
     _write_model(tmp_path)
     prepped = []
 
-    def _fake_prep(a, client, in_set_landing=frozenset(), registry=None):
+    def _fake_prep(a,
+                   client,
+                   in_set_landing=frozenset(),
+                   registry=None,
+                   **kwargs):
       prepped.append(a.landing_table)
       raise SystemExit(
           f"[preflight P4] boom on {a.landing_table.rsplit('.', 1)[-1]}")

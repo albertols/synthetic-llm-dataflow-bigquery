@@ -50,12 +50,14 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import functools
 import json
 import logging
 import os
 import re
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -2738,6 +2740,7 @@ def _load_reference_and_preflight(
     registry: RelationshipRegistry,
     in_set_landing: frozenset[str] = frozenset(),
     landing_schema=None,
+    prepared: TablePrep | None = None,
 ):
   """Eager reference read + relational preflight (ADR 0032): the
     table's relations come from `config/relationships/`, pk/identity
@@ -2745,13 +2748,18 @@ def _load_reference_and_preflight(
     and unknown columns fail fast — all driver-side, before any graph
     exists. ADR 0036: resolves the driving edge's roles and, when its
     parent is in-set, its measured (or cached) source fan-out — carried
-    into `preflight` so a driven child's row count derives from it."""
-  logger.info("Loading reference rows from %s (limit=%d)", args.reference_table,
-              args.reference_rows_limit)
-  reference_rows = load_reference_rows(
-      table=args.reference_table,
-      limit=args.reference_rows_limit,
-  )
+    into `preflight` so a driven child's row count derives from it.
+    ADR 0045: with `prepared`, the reference sample and the source stats
+    were read ahead on a prep thread; everything else runs here."""
+  if prepared is None:
+    logger.info("Loading reference rows from %s (limit=%d)",
+                args.reference_table, args.reference_rows_limit)
+    reference_rows = load_reference_rows(
+        table=args.reference_table,
+        limit=args.reference_rows_limit,
+    )
+  else:
+    reference_rows = prepared.reference_rows  # read ahead (ADR 0045)
   in_set_names = {t.rsplit(".", 1)[-1] for t in in_set_landing}
   # ADR 0035: an in-set parent lands at most its own resolved row
   # count. ADR 0036: a driven parent's count may itself be DERIVED
@@ -2866,7 +2874,8 @@ def _load_reference_and_preflight(
     # arrive as side inputs; still derive for the fk_edges metadata.
     args.fk_parent_landing = args.fk_parent_landing or (
         derive_fk_parent_landing(args.landing_table))
-  source_distinct = _emit_source_stats(args, table_schema, reference_rows, pf)
+  source_distinct = _emit_source_stats(
+      args, table_schema, reference_rows, pf, prepared=prepared)
   return (
       reference_rows,
       pf,
@@ -2878,21 +2887,24 @@ def _load_reference_and_preflight(
   )
 
 
-def _emit_source_stats(args, table_schema, reference_rows,
-                       pf) -> dict[str, int]:
-  """WS-B: one profiling pass over the already-loaded reference sample —
-    milestone always, JSON artifact and BQ rows when configured. A digest
-    that already has rows is skipped (pool-store exists() idiom).
+@dataclass(frozen=True)
+class SourceStats:
+  """One table's source stats as computed — profiled from the reference
+    sample and, under `exact`, completed by the aggregate scan (ADR 0022) —
+    before anything is written."""
+  stats: dict[str, Any]
+  source_distinct: dict[str, int]
 
-    Returns per-column EXACT distinct counts when ``--source_stats=exact``
-    ran (ADR 0022 — they feed free-text pool sizing via
-    ``GenerationContext.source_distinct``); empty dict otherwise.
-    """
+
+def compute_source_stats(args, table_schema, reference_rows,
+                         relations) -> SourceStats | None:
+  """The stats `_emit_source_stats` writes, computed and not written: a
+    prep thread may run this (ADR 0045) — profiling and BigQuery reads only."""
   if args.source_stats == "off" or not reference_rows:
-    return {}
+    return None
   config = config_of(args)
   stats = profile_source_table(
-      table_schema, reference_rows, relations=pf.relations, config=config)
+      table_schema, reference_rows, relations=relations, config=config)
   source_distinct: dict[str, int] = {}
   if args.source_stats == "exact":
     from sdfb_beam.io.exact_stats import compute_exact_stats
@@ -2920,6 +2932,19 @@ def _emit_source_stats(args, table_schema, reference_rows,
           table=args.reference_table,
           columns=len(source_distinct),
       )
+  return SourceStats(stats=stats, source_distinct=source_distinct)
+
+
+def write_source_stats(args, table_schema, reference_rows,
+                       computed: SourceStats | None) -> dict[str, int]:
+  """The milestone always, the JSON artifact and the store rows when
+    configured; a digest that already has rows is skipped (pool-store
+    exists() idiom). Returns the exact distinct counts (ADR 0022 — they feed
+    free-text pool sizing via `GenerationContext.source_distinct`)."""
+  if computed is None:
+    return {}
+  stats, source_distinct = computed.stats, computed.source_distinct
+  config = config_of(args)
   sparse = sorted(stats.items(), key=lambda kv: -kv[1]["empty_fraction"])[:5]
   log_milestone(
       "source_table_stats",
@@ -2952,6 +2977,83 @@ def _emit_source_stats(args, table_schema, reference_rows,
           rows=len(stats),
       )
   return source_distinct
+
+
+def _emit_source_stats(args,
+                       table_schema,
+                       reference_rows,
+                       pf,
+                       *,
+                       prepared: TablePrep | None = None) -> dict[str, int]:
+  """WS-B: one profiling pass over the already-loaded reference sample —
+    milestone always, JSON artifact and BQ rows when configured.
+
+    With `prepared` (ADR 0045) the computation already ran on a prep thread;
+    the write happens here, after preflight, exactly where it always has."""
+  computed = (
+      prepared.stats if prepared is not None else compute_source_stats(
+          args, table_schema, reference_rows, pf.relations))
+  return write_source_stats(args, table_schema, reference_rows, computed)
+
+
+@dataclass(frozen=True)
+class TablePrep:
+  """What one table's prep READS, done ahead on a prep thread (ADR 0045):
+    both schemas, the reference sample and the computed source stats.
+    Nothing here writes."""
+  schemas: tuple[TableSchema, TableSchema | None]
+  reference_rows: list[dict]
+  stats: SourceStats | None
+
+
+def prefetch_table_prep(args, registry: RelationshipRegistry) -> TablePrep:
+  """A prep thread's work for one table (ADR 0045): BigQuery reads and
+    pure profiling only — no model, no embedder (the transformers v5
+    lazy-import race of 2026-07-30 is why nothing else runs here)."""
+  schemas = resolve_schemas(args.ddl_uri, args.reference_table,
+                            args.landing_table)
+  logger.info("Loading reference rows from %s (limit=%d)", args.reference_table,
+              args.reference_rows_limit)
+  rows = load_reference_rows(
+      table=args.reference_table, limit=args.reference_rows_limit)
+  stats = compute_source_stats(args, schemas[0], rows,
+                               registry.relations(args.landing_table))
+  return TablePrep(schemas=schemas, reference_rows=rows, stats=stats)
+
+
+class PrepReadAhead:
+  """Each table's prep reads on `workers` threads (ADR 0045). Nothing
+    starts until the first table asks; then every table's reads are
+    submitted, and each table's prep takes its own, in plan order, where the
+    sequential prep would have read them. A read that failed raises there."""
+
+  def __init__(self, table_args: Sequence[argparse.Namespace],
+               registry: RelationshipRegistry, workers: int):
+    self._args = list(table_args)
+    self._registry = registry
+    self._workers = workers
+    self._pool: ThreadPoolExecutor | None = None
+    self._futures: list[Future[TablePrep]] = []
+
+  def prep(self, index: int) -> TablePrep:
+    if self._pool is None:
+      # Logged first, so it heads the prep threads' own lines.
+      log_milestone(
+          "launch_prep_parallel", workers=self._workers, tables=len(self._args))
+      self._pool = ThreadPoolExecutor(
+          max_workers=self._workers, thread_name_prefix="sdfb-prep")
+      self._futures = [
+          self._pool.submit(prefetch_table_prep, args, self._registry)
+          for args in self._args
+      ]
+    return self._futures[index].result()
+
+  def close(self) -> None:
+    """Cancel the reads that have not started and wait for the running
+    ones: no prep thread outlives the launch's prep, and a read whose table
+    was never reached is dropped unseen, as it was never read before."""
+    if self._pool is not None:
+      self._pool.shutdown(wait=True, cancel_futures=True)
 
 
 def warm_pools_trusted(pool_store,
@@ -3521,14 +3623,18 @@ def _prepare_table_spec(
     model_client,
     in_set_landing: frozenset[str] = frozenset(),
     registry: RelationshipRegistry | None = None,
+    prep: Callable[[], TablePrep] | None = None,
 ) -> TableSpec:
   """Everything one table needs, driver-side: schema, preflight, FK
     pools (EXTERNAL parents only — in-set parents arrive as in-DAG side
     inputs, ADR 0030), stores, sinks, config. Shared by the
-    single-table runner and the single-job relational runner."""
-  table_schema, landing_schema = resolve_schemas(args.ddl_uri,
-                                                 args.reference_table,
-                                                 args.landing_table)
+    single-table runner and the single-job relational runner. `prep`
+    hands over this table's reads when a `PrepReadAhead` ran them
+    (ADR 0045)."""
+  prepared = prep() if prep is not None else None
+  table_schema, landing_schema = (
+      prepared.schemas if prepared is not None else resolve_schemas(
+          args.ddl_uri, args.reference_table, args.landing_table))
   # ADR 0037 §4 ruling B: the conditional NULL policy reads the SINK's
   # column modes. `table_schema`'s modes mirror the SOURCE (only the
   # description surfaces are overlaid from the landing table), so the
@@ -3568,6 +3674,7 @@ def _prepare_table_spec(
       registry,
       in_set_landing=in_set_landing,
       landing_schema=landing_schema,
+      prepared=prepared,
   )
   log_relationship_model(args.landing_table, registry, mode=fk_mode)
 
@@ -3877,6 +3984,39 @@ def _run_one_table(
   return 0
 
 
+def _relational_table_args(
+    plan, args, rows_by_landing: dict[str, int],
+    distinct_keys_by_landing: dict[str, int]) -> list[argparse.Namespace]:
+  """Each planned table's namespace for the single job, built before any
+    table is prepared so its reads can run ahead (ADR 0045). The two dicts
+    are shared, filled by `_run_relational_job` in plan order."""
+  # The --ddl_uri pin describes the USER'S target table(s) — closure
+  # siblings extract live only (2026-08-22 launch: the first PLANNED
+  # table, a parent, wrongly inherited the target's pin and logged
+  # spurious ddl_pin_drift).
+  pin_owners = set(parse_landing_tables(args.landing_table))
+  table_args_list = []
+  for run in plan.runs:
+    table_args = argparse.Namespace(**vars(args))
+    table_args.landing_table = run.landing_table
+    table_args.reference_table = run.source_table
+    table_args.run_id = run.run_id
+    table_args.fk_parent_landing = (
+        args.fk_parent_landing or run.fk_parent_landing)
+    if run.num_rows is not None:
+      table_args.num_rows = run.num_rows  # ADR 0045: the model's rows
+    # Underscored on purpose: an internal Namespace channel read back via
+    # getattr(), never a CLI flag.
+    # pylint: disable-next=protected-access
+    table_args._rows_by_landing = rows_by_landing
+    # pylint: disable-next=protected-access
+    table_args._distinct_keys_by_landing = distinct_keys_by_landing
+    if run.landing_table not in pin_owners:
+      table_args.ddl_uri = ""  # pin describes the target only
+    table_args_list.append(table_args)
+  return table_args_list
+
+
 def _run_relational_job(
     plan,
     args,
@@ -3916,11 +4056,6 @@ def _run_relational_job(
       cross_process=cross_process,
   )
   in_set = frozenset(r.landing_table for r in plan.runs)
-  # The --ddl_uri pin describes the USER'S target table(s) — closure
-  # siblings extract live only (2026-08-22 launch: the first PLANNED
-  # table, a parent, wrongly inherited the target's pin and logged
-  # spurious ddl_pin_drift).
-  pin_owners = set(parse_landing_tables(args.landing_table))
   specs = []
   prep_failures: list[tuple[str, str]] = []
   # ADR 0036: a grandchild's derived row count depends on its parent's
@@ -3932,42 +4067,45 @@ def _run_relational_job(
   # what its children fan out over — the same number as its rows unless
   # its `pk:` was adjusted away.
   distinct_keys_by_landing: dict[str, int] = {}
-  for run in plan.runs:
-    table_args = argparse.Namespace(**vars(args))
-    table_args.landing_table = run.landing_table
-    table_args.reference_table = run.source_table
-    table_args.run_id = run.run_id
-    table_args.fk_parent_landing = (
-        args.fk_parent_landing or run.fk_parent_landing)
-    if run.num_rows is not None:
-      table_args.num_rows = run.num_rows  # ADR 0045: the model's rows
-    # Underscored on purpose: an internal Namespace channel read back via
-    # getattr(), never a CLI flag.
-    # pylint: disable-next=protected-access
-    table_args._rows_by_landing = rows_by_landing
-    # pylint: disable-next=protected-access
-    table_args._distinct_keys_by_landing = distinct_keys_by_landing
-    if run.landing_table not in pin_owners:
-      table_args.ddl_uri = ""  # pin describes the target only
-    # Collect-then-fail (2026-08-22 launch lesson): one table's
-    # preflight stop must not HIDE the remaining tables' constraint
-    # reports and blockers — prep everything, abort once with all.
-    try:
-      specs.append(
-          _prepare_table_spec(
-              table_args,
-              model_client,
-              in_set_landing=in_set,
-              registry=registry,
-          ))
-      rows_by_landing[specs[-1].config.landing_table] = (
-          specs[-1].config.num_rows)
-      distinct_keys_by_landing[specs[-1].config.landing_table] = (
-          distinct_keys_landed(specs[-1].config.num_rows,
-                               specs[-1].adjustments))
-    except SystemExit as exc:
-      logger.error("prep failed for %s: %s", run.landing_table, exc)
-      prep_failures.append((run.landing_table, str(exc)))
+  table_args_list = _relational_table_args(plan, args, rows_by_landing,
+                                           distinct_keys_by_landing)
+  # ADR 0045 — the reads run ahead on prep_workers threads; everything
+  # cross-table below still runs table by table, in plan order. One worker
+  # (or a hand-built namespace) is the sequence of before: no thread.
+  workers = int(getattr(args, "prep_workers", 1) or 1)
+  read_ahead = (
+      PrepReadAhead(table_args_list, registry or RelationshipRegistry(),
+                    workers)
+      if workers > 1 and len(table_args_list) > 1 else None)
+  try:
+    for index, (run, table_args) in enumerate(
+        zip(plan.runs, table_args_list, strict=True)):
+      prep_kwargs = ({
+          "prep": functools.partial(read_ahead.prep, index)
+      } if read_ahead is not None else {})
+      # Collect-then-fail (2026-08-22 launch lesson): one table's
+      # preflight stop must not HIDE the remaining tables' constraint
+      # reports and blockers — prep everything, abort once with all.
+      try:
+        specs.append(
+            _prepare_table_spec(
+                table_args,
+                model_client,
+                in_set_landing=in_set,
+                registry=registry,
+                **prep_kwargs,
+            ))
+        rows_by_landing[specs[-1].config.landing_table] = (
+            specs[-1].config.num_rows)
+        distinct_keys_by_landing[specs[-1].config.landing_table] = (
+            distinct_keys_landed(specs[-1].config.num_rows,
+                                 specs[-1].adjustments))
+      except SystemExit as exc:
+        logger.error("prep failed for %s: %s", run.landing_table, exc)
+        prep_failures.append((run.landing_table, str(exc)))
+  finally:
+    if read_ahead is not None:
+      read_ahead.close()
   if prep_failures:
     summary = "\n".join(f"- {t}: {e}" for t, e in prep_failures)
     raise SystemExit(f"{len(prep_failures)} of {len(plan.runs)} planned tables "
