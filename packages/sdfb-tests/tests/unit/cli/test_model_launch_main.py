@@ -359,7 +359,7 @@ def _only_row(out: Path, stem: str) -> dict:
 
 def test_every_batch_records_its_tables_sources_rows_and_one_digest(
     model_uri, direct):
-  """AC-B-3, and §6.5/§6.7: each batch's rows carry the resolved source,
+  """AC-B-3, and ADR 0045 D2/D4: each batch's rows carry the resolved source,
     the table's rows, the launch base and the batch; every batch shares one
     config digest."""
   assert _main(model_uri, "--max_tables_per_job=2", "--client_type=fake",

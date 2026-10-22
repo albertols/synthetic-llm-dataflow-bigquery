@@ -73,6 +73,7 @@ Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the ot
 - `packages/sdfb-core/src/sdfb_core/record.py` — the generation record (the `validation_runs` record columns and the config snapshot, ADR 0044); `sdfb_core/version.py` — `generator_version`.
 - `packages/sdfb-beam/src/sdfb_beam/pipeline.py` — `build_pipeline()` composer.
 - `packages/sdfb-beam/src/sdfb_beam/ddl/cli.py` — DDL extractor CLI.
+- `packages/sdfb-core/src/sdfb_core/launch/` — whole-model launches (selection, per-table source and rows, the batch planner, ADR 0045); `composer/synthetic_model_launch.py` + `composer/sdfb_batches.py` — the model DAG and its planner mirror; `scripts/launch/run_model.py` — the CLI runner.
 - `scripts/extract_ddl.py`, `scripts/hello_synthetic_mlx.py` — runnable entry shims (image build/push live in CI, see [ADR 0008](docs/adr/0008-ci-driven-builds.md)).
 - `packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py` — `sdfb-eval` (`plan`, `run`, `report`, `compare`, `catalogue`, `schemas`); the metric catalogue is `catalogue/metrics.yaml`.
 - `docker/flex_entry.py` — the flex template's entry: dispatches on `--sdfb_job` to generation or evaluation.

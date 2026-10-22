@@ -378,6 +378,50 @@ will receive and where each number came from, before the graph is built
 [`contracts/model_adjustment.py`](../packages/sdfb-core/src/sdfb_core/contracts/model_adjustment.py),
 [`contracts/row_projection.py`](../packages/sdfb-core/src/sdfb_core/contracts/row_projection.py).
 
+### 4.5 Whole-model launches
+
+**Claim: one launch generates every enabled table of a model, in batch jobs
+of at most K tables that never split a component.**
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  M[("📄 model<br/>8 tables · 7 enabled")]:::store
+  P["⚙️ plan_batches<br/>K = 4"]:::cpu
+  subgraph B0["b00 · 3 tables"]
+    A1["⚪ T_ACCOUNTS ← T_LOGINS"]:::data
+    A2["⚪ T_RATES"]:::data
+  end
+  subgraph B1["b01 · 4 tables"]
+    O1["⚪ T_ORDERS ← T_ITEMS,<br/>T_SHIPMENTS"]:::data
+    O2["⚪ T_EVENTS_LOG"]:::data
+  end
+  X["∅ T_LEGACY<br/>enabled: false"]:::data
+  M --> P
+  P --> B0
+  P --> B1
+  P -.-> X
+```
+
+*First-fit-decreasing packs whole components: no edge crosses a batch.*
+`launch.tables: all` selects the `enabled: true` tables of one model file; a
+table may name its own `source_table` and `num_rows`. The planner packs whole
+components first-fit-decreasing into batches of at most
+`launch.max_tables_per_job` tables, and every batch's launcher plans again and
+checks the count; the Composer model DAG and `scripts/launch/run_model.py`
+run the batches, and one evaluation reads every landed batch's
+`validation_runs` rows by the launch's base run id
+([ADR 0045](adr/0045-whole-model-launches.md)). Code:
+[`launch/batches.py::plan_batches`](../packages/sdfb-core/src/sdfb_core/launch/batches.py),
+[`launch/tables.py::source_fqn`](../packages/sdfb-core/src/sdfb_core/launch/tables.py),
+[`cli/run_pipeline.py::_run_model`](../packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py),
+[`composer/sdfb_batches.py`](../composer/sdfb_batches.py).
+
 ## 5. Fidelity, value pools and constraints
 
 **Claim: numeric and temporal values are drawn where the source is dense, not
@@ -530,6 +574,7 @@ edge keeps the table and stops drawing keys through that edge.*
 | :-- | :-- | :-- |
 | Every generator setting (flags + tunable constants) | [`config/generator.yaml`](../config/generator.yaml), rendered from [`sdfb_core/config/`](../packages/sdfb-core/src/sdfb_core/config/) | launcher (`--config_uri`, file wins), workers via `generator_config` ([ADR 0043](adr/0043-generator-config.md)) |
 | Tables, keys, edges, `enabled` / `enforced` / `drives` | `config/relationships/*.yaml` | launcher and workers; one relationship card is logged per run |
+| Which tables a launch generates, each table's source and rows | `launch.tables`, `launch.max_tables_per_job` ([`config/generator.yaml`](../config/generator.yaml)); `source_table`, `num_rows` per table (`config/relationships/*.yaml`) | launcher, the model DAG, `scripts/launch/run_model.py` (§4.5) |
 | Model URI, vLLM server flags, licence | [`config/models.yml`](../config/models.yml) | nobody at runtime — a reference registry; `serving.model_uri` points at one of its entries |
 | Severity budgets per environment | [`config/thresholds.yml`](../config/thresholds.yml) | thresholds gate (§7) |
 | Column constraints | the table's DDL contract | constraint router (§5) |

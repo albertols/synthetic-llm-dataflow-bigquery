@@ -47,7 +47,7 @@ _FQN_PARTS = 3  # project.dataset.table
 
 def source_fqn(table: str, relations: TableRelations | None,
                source_dataset: str) -> str:
-  """Where a launch reads `table`'s source (§6.2 of ADR 0045).
+  """Where a launch reads `table`'s source (D2 of ADR 0045).
 
   `table` may be a bare name or an FQN (its last part is the name). Without
   an override: `<source_dataset>.<name>` — the rule `derive_source_fqn`
