@@ -11,7 +11,7 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Parallel launcher prep (ADR 0045 §prep, Ruling 17): the reads run ahead
+"""Parallel launcher prep (ADR 0045 D8, Ruling 17): the reads run ahead
 on prep_workers threads, the cross-table steps keep the plan's order, the
 specs do not depend on the thread count, and prep_workers=1 is the exact
 sequence of before.

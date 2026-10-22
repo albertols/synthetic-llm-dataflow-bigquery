@@ -82,6 +82,11 @@ _NOT_STARTED = -15
 _COULD_NOT_START = 127
 # project.dataset.table
 _FQN_PARTS = 3
+# Printed under the evaluation command: from a checkout the evaluation job
+# needs what the model DAG's evaluation launch passes (the worker image, the
+# disk for it, the corp worker options), listed in RUN_PLAYBOOK §9d.
+_EVALUATION_HINT = ("# append --sdk_container_image=<image> --disk_size_gb=200 "
+                    "and the worker options: RUN_PLAYBOOK §9d")
 
 
 @dataclass(frozen=True)
@@ -327,6 +332,7 @@ def main(argv: list[str] | None = None) -> int:
       print(f"  # PARTIAL: {unidentified} finished OK but logged no job id, "
             "so the command below does not cover them")
     print("  " + command)
+    print("  " + _EVALUATION_HINT)
   elif unidentified:
     print(f"[run_model] no evaluation command: {unidentified} finished OK "
           "but logged no job id (see its log)")

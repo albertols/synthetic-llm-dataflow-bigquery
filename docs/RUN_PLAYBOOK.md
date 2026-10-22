@@ -811,16 +811,30 @@ on the branch.
 Runs once on the corp project, after §2d, from a checkout of
 `feat/config-record-model-launch`. Every name in angle brackets is yours and
 nothing here names a real table: §2d's `<project>`, `<quality_dataset>`,
-`<evaluation_dataset>` and `<bucket>`; `<region>`; `<source_dataset>` and
-`<landing_dataset>`, the datasets of `<project>` your tables are read from
-and land in; and,
-once the DAG has planned, `<base>`, the launch's base run id. It closes
-AC-B-5 of [ADR 0045](adr/0045-whole-model-launches.md): a model-DAG launch
-with at least two batches, each launched inside the Flex Template's
-12-minute window, and one evaluation covering every landed table.
+`<evaluation_dataset>`, `<bucket>` and `<location>`; `<region>`;
+`<source_dataset>`, the dataset of `<project>` your tables are read from;
+`<landing_dataset>`, the dataset your real landing tables live in, which this
+checklist only reads (their schemas); `<scratch_landing_dataset>`, a dataset
+step 5 creates for this checklist and step 16 deletes — every acceptance run
+lands there, never in `<landing_dataset>`; and, once the DAG has planned,
+`<base>`, the launch's base run id. It closes AC-B-5 of
+[ADR 0045](adr/0045-whole-model-launches.md): a model-DAG launch with at
+least two batches, each launched inside the Flex Template's 12-minute
+window, and one evaluation covering every landed table.
+
+**Why a scratch landing dataset, overwritten.** The evaluation reads each
+landing table whole (`scope=manual`). A table that also holds rows of an
+earlier launch fails the evaluator's row-count check
+(`scope count_mismatch … likely rows other launches wrote to the same
+table`), and the evaluation ends `PARTIAL`. So every run below lands in
+`<scratch_landing_dataset>` with `write_disposition` `overwrite`: each run
+replaces only the scratch copies of its own batches' tables. Under `append`
+the second and later runs of the same tables end `PARTIAL` for that reason.
+Never point `overwrite` at `<landing_dataset>`.
 
 *Deploy first; then a five-table copy of your model through the DAG, its
-failure path and the CLI; the whole model last:*
+failure path and the CLI; the whole model last; then remove what the
+checklist created:*
 
 ```mermaid
 flowchart LR
@@ -838,7 +852,8 @@ flowchart LR
   C["⚙️ 13 run_model.py"]:::cpu
   W["🔀 14 the whole<br/>model"]:::beam
   P["⚙️ 15 probe"]:::cpu
-  M --> B --> S --> D --> F --> C --> W --> P
+  X["∅ 16 clean up<br/>scratch only"]:::data
+  M --> B --> S --> D --> F --> C --> W --> P --> X
 ```
 
 The laptop has already run the model DAG under Airflow 2.10.5's `dag.test()`
@@ -880,14 +895,23 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
    but five unrelated tables (no FK edge between them): one with a `pk:`, one
    without, and, if your sources allow, one with a `source_table` in another
    dataset of `<project>` (a two-part `other_dataset.TABLE`) and a
-   `num_rows`. Upload it:
-   `gcloud storage cp <model>-acceptance.yaml gs://<bucket>/synthetic/relationships/<model>-acceptance.yaml`.
+   `num_rows`. Upload it under its own prefix, `acceptance/`, never beside
+   the real model: a launch that names the folder
+   `gs://<bucket>/synthetic/relationships` reads every `*.yaml` directly
+   under it, and two files declaring the same table stop it (the scan does
+   not recurse, so `acceptance/` is never read by it):
+
+   ```bash
+   gcloud storage cp <model>-acceptance.yaml \
+     gs://<bucket>/synthetic/relationships/acceptance/<model>-acceptance.yaml
+   ```
+
    Plan it on the laptop (no GCP needed for a local file):
 
    ```bash
    uv run --no-sync python3 scripts/launch/run_model.py --dry_run \
      --relationships_uri=<the local copy> --source_dataset=<project>.<source_dataset> \
-     --landing_dataset=<project>.<landing_dataset> \
+     --landing_dataset=<project>.<scratch_landing_dataset> \
      --dlq_table=<project>.<quality_dataset>.dlq --num_rows=1000 \
      --run_id=plan --model_uri=gs://<bucket>/synthetic/models/<family>/<model>/<version>/ \
      --max_tables_per_job=3
@@ -897,10 +921,40 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
    <n> disabled · 2 batch job(s) of <= 3 tables`, then `b00` with three tables,
    `b01` with two, and the skipped tables.
 
-6. **Trigger the model DAG** with `relationships_uri` = the uploaded file,
-   `source_dataset` and `landing_dataset` (their defaults are the datasets of
-   the build's source and landing tables), `num_rows` = `1000`,
-   `max_tables_per_job` = `3`, `run_evaluation` true (the default).
+   **Create the scratch landing dataset** with an empty copy of each enabled
+   table's landing table.
+   [`CREATE TABLE … LIKE`](https://cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#create_table_like)
+   copies the table's metadata (the schema with its column descriptions,
+   where the prompt constraints live, the partitioning and the clustering)
+   and no row. The list of tables is the launcher's own selection:
+
+   ```bash
+   bq mk --dataset --location=<location> <project>:<scratch_landing_dataset>
+   uv run --no-sync python3 -c '
+   import sys
+   from sdfb_core.contracts.relationships import RelationshipRegistry
+   from sdfb_core.launch.batches import select_tables
+   path, scratch, landing = sys.argv[1:4]
+   registry = RelationshipRegistry.from_sources([(path, open(path).read())])
+   for table in select_tables(registry)[0]:
+       print(f"CREATE TABLE IF NOT EXISTS `{scratch}.{table}` LIKE `{landing}.{table}`;")
+   ' <the local copy> <project>.<scratch_landing_dataset> <project>.<landing_dataset> > scratch_tables.sql
+   bq query --use_legacy_sql=false "$(cat scratch_tables.sql)"
+   ```
+
+   The job's service account needs the same access to
+   `<scratch_landing_dataset>` as to `<landing_dataset>`
+   (`roles/bigquery.dataEditor`), and the evaluator's read access
+   (`roles/bigquery.dataViewer`).
+
+6. **Trigger the model DAG** with `relationships_uri` = the uploaded file
+   (`gs://<bucket>/synthetic/relationships/acceptance/<model>-acceptance.yaml`),
+   `source_dataset` = `<project>.<source_dataset>`, `landing_dataset` =
+   `<project>.<scratch_landing_dataset>` (its default is the real landing
+   dataset: change it), `write_disposition` = `overwrite` (on the scratch
+   dataset only), `num_rows` = `1000`, `max_tables_per_job` = `3`,
+   `run_evaluation` true (the default) and `create_if_not_exists` false (the
+   default: step 5 created the tables).
 
 7. **The `plan` task's log:** the `MODEL LAUNCH PLAN | 2 batch job(s) of <= 3
    tables` banner with `b00` and `b01`, the same tables as the dry run. Its
@@ -931,7 +985,10 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
    launcher's clock just before it built the graph) must be under 12 minutes,
    and 12 minutes minus it is the batch's margin. Write both margins down:
    they are the measurement of K, which ADR 0045 only estimates. The probe of
-   step 15 computes them.
+   step 15 computes them. Cross-check: the launcher logs `Relational pipeline
+   launched: <3 or 2> tables, run_id=<base>-b0N` once the graph is built,
+   just before it hands the job over: after `launched_at` by the graph's
+   build.
 
 9. **The mapped-task behaviours the DAG relies on** (unverified until now):
    each `start_batch` instance stays running until its Dataflow job is DONE;
@@ -965,8 +1022,9 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
 11. **The registry** — one chained evaluation for the launch:
 
     ```sql
-    SELECT evaluation_id, event, status, base_run_id, generation_job_id,
-           generation_job_ids, ARRAY_LENGTH(run_ids) AS runs, params_source,
+    SELECT evaluation_id, event, status, status_reason, base_run_id,
+           generation_job_id, generation_job_ids,
+           ARRAY_LENGTH(run_ids) AS runs, params_source,
            ARRAY(SELECT AS STRUCT name, source_table FROM UNNEST(tables)) AS sources,
            warnings
     FROM `<project>.<evaluation_dataset>.evaluation_latest`
@@ -978,20 +1036,27 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
     order, `generation_job_id` = the first, `runs` = 5, `params_source` =
     `validation_runs`; `sources` lists the five landed tables, the overridden
     one with its `source_table`; no warning about rows of jobs not in
-    `generation_job_ids`.
+    `generation_job_ids`. A `PARTIAL` names its cause in `status_reason`; a
+    `scope count_mismatch` there means a table held rows of another launch
+    (an `append` run, or a landing dataset that is not the scratch one).
 
-12. **The failure path** (on a scratch copy of the model, the same five
+12. **The failure path** (on a second copy of the model, the same five
     tables): make one batch fail — give one table of b00 a `pk:` on a
     low-cardinality column (its values repeat on more than half of the
     reference sample's rows, and it has fewer distinct values than
     `num_rows`), so preflight P5 stops it (`[preflight P5] … the declared PK …
-    is not a key of this data`) — upload it and trigger again. Expect: b00's
-    `start_batch` instance fails, b01 lands, `fail_if_a_batch_failed` fails
-    and with it the run; the evaluation covers b01's tables only
-    (`generation_job_ids` = b01's job id) and its warnings name nothing of b00
-    (no row of b00 was written). To run b00 again, fix the cause and clear its
-    `start_batch` instance with its downstream tasks (the instances have no
-    retries: a retry would launch the batch again under the same base).
+    is not a key of this data`). Upload it beside the first copy,
+    `gs://<bucket>/synthetic/relationships/acceptance/<model>-failure.yaml`,
+    and trigger again with step 6's params (`landing_dataset` the scratch
+    one, `write_disposition` `overwrite`) and this file. Expect: b00's
+    `start_batch` instance fails, b01 lands (its scratch tables overwritten),
+    `fail_if_a_batch_failed` fails and with it the run; the evaluation covers
+    b01's tables only (`generation_job_ids` = b01's job id) and its warnings
+    name nothing of b00 (no row of b00 was written; b00's scratch tables keep
+    step 6's rows, which this evaluation does not read). To run b00 again,
+    fix the cause and clear its `start_batch` instance with its downstream
+    tasks (the instances have no retries: a retry would launch the batch
+    again under the same base).
 
 13. **The CLI path**, from a checkout on a machine with GCP credentials (not
     inside the image: the image sets `FLEX_TEMPLATE_PYTHON_PY_FILE`, so a
@@ -999,27 +1064,44 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
 
     ```bash
     uv run --no-sync python3 scripts/launch/run_model.py \
-      --relationships_uri=gs://<bucket>/synthetic/relationships/<model>-acceptance.yaml \
+      --relationships_uri=gs://<bucket>/synthetic/relationships/acceptance/<model>-acceptance.yaml \
       --source_dataset=<project>.<source_dataset> \
-      --landing_dataset=<project>.<landing_dataset> \
-      --dlq_table=<project>.<quality_dataset>.dlq \
-      --validation_runs_table=<project>.<quality_dataset>.validation_runs \
+      --landing_dataset=<project>.<scratch_landing_dataset> \
       --num_rows=1000 --max_tables_per_job=3 --run_id=<a new base> \
-      --model_uri=gs://<bucket>/synthetic/models/<family>/<model>/<version>/ \
-      <the Beam options of §9d step 2b, --sdk_container_image the image of step 3, --max_parallel_jobs=2>
+      <§9d step 2b's command from --dlq_table on, with --write_disposition=overwrite and --max_parallel_jobs=2>
     ```
 
-    Expect two lines `<a new base>-b0N  OK  job <job id>  runs/model-launch/<a new base>/b0N.log`
-    and the printed `sdfb-eval run … --run_id=<a new base>
-    --generation_job_ids=<id>,<id> … --scope=manual …` command; run it from
-    the repository root (fill in its `<REGION>` and `<BUCKET>`), and expect
-    one registry row as in step 11 for `base_run_id = '<a new base>'`. The
-    exit status is 0.
+    (In §9d's command `synthetic_data_quality` stands for your
+    `<quality_dataset>`.)
 
-14. **The whole model.** Upload the model itself (every table it enables)
-    and trigger the model DAG with the default `max_tables_per_job` (10).
-    Expect one `model_batch_oversized` WARNING per component larger than 10,
-    each run whole. Read every batch's launch margin (step 8); if any is under
+    `--write_disposition=overwrite` replaces the scratch tables step 6 and
+    step 12 landed; under the CLI's default `append` this evaluation would end
+    `PARTIAL` (the intro). Expect two lines
+    `<a new base>-b0N  OK  job <job id>  <checkout>/runs/model-launch/<a new base>/b0N.log`
+    (the path is absolute; a character of the run id outside
+    `[A-Za-z0-9._-]` becomes `-` in it), then the printed
+    `sdfb-eval run … --run_id=<a new base> --generation_job_ids=<id>,<id> …
+    --scope=manual …` command and, under it,
+    `# append --sdk_container_image=<image> --disk_size_gb=200 and the worker options: RUN_PLAYBOOK §9d`.
+    Run the command from the repository root with its `<REGION>` and
+    `<BUCKET>` filled in and §9d step 2b's evaluation options appended (the
+    worker image and the disk are required from a checkout: without the image
+    the evaluation's workers boot Beam's stock image and cannot import
+    `sdfb_evaluation`). Expect one registry row as in step 11 for
+    `base_run_id = '<a new base>'`, and `run_model.py`'s exit status 0.
+
+14. **The whole model.** Add an empty copy of every table the model enables
+    to the scratch dataset (step 5's command, with a local copy of the model
+    file itself in place of the acceptance copy; `IF NOT EXISTS` skips the
+    five already there). If the model is not on GCS yet, upload it under
+    `gs://<bucket>/synthetic/relationships/acceptance/`; if it already lives in
+    the folder, point `relationships_uri` at that file. Trigger the model DAG
+    with it, step 6's `source_dataset`, `landing_dataset` (the scratch one)
+    and `write_disposition` (`overwrite`), and the default
+    `max_tables_per_job` (10). Every batch's launcher re-plans the whole
+    model, so each launcher's log carries one `model_batch_oversized` WARNING
+    per component larger than 10, and each such component runs whole, as its
+    own batch. Read every batch's launch margin (step 8); if any is under
     two minutes, lower `max_tables_per_job` (a config file or the DAG param)
     and note the value that holds.
 
@@ -1035,6 +1117,19 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
 
     Expect it to pass and print each batch job's margin.
 
+16. **Clean up what the checklist created**, after steps 10, 11 and 15 are
+    recorded: the scratch dataset (and only it: check the name before you
+    run `rm`) and the model copies under `acceptance/`. The rows the runs
+    appended to the shared `dlq` and `validation_runs` tables stay, as for
+    any launch.
+
+    ```bash
+    bq rm -r -f -d <project>:<scratch_landing_dataset>
+    gcloud storage rm --recursive gs://<bucket>/synthetic/relationships/acceptance/
+    ```
+
+    If step 14 pointed at the model's own file in the folder, that file stays.
+
 **If it fails** — what each line means and the one fix:
 
 | You see | It means | Fix |
@@ -1046,6 +1141,9 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
 | `launch_option_unused key=…` (launcher, WARNING) | a key the launch's `tables` mode does not read was given | drop it |
 | `collect_landed` skipped, no evaluation | `run_evaluation` is off, or no batch job reached DONE | the failed batches first |
 | the evaluation finds no row for `<base>` | `evaluation_output_dataset` is not the dataset of `validation_runs` | its default |
+| `status` `PARTIAL` with `scope count_mismatch … likely rows other launches wrote to the same table` | a landing table held rows of an earlier launch: an `append` run, or a landing dataset other than the scratch one | `landing_dataset` = the scratch dataset and `write_disposition` = `overwrite` (steps 6, 12, 13, 14) |
+| a launch that names the folder `gs://<bucket>/synthetic/relationships` stops with `declared in 2 models or more` | a model copy sits directly in the folder | move it under `acceptance/` (step 5) |
+| the CLI's evaluation job fails to import `sdfb_evaluation` | the printed command ran without `--sdk_container_image` | append §9d step 2b's evaluation options |
 | the evaluation fails at its registry write, naming `generation_job_ids` | the registry is not migrated | step 1 |
 | the CLI batches' workers fail with `ModuleNotFoundError: No module named 'sdfb_core'` | a checkout launch without `--sdk_container_image` (the launcher WARNs) | the image of step 3 |
 
@@ -1838,7 +1936,7 @@ Whole-model launches ([ADR 0045](adr/0045-whole-model-launches.md), §9d):
 |---|---|
 | `model_launch_plan batches= max_tables_per_job= model= skipped= tables=` + the multi-line `MODEL LAUNCH` block (launcher, once per launcher of a `tables: all` launch) | the whole plan: the model and its file, the tables enabled and disabled, every batch with its tables, `[OVERSIZED — one component of N tables]` on a batch larger than K, and the skipped tables. `scripts/launch/run_model.py --dry_run` prints the same block; the model DAG's `plan` task logs its own `MODEL LAUNCH PLAN` banner |
 | `model_batch batch= count= index= launch_run_id= run_id= tables=` (launcher, once per batch it runs) | this job is batch `index` of `count`: its run id `<base>-bNN`, the launch's base run id, its table count. Its tables run as `<base>-bNN-MM-<table>` |
-| `model_batch_oversized batch= max_tables_per_job= note= tables=` (launcher, **WARNING**) | one connected component is larger than `max_tables_per_job`: it runs whole, as its own batch job, never split |
+| `model_batch_oversized batch= max_tables_per_job= note= tables=` (launcher, **WARNING**) | one connected component is larger than `max_tables_per_job`: it runs whole, as its own batch job (`batch=`), never split. Every batch's launcher re-plans the whole model, so every launcher's log carries one per oversized batch of the plan, not only the oversized batch's own |
 | `model_batch_count_mismatch max_tables_per_job= planned= replanned=` (launcher, **ERROR**) | the orchestrator planned `planned` batches and this launcher plans `replanned`: the model file or K changed in between. The batch stops before reading any table; trigger the model DAG again, or rerun `run_model.py` |
 | `model_batches_in_sequence batches= note=` (launcher, **WARNING**) | a CLI `--tables=all` launch of several batches without `--batch_index`: they run one after another in this process (`run_model.py` runs them in parallel). A Flex launch refuses instead |
 | `model_batch_failed batch= rc=` (launcher, **ERROR**) | in that CLI sequence, a batch returned non-zero (`rc=`) or raised (no `rc=`, the traceback above it); the next batch runs, and the launch ends naming every failed batch |
@@ -2329,8 +2427,13 @@ re-read at scale.
 [ADR 0045](adr/0045-whole-model-launches.md). One model file (not a folder)
 names the tables; `enabled: false` skips one; a table may set `source_table`
 and `num_rows` ([config/relationships/README.md](../config/relationships/README.md#whole-model-launches-tables-all-adr-0045)).
-Upload the model next to the others:
-`gcloud storage cp <model>.yaml gs://<bucket>/synthetic/relationships/<model>.yaml`.
+Upload the model where no folder launch reads it twice. A launch that names
+the folder `gs://<bucket>/synthetic/relationships` reads every `*.yaml`
+directly under it and stops when two files declare one table; the scan does
+not recurse. So the one model file that declares these tables may sit in the
+folder (`gs://<bucket>/synthetic/relationships/<model>.yaml`), and a copy or
+a variant of it goes under a sub-prefix, e.g.
+`gs://<bucket>/synthetic/relationships/whole-model/<model>.yaml`.
 
 *The model DAG plans once, launches one Flex job per batch, at most
 `SDFB_MAX_PARALLEL_JOBS` at a time, and evaluates the batches that landed
@@ -2387,48 +2490,99 @@ Dataflow job.
 **2b. Launch from a checkout** (GCP credentials; from a checkout, not inside
 the image: the image sets `FLEX_TEMPLATE_PYTHON_PY_FILE` for every process,
 so a launcher there counts as Flex and refuses a multi-batch plan without
-`--batch_index`). The same flags plus Beam's, without `--dry_run`. A checkout
-has no `SDFB_SDK_CONTAINER_IMAGE`, so pass the image the template runs, and
-the worker options the model DAG's launch sets
-(`composer/sdfb_batches.py::launch_environment`):
+`--batch_index`). To launch what the model DAG launches, pass what its launch
+passes: the launcher flags of `composer/sdfb_batches.py::common_parameters`
+and the worker options of `::launch_environment`, here for its `gpu` param
+`l4` and `sdk_containers` `multi`. A checkout has no
+`SDFB_SDK_CONTAINER_IMAGE`, so the image the template runs is passed too.
+Give the launch its own run id (not step 1's `plan`):
 
 ```bash
-uv run --no-sync python3 scripts/launch/run_model.py <the flags above> \
+uv run --no-sync python3 scripts/launch/run_model.py \
+  --relationships_uri=<model>.yaml --source_dataset=<project>.<source_dataset> \
+  --landing_dataset=<project>.<landing_dataset> --num_rows=<N> \
+  --run_id=<a new base run id> \
+  --dlq_table=<project>.synthetic_data_quality.dlq \
+  --validation_runs_table=<project>.synthetic_data_quality.validation_runs \
+  --model_uri=gs://<bucket>/synthetic/models/<family>/<model>/<version>/ \
+  --embedder_uri=<the build's embedder URI> --env=<env> \
+  --engine=<b1_rag or b2_library> --vllm_dtype=float16 \
+  --write_disposition=<append or overwrite> \
+  --rag_chunks_table=<rag_chunks table> --build_rag_layer=true \
+  --freetext_pools_table=<freetext_pools table> --build_pool_layer=true \
+  --source_stats_table=<source_table_stats table> \
   --runner=DataflowRunner --project=<project> --region=<region> \
-  --temp_location=gs://<bucket>/temp \
+  --temp_location=gs://<bucket>/temp --staging_location=gs://<bucket>/staging \
   --sdk_container_image=<the image the template runs> \
   --machine_type=g2-standard-8 --max_num_workers=4 \
   --experiments=use_runner_v2 --experiments=upload_graph \
   --experiments=enable_secure_boot \
   --experiments="worker_accelerator=type:nvidia-l4;count:1;install-nvidia-driver" \
   --experiments=automatically_use_created_reservation \
+  --experiments="use_network_tags=<tags>" \
   --subnetwork=<subnetwork> --service_account_email=<the job's service account> \
   --no_use_public_ips --max_parallel_jobs=2
 ```
 
-(That is the DAG's environment for its `gpu` param `l4` and `sdk_containers`
-`multi`. For a T4: `n1-standard-8` and
-`worker_accelerator=type:nvidia-tesla-t4;count:1;install-nvidia-driver:5xx`;
-for `--client_type=fake`: `e2-standard-8` and no accelerator or reservation
-experiment; for one SDK container per worker, add
-`--experiments=no_use_multiple_sdk_containers`. Without
-`--sdk_container_image` the launcher WARNs and the workers boot Beam's stock
-container, which has no `sdfb_core`.)
+- **The launcher flags.** `--validation_runs_table` is what makes each batch
+  write its generation record: without it (the launcher's default is empty)
+  no row is written and the evaluation has nothing to read. The embedder, the
+  `env` and the three store tables are the values workflow 3 substitutes into
+  the DAG (an empty store: drop its two flags; an empty embedder: drop it,
+  B.1 then uses the `HashingEmbedder`). The DAG forwards its other params
+  with defaults equal to the launcher's, except `vllm_dtype` (`float16`; the
+  launcher's is `auto`) and `engine` and `write_disposition` (the build's
+  defaults), passed above; `reference_rows_limit` is `10000` in both.
+- **The worker options.** `use_network_tags` only when the Composer
+  Variable `DATAFLOW_NETWORK_TAGS` is set (its value; the DAG's second tag
+  experiment is for the Flex launcher VM, which a checkout launch has not);
+  drop the line otherwise. For a T4: `n1-standard-8` and
+  `worker_accelerator=type:nvidia-tesla-t4;count:1;install-nvidia-driver:5xx`;
+  for `--client_type=fake`: `e2-standard-8` and no accelerator or
+  reservation experiment; for one SDK container per worker, add
+  `--experiments=no_use_multiple_sdk_containers`. Without
+  `--sdk_container_image` the launcher WARNs and the workers boot Beam's
+  stock container, which has no `sdfb_core`. The DAG's job labels and
+  launcher machine are left out.
 
 It refuses `--batch_index`, `--batch_count` and `--job_name` (and any
 abbreviation of them of three or more characters): it sets them per batch.
-It waits for every batch, prints one
-line per batch (`<base>-bNN  OK  job <job id>  <log>`, or `FAILED rc=…`) and
-the `sdfb-eval run --run_id=<base> --generation_job_ids=<ids> … --scope=manual
-…` command for the landed ones (`--scope=manual`: a `--run_id` evaluation has
-no labelled writes, so `auto` would resolve every table's scope to
-`unknown`). A batch that finished OK but logged no job id marks the command
-`# PARTIAL`. Each batch's output is in `runs/model-launch/<run_id>/bNN.log`.
-Exit 0: every batch finished; 1: at least one failed, the others ran; 2: a
-usage error, nothing launched. On Ctrl-C or SIGTERM it stops the launchers
-and prints every Dataflow job they had already created, with
-`gcloud dataflow jobs cancel <id> --region=<region>`: stopping a launcher
-does not cancel its job.
+It waits for every batch, prints one line per batch
+(`<base>-bNN  OK  job <job id>  <log>`, or `FAILED rc=…`), where `<log>` is
+the absolute path of the batch's output, `<checkout>/runs/model-launch/<run
+id>/bNN.log` (a character of the run id outside `[A-Za-z0-9._-]` becomes
+`-`; `--log_dir` puts the logs elsewhere). Then the `sdfb-eval run
+--run_id=<base> --generation_job_ids=<ids> … --scope=manual …` command for
+the landed ones (`--scope=manual`: a `--run_id` evaluation has no labelled
+writes, so `auto` would resolve every table's scope to `unknown`), and under
+it the line
+`# append --sdk_container_image=<image> --disk_size_gb=200 and the worker options: RUN_PLAYBOOK §9d`.
+A batch that finished OK but logged no job id marks the command
+`# PARTIAL`. Exit 0: every batch finished; 1: at least one failed, the
+others ran; 2: a usage error, nothing launched. On Ctrl-C or SIGTERM it
+stops the launchers and prints every Dataflow job they had already created,
+with `gcloud dataflow jobs cancel <id> --region=<region>`: stopping a
+launcher does not cancel its job.
+
+**The evaluation options.** Run the printed command from the repository
+root with `<REGION>` and `<BUCKET>` filled in and, appended, the options the
+model DAG's evaluation launch gives its CPU workers
+(`composer/synthetic_model_launch.py`, `trigger_evaluation`):
+
+```bash
+  --sdk_container_image=<the image the template runs> --disk_size_gb=200 \
+  --machine_type=e2-standard-8 --max_num_workers=8 \
+  --experiments=use_runner_v2 --experiments=enable_secure_boot \
+  --experiments="use_network_tags=<tags>" \
+  --subnetwork=<subnetwork> --service_account_email=<the job's service account> \
+  --no_use_public_ips
+```
+
+The worker image and the disk are required: outside the image the
+evaluation's workers otherwise boot Beam's stock image and cannot import
+`sdfb_evaluation`, and they unpack the multi-GB image onto their boot disk.
+`use_network_tags` as above; the machine and the worker cap are the DAG's
+`evaluation_machine_type` and `evaluation_max_workers` defaults.
 
 `--generation_job_ids` narrows ONE evaluation to those batch jobs' rows,
 unlike the standalone evaluation DAG's `generation_job_ids` param, which
@@ -2438,7 +2592,9 @@ fans out one evaluation per job.
 `model_launch_plan` (the plan, once per launcher), `model_batch batch=bNN …
 launch_run_id=<base>`, one `table_override` per overridden table,
 `launch_prep_parallel` (reads on threads), and the warnings
-`model_batch_oversized` and `launch_option_unused`. On a batch of unrelated
+`model_batch_oversized` (one per oversized batch of the whole plan, in every
+launcher's log: each re-plans the model) and `launch_option_unused`. On a
+batch of unrelated
 tables (an isolated forest) the `relational_closure_no_enforced_edges`
 WARNING is expected. Each table's `relationship_model` card is logged during
 its batch's prep and on the workers. `model_batch_count_mismatch` means the

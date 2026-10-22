@@ -300,6 +300,20 @@ def test_stop_gives_every_launcher_one_shared_grace_period(monkeypatch):
   assert elapsed < 2 * grace
 
 
+def test_the_evaluation_command_names_what_to_append_for_dataflow(
+    argv, monkeypatch, capsys):
+  """From a checkout the printed command needs the worker image, the disk
+    and the worker options the model DAG's evaluation passes: the line under
+    it says so (ADR 0045, RUN_PLAYBOOK §9d)."""
+  monkeypatch.setattr(RM.subprocess, "Popen", _Launchers())
+  assert RM.main([*argv, "--max_tables_per_job=2"]) == 0
+  lines = capsys.readouterr().out.splitlines()
+  command = next(i for i, line in enumerate(lines) if "sdfb-eval run" in line)
+  assert lines[command + 1] == (
+      "  # append --sdk_container_image=<image> --disk_size_gb=200 and the "
+      "worker options: RUN_PLAYBOOK §9d")
+
+
 def test_no_evaluation_command_when_no_batch_landed(argv, monkeypatch, capsys):
   monkeypatch.setattr(RM.subprocess, "Popen", _Launchers(codes={0: 1, 1: 1}))
   assert RM.main([*argv, "--max_tables_per_job=2"]) == 1

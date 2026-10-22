@@ -2306,7 +2306,7 @@ def log_model_launch(launch: ModelLaunch) -> None:
 
 
 def chosen_batches(args: argparse.Namespace, launch: ModelLaunch) -> list[int]:
-  """The batches this launcher runs (ADR 0045 §orchestration): the one the
+  """The batches this launcher runs (ADR 0045 D4): the one the
     orchestrator named, after checking its count; the only one; or, on the
     CLI, every batch in sequence. A Flex launch runs one job, so it refuses
     a multi-batch plan without --batch_index."""

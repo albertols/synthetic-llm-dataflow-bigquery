@@ -1,6 +1,6 @@
 # ADR 0045 — Whole-model launches: every enabled table of one model, in batch jobs
 
-**Status:** Accepted (2026-10-21). Built and tested on a laptop (DirectRunner, fake client, the model DAG read statically); the Dataflow acceptance (AC-B-5) is the corp run of [RUN_PLAYBOOK §2e](../RUN_PLAYBOOK.md#2e-corp-acceptance-of-whole-model-launches-b). Built in phase B of the config, record and model-launch work (the phase design is local to the branch and not committed).
+**Status:** Accepted (2026-10-21). Built and tested on a laptop (DirectRunner, fake client; the model DAG pinned by static tests and run under Airflow 2.10.5's `dag.test()` with GCS and Dataflow stubbed, D6); the Dataflow acceptance (AC-B-5) is the corp run of [RUN_PLAYBOOK §2e](../RUN_PLAYBOOK.md#2e-corp-acceptance-of-whole-model-launches-b). Built in phase B of the config, record and model-launch work (the phase design is local to the branch and not committed).
 **Design:** [`docs/DESIGN.md` §4 Relational generation](../DESIGN.md#4-relational-generation) ([§4.5 Whole-model launches](../DESIGN.md#45-whole-model-launches))
 **Code:** [`sdfb_core/launch/tables.py`](../../packages/sdfb-core/src/sdfb_core/launch/tables.py) (the launch modes, a table's source and rows) · [`sdfb_core/launch/batches.py`](../../packages/sdfb-core/src/sdfb_core/launch/batches.py) (the planner) · `sdfb_beam/cli/run_pipeline.py` (`_run_model`, `chosen_batches`, `_run_batch`, `PrepReadAhead`) · [`composer/synthetic_model_launch.py`](../../composer/synthetic_model_launch.py) (the model DAG) · [`composer/sdfb_batches.py`](../../composer/sdfb_batches.py) (its planner mirror) · [`scripts/launch/run_model.py`](../../scripts/launch/run_model.py) (the CLI runner) · `sdfb_evaluation/context/runs.py` (`rows_of_jobs`), `sdfb_evaluation/context/launch.py` (`_launch_of`)
 **Builds on:** [ADR 0030](0030-single-job-relational-generation.md) (a component in one job) · [ADR 0032](0032-relationships-as-config.md) (relationships are configuration) · [ADR 0036](0036-parent-driven-fanout-generation.md) (a child's rows follow its parents) · [ADR 0043](0043-generator-config.md) (the config keys) · [ADR 0044](0044-generation-record.md) (the record each batch writes)
@@ -191,8 +191,9 @@ flowchart LR
 2. **Sort** them by size descending, then by their first table name.
 3. **First-fit-decreasing** into bins of at most K tables: each component goes
    into the first bin it fits, else a new one. A component larger than K gets
-   a bin of its own (`Batch.oversized`), announced by one
-   `model_batch_oversized` WARNING and run whole.
+   a bin of its own (`Batch.oversized`) and runs whole. Every batch's
+   launcher re-plans the whole model, so each launcher logs one
+   `model_batch_oversized` WARNING per oversized batch of the plan.
 4. **Name** the bins by their first table: b00, b01, … in that order.
 
 In the figure the components are sized 3, 2, 1, 1: the 3 opens b01's bin and
@@ -488,14 +489,18 @@ flowchart LR
   read that failed raises at its table's turn, the same exception as before.
   At the end the reads not started are cancelled and the ones in flight
   waited for.
-- **The one default-on change** for a launch that uses none of this ADR's
-  options: the outputs are identical; the timing, the log order, and the reads
-  already paid by a table that preflight then stops differ (under
-  `--source_stats=exact` that includes its exact aggregate scan, and the
-  look-ahead can have finished later tables' reads when a hard failure lands).
-  The launcher also issues more BigQuery reads at once. `launch.prep_workers:
-  1` restores the previous sequence exactly
+- **The one default-on change in what a launch does** for a launch that uses
+  none of this ADR's options: the outputs are identical; the timing, the log
+  order, and the reads already paid by a table that preflight then stops
+  differ (under `--source_stats=exact` that includes its exact aggregate
+  scan, and the look-ahead can have finished later tables' reads when a hard
+  failure lands). The launcher also issues more BigQuery reads at once.
+  `launch.prep_workers: 1` restores the previous sequence exactly
   (`packages/sdfb-tests/tests/unit/cli/test_parallel_prep.py`).
+- **A second, usage-level change** for every launch, at parse time
+  (Ruling 25): the new flags make some abbreviations ambiguous, so a launch
+  typed with one now stops with argparse's usage error before it does
+  anything. No spelled-out flag changes.
 
 ### Rulings
 
@@ -559,10 +564,12 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
     `scripts/gui/export_knobs.py` does not count a DAG param whose
     description begins "Only with run_evaluation" as a surface of a generator
     flag.
-25. **Abbreviated flags**: argparse's prefix matching stays on; prefixes only
-    `--landing_table` or `--batch_size` matched before (`--landing`,
-    `--landing_`, `--batch`, `--batch_`) are now ambiguous and stop the
-    launch.
+25. **Abbreviated flags**: argparse's prefix matching stays on; the
+    abbreviations only `--landing_table` (`--l` … `--landing_`),
+    `--batch_size` (`--ba` … `--batch_`) or `--thresholds_uri` (`--t`)
+    matched before are now ambiguous with `--landing_dataset`,
+    `--batch_index` / `--batch_count` and `--tables`, and stop the launch at
+    parse time.
 26. **The Dataflow Solution Guides copy** ships neither `composer/` nor
     `scripts/launch/`; it ships `example_isolated_forest.yaml`, and its form of
     a whole-model launch is the launcher's `--tables=all` (batches in
@@ -631,10 +638,10 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
   batch's margin to the Flex launcher's 12 minutes
   ([Dataflow: troubleshoot Flex Templates](https://cloud.google.com/dataflow/docs/guides/troubleshoot-templates))
   and lowers K where a margin is thin.
-- **Abbreviated flags.** `--landing` and `--batch` (and `--landing_`,
-  `--batch_`) are now ambiguous; a script that abbreviated `--landing_table`
-  or `--batch_size` that way fails at parse time and must spell them out
-  (Ruling 25).
+- **Abbreviated flags.** `--landing`, `--batch`, `--t` and the other
+  abbreviations of Ruling 25 are now ambiguous; a script that abbreviated
+  `--landing_table`, `--batch_size` or `--thresholds_uri` that way fails at
+  parse time and must spell the flag out.
 - **A held Airflow worker slot per running batch**, for the job's duration
   (D6), at most `SDFB_MAX_PARALLEL_JOBS` slots.
 - **A run id ending in `-bNN`**, written without a record and evaluated by a

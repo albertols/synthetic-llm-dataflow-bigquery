@@ -462,33 +462,49 @@ it, so name the file.)
 | `source_table` | where the table's source is read | `[project.]dataset.table`; a two-part name takes the source dataset's project (`--source_dataset`, or the reference table's dataset in an explicit launch); applies to explicit launches too |
 | `num_rows` | the table's own rows | an integer ≥ 1 (`5000`, never `"5000"` or `true`); a table a parent drives (ADR 0036) may not set it — the load refuses the model; applies to explicit launches too |
 
-Each table the model overrides is announced once per launch, before any
-table is read: `SDFB_MILESTONE name=table_override num_rows=5000 source_table=<project>.other_ds.RATES_V2 table=T_RATES`.
+Each table the model overrides is announced once, by the job that generates
+it, before any table of that job is read (a CLI run of several batches
+announces each batch's overrides when that batch starts):
+`SDFB_MILESTONE name=table_override num_rows=5000 source_table=<project>.other_ds.RATES_V2 table=T_RATES`.
 A model without the two keys keeps its sha12, so its caches and every
 launch of it are unchanged.
 
 A global `--pk_cols` / `--identity_cols` is refused with `--tables=all`:
 declare `pk:` / `identity:` per table. `--reference_table`,
 `--landing_table` and `--ddl_uri` are not read (one `launch_option_unused`
-WARNING each when given). See the plan without launching:
+WARNING each when given).
+
+**In the source repository (golden source)**, see the plan without
+launching, then launch it with the Composer model DAG or `run_model.py`
+(RUN_PLAYBOOK §9d). Both, and this dry run, exist only there:
+`scripts/launch/run_model.py` and `composer/` are not shipped in the
+Dataflow Solution Guides copy.
 
 ```bash
+# golden source only
 uv run --no-sync python3 scripts/launch/run_model.py --dry_run \
   --relationships_uri=<the model file> --source_dataset=<P>.<SRC> \
   --landing_dataset=<P>.<LAND> --dlq_table=<P>.synthetic_data_quality.dlq \
   --num_rows=1000 --run_id=plan --model_uri=gs://<B>/synthetic/models/<f>/<m>/<v>/
 ```
 
-Launch it with the Composer model DAG or `run_model.py` (RUN_PLAYBOOK §9d).
-Both live only in the source repository (golden source):
-`scripts/launch/run_model.py` and `composer/` are not shipped in the
-Dataflow Solution Guides copy. There, run the launcher from a checkout
-(`python -m sdfb_beam.cli.run_pipeline`) with `--tables=all` and the same
-`--relationships_uri`, source, landing and DLQ options: it plans the same
-batches and runs them one after another, in sequence, and a failed batch
-does not stop the next. A Flex Template launch runs one Dataflow job, so it
-takes a plan of one batch, or one `batch_index` with its `batch_count`, and
-refuses more.
+**In the Dataflow Solution Guides copy**, run the launcher itself from a
+checkout with `--tables=all` and the same options, plus a run id of its own
+and Beam's: it logs the same plan (`model_launch_plan`, the `MODEL LAUNCH`
+block) before it reads any table, then runs the batches one after another,
+in sequence, and a failed batch does not stop the next. There is no dry run:
+this launches.
+
+```bash
+uv run --no-sync python3 -m sdfb_beam.cli.run_pipeline --tables=all \
+  --relationships_uri=<the model file> --source_dataset=<P>.<SRC> \
+  --landing_dataset=<P>.<LAND> --dlq_table=<P>.synthetic_data_quality.dlq \
+  --num_rows=1000 --run_id=<run id> --model_uri=gs://<B>/synthetic/models/<f>/<m>/<v>/ \
+  <Beam's options>
+```
+
+A Flex Template launch runs one Dataflow job, so it takes a plan of one
+batch, or one `batch_index` with its `batch_count`, and refuses more.
 
 ## `pk:` must actually BE a key
 
