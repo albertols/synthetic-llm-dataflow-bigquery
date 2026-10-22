@@ -118,6 +118,7 @@ export function evaluation(overrides: Partial<EvaluationRecord> = {}): Evaluatio
     artifacts_uri: null,
     generator_version: null,
     generator_config_digest: null,
+    generation_job_ids: ["2026-09-20_09_00_00-1"],
     ...overrides,
   };
 }

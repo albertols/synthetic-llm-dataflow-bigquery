@@ -34,23 +34,31 @@ the launch's config. The read is `SELECT *`, so a table created before
 those columns works too — its rows simply have none of them.
 `runs_of_job` finds one Dataflow job's rows without knowing its tables.
 
+A whole-model launch (ADR 0045) runs batch jobs `B-bNN`, their tables
+`B-bNN-MM-<table>`, so each row splits to the base `B-bNN`; the launch
+they belong to is the row's recorded `launch_run_id`, `B`
+(`context.launch`). `rows_of_jobs` keeps the rows of the batch jobs that
+landed.
+
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
-Design: docs/DESIGN.md §7 Validation and the dead-letter queue
-(ADR 0044).
+Design: docs/DESIGN.md §4 Relational generation;
+§7 Validation and the dead-letter queue
+(ADR 0044, 0045).
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from typing import Any
 
 from sdfb_evaluation.context.jobs import iso_timestamp, parse_timestamp
 
 __all__ = [
-    "RECORD_READ_COLUMNS", "of_job", "runs_for", "runs_of_job", "split_run_id"
+    "RECORD_READ_COLUMNS", "of_job", "rows_of_jobs", "runs_for", "runs_of_job",
+    "split_run_id"
 ]
 
 _DATASET_RE = re.compile(
@@ -209,3 +217,28 @@ def runs_of_job(bq: Any,
       if of_job(row.get("job_id"), row.get("job_name"), job_id, job_name)
   ]
   return _shaped(own)
+
+
+def rows_of_jobs(rows: Sequence[Mapping[str, Any]], job_ids: Sequence[str],
+                 notes: list[str]) -> list[Mapping[str, Any]]:
+  """A whole-model launch's rows written by the listed batch jobs
+  (ADR 0045): a row whose recorded `job_id` is not listed is dropped; a row
+  with no `job_id` (the worker could not read it, ADR 0044) is kept —
+  nothing says which job wrote it. Each case is a note.
+
+  By id only, unlike `of_job`, which falls back to the row's `job_name`:
+  the callers (the model DAG, `scripts/launch/run_model.py`) know only the
+  ids of the batch jobs that landed, so there is no name to match."""
+  wanted = set(job_ids)
+  dropped = sorted(
+      str(r["run_id"])
+      for r in rows
+      if r.get("job_id") and r["job_id"] not in wanted)
+  unattributed = sorted(str(r["run_id"]) for r in rows if not r.get("job_id"))
+  if dropped:
+    notes.append(f"validation_runs rows of jobs not in generation_job_ids "
+                 f"were not evaluated: {dropped}")
+  if unattributed:
+    notes.append(f"validation_runs rows that carry no job id were evaluated "
+                 f"(nothing says which job wrote them): {unattributed}")
+  return [r for r in rows if not r.get("job_id") or r["job_id"] in wanted]

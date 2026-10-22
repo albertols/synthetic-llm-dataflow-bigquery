@@ -558,6 +558,7 @@ export function buildAdjustedLaunch(
     if (miswired) {
       // The DAG handed the evaluator the chained evaluation's own job as "the generation job".
       running.generation_job_id = chainedFinal!.evaluation_job_id;
+      running.generation_job_ids = running.generation_job_id ? [running.generation_job_id] : [];
       running.generation_job_name = `${EVALUATOR_JOB_NAME_PREFIXES[0]}v0-5-3-${chainedFinal!.evaluated_at
         .slice(0, 19)
         .replace(/[-:]/g, "")

@@ -56,6 +56,12 @@ then the rows of that table in the job's window that name the job
 path's first step, where the record names what is evaluated
 (`cli.driver`).
 
+A whole-model launch (ADR 0045) runs batch jobs `B-bNN`, their tables
+`B-bNN-MM-<table>`: a batch's rows belong to the launch `B` — by their
+recorded `launch_run_id`, else by the `-bNN` suffix of their run ids'
+base (`_launch_of`) — so `--run_id B` reads every batch, and a batch's
+own run id `B-bNN` only its own rows.
+
 `tables_in_order` never silently narrows a relational launch to its
 `--landing_table` target:
 
@@ -82,9 +88,9 @@ none of them resolves a table.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
-Design: docs/DESIGN.md §7 Validation and the dead-letter queue;
-§8 Configuration
-(ADR 0043, 0044).
+Design: docs/DESIGN.md §4 Relational generation;
+§7 Validation and the dead-letter queue; §8 Configuration
+(ADR 0043, 0044, 0045).
 """
 
 from __future__ import annotations
@@ -93,6 +99,7 @@ import dataclasses
 import json
 import logging
 import math
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -576,9 +583,11 @@ def _manual_value(key: str, value: Any) -> Any:
 def _resolved_mismatch(launch_config: Mapping[str, Any]) -> str | None:
   """Why the launch_config's resolved table list and run ids disagree, or
   None. `plan_launch` names run i of a multi-table launch
-  `{run_id}-{i:02d}-{table}`; a single table runs as `{run_id}` itself.
-  Lines the launcher logged in the same instant can come back reordered
-  and still parse — this is the check that catches it."""
+  `{run_id}-{i:02d}-{table}`; a single table runs as `{run_id}` itself,
+  or — a whole-model batch of one table (ADR 0045) — as
+  `{run_id}-00-{table}`. Lines the launcher logged in the same instant can
+  come back reordered and still parse — this is the check that catches
+  it."""
   resolved = launch_config.get("resolved")
   if not isinstance(resolved, Mapping):
     return None
@@ -588,8 +597,13 @@ def _resolved_mismatch(launch_config: Mapping[str, Any]) -> str | None:
     return f"{len(tables)} tables but {len(run_ids)} run ids"
   base = _text(launch_config.get("run_id"))
   if len(tables) == 1:
-    if base is not None and run_ids[0] != base:
-      return f"the single run id {run_ids[0]!r} is not the run_id {base!r}"
+    if base is None:
+      return None
+    short = tables[0].rsplit(".", 1)[-1]
+    batch = f"{base}-00-{short}"
+    if run_ids[0] not in (base, batch):
+      return (f"the single run id {run_ids[0]!r} is not the run_id {base!r} "
+              f"(nor a one-table batch's {batch!r})")
     return None
   for index, (table, run_id) in enumerate(zip(tables, run_ids, strict=True)):
     short = table.rsplit(".", 1)[-1]
@@ -601,23 +615,47 @@ def _resolved_mismatch(launch_config: Mapping[str, Any]) -> str | None:
   return None
 
 
+# ADR 0045 — a whole-model launch runs batch jobs `<base>-bNN`, their tables
+# `<base>-bNN-MM-<table>`; a row's split base is then `<base>-bNN`.
+_BATCH = re.compile(r"(?P<launch>.+)-b(?P<batch>\d{2,})")
+
+
+def _launch_of(record: RunRecord, base: str | None) -> str:
+  """The launch a validation_runs row belongs to (Ruling 3 of ADR 0045).
+  With the asked `base`: that base when the row's recorded `launch_run_id`
+  (ADR 0044), its run id's base, or that base without a whole-model batch
+  suffix names it — else the row's own base. Without one: the recorded
+  launch, else the run id's base."""
+  split = record.base_and_index[0]
+  if base is not None:
+    if base in (record.launch_run_id, split):
+      return base
+    match = _BATCH.fullmatch(split)
+    if match is not None and match.group("launch") == base:
+      return base
+    return split
+  return record.launch_run_id or split
+
+
 def _pick_runs(records: list[RunRecord], base: str | None,
                notes: list[str]) -> tuple[str | None, list[RunRecord]]:
   """(base, this launch's records): other launches' rows are dropped
-  loudly; with no base known, the most recently created one is taken."""
+  loudly; with no base known, the most recently created one is taken. A
+  row's launch is `_launch_of`'s: a whole-model batch's rows are its
+  launch's (ADR 0045)."""
   if not records:
     return base, []
   if base is None:
     latest = max(records, key=lambda r: r.created_at or "")
-    base = latest.base_and_index[0]
-    bases = sorted({r.base_and_index[0] for r in records})
+    base = _launch_of(latest, None)
+    bases = sorted({_launch_of(r, None) for r in records})
     if len(bases) > 1:
       notes.append(f"validation_runs holds rows of {len(bases)} launches "
                    f"({bases}) for these tables in the window and the "
                    f"launch's own run id is unknown; taking the latest, "
                    f"{base} — pass manual base_run_id to choose")
-  own = [r for r in records if r.base_and_index[0] == base]
-  others = sorted(r.run_id for r in records if r.base_and_index[0] != base)
+  own = [r for r in records if _launch_of(r, base) == base]
+  others = sorted(r.run_id for r in records if _launch_of(r, base) != base)
   if others:
     notes.append(f"validation_runs rows of another launch in the window were "
                  f"ignored: {others} — they wrote to the same landing tables "
@@ -660,9 +698,10 @@ class LaunchContext:
   """What generation job X wrote, with which parameters.
 
   The rev-1 fields plus `params_source` and `writes`; `runs` (the
-  per-table `validation_runs` rows), `model_adjusted` (None = unknown)
-  and `warnings` (every fallback taken) complete what the registry and
-  the planner read.
+  per-table `validation_runs` rows), `model_adjusted` (None = unknown),
+  `warnings` (every fallback taken) and `generation_job_ids` (a
+  whole-model launch's batch jobs, ADR 0045) complete what the registry
+  and the planner read.
   """
   generation_job_id: str | None
   job_name: str | None
@@ -687,6 +726,9 @@ class LaunchContext:
   runs: tuple[RunRecord, ...] = ()
   model_adjusted: bool | None = None
   warnings: tuple[str, ...] = ()
+  # ADR 0045 — the generation jobs this evaluation covers: a whole-model
+  # launch's batch jobs (generation_job_id is the first); empty otherwise.
+  generation_job_ids: tuple[str, ...] = ()
 
   def typed_filters(self) -> dict[str, Any]:
     """The registry's generation-filter columns (`engine` … `vllm_dtype`

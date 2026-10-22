@@ -489,6 +489,13 @@
       "isOptional": true
     },
     {
+      "name": "generation_job_ids",
+      "label": "Evaluation: Generation job ids",
+      "helpText": "Evaluation only. With run_id alone (a whole-model launch's base run id, ADR 0045): the Dataflow ids of its batch jobs that landed, comma-separated. Only their rows of validation_runs are evaluated (a row without a job id is kept, with a note); the registry row records every id, the first as generation_job_id.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
       "name": "label_key_uri",
       "label": "Evaluation: Label key URI",
       "helpText": "Evaluation only. The operator's label key: a Secret Manager version (projects/P/secrets/S/versions/V) or a gs:// object. Empty: the key is ephemeral.",

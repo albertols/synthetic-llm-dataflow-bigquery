@@ -123,15 +123,16 @@ def test_run_flags_default_to_the_brief():
   assert knobs == Knobs(evaluation_id="eval-20260914T080000Z-00000001")
   flags = public_run_flags()
   assert {
-      "--project", "--region", "--generation_job_id", "--run_id",
-      "--relationships_uri", "--tables", "--seed_table", "--reference_dataset",
-      "--reference_rows_limit", "--validation_runs_table", "--landing_dataset",
-      "--mode", "--scope", "--allow_contaminated", "--sample_rows",
-      "--privacy_sample_rows", "--detection_sample_rows", "--pair_max_columns",
-      "--row_flags_top_k", "--row_flags_source_keys", "--max_bytes_billed",
-      "--max_shuffle_gb", "--output_dataset", "--temp_dataset", "--sink",
-      "--output_local", "--thresholds_uri", "--fail_on", "--trigger",
-      "--label_key_uri", "--runner"
+      "--project", "--region", "--generation_job_id", "--generation_job_ids",
+      "--run_id", "--relationships_uri", "--tables", "--seed_table",
+      "--reference_dataset", "--reference_rows_limit",
+      "--validation_runs_table", "--landing_dataset", "--mode", "--scope",
+      "--allow_contaminated", "--sample_rows", "--privacy_sample_rows",
+      "--detection_sample_rows", "--pair_max_columns", "--row_flags_top_k",
+      "--row_flags_source_keys", "--max_bytes_billed", "--max_shuffle_gb",
+      "--output_dataset", "--temp_dataset", "--sink", "--output_local",
+      "--thresholds_uri", "--fail_on", "--trigger", "--label_key_uri",
+      "--runner"
   } == set(flags)
   assert "--fixture_dir" not in flags  # hidden
   assert "--evaluation_id" not in flags  # minted, never passed (R88c)

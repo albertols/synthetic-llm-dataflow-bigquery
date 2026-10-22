@@ -50,6 +50,7 @@ sdfb-eval`.
 | :-- | :-- |
 | a generation Dataflow job | `--job_id J --region R` (alias `--generation_job_id`) |
 | a launch by its base run id | `--run_id B`, looked up in `validation_runs` of `--output_dataset` |
+| a whole-model launch (ADR 0045) | `--run_id B --generation_job_ids J1,J2`: the batch jobs `B-bNN` that landed. Only the rows those jobs wrote are evaluated (a row that carries no job id is kept, with a warning); the registry row records every id in `generation_job_ids`, the first as `generation_job_id`. `--generation_job_ids` goes with `--run_id` alone. Without it, `--run_id B` evaluates every batch's rows |
 | tables named by hand | `--tables A,B --landing_dataset L --reference_dataset D`, parents first |
 | what a launch of one table generated | `--seed_table T --landing_dataset L --reference_dataset D`; with `--relationships_uri`, T's enabled component, parents first |
 | the same, with the job that ran it | `--seed_table T --job_id J --region R` and the two datasets: the job id is the launch's identity, only the Dataflow job is read (its window, never its log). With `--validation_runs_table`, the job's generation record (ADR 0044) names the tables, their datasets, the relationship model and `--reference_rows_limit`, replacing the seed-derived ones; each difference is a warning |

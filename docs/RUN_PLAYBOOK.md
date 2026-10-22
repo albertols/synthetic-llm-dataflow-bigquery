@@ -512,7 +512,12 @@ flowchart LR
    the old schema, and BigQuery rejects a load schema that lacks a column the
    table has (`Provided Schema does not match Table … Field generator_version
    is missing in new schema`). Until step 4's template is up, trigger the
-   generation DAG with `run_evaluation` false.
+   generation DAG with `run_evaluation` false. The committed registry schema
+   also appends ADR 0045's `generation_job_ids` (REPEATED): the one registry
+   `bq update` below adds it with ADR 0044's two columns, and the same
+   applies to it — the new evaluator writes it, the new GUI's contract
+   expects it on every registry row, and an evaluator image from before it
+   cannot write to the migrated registry.
 
    ```bash
    bq update --schema config/bq_schema/synthetic_data_quality/validation_runs.schema.json \
@@ -537,15 +542,17 @@ flowchart LR
    13h) OK.
 
    **Rolling the evaluator back** to an image from before ADR 0044 needs the
-   two registry columns dropped, then the views refreshed from the checkout
-   you roll back to; the values the new evaluator wrote in them are lost.
-   Otherwise stay on the new image. With the columns gone the new GUI's
-   evaluation list fails too, so roll it back with them:
+   three registry columns dropped, `generation_job_ids` with ADR 0044's two,
+   then the views refreshed from the checkout you roll back to; the values
+   the new evaluator wrote in them are lost. Otherwise stay on the new image.
+   With the columns gone the new GUI's evaluation list fails too, so roll it
+   back with them:
 
    ```bash
    bq query --use_legacy_sql=false \
      'ALTER TABLE `<project>.<evaluation_dataset>.evaluation_data_history`
-        DROP COLUMN generator_version, DROP COLUMN generator_config_digest'
+        DROP COLUMN generator_version, DROP COLUMN generator_config_digest,
+        DROP COLUMN generation_job_ids'
    uv run --frozen --project packages/sdfb-evaluation sdfb-eval schemas \
          --project <project> --dataset <evaluation_dataset> --apply   # replaces the views
    ```
@@ -558,8 +565,8 @@ flowchart LR
    file being v0.6.1's (the last release before ADR 0044)
    `packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_data_history.schema.json`
    (`git show v0.6.1:<that path>`). BigQuery either rejects the load, naming
-   `generator_version`, or accepts it (then an old image can write). Delete
-   the copy afterwards.
+   a column the old file lacks (`generator_version`, …), or accepts it (then
+   an old image can write). Delete the copy afterwards.
 
 2. **Apply the workflow edits of [§0a](#0a-workflow-edits-for-the-generation-record-untracked-workflows)**
    to workflows 1, 2, 3 and 3e, all four together.
@@ -755,8 +762,8 @@ flowchart LR
 | `generation_record_job_id … source=none` (worker) | no metadata attribute gave the job id: `job_id` is NULL (step 9 and AC-A2-5 fail), readers match `job_name` | nothing to fix in the run; report it (step 8) |
 | `generation_record_job_id … source=not_dataflow` (worker) | a DirectRunner launch: no job id to read | none |
 | `generator_version_mismatch launcher=… worker=…` (worker) | the launcher's code is not the workers' image: a template on an older image, or a launch from a checkout | rebuild the template on the image (step 4) and launch from it |
-| the evaluation fails at its registry write, naming `generator_version` or `generator_config_digest` | the registry is not migrated | step 1's registry `bq update` |
-| the evaluation fails at its registry write with `Provided Schema does not match Table … Field generator_version is missing in new schema` | an evaluator image from before ADR 0044 wrote to the migrated registry | steps 3–4 (the new image and template), or step 1's rollback |
+| the evaluation fails at its registry write, naming `generator_version`, `generator_config_digest` or `generation_job_ids` | the registry is not migrated | step 1's registry `bq update` |
+| the evaluation fails at its registry write with `Provided Schema does not match Table … Field generator_version is missing in new schema` (or `generation_job_ids`) | an evaluator image from before ADR 0044 (or ADR 0045) wrote to the migrated registry | steps 3–4 (the new image and template), or step 1's rollback |
 | the GUI's evaluation list fails with `Unrecognized name: generator_version` | the registry or its views are not migrated | step 1's registry `bq update` and `sdfb-eval schemas --apply` |
 | `params_source` is not `validation_runs` and the list's cells are empty | the evaluation found no record: the generation job could not be read (a "no window" warning: grant `roles/dataflow.viewer`), or its rows lack the columns | step 9 first, then the job read |
 | "No generation record" on the Parameters tab | the run's rows predate the migration or went to a table without the columns | step 1, then a new launch |

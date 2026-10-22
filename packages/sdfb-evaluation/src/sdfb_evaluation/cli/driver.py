@@ -222,7 +222,7 @@ Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 Design: docs/DESIGN.md §4 Relational generation;
 §7 Validation and the dead-letter queue
-(ADR 0038, 0044).
+(ADR 0038, 0044, 0045).
 """
 
 from __future__ import annotations
@@ -305,7 +305,7 @@ from sdfb_evaluation.context.relationships import (
     generation_order,
     load_models,
 )
-from sdfb_evaluation.context.runs import runs_for
+from sdfb_evaluation.context.runs import rows_of_jobs, runs_for
 from sdfb_evaluation.report.store import (
     REGISTRY,
     NoSuchEvaluationError,
@@ -867,14 +867,28 @@ def _resolve(args: argparse.Namespace, env: Env, bq: Any) -> LaunchContext:
   if args.run_id and not args.job_id and not args.tables:
     # no job to ask: the launch is what validation_runs recorded under the
     # run id, in the generator's quality dataset (--output_dataset)
-    runs = runs_for(
+    runs: Sequence[Mapping[str, Any]] = runs_for(
         bq,
         quality_dataset=qualified_dataset(args.output_dataset, args.project),
         landing_tables=[],
         window=(None, None),
         base_run_id=args.run_id)
-    return LaunchContext.from_sources(
-        job=None, launch_config=None, writes=(), manual=manual, runs=runs)
+    job_ids = tuple(getattr(args, "job_ids", None) or ())
+    notes: list[str] = []
+    if job_ids:
+      # ADR 0045: a whole-model launch's batch jobs that landed
+      runs = rows_of_jobs(runs, job_ids, notes)
+    context = LaunchContext.from_sources(
+        job=None,
+        launch_config=None,
+        writes=(),
+        manual=manual,
+        runs=runs,
+        warnings=notes)
+    if not job_ids:
+      return context
+    return dataclasses.replace(
+        context, generation_job_id=job_ids[0], generation_job_ids=job_ids)
   factory = env.session_factory
   if job_id is not None and factory is None:
     factory = make_session
@@ -1139,8 +1153,11 @@ def planning_failed_row(args: argparse.Namespace,
   thresholds_uri, digest = _override(args)
   resolved = launch is not None
   if launch is None:
+    # ADR 0045: a whole-model launch's listed batch jobs, the first as
+    # generation_job_id, as on a resolved launch (`_resolve`)
+    job_ids = tuple(getattr(args, "job_ids", None) or ())
     launch = LaunchContext(
-        generation_job_id=args.job_id,
+        generation_job_id=args.job_id or (job_ids[0] if job_ids else None),
         job_name=None,
         region=args.region if args.job_id else None,
         started_at=None,
@@ -1156,7 +1173,8 @@ def planning_failed_row(args: argparse.Namespace,
         model_name=None,
         adjusted_model_uri=None,
         params_source="manual",
-        writes=())
+        writes=(),
+        generation_job_ids=job_ids)
   try:
     key = (
         evaluation_key(launch, args.mode, knobs) if resolved else _request_key(

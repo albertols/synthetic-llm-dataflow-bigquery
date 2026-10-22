@@ -403,9 +403,7 @@ def test_the_evaluation_parameters_are_template_parameters():
   parameters = _entry(_task(DAG, "trigger_evaluation"), "parameters")
   assert isinstance(parameters, ast.Dict)
   keys = {k.value for k in parameters.keys if isinstance(k, ast.Constant)}
-  # `generation_job_ids` joins the template with the evaluator's flag
-  # (Task 11), which drops this exception.
-  assert keys - {"generation_job_ids"} <= names, keys - names
+  assert keys <= names, keys - names
   assert {"sdfb_job", "run_id", "generation_job_ids", "output_dataset"} <= keys
 
 

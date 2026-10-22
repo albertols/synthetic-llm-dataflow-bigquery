@@ -166,6 +166,7 @@ function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
   } as EvaluationDataHistoryRow["evaluation_params"];
   const base = baseRunId(spec);
   const tables = spec.relational ? ["users", "orders", "order_items"] : spec.tables;
+  const generationJobId = mockGenerationJobId(spec);
   return {
     evaluation_id: spec.id,
     recorded_at: spec.evaluatedAt,
@@ -185,7 +186,7 @@ function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
         ? dataflowJobId(Date.parse(spec.evaluatedAt), (lo, hi) => rng.int(lo, hi))
         : null,
     image: `europe-west3-docker.pkg.dev/${PROJECT}/sdfb/sdfb-evaluation:${evaluatorVersion}`,
-    generation_job_id: mockGenerationJobId(spec),
+    generation_job_id: generationJobId,
     generation_job_name: mockGenerationJobName(spec),
     generation_region: "europe-west3",
     generation_started_at: minutes(spec.evaluatedAt, -150),
@@ -256,6 +257,8 @@ function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
     artifacts_uri: `gs://synthetic-platform-demo/synthetic/evaluations/${spec.id}/`,
     generator_version: mockVersions(spec).worker,
     generator_config_digest: mockConfigDigest(mockValues(spec, tables)),
+    // ADR 0045: what the evaluator writes for a single-job evaluation
+    generation_job_ids: [generationJobId],
   };
 }
 

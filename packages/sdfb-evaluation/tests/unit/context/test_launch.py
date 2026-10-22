@@ -14,9 +14,9 @@
 """`job_id` → `LaunchContext` (`sdfb_evaluation.context.launch`): the
 resolution order, `params_source`, fallbacks and the registry filters.
 
-Design: docs/DESIGN.md §7 Validation and the dead-letter queue;
-§8 Configuration
-(ADR 0043, 0044).
+Design: docs/DESIGN.md §4 Relational generation;
+§7 Validation and the dead-letter queue; §8 Configuration
+(ADR 0043, 0044, 0045).
 """
 
 from __future__ import annotations
@@ -1570,3 +1570,122 @@ def test_job_record_by_name_without_a_launch_time_takes_the_latest_with_a_note(
   assert len(notes) == 1
   note = notes[0]
   assert "the latest is taken" in note and BASE in note and _PREVIOUS in note
+
+
+# --------------------------------------------------------------------------
+# ADR 0045 — a whole-model launch's batches are one launch
+# --------------------------------------------------------------------------
+_LAUNCH = "manual__2026-10-21-abcd1234"
+_LANDING = "demo-project.synthetic_data"
+
+
+def _batch_row(batch: int, index: int, table: str, *, recorded: bool = True):
+  return {
+      "run_id": f"{_LAUNCH}-b{batch:02d}-{index:02d}-{table}",
+      "landing_table": f"{_LANDING}.{table}",
+      "reference_table": f"demo-project.src.{table}",
+      "created_at": f"2026-10-21T10:{batch:02d}:{index:02d}.000000Z",
+      "launch_run_id": _LAUNCH if recorded else None,
+      "job_id": f"job-{batch}" if recorded else None,
+  }
+
+
+def _by_base(rows, base):
+  return LaunchContext.from_sources(
+      job=None,
+      launch_config=None,
+      writes=(),
+      manual={
+          "base_run_id": base,
+          "params": {
+              "run_id": base
+          }
+      },
+      runs=rows)
+
+
+_BATCH_ROWS = [
+    _batch_row(0, 0, "T_A"),
+    _batch_row(0, 1, "T_B"),
+    _batch_row(1, 0, "T_C"),
+]
+
+
+@pytest.mark.parametrize("recorded", [True, False])
+def test_a_model_launch_by_its_base_takes_every_batchs_rows(recorded):
+  """With the record (launch_run_id) and without it (the `-bNN` rule)."""
+  rows = [
+      _batch_row(b, i, t, recorded=recorded)
+      for b, i, t in ((0, 0, "T_A"), (0, 1, "T_B"), (1, 0, "T_C"))
+  ]
+  ctx = _by_base(rows, _LAUNCH)
+  assert sorted(ctx.tables_in_order) == [
+      f"{_LANDING}.{t}" for t in ("T_A", "T_B", "T_C")
+  ]
+  assert ctx.base_run_id == _LAUNCH
+  assert not [w for w in ctx.warnings if "another launch" in w]
+
+
+def test_one_batch_by_its_own_run_id():
+  ctx = _by_base(_BATCH_ROWS, f"{_LAUNCH}-b01")
+  assert ctx.tables_in_order == (f"{_LANDING}.T_C",)
+
+
+def test_a_run_id_that_merely_ends_like_a_batch_is_its_own_launch():
+  row = {
+      "run_id": "nightly-b01",
+      "landing_table": f"{_LANDING}.T_A",
+      "created_at": "2026-10-21T10:00:00.000000Z",
+  }
+  ctx = _by_base([row], "nightly-b01")
+  assert ctx.tables_in_order == (f"{_LANDING}.T_A",)
+
+
+def test_without_a_base_the_batches_group_by_their_recorded_launch():
+  ctx = LaunchContext.from_sources(
+      job=None, launch_config=None, writes=(), manual=None, runs=_BATCH_ROWS)
+  assert len(ctx.tables_in_order) == 3
+  assert not [w for w in ctx.warnings if "launches" in w]
+
+
+def _one_table_batch_config(run_id: str) -> dict:
+  """The `launch_config` a one-table batch b03 logs (ADR 0045): the batch's
+  run_id, and its one run id with the suffix a multi-table plan gets."""
+  return {
+      "run_id": f"{_LAUNCH}-b03",
+      "resolved": {
+          "tables_in_order": [f"{_LANDING}.T_A"],
+          "run_ids": [run_id],
+      },
+  }
+
+
+def test_a_one_table_batchs_launch_config_is_kept():
+  """`plan_launch(model_launch=True)` names a one-table batch's run
+  `<batch run id>-00-<table>`: no reorder, so the log is kept."""
+  ctx = LaunchContext.from_sources(
+      job=None,
+      launch_config=_one_table_batch_config(f"{_LAUNCH}-b03-00-T_A"),
+      writes=(),
+      manual=None)
+  assert ctx.tables_in_order == (f"{_LANDING}.T_A",)
+  assert ctx.run_ids == (f"{_LAUNCH}-b03-00-T_A",)
+  assert ctx.params_source == "logs"
+  assert not [w for w in ctx.warnings if "launch_config discarded" in w]
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    [
+        f"{_LAUNCH}-b03-01-T_A",  # another position
+        f"{_LAUNCH}-b03-00-T_B",  # another table
+        f"{_LAUNCH}-b04-00-T_A",  # another batch
+    ])
+def test_a_one_table_run_id_of_another_run_is_still_discarded(run_id):
+  ctx = LaunchContext.from_sources(
+      job=None,
+      launch_config=_one_table_batch_config(run_id),
+      writes=(),
+      manual={"tables_in_order": [f"{_LANDING}.T_A"]})
+  assert ctx.params_source == "manual"
+  assert any("launch_config discarded" in w for w in ctx.warnings)

@@ -716,6 +716,7 @@ describe("the adjusted-keys launch (ADR 0038)", { timeout: 60_000 }, () => {
     expect(isEvaluatorJobName(chained.generation_job_name)).toBe(false);
     expect(isEvaluatorJobName(miswired.generation_job_name)).toBe(true);
     expect(miswired.generation_job_id).toBe(chained.evaluation_job_id);
+    expect(miswired.generation_job_ids).toEqual([chained.evaluation_job_id]);
     expect([miswired.generation_started_at, miswired.generation_finished_at]).toEqual([
       chained.evaluated_at,
       chained.finished_at,

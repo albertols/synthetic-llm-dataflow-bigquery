@@ -73,6 +73,7 @@ Every row also says which generation it evaluated, and with what:
 | `retrieval_method` | `free_text.pool_seed_strategy` as launched, for every engine, `b2_library` included (as before ADR 0044); `validation_runs.retrieval_method` is NULL for `b2_library` |
 | `generator_version` | `validation_runs.generator_version` of the evaluated generation, `<base>-<branch>-<sha7>[-dirty]`; NULL when the generation wrote no record |
 | `generator_config_digest` | `validation_runs.config_digest` of the evaluated generation: same digest, same generator config; NULL when the generation wrote no record |
+| `generation_job_ids` | the Dataflow job ids of the generation this evaluation covers: each batch job of a whole-model launch that landed (`generation_job_id` is the first, ADR 0045), else the one generation job; empty when the evaluation names no job |
 
 ## How to read a metric row
 

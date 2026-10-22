@@ -29,6 +29,7 @@ from sdfb_evaluation.context.jobs import (
 from sdfb_evaluation.context.runs import (
     RECORD_READ_COLUMNS,
     of_job,
+    rows_of_jobs,
     runs_for,
     runs_of_job,
     split_run_id,
@@ -391,3 +392,33 @@ def test_runs_of_job_needs_both_window_bounds(fake_bq):
     ])
 def test_of_job(row_id, row_name, job_id, job_name, expected):
   assert of_job(row_id, row_name, job_id, job_name) is expected
+
+
+def test_rows_of_jobs_keeps_the_listed_jobs_rows():
+  rows = [{
+      "run_id": "B-b00-00-T_A",
+      "job_id": "job-0"
+  }, {
+      "run_id": "B-b01-00-T_B",
+      "job_id": "job-1"
+  }, {
+      "run_id": "B-b02-00-T_C",
+      "job_id": "job-2"
+  }]
+  notes: list[str] = []
+  kept = rows_of_jobs(rows, ["job-0", "job-1"], notes)
+  assert [r["run_id"] for r in kept] == ["B-b00-00-T_A", "B-b01-00-T_B"]
+  assert notes == [
+      "validation_runs rows of jobs not in generation_job_ids were not "
+      "evaluated: ['B-b02-00-T_C']"
+  ]
+
+
+def test_rows_without_a_job_id_are_kept_with_a_note():
+  rows = [{"run_id": "B-b00-00-T_A", "job_id": None}]
+  notes: list[str] = []
+  assert rows_of_jobs(rows, ["job-0"], notes) == rows
+  assert notes == [
+      "validation_runs rows that carry no job id were evaluated (nothing "
+      "says which job wrote them): ['B-b00-00-T_A']"
+  ]

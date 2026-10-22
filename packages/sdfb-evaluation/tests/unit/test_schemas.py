@@ -50,15 +50,17 @@ def test_registry_gui_filters_and_lifecycle():
               "retrieval_method", "reference_rows_limit", "source_stats_tier",
               "profiler_version", "generation_params", "evaluation_params",
               "overall_score", "tables", "params_source", "generator_version",
-              "generator_config_digest"):
+              "generator_config_digest", "generation_job_ids"):
     assert col in names, col
 
 
 def test_registry_record_columns_are_appended_and_nullable():
   fields = schemas.load_schema("evaluation_data_history")
-  names = [f["name"] for f in fields]
-  assert names[-2:] == ["generator_version", "generator_config_digest"]
-  assert all(f.get("mode", "NULLABLE") == "NULLABLE" for f in fields[-2:])
+  assert [f["name"] for f in fields][-3:] == [
+      "generator_version", "generator_config_digest", "generation_job_ids"
+  ]
+  assert all(f.get("mode", "NULLABLE") == "NULLABLE" for f in fields[-3:-1])
+  assert fields[-1]["type"] == "STRING" and fields[-1]["mode"] == "REPEATED"
   (source,) = [f for f in fields if f["name"] == "params_source"]
   assert "validation_runs" in source["description"]
 

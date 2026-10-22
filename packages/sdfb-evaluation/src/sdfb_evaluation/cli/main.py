@@ -28,6 +28,9 @@ A target (plan, run) is exactly one of
     --job_id J --region R          a generation Dataflow job
     --run_id B                     a launch by its base run id, from the
                                    validation_runs of --output_dataset
+    --run_id B [--generation_job_ids J1,J2]
+                                   a whole-model launch (ADR 0045): only
+                                   the rows those batch jobs wrote
     --tables A,B --landing_dataset L --reference_dataset D
       [--relationships_uri U]      tables named by hand
 
@@ -88,9 +91,9 @@ is Beam's to read.)
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
-Design: docs/DESIGN.md §7 Validation and the dead-letter queue;
-§11 Evaluation (sdfb-evaluation)
-(ADR 0041, 0044).
+Design: docs/DESIGN.md §4 Relational generation;
+§7 Validation and the dead-letter queue; §11 Evaluation (sdfb-evaluation)
+(ADR 0041, 0044, 0045).
 """
 
 from __future__ import annotations
@@ -240,6 +243,15 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
       "the job id. A template launch passes it "
       "as --generation_job_id, because the template launcher does not pass "
       "a parameter named job_id (ADR 0041)")
+  group.add_argument(
+      "--generation_job_ids",
+      dest="job_ids",
+      type=_csv,
+      help="with --run_id alone (a whole-model launch's base run id, "
+      "ADR 0045): the Dataflow ids of its batch jobs that landed, "
+      "comma-separated. Only the rows those jobs wrote are evaluated (a row "
+      "that carries no job id is kept, with a note); the registry row "
+      "records every id, the first as generation_job_id")
   group.add_argument(
       "--run_id",
       type=_text,
@@ -510,6 +522,11 @@ def _check_target(parser: argparse.ArgumentParser,
                                                            args.tables),
                                ("--seed_table", args.seed_table)) if value
   ]
+  job_ids = getattr(args, "job_ids", None)
+  if job_ids and (not args.run_id or args.job_id or args.tables or
+                  args.seed_table):
+    parser.error("--generation_job_ids goes with --run_id alone (a "
+                 "whole-model launch's base run id, ADR 0045)")
   if args.fixture_dir:
     if targets:
       parser.error("--fixture_dir is its own target")

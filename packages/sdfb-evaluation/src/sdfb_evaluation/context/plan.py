@@ -144,8 +144,9 @@ distance is 0), then schema order — and every pair among them.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
-Design: docs/DESIGN.md §5 Fidelity; §7 Validation and the dead-letter queue
-(ADR 0022, 0044).
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity;
+§7 Validation and the dead-letter queue
+(ADR 0022, 0044, 0045).
 """
 
 from __future__ import annotations
@@ -1329,6 +1330,10 @@ class EvaluationPlan:  # pylint: disable=too-many-instance-attributes  # one fie
     return {
         "generation_job_id":
             launch.generation_job_id,
+        # ADR 0045: a whole-model launch's batch jobs, else the one job
+        "generation_job_ids":
+            list(launch.generation_job_ids) or
+            ([launch.generation_job_id] if launch.generation_job_id else []),
         "generation_job_name":
             launch.job_name,
         "generation_region":

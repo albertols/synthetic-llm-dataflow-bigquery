@@ -1629,3 +1629,23 @@ def test_a_launch_without_a_record_writes_nulls_and_flat_params():
   assert seed["generator_config_digest"] is None
   assert seed["generation_params"]["run_id"] == BASE
   assert "values" not in seed["generation_params"]
+
+
+def test_the_registry_row_records_every_generation_job():
+  bq = thelook_bq()
+  launch = dataclasses.replace(
+      thelook_launch(bq),
+      generation_job_id="job-0",
+      generation_job_ids=("job-0", "job-1"))
+  plan, _ = _plan(bq, launch)
+  seed = plan.registry_seed()
+  _check_row(seed)
+  assert seed["generation_job_id"] == "job-0"
+  assert seed["generation_job_ids"] == ["job-0", "job-1"]
+
+
+def test_a_single_job_evaluation_records_its_one_job():
+  plan, _ = _plan()
+  seed = plan.registry_seed()
+  expected = [seed["generation_job_id"]] if seed["generation_job_id"] else []
+  assert seed["generation_job_ids"] == expected
