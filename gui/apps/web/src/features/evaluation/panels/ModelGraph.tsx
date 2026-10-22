@@ -10,6 +10,8 @@
  */
 import { useId, useMemo, useState, type KeyboardEvent } from "react";
 
+import { NOT_APPLICABLE_LABEL } from "@contracts/applicability";
+
 import { InfoHint } from "@/components/InfoHint";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/cn";
@@ -27,6 +29,7 @@ import {
   type GraphEdge,
   type GraphNode,
 } from "../lib/graph";
+import { batchLabel, type KeyState, type TableFacts } from "../lib/tables";
 import { VisualFrame } from "../components/VisualFrame";
 
 const STATUS_GLYPH: Record<string, string> = { pass: "✓", warn: "!", fail: "✕", info: "i", not_evaluated: "–" };
@@ -66,16 +69,35 @@ function adjustmentChip(adjustment: NonNullable<GraphNode["adjustment"]>): { tex
   };
 }
 
-/** The accessible name of a table node or tile: score, status, the ADR 0038 key reading and what pressing does. */
-function nodeLabel(node: GraphNode, selected: boolean): string {
+const PK_TEXT: Record<KeyState, string> = { declared: "PK", none: "no PK", unknown: "PK ?" };
+
+/** The per-table facts of a tile, in words (ADR 0036, ADR 0044, ADR 0045). */
+function factsLabel(facts: TableFacts): string {
+  const key =
+    facts.pk === "declared"
+      ? `primary key ${facts.pkColumns.join(", ") || "declared"}`
+      : facts.pk === "none"
+        ? "no primary key declared: its uniqueness check is not applicable"
+        : "primary key not known";
+  const override = facts.sourceOverride ? `, source override ${facts.sourceOverride}` : "";
+  const batch = facts.batch !== null ? `, batch job ${batchLabel(facts.batch)}` : "";
+  return `, ${key}${override}${batch}`;
+}
+
+/**
+ * The accessible name of a table node or tile: score, status, the per-table facts (tiles), the ADR 0038 key
+ * reading and what pressing does.
+ */
+function nodeLabel(node: GraphNode, selected: boolean, facts?: TableFacts): string {
   const adjusted = node.adjustment
     ? `, primary key: ${node.adjustment.kind === "disagree" ? "measures disagree" : node.adjustment.label} (ADR 0038)`
     : "";
-  const status = node.status ? `, ${node.status}` : "";
+  const shown = facts?.status ?? node.status;
+  const status = shown ? `, ${shown}` : "";
   const action = selected
     ? "Showing only this table; press to show all tables."
     : "Press to scope the views to this table.";
-  return `${node.name}${node.external ? " (external)" : ""}: overall score ${fmtScore(node.score)}${status}${adjusted}. ${action}`;
+  return `${node.name}${node.external ? " (external)" : ""}: overall score ${fmtScore(node.score)}${status}${facts ? factsLabel(facts) : ""}${adjusted}. ${action}`;
 }
 
 function seqForScore(score: number | null): string {
@@ -273,18 +295,31 @@ function NodeBox({
  * One isolated table: a button that scopes the run view to it, like a node of the layered drawing. It
  * carries the ADR 0038 reading as a node does: the "PK adj." chip text and the key reading in its label.
  */
-function Tile({ node, selected, onSelect }: { node: GraphNode; selected: boolean; onSelect: (name: string) => void }) {
-  const glyph = STATUS_GLYPH[node.status ?? ""] ?? "";
+function Tile({
+  node,
+  facts,
+  selected,
+  onSelect,
+}: {
+  node: GraphNode;
+  facts: TableFacts | undefined;
+  selected: boolean;
+  onSelect: (name: string) => void;
+}) {
+  const status = facts?.status ?? node.status ?? "not_evaluated";
+  const glyph = STATUS_GLYPH[status] ?? "";
+  const pk = facts?.pk ?? "unknown";
   const chip = node.adjustment ? adjustmentChip(node.adjustment) : null;
   return (
     <button
       type="button"
       data-slot="table-tile"
       data-table={node.name}
-      data-status={node.status ?? "not_evaluated"}
+      data-status={status}
+      data-pk={pk}
       data-adjustment={node.adjustment?.verdict}
       aria-pressed={selected}
-      aria-label={nodeLabel(node, selected)}
+      aria-label={nodeLabel(node, selected, facts)}
       onClick={() => onSelect(node.name)}
       className={cn(
         "flex w-full cursor-pointer flex-col justify-between rounded-md border bg-surface-2 py-1 pr-2 pl-2.5 text-left",
@@ -294,10 +329,30 @@ function Tile({ node, selected, onSelect }: { node: GraphNode; selected: boolean
       // The left edge is the score colour (sequential, as the node bars); the glyph and number say it too.
       style={{ height: `${TILE_H_REM}rem`, borderLeftWidth: 4, borderLeftColor: seqForScore(node.score) }}
     >
-      <span className="truncate font-mono text-xs font-semibold text-text-1" title={node.name}>
-        {node.name}
+      <span className="flex min-w-0 items-center gap-1">
+        <span className="truncate font-mono text-xs font-semibold text-text-1" title={node.name}>
+          {node.name}
+        </span>
+        {facts?.sourceOverride ? (
+          <span
+            aria-hidden="true"
+            className="ml-auto text-xs text-text-2"
+            title={`source override: ${facts.sourceOverride}`}
+          >
+            ⇄
+          </span>
+        ) : null}
       </span>
       <span className="flex items-center gap-1.5 text-[11px] text-text-2 tabular-nums">
+        {facts ? (
+          <span
+            aria-hidden="true"
+            className={pk === "none" ? "text-text-3" : undefined}
+            title={pk === "none" ? NOT_APPLICABLE_LABEL.pk : undefined}
+          >
+            {PK_TEXT[pk]}
+          </span>
+        ) : null}
         <span aria-hidden="true">{glyph}</span>
         {fmtScore(node.score)}
         {chip ? (
@@ -309,6 +364,11 @@ function Tile({ node, selected, onSelect }: { node: GraphNode; selected: boolean
             {chip.text}
           </span>
         ) : null}
+        {facts && facts.batch !== null ? (
+          <span aria-hidden="true" className="ml-auto text-text-3">
+            {batchLabel(facts.batch)}
+          </span>
+        ) : null}
       </span>
     </button>
   );
@@ -317,10 +377,12 @@ function Tile({ node, selected, onSelect }: { node: GraphNode; selected: boolean
 /** The degree-0 tables (ADR 0036): a grid bounded at TILE_ROWS_MAX rows, scrolling inside its frame. */
 function TileGrid({
   tiles,
+  facts,
   selected,
   onSelect,
 }: {
   tiles: readonly GraphNode[];
+  facts?: ReadonlyMap<string, TableFacts>;
   selected?: string;
   onSelect: (name: string) => void;
 }) {
@@ -347,7 +409,7 @@ function TileGrid({
         >
           {tiles.map((node) => (
             <li key={node.name}>
-              <Tile node={node} selected={selected === node.name} onSelect={onSelect} />
+              <Tile node={node} facts={facts?.get(node.name)} selected={selected === node.name} onSelect={onSelect} />
             </li>
           ))}
         </ul>
@@ -360,12 +422,15 @@ export function ModelGraph({
   graph,
   modelName,
   resolvedFrom,
+  facts,
   selected,
   onSelect,
 }: {
   graph: Graph;
   modelName: string | null;
   resolvedFrom: Graph["resolvedFrom"];
+  /** Per-table facts (lib/tables.ts) the tiles show; without them a tile shows its score only. */
+  facts?: ReadonlyMap<string, TableFacts>;
   selected?: string;
   onSelect: (table: string | undefined) => void;
 }) {
@@ -381,6 +446,9 @@ export function ModelGraph({
         overall_score: n.score,
         status: n.status,
         placement: n.placement,
+        pk: facts?.get(n.name)?.pk ?? null,
+        batch: facts?.get(n.name)?.batch ?? null,
+        source_override: facts?.get(n.name)?.sourceOverride ?? null,
         pk_adjustment: n.adjustment
           ? n.adjustment.kind === "disagree"
             ? "measures disagree"
@@ -397,7 +465,7 @@ export function ModelGraph({
         status: e.status,
       })),
     ],
-    [graph],
+    [graph, facts],
   );
   const select = (name: string) => onSelect(selected === name ? undefined : name);
   return (
@@ -482,7 +550,7 @@ export function ModelGraph({
           </svg>
         </div>
       ) : null}
-      {graph.tiles.length ? <TileGrid tiles={graph.tiles} selected={selected} onSelect={select} /> : null}
+      {graph.tiles.length ? <TileGrid tiles={graph.tiles} facts={facts} selected={selected} onSelect={select} /> : null}
       {graph.edges.length ? (
         <ul className="mt-3 grid gap-1.5 text-xs text-text-2" aria-label="Foreign keys">
           {graph.edges.map((edge) => (

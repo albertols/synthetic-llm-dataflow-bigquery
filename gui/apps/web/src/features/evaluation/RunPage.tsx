@@ -43,6 +43,7 @@ import { buildGraph, WIDE_GRAPH_MIN_TILES } from "./lib/graph";
 import { findings, headline } from "./lib/interpret";
 import { columnSummaries, countStatuses, familyCards, heatmapModel, tableNames } from "./lib/model";
 import { toleranceOf } from "./lib/record";
+import { tableFacts } from "./lib/tables";
 import { ColumnDrawer } from "./panels/ColumnDrawer";
 import { ColumnHeatmap, HEATMAP_PAGE } from "./panels/ColumnHeatmap";
 import { DetectionPanel } from "./panels/DetectionPanel";
@@ -151,6 +152,8 @@ function RunPageContent() {
     // A re-reading layered on the evaluator's rows: the cards, the headline and the counts below
     // are computed from the rows as stored, whatever the adjustments say.
     const adjusted = adjustmentRows(detail, adjustments?.model_adjustments, tolerance);
+    const graph = buildGraph(detail, model, adjusted, record?.declared_tables);
+    const facts = tableFacts({ detail, graph, record });
     return {
       model,
       summaries,
@@ -160,7 +163,9 @@ function RunPageContent() {
       cards: familyCards(detail),
       findings: findings(detail, adjustments?.model_adjustments, tolerance),
       headline: headline(detail),
-      graph: buildGraph(detail, model, adjusted, record?.declared_tables),
+      graph,
+      facts,
+      factsByName: new Map(facts.map((f) => [f.name, f])),
       tables: tableNames(detail.evaluation, detail.metrics),
       counts: countStatuses(detail.metrics.filter((m) => !isRollup(m.metric_id))),
     };
@@ -418,6 +423,7 @@ function RunPageContent() {
                 />
                 <ModelGraph
                   graph={derived.graph}
+                  facts={derived.factsByName}
                   modelName={evaluation.relationship_model}
                   resolvedFrom={derived.graph.resolvedFrom}
                   selected={table}
@@ -446,6 +452,7 @@ function RunPageContent() {
               />
               <ModelGraph
                 graph={derived.graph}
+                facts={derived.factsByName}
                 modelName={evaluation.relationship_model}
                 resolvedFrom={derived.graph.resolvedFrom}
                 selected={table}

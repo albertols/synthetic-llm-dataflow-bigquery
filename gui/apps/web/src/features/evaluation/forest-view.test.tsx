@@ -88,6 +88,29 @@ describe("a forest of isolated tables (ADR 0036)", () => {
     expect(within(frame).getByRole("cell", { name: "T_120" })).toBeInTheDocument();
   });
 
+  it("every tile says whether its table declares a key, reads another source, and which batch job built it", async () => {
+    stubForest();
+    renderAt(`/evaluation/${ID}`);
+    const grid = await screen.findByRole("region", { name: "Isolated tables: 120" });
+    await waitFor(() => expect(tile(grid, "T_003")).toHaveAttribute("data-pk", "none"));
+    expect(tile(grid, "T_003")).toHaveTextContent("no PK");
+    expect(tile(grid, "T_003")).toHaveAccessibleName(/no primary key declared/);
+    expect(tile(grid, "T_001")).toHaveTextContent("PK");
+    expect(tile(grid, "T_007")).toHaveTextContent("⇄");
+    expect(tile(grid, "T_007")).toHaveAccessibleName(/source override example_archive\.T_007_V2/);
+    expect(tile(grid, "T_033")).toHaveTextContent("b03");
+    expect(tile(grid, "T_004")).toHaveAttribute("data-status", "fail");
+  });
+
+  it("without a record the tiles still read the key and the batch from the evaluator's rows and the run ids", async () => {
+    stubForest(forestDetail(), null);
+    renderAt(`/evaluation/${ID}`);
+    const grid = await screen.findByRole("region", { name: "Isolated tables: 120" });
+    await waitFor(() => expect(tile(grid, "T_003")).toHaveAttribute("data-pk", "none"));
+    expect(tile(grid, "T_033")).toHaveTextContent("b03");
+    expect(tile(grid, "T_007")).not.toHaveTextContent("⇄");
+  });
+
   it("an isolated table whose key the launch adjusted keeps its ADR 0038 reading on the tile", async () => {
     const detail: EvaluationDetail = {
       evaluation: evaluation({
