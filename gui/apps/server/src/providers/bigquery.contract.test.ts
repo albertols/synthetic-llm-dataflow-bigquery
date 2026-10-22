@@ -21,7 +21,7 @@ import { buildApp } from "../app";
 import { loadConfig } from "../config";
 import { assertReadOnly, QUERIES } from "../queries/registry";
 import { BigQueryProvider, type BigQueryClient } from "./bigquery";
-import { MockProvider } from "./mock";
+import { belongsToLaunch, MockProvider } from "./mock";
 import { BytesCapError, ContractError, newContext } from "./types";
 
 const config = loadConfig({
@@ -177,6 +177,28 @@ describe("the BigQuery provider", { timeout: 60_000 }, () => {
     );
     expect(calls).toHaveLength(2);
     expect(again).toEqual({ bytesEstimate: 0, queries: 1, cacheHits: 1, warnings: [] });
+  });
+
+  it("filters runs by launch with the mock's grammar, three-digit positions included (ADR 0045)", () => {
+    const sql = QUERIES["runs.list"].sql({ quality: "p.q", rag: "p.r" });
+    const pattern = /r'(\^[^']+\$)'/.exec(sql)?.[1];
+    expect(pattern).toBeDefined();
+    const bigquery = new RegExp(pattern!);
+    const cases: [string, boolean][] = [
+      ["B", true],
+      ["B-07-T_A", true],
+      ["B-100-T_A", true],
+      ["B-b00-07-T_A", true],
+      ["B-b03-100-T_A", true],
+      ["B-7-T_A", false],
+      ["B-bX-07-T_A", false],
+      ["Bx-07-T_A", false],
+    ];
+    for (const [runId, belongs] of cases) {
+      expect(belongsToLaunch(runId, "B"), runId).toBe(belongs);
+      const rest = runId.startsWith("B-") ? runId.slice(2) : null;
+      expect(runId === "B" || (rest !== null && bigquery.test(rest)), runId).toBe(belongs);
+    }
   });
 
   it("selects metrics_info in every registry query (Ruling R37)", () => {

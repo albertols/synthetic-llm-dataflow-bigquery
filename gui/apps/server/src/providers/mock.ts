@@ -62,10 +62,13 @@ const nullsFirst = (a: string | null, b: string | null) =>
 
 /**
  * `run_id` belongs to launch `base`: the one-table id itself, a per-table `<base>-NN-<table>`, or a
- * batched launch's `<base>-bNN-MM-<table>` (ADR 0045).
+ * batched launch's `<base>-bNN-MM-<table>` (ADR 0045). The launcher writes positions `{i:02d}`, so
+ * a launch or batch of 100 tables or more has three-digit positions from 100 on.
  */
 export function belongsToLaunch(runId: string, base: string): boolean {
-  return runId === base || (runId.startsWith(`${base}-`) && /^(b\d{2,}-)?\d{2}-.+$/.test(runId.slice(base.length + 1)));
+  return (
+    runId === base || (runId.startsWith(`${base}-`) && /^(b\d{2,}-)?\d{2,}-.+$/.test(runId.slice(base.length + 1)))
+  );
 }
 
 type JsonValue = NonNullable<DlqSummary["sample"]>["raw_record"];

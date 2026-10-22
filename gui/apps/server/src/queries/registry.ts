@@ -328,7 +328,7 @@ LIMIT @limit`,
 WHERE (IFNULL(ARRAY_LENGTH(@run_ids), 0) = 0 OR run_id IN UNNEST(@run_ids))
   AND (@base_run_id IS NULL OR run_id = @base_run_id
     OR (STARTS_WITH(run_id, CONCAT(@base_run_id, '-'))
-      AND REGEXP_CONTAINS(SUBSTR(run_id, LENGTH(@base_run_id) + 2), r'^(b[0-9]{2,}-)?[0-9]{2}-.+$')))
+      AND REGEXP_CONTAINS(SUBSTR(run_id, LENGTH(@base_run_id) + 2), r'^(b[0-9]{2,}-)?[0-9]{2,}-.+$')))
   AND (IFNULL(ARRAY_LENGTH(@landing_table), 0) = 0 OR landing_table IN UNNEST(@landing_table))
   AND (IFNULL(ARRAY_LENGTH(@engine), 0) = 0 OR engine IN UNNEST(@engine))
   AND (IFNULL(ARRAY_LENGTH(@status), 0) = 0 OR status IN UNNEST(@status))
