@@ -56,6 +56,7 @@ RM = _load()
 
 @pytest.fixture(name="argv")
 def fixture_argv(tmp_path):
+  logs = tmp_path / "logs"
   model = tmp_path / "forest.yaml"
   model.write_text(_FOREST, encoding="utf-8")
   return [
@@ -63,7 +64,7 @@ def fixture_argv(tmp_path):
       "--model_uri=gs://b/synthetic/models/m/v1/", "--source_dataset=p.src",
       "--landing_dataset=p.land", f"--relationships_uri={model}",
       "--validation_runs_table=p.synthetic_data_quality.validation_runs",
-      "--project=p", "--runner=DataflowRunner", f"--log_dir={tmp_path / 'logs'}"
+      "--project=p", "--runner=DataflowRunner", f"--log_dir={logs}"
   ]
 
 
@@ -96,10 +97,12 @@ class _Proc:
   def wait(self, timeout=None):
     del timeout
     if self.index in self.owner.hang:
+      self.owner.arrive()
       self._ended.wait(120)
       return self.returncode
     time.sleep(self.owner.pause)
-    self.stdout.write(f"INFO Created job with id: [job-{self.index}]\n")
+    if self.index not in self.owner.no_id:
+      self.stdout.write(f"INFO Created job with id: [job-{self.index}]\n")
     with self.owner.lock:
       self.owner.running -= 1
     self.returncode = self.owner.codes.get(self.index, 0)
@@ -110,8 +113,18 @@ class _Launchers:
   """A fake `subprocess.Popen`: records the commands, the processes and the
   peak number running at once."""
 
-  def __init__(self, codes=None, pause=0.0, hang=(), refuse=()):
+  def __init__(self,
+               codes=None,
+               pause=0.0,
+               hang=(),
+               refuse=(),
+               no_id=(),
+               signal_after=None):
     self.codes = codes or {}
+    self.no_id = set(no_id)
+    # (signal, n): sent to this process once n hung launchers are waiting
+    self.signal_after = signal_after
+    self.arrived = 0
     self.pause = pause
     self.hang = set(hang)
     self.refuse = set(refuse)
@@ -133,20 +146,21 @@ class _Launchers:
       self.peak = max(self.peak, self.running)
       proc = _Proc(self, cmd, stdout, index)
       self.procs.append(proc)
+    if index in self.hang and index not in self.no_id:
+      # a hung launcher has already created its Dataflow job
+      stdout.write(f"INFO Created job with id: [job-{index}]\n")
     return proc
 
-
-def _interrupt_once_started(launchers, count):
-  """Ctrl-C the main thread once `count` launchers are running."""
-
-  def watch():
-    deadline = time.monotonic() + 60
-    while len(launchers.procs) < count and time.monotonic() < deadline:
-      time.sleep(0.01)
-    # a real SIGINT: it wakes the main thread out of a blocking wait
-    os.kill(os.getpid(), signal.SIGINT)
-
-  threading.Thread(target=watch, daemon=True).start()
+  def arrive(self):
+    """A hung launcher is waiting: send the signal once all are. Sent from
+    here, the main thread is certainly still inside `main`."""
+    with self.lock:
+      self.arrived += 1
+      fire = (
+          self.signal_after is not None and
+          self.arrived == self.signal_after[1])
+    if fire:
+      os.kill(os.getpid(), self.signal_after[0])
 
 
 def test_a_dry_run_prints_the_plan_and_launches_nothing(argv, monkeypatch,
@@ -215,25 +229,109 @@ def test_a_launcher_that_cannot_start_fails_only_its_batch(
   assert "r1-b00  FAILED rc=127" in capsys.readouterr().out
 
 
-def test_ctrl_c_terminates_every_running_launcher(argv, monkeypatch):
-  launchers = _Launchers(hang={0, 1})
+def test_ctrl_c_terminates_every_running_launcher(argv, monkeypatch, capsys):
+  launchers = _Launchers(hang={0, 1}, signal_after=(signal.SIGINT, 2))
   monkeypatch.setattr(RM.subprocess, "Popen", launchers)
-  _interrupt_once_started(launchers, 2)
   with pytest.raises(KeyboardInterrupt):
     RM.main([*argv, "--max_tables_per_job=1", "--max_parallel_jobs=2"])
   # two ran and were stopped; the third never started
   assert len(launchers.procs) == 2
   assert all(p.terminated and p.returncode is not None for p in launchers.procs)
+  # their Dataflow jobs outlive the launchers: the operator is told
+  out = capsys.readouterr().out
+  assert "job-0" in out and "job-1" in out and "b00.log" in out
+  assert "may still be running" in out
+  assert "gcloud dataflow jobs cancel" in out
+
+
+def test_sigterm_takes_the_same_stop_path_and_restores_the_handler(
+    argv, monkeypatch):
+  before = signal.getsignal(signal.SIGTERM)
+  launchers = _Launchers(hang={0, 1}, signal_after=(signal.SIGTERM, 2))
+  monkeypatch.setattr(RM.subprocess, "Popen", launchers)
+  with pytest.raises(KeyboardInterrupt):
+    RM.main([*argv, "--max_tables_per_job=1", "--max_parallel_jobs=2"])
+  assert all(p.terminated for p in launchers.procs)
+  assert signal.getsignal(signal.SIGTERM) == before
 
 
 def test_an_interrupt_starts_no_further_batch(argv, monkeypatch):
-  launchers = _Launchers(hang={0})
+  launchers = _Launchers(hang={0}, signal_after=(signal.SIGINT, 1))
   monkeypatch.setattr(RM.subprocess, "Popen", launchers)
-  _interrupt_once_started(launchers, 1)
   with pytest.raises(KeyboardInterrupt):
     RM.main([*argv, "--max_tables_per_job=1"])
   assert [p.index for p in launchers.procs] == [0]
   assert launchers.procs[0].terminated
+
+
+def test_stop_gives_every_launcher_one_shared_grace_period(monkeypatch):
+  grace = 0.3
+
+  class Slow:
+    """Outlives the grace period; only kill() ends it."""
+    returncode = None
+    killed = False
+
+    def poll(self):
+      return self.returncode
+
+    def terminate(self):
+      pass
+
+    def kill(self):
+      self.killed = True
+      self.returncode = -9
+
+    def wait(self, timeout=None):
+      if self.killed:
+        return self.returncode
+      time.sleep(timeout)
+      raise subprocess.TimeoutExpired("x", timeout)
+
+  procs = [Slow(), Slow(), Slow()]
+  fleet = RM.Fleet()
+  monkeypatch.setattr(RM, "_TERMINATE_GRACE_SECONDS", grace)
+  monkeypatch.setattr(RM.subprocess, "Popen", lambda *a, **k: procs.pop())
+  started = [fleet.start(["x"], stdout=None) for _ in range(3)]
+  begin = time.monotonic()
+  fleet.stop()
+  elapsed = time.monotonic() - begin
+  assert all(p.killed for p in started)
+  assert elapsed < 2 * grace
+
+
+def test_no_evaluation_command_when_no_batch_landed(argv, monkeypatch, capsys):
+  monkeypatch.setattr(RM.subprocess, "Popen", _Launchers(codes={0: 1, 1: 1}))
+  assert RM.main([*argv, "--max_tables_per_job=2"]) == 1
+  out = capsys.readouterr().out
+  assert "sdfb-eval" not in out
+  assert "no evaluation command" in out
+
+
+def test_the_failed_batches_are_named_in_the_closing_line(
+    argv, monkeypatch, capsys):
+  monkeypatch.setattr(RM.subprocess, "Popen", _Launchers(codes={0: 1, 2: 3}))
+  assert RM.main([*argv, "--max_tables_per_job=1"]) == 1
+  assert "2 batch(es) failed: r1-b00, r1-b02" in capsys.readouterr().out
+
+
+def test_a_landed_batch_without_a_job_id_marks_the_command_partial(
+    argv, monkeypatch, capsys):
+  monkeypatch.setattr(RM.subprocess, "Popen", _Launchers(no_id={1}))
+  assert RM.main([*argv, "--max_tables_per_job=1"]) == 0
+  out = capsys.readouterr().out
+  assert "r1-b01  OK" in out
+  assert "# PARTIAL: r1-b01" in out
+  assert "--generation_job_ids=job-0,job-2 " in out
+
+
+def test_no_command_when_no_landed_batch_has_a_job_id(argv, monkeypatch,
+                                                      capsys):
+  monkeypatch.setattr(RM.subprocess, "Popen", _Launchers(no_id={0, 1}))
+  assert RM.main([*argv, "--max_tables_per_job=2"]) == 0
+  out = capsys.readouterr().out
+  assert "sdfb-eval" not in out
+  assert "no evaluation command" in out and "r1-b00" in out
 
 
 def test_a_stubborn_launcher_is_killed(monkeypatch):
@@ -268,11 +366,12 @@ def test_a_stubborn_launcher_is_killed(monkeypatch):
   assert fleet.start(["x"], stdout=None) is None
 
 
-@pytest.mark.parametrize("flag",
-                         ["--batch_index=0", "--batch_count=2", "--job_name=m"])
-def test_the_script_owns_the_per_batch_flags(argv, flag, capsys):
+@pytest.mark.parametrize(
+    "flags", [["--batch_index=0"], ["--batch_count=2"], ["--job_name=m"],
+              ["--batch_ind=0"], ["--batch_c", "2"], ["--job_n=x"]])
+def test_the_script_owns_the_per_batch_flags(argv, flags, capsys):
   with pytest.raises(SystemExit) as exc:
-    RM.main([*argv, flag])
+    RM.main([*argv, *flags])
   assert exc.value.code == 2
   assert "set per batch by the launcher" in capsys.readouterr().err
 
