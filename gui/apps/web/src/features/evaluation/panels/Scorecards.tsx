@@ -10,6 +10,8 @@
  * list renders only its visible rows above twelve tables, and each table's
  * integrity score opens the units it averages (ADR 0036, ADR 0042).
  */
+import { useMemo } from "react";
+
 import type { MetricRow } from "@contracts/api";
 import { inapplicableKey, NOT_APPLICABLE_LABEL } from "@contracts/applicability";
 
@@ -21,6 +23,7 @@ import { fmtPoints, fmtRepeatShare, fmtTolerance } from "@/lib/adjustments";
 import { cn } from "@/lib/cn";
 
 import { PK_METRIC, type AdjustmentRow } from "../lib/adjustment";
+import type { TableView } from "../lib/tables";
 import { FAMILY_LABEL, FAMILY_QUESTION, isLevel, metricConcept, metricShort } from "../lib/catalogue";
 import { fmtCompared, fmtMetric, fmtScore, scopeLabel } from "../lib/format";
 import type { RunTab } from "../lib/interpret";
@@ -198,15 +201,23 @@ function Card({
   selectedTable,
   adjustments,
   tolerance,
+  view,
   onOpen,
 }: {
   card: FamilyCard;
   tolerance?: number;
   selectedTable?: string;
   adjustments: readonly AdjustmentRow[];
+  view?: TableView | null;
   onOpen: (t: OpenTarget) => void;
 }) {
   const titleId = `scorecard-${card.family}`;
+  // The filter bar's tables in its order; the roll-up and the counts above stay the whole run's.
+  const rows = useMemo(() => {
+    if (!view) return card.tables;
+    const byTable = new Map(card.tables.map((t) => [t.table, t]));
+    return view.order.flatMap((name) => byTable.get(name) ?? []);
+  }, [card.tables, view]);
   const warn = card.rollup?.threshold_warn ?? 0.85;
   const fail = card.rollup?.threshold_fail ?? 0.7;
   // ADR 0038: of the key failures the evaluator counted, those on keys the launch adjusted. The
@@ -264,7 +275,20 @@ function Card({
           </span>
         </div>
       </div>
-      {card.tables.length > 1 ? <TableScores card={card} rows={card.tables} selectedTable={selectedTable} /> : null}
+      {card.tables.length > 1 ? (
+        <div className="grid gap-1">
+          {view && rows.length !== card.tables.length ? (
+            <p className="text-[11px] text-text-3">
+              {rows.length} of {card.tables.length} tables (filtered)
+            </p>
+          ) : null}
+          {rows.length ? (
+            <TableScores card={card} rows={rows} selectedTable={selectedTable} />
+          ) : (
+            <p className="text-xs text-text-3">No table matches the filters.</p>
+          )}
+        </div>
+      ) : null}
       <p className="-mb-1 flex items-center gap-0.5 text-[11px] font-medium tracking-wide text-text-3 uppercase">
         Metrics per level
         <InfoHint concept="eval:info-status" />
@@ -306,11 +330,14 @@ export function Scorecards({
   selectedTable,
   adjustments = NO_ADJUSTMENTS,
   tolerance,
+  view,
   onOpen,
 }: {
   cards: FamilyCard[];
   /** The run's repeat-share tolerance (A1 ruling R16); the default when omitted. */
   tolerance?: number;
+  /** The filter bar's tables and order (lib/tables.ts `tableView`); null: every table, in score order. */
+  view?: TableView | null;
   selectedTable?: string;
   /** ADR 0038: per table, the generator's verdict on its declared key (lib/adjustment.ts `adjustmentRows`). */
   adjustments?: readonly AdjustmentRow[];
@@ -332,6 +359,7 @@ export function Scorecards({
             selectedTable={selectedTable}
             adjustments={adjustments}
             tolerance={tolerance}
+            view={view}
             onOpen={onOpen}
           />
         ))}

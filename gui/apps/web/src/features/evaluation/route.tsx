@@ -108,6 +108,12 @@ export const runSearchSchema = searchParams({
   q: optString(),
   /** Heatmap rows shown (grows by 50). */
   rows: integer({ min: 1, max: 5000 }),
+  /** Table filters of a run with many tables (ADR 0042): name search, primary key, status, batch job, sort. */
+  tq: optString(),
+  pk: oneOf(["yes", "no"]),
+  ts: oneOf(["pass", "warn", "fail", "not_evaluated"]),
+  batch: integer({ min: 0, max: 9999 }),
+  tsort: oneOf(["score", "name"]),
 });
 export type EvaluationRunSearch = SearchOf<typeof runSearchSchema>;
 

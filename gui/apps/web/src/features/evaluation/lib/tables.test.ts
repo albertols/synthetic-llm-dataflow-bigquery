@@ -5,7 +5,16 @@ import type { RelationshipModel } from "@contracts/relational";
 
 import { evaluation, forestDetail, forestRecord, richDetail, tableEntry } from "../test/fixtures";
 import { buildGraph } from "./graph";
-import { batchLabel, batchOfRunId, declaresNoEdges, modelSummary, tableFacts, type TableFacts } from "./tables";
+import {
+  batchLabel,
+  batchOfRunId,
+  declaresNoEdges,
+  filterTables,
+  modelSummary,
+  tableFacts,
+  tableView,
+  type TableFacts,
+} from "./tables";
 
 const byName = (facts: TableFacts[]) => new Map(facts.map((f) => [f.name, f]));
 
@@ -187,5 +196,58 @@ describe("declaresNoEdges", () => {
     expect(
       declaresNoEdges({ facts: tableFacts({ detail: unknown, graph: g3 }), graph: g3, evaluation: unknown.evaluation }),
     ).toBe(false);
+  });
+});
+
+describe("filterTables", () => {
+  const facts = [...forest().values()];
+  const names = (f: TableFacts[]) => f.map((t) => t.name);
+
+  it("searches names, and filters by key, status and batch job", () => {
+    expect(names(filterTables(facts, { query: "t_01", sort: "name" }))).toEqual([
+      "T_010",
+      "T_011",
+      "T_012",
+      "T_013",
+      "T_014",
+      "T_015",
+      "T_016",
+      "T_017",
+      "T_018",
+      "T_019",
+    ]);
+    expect(filterTables(facts, { pk: "no" })).toHaveLength(40);
+    expect(filterTables(facts, { pk: "yes" })).toHaveLength(80);
+    const fails = filterTables(facts, { status: "fail" });
+    expect(fails).toHaveLength(34);
+    expect(fails.every((f) => f.status === "fail")).toBe(true);
+    expect(names(filterTables(facts, { batch: 3, sort: "name" }))).toEqual([
+      "T_031",
+      "T_032",
+      "T_033",
+      "T_034",
+      "T_035",
+      "T_036",
+      "T_037",
+      "T_038",
+      "T_039",
+      "T_040",
+    ]);
+  });
+
+  it("sorts worst first by default: failing tables, then the lowest scores, then the name", () => {
+    expect(names(filterTables(facts, {})).slice(0, 4)).toEqual(["T_040", "T_080", "T_120", "T_013"]);
+    expect(names(filterTables(facts, { sort: "name" })).slice(0, 2)).toEqual(["T_001", "T_002"]);
+  });
+
+  it("a view keeps the order and says how many of how many", () => {
+    const view = tableView(facts, { pk: "no", sort: "name" });
+    expect([
+      view.order.length,
+      view.total,
+      view.order[0],
+      view.visible.has("T_003"),
+      view.visible.has("T_001"),
+    ]).toEqual([40, 120, "T_003", true, false]);
   });
 });

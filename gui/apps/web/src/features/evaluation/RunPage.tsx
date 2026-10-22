@@ -1,7 +1,8 @@
 /**
  * The run view, /evaluation/$evaluationId: one evaluation read top-down —
  * header (status, scope, reference, sampled mode), scorecards per family
- * with level chips, the interpretation, the model graph, then one section
+ * with level chips, from ten tables a filter bar over the tiles and the
+ * per-table scorecards (ADR 0042), the interpretation, the model graph, then one section
  * per question (columns, pairs, privacy, detection, relational, parameters)
  * in URL-driven tabs. Only the active section renders; column profiles load
  * when a drawer opens. The noise-floor legend is docked to the bottom.
@@ -37,6 +38,7 @@ import { CLOSE_BY_HAND, isStale, STALE_AFTER_HOURS } from "@/lib/runState";
 
 import { NoiseLegend } from "./components/NoiseLegend";
 import { StatusCounts } from "./components/StatusCounts";
+import { TableFilters } from "./components/TableFilters";
 import { adjustedSummary, adjustedTableCount, adjustmentRows, PK_METRIC } from "./lib/adjustment";
 import { isRollup } from "./lib/catalogue";
 import { fmtScore, shortModel } from "./lib/format";
@@ -44,7 +46,15 @@ import { buildGraph, WIDE_GRAPH_MIN_TILES } from "./lib/graph";
 import { findings, headline } from "./lib/interpret";
 import { columnSummaries, countStatuses, familyCards, heatmapModel, tableNames } from "./lib/model";
 import { projectOf, toleranceOf } from "./lib/record";
-import { declaresNoEdges, modelSummary, SUMMARY_MIN_TABLES, tableFacts } from "./lib/tables";
+import {
+  declaresNoEdges,
+  FILTER_MIN_TABLES,
+  modelSummary,
+  SUMMARY_MIN_TABLES,
+  tableFacts,
+  tableView,
+  type TableFilter,
+} from "./lib/tables";
 import { ColumnDrawer } from "./panels/ColumnDrawer";
 import { ColumnHeatmap, HEATMAP_PAGE } from "./panels/ColumnHeatmap";
 import { DetectionPanel } from "./panels/DetectionPanel";
@@ -58,7 +68,7 @@ import { PrivacyPanel } from "./panels/PrivacyPanel";
 import { RelationalPanel } from "./panels/RelationalPanel";
 import { RunHeader } from "./panels/RunHeader";
 import { Scorecards, type OpenTarget } from "./panels/Scorecards";
-import type { EvaluationRunSearch, RunTabId } from "./route";
+import { runSearchSchema, type EvaluationRunSearch, type RunTabId } from "./route";
 import { RelatedKnobsProvider } from "./components/RelatedKnobs";
 
 const route = getRouteApi("/evaluation/$evaluationId");
@@ -198,6 +208,43 @@ function RunPageContent() {
     [derived, table, search.family, search.problems, search.q],
   );
 
+  // The router merges the raw URL over a key its validator dropped, so a stale `?ts=bogus` still reads
+  // as "bogus" here: validate the filter keys again, and a stale link shows every table.
+  const tableFilter = useMemo<TableFilter>(() => {
+    const field = runSearchSchema.fields;
+    return {
+      query: field.tq(search.tq),
+      pk: field.pk(search.pk),
+      status: field.ts(search.ts),
+      batch: field.batch(search.batch),
+      sort: field.tsort(search.tsort),
+    };
+  }, [search.tq, search.pk, search.ts, search.batch, search.tsort]);
+  // Ten or more tables: the bar shows, and its values narrow the tiles and the per-table scorecards.
+  const view = useMemo(
+    () => (derived && derived.facts.length >= FILTER_MIN_TABLES ? tableView(derived.facts, tableFilter) : null),
+    [derived, tableFilter],
+  );
+  const batchJobs = useMemo(
+    () =>
+      derived
+        ? [...new Set(derived.facts.flatMap((f) => (f.batch === null ? [] : [f.batch])))].sort((a, b) => a - b)
+        : [],
+    [derived],
+  );
+  const onTableFilter = useCallback(
+    (patch: Partial<TableFilter>) => {
+      const next: Partial<EvaluationRunSearch> = {};
+      if ("query" in patch) next.tq = patch.query || undefined;
+      if ("pk" in patch) next.pk = patch.pk;
+      if ("status" in patch) next.ts = patch.status;
+      if ("batch" in patch) next.batch = patch.batch;
+      if ("sort" in patch) next.tsort = patch.sort === "score" ? undefined : patch.sort;
+      setSearch(next, true);
+    },
+    [setSearch],
+  );
+
   const onOpen = useCallback(
     (target: OpenTarget) => setSearch({ tab: target.tab, column: target.column, table: target.table ?? table }),
     [setSearch, table],
@@ -251,6 +298,15 @@ function RunPageContent() {
         project={projectOf(record?.runs[0]?.landing_table ?? evaluation.tables[0]?.landing_table)}
       />
     ) : null;
+  const filterBar = view ? (
+    <TableFilters
+      value={tableFilter}
+      onChange={onTableFilter}
+      batches={batchJobs}
+      shown={view.order.length}
+      total={view.total}
+    />
+  ) : null;
   const notApplicable = detail.metrics.filter((m) => inapplicableKey(m) !== null).length;
   const rowsSynthetic = evaluation.tables.reduce((acc, t) => acc + (t.rows_synthetic ?? 0), 0);
   // The registry row names an evaluator job as its generation job: by that job's name, or because
@@ -425,11 +481,13 @@ function RunPageContent() {
                 />
               </div>
               {summaryCard}
+              {filterBar}
               <Scorecards
                 cards={derived.cards}
                 selectedTable={table}
                 adjustments={derived.adjusted}
                 tolerance={tolerance}
+                view={view}
                 onOpen={onOpen}
               />
               <div className={cn("grid gap-6", !wideGraph && "xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]")}>
@@ -442,6 +500,7 @@ function RunPageContent() {
                 <ModelGraph
                   graph={derived.graph}
                   facts={derived.factsByName}
+                  view={view}
                   modelName={evaluation.relationship_model}
                   resolvedFrom={derived.graph.resolvedFrom}
                   selected={table}
@@ -469,9 +528,11 @@ function RunPageContent() {
                       : "The evaluator wrote a registry row but no metric rows.")
                 }
               />
+              {filterBar}
               <ModelGraph
                 graph={derived.graph}
                 facts={derived.factsByName}
+                view={view}
                 modelName={evaluation.relationship_model}
                 resolvedFrom={derived.graph.resolvedFrom}
                 selected={table}

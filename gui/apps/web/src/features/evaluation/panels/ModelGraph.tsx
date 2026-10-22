@@ -29,7 +29,7 @@ import {
   type GraphEdge,
   type GraphNode,
 } from "../lib/graph";
-import { batchLabel, type KeyState, type TableFacts } from "../lib/tables";
+import { batchLabel, type KeyState, type TableFacts, type TableView } from "../lib/tables";
 import { VisualFrame } from "../components/VisualFrame";
 
 const STATUS_GLYPH: Record<string, string> = { pass: "✓", warn: "!", fail: "✕", info: "i", not_evaluated: "–" };
@@ -377,11 +377,15 @@ function Tile({
 /** The degree-0 tables (ADR 0036): a grid bounded at TILE_ROWS_MAX rows, scrolling inside its frame. */
 function TileGrid({
   tiles,
+  total,
   facts,
   selected,
   onSelect,
 }: {
+  /** The tiles to draw (a filter may have narrowed them). */
   tiles: readonly GraphNode[];
+  /** Every isolated table of the run, drawn or not. */
+  total: number;
   facts?: ReadonlyMap<string, TableFacts>;
   selected?: string;
   onSelect: (name: string) => void;
@@ -389,30 +393,35 @@ function TileGrid({
   return (
     <div className="grid gap-2" data-slot="tile-grid">
       <p className="flex items-center gap-0.5 text-[11px] font-medium tracking-wide text-text-3 uppercase">
-        Isolated tables · {formatCount(tiles.length)}
+        Isolated tables ·{" "}
+        {tiles.length === total ? formatCount(total) : `${formatCount(tiles.length)} of ${formatCount(total)}`}
         <InfoHint concept="eval:isolated-tables" />
       </p>
       <div
         role="region"
         tabIndex={0}
-        aria-label={`Isolated tables: ${tiles.length}`}
+        aria-label={`Isolated tables: ${total}`}
         className="overflow-y-auto rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring"
         style={{ maxHeight: `${TILE_GRID_MAX_REM}rem` }}
       >
-        <ul
-          aria-label={`${tiles.length} tables`}
-          className="m-0 grid list-none p-0"
-          style={{
-            gridTemplateColumns: `repeat(auto-fill, minmax(${TILE_MIN_REM}rem, 1fr))`,
-            gap: `${TILE_GAP_REM}rem`,
-          }}
-        >
-          {tiles.map((node) => (
-            <li key={node.name}>
-              <Tile node={node} facts={facts?.get(node.name)} selected={selected === node.name} onSelect={onSelect} />
-            </li>
-          ))}
-        </ul>
+        {tiles.length ? (
+          <ul
+            aria-label={`${tiles.length} tables`}
+            className="m-0 grid list-none p-0"
+            style={{
+              gridTemplateColumns: `repeat(auto-fill, minmax(${TILE_MIN_REM}rem, 1fr))`,
+              gap: `${TILE_GAP_REM}rem`,
+            }}
+          >
+            {tiles.map((node) => (
+              <li key={node.name}>
+                <Tile node={node} facts={facts?.get(node.name)} selected={selected === node.name} onSelect={onSelect} />
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="p-3 text-xs text-text-3">No table matches the filters.</p>
+        )}
       </div>
     </div>
   );
@@ -423,6 +432,7 @@ export function ModelGraph({
   modelName,
   resolvedFrom,
   facts,
+  view,
   selected,
   onSelect,
 }: {
@@ -431,10 +441,18 @@ export function ModelGraph({
   resolvedFrom: Graph["resolvedFrom"];
   /** Per-table facts (lib/tables.ts) the tiles show; without them a tile shows its score only. */
   facts?: ReadonlyMap<string, TableFacts>;
+  /** The filter bar's tables and order (lib/tables.ts `tableView`); null: every tile, in graph order. */
+  view?: TableView | null;
   selected?: string;
   onSelect: (table: string | undefined) => void;
 }) {
   const titleId = useId();
+  // The view lists covered tables only, so a filter can never surface a table without facts (ADR 0036).
+  const shownTiles = useMemo(() => {
+    if (!view) return graph.tiles;
+    const byName = new Map(graph.tiles.map((t) => [t.name, t]));
+    return view.order.flatMap((name) => byName.get(name) ?? []);
+  }, [graph.tiles, view]);
   const layered = useMemo(() => graph.nodes.filter((n) => n.placement === "layer"), [graph.nodes]);
   const nodes = useMemo(() => new Map(layered.map((n) => [n.name, n])), [layered]);
   const data = useMemo(
@@ -550,7 +568,9 @@ export function ModelGraph({
           </svg>
         </div>
       ) : null}
-      {graph.tiles.length ? <TileGrid tiles={graph.tiles} facts={facts} selected={selected} onSelect={select} /> : null}
+      {graph.tiles.length ? (
+        <TileGrid tiles={shownTiles} total={graph.tiles.length} facts={facts} selected={selected} onSelect={select} />
+      ) : null}
       {graph.edges.length ? (
         <ul className="mt-3 grid gap-1.5 text-xs text-text-2" aria-label="Foreign keys">
           {graph.edges.map((edge) => (

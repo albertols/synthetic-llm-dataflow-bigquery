@@ -268,3 +268,81 @@ describe("per-table scorecards at scale (ADR 0036)", () => {
     await waitFor(() => expect(within(frame).getByText("T_100")).toBeInTheDocument());
   });
 });
+
+describe("search and filters (ADR 0042)", () => {
+  const grid = () => screen.findByRole("region", { name: "Isolated tables: 120" });
+  const listOf = (family: string) => screen.getByRole("list", { name: `${family} score per table` });
+
+  it("narrow the tiles and the per-table scorecards together, and live in the URL", async () => {
+    stubForest();
+    const { router } = renderAt(`/evaluation/${ID}`);
+    const search = await screen.findByRole("searchbox", { name: "Find a table" });
+    // One change event: the input is controlled by the URL, as the heatmap's search is.
+    fireEvent.change(search, { target: { value: "T_11" } });
+    await waitFor(() => expect(router.state.location.search).toMatchObject({ tq: "T_11" }));
+    expect(tiles(await grid())).toHaveLength(10);
+    expect(listOf("Integrity").querySelectorAll("li")).toHaveLength(10);
+    expect(screen.getByRole("group", { name: "Table filters" })).toHaveTextContent("10 of 120 tables");
+  });
+
+  it("filter by key from a shared link", async () => {
+    stubForest();
+    renderAt(`/evaluation/${ID}?pk=no`);
+    expect(tiles(await grid()).every((t) => t.dataset.pk === "none")).toBe(true);
+    expect(tiles(await grid())).toHaveLength(40);
+  });
+
+  it("status and batch narrow as the URL says", async () => {
+    stubForest();
+    renderAt(`/evaluation/${ID}?ts=fail&batch=0`);
+    const shown = tiles(await grid()).map((t) => t.dataset.table);
+    // Batch b00 is T_001 … T_010; of those, T_004 (key failure) and T_010 (score 0.70) fail.
+    expect(shown.sort()).toEqual(["T_004", "T_010"]);
+  });
+
+  it("sort worst first by default, by name on request", async () => {
+    stubForest();
+    renderAt(`/evaluation/${ID}?tsort=name`);
+    expect(tiles(await grid())[0]).toHaveAttribute("data-table", "T_001");
+  });
+
+  it("a filter that matches nothing says so, and Clear filters brings every table back", async () => {
+    stubForest();
+    renderAt(`/evaluation/${ID}?tq=nothing`);
+    const region = await grid();
+    expect(region).toHaveTextContent("No table matches the filters.");
+    await userEvent.click(screen.getByRole("button", { name: "Clear filters" }));
+    await waitFor(() => expect(tiles(region)).toHaveLength(120));
+  });
+
+  it("stale values in a shared link are ignored", async () => {
+    stubForest();
+    renderAt(`/evaluation/${ID}?ts=bogus&batch=-1&pk=maybe`);
+    expect(tiles(await grid())).toHaveLength(120);
+    expect(screen.getByRole("group", { name: "Table filters" })).toHaveTextContent("120 of 120 tables");
+  });
+
+  it("search brings any table into a plain list", async () => {
+    stubForest();
+    renderAt(`/evaluation/${ID}?tq=T_100`);
+    await grid();
+    const list = listOf("Integrity");
+    expect(list.closest('[role="region"]')).toBeNull();
+    expect(within(list).getByRole("button", { name: /^Integrity units of T_100/ })).toBeInTheDocument();
+  });
+
+  it("below ten tables there is no filter bar", async () => {
+    stubForest(forestDetail(9), forestRecord(9));
+    renderAt(`/evaluation/${ID}`);
+    await screen.findByRole("region", { name: "Model summary" });
+    expect(screen.queryByRole("group", { name: "Table filters" })).toBeNull();
+  });
+
+  it("a served model's table the evaluation does not cover is never a tile and never counted as shown", async () => {
+    stubForest(forestDetail(), forestRecord(), [servedForest()]);
+    renderAt(`/evaluation/${ID}`);
+    expect(tiles(await grid())).toHaveLength(120);
+    expect(screen.getByRole("group", { name: "Table filters" })).toHaveTextContent("120 of 120 tables");
+    expect(screen.queryByText("No table matches the filters.")).toBeNull();
+  });
+});

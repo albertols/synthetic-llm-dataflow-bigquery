@@ -190,3 +190,54 @@ export function declaresNoEdges(input: {
   const roles = input.evaluation.tables.filter((t) => t.role !== "external").map((t) => t.role);
   return roles.length >= 2 && roles.every((r) => r === "isolated");
 }
+
+/** The filter bar shows from this many tables (ADR 0042; below it every table is already in view). */
+export const FILTER_MIN_TABLES = 10;
+
+export type TableSort = "score" | "name";
+
+export interface TableFilter {
+  /** Case-insensitive part of the table's name. */
+  query?: string;
+  pk?: "yes" | "no";
+  status?: TableStatus;
+  batch?: number;
+  /** "score" (the default): worst first, failing tables then the lowest scores. */
+  sort?: TableSort;
+}
+
+const STATUS_ORDER: Record<TableStatus, number> = { fail: 0, warn: 1, not_evaluated: 2, pass: 3 };
+
+const byName = (a: TableFacts, b: TableFacts) => a.name.localeCompare(b.name);
+const byWorst = (a: TableFacts, b: TableFacts) =>
+  STATUS_ORDER[a.status] - STATUS_ORDER[b.status] || (a.score ?? 2) - (b.score ?? 2) || byName(a, b);
+
+export function filterTables(facts: readonly TableFacts[], filter: TableFilter): TableFacts[] {
+  const query = filter.query?.trim().toLowerCase();
+  return facts
+    .filter(
+      (f) =>
+        (!query || f.name.toLowerCase().includes(query)) &&
+        (!filter.pk || (filter.pk === "yes" ? f.pk === "declared" : f.pk === "none")) &&
+        (!filter.status || f.status === filter.status) &&
+        (filter.batch === undefined || f.batch === filter.batch),
+    )
+    .sort(filter.sort === "name" ? byName : byWorst);
+}
+
+/**
+ * What the tiles and the per-table scorecards show under a filter: these tables, in this order.
+ * Built from the run's facts only, so a table the evaluation does not cover (no facts, no score,
+ * ADR 0036) is never in `order` and never counted in `total`.
+ */
+export interface TableView {
+  order: readonly string[];
+  visible: ReadonlySet<string>;
+  /** Every table the run covers. */
+  total: number;
+}
+
+export function tableView(facts: readonly TableFacts[], filter: TableFilter): TableView {
+  const order = filterTables(facts, filter).map((f) => f.name);
+  return { order, visible: new Set(order), total: facts.length };
+}
