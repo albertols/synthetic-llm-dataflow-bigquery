@@ -16,9 +16,13 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { formatDateTime, MISSING } from "@/lib/format";
 
 import { configYaml } from "../lib/configYaml";
-import { dataflowJobUrl, projectOf, SECTION_ORDER, shortVersion } from "../lib/record";
+import { dataflowJobUrl, generationRegion, projectOf, SECTION_ORDER, shortVersion } from "../lib/record";
+import { plannedBatchJobs } from "../lib/tables";
 
 const PROVENANCE_VARIANT = { file: "accent", flag: "info", default: "neutral" } as const;
+
+/** Above this many declared tables the list scrolls inside a focusable frame, as Tables in scope does (RunHeader). */
+const DECLARED_ROWS_MAX = 12;
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -110,7 +114,26 @@ export function GeneratorPanel({
         name,
         tableSummary(declaration),
       ]);
-  const batchJobs = record.batches.length;
+  // Planned, then recorded when they differ ("12 batch jobs · 11 recorded"), as the model summary card says it.
+  const recordedJobs = record.batches.length;
+  const plannedJobs = plannedBatchJobs(record.batches) ?? 0;
+  // The registry's region, else the record's: a link without its region does not open the job (ADR 0045).
+  const region = generationRegion(evaluation.generation_region, record);
+  const declared = (
+    <ul className="grid">
+      {tables.map(([name, { pk, fks }]) => {
+        return (
+          <li key={name} className="flex flex-wrap gap-2 border-b border-border py-1 last:border-0">
+            <span className="text-text-1">{name}</span>
+            <span className="text-text-2">pk {pk}</span>
+            <span className="text-text-3">
+              {fks} fk {fks === 1 ? "edge" : "edges"}
+            </span>
+          </li>
+        );
+      })}
+    </ul>
+  );
 
   return (
     <section aria-label="Generator" className="grid gap-3">
@@ -130,17 +153,23 @@ export function GeneratorPanel({
           </Badge>
         ))}
         {launched ? <span className="text-xs text-text-3">launched {formatDateTime(launched)}</span> : null}
-        {jobs.map((run) => (
-          <a
-            key={run.job_id}
-            className="font-mono text-xs text-link underline-offset-4 hover:underline"
-            href={dataflowJobUrl(run.job_id!, evaluation.generation_region, projectOf(run.landing_table))}
-            target="_blank"
-            rel="noreferrer noopener"
-          >
-            {run.job_id}
-          </a>
-        ))}
+        {jobs.map((run) =>
+          region ? (
+            <a
+              key={run.job_id}
+              className="font-mono text-xs text-link underline-offset-4 hover:underline"
+              href={dataflowJobUrl(run.job_id!, region, projectOf(run.landing_table))}
+              target="_blank"
+              rel="noreferrer noopener"
+            >
+              {run.job_id}
+            </a>
+          ) : (
+            <span key={run.job_id} className="font-mono text-xs [overflow-wrap:anywhere] text-text-2">
+              {run.job_id}
+            </span>
+          ),
+        )}
         <Button size="sm" className="ml-auto" disabled={configYaml(record) === null} onClick={() => download(record)}>
           <Download aria-hidden="true" />
           Download as config.yaml
@@ -201,25 +230,25 @@ export function GeneratorPanel({
                 {text(model.model) ?? MISSING} <span className="text-text-3">({text(model.sha12) ?? "no sha"})</span>
               </p>
               <p className="break-all text-text-2">{text(model.uri) ?? MISSING}</p>
-              {batchJobs ? (
+              {plannedJobs ? (
                 <p className="text-text-1">
-                  {tables.length} table{tables.length === 1 ? "" : "s"} · {batchJobs} batch job
-                  {batchJobs === 1 ? "" : "s"}
+                  {tables.length} table{tables.length === 1 ? "" : "s"} · {plannedJobs} batch job
+                  {plannedJobs === 1 ? "" : "s"}
+                  {recordedJobs < plannedJobs ? ` · ${recordedJobs} recorded` : ""}
                 </p>
               ) : null}
-              <ul className="grid">
-                {tables.map(([name, { pk, fks }]) => {
-                  return (
-                    <li key={name} className="flex flex-wrap gap-2 border-b border-border py-1 last:border-0">
-                      <span className="text-text-1">{name}</span>
-                      <span className="text-text-2">pk {pk}</span>
-                      <span className="text-text-3">
-                        {fks} fk {fks === 1 ? "edge" : "edges"}
-                      </span>
-                    </li>
-                  );
-                })}
-              </ul>
+              {tables.length > DECLARED_ROWS_MAX ? (
+                <div
+                  role="region"
+                  tabIndex={0}
+                  aria-label={`Declared tables: ${tables.length}`}
+                  className="max-h-96 overflow-y-auto rounded-md border border-border px-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring"
+                >
+                  {declared}
+                </div>
+              ) : (
+                declared
+              )}
             </CardContent>
           </Card>
         ) : null}

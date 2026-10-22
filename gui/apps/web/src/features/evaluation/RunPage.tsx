@@ -45,7 +45,7 @@ import { fmtScore, shortModel } from "./lib/format";
 import { buildGraph, WIDE_GRAPH_MIN_TILES } from "./lib/graph";
 import { findings, headline } from "./lib/interpret";
 import { columnSummaries, countStatuses, familyCards, heatmapModel, tableNames } from "./lib/model";
-import { projectOf, toleranceOf } from "./lib/record";
+import { generationRegion, projectOf, toleranceOf } from "./lib/record";
 import {
   declaresNoEdges,
   FILTER_MIN_TABLES,
@@ -220,11 +220,14 @@ function RunPageContent() {
       sort: field.tsort(search.tsort),
     };
   }, [search.tq, search.pk, search.ts, search.batch, search.tsort]);
-  // Ten or more tables: the bar shows, and its values narrow the tiles and the per-table scorecards.
+  // Ten or more tables: the bar shows, and its values narrow the tiles and the per-table scorecards. The
+  // table the view is scoped to stays shown (pinned first) when a filter would hide it.
   const view = useMemo(
-    () => (derived && derived.facts.length >= FILTER_MIN_TABLES ? tableView(derived.facts, tableFilter) : null),
-    [derived, tableFilter],
+    () => (derived && derived.facts.length >= FILTER_MIN_TABLES ? tableView(derived.facts, tableFilter, table) : null),
+    [derived, tableFilter, table],
   );
+  // The run's own tables drawn in the layered graph: the bar does not narrow them.
+  const layeredTables = useMemo(() => (derived ? derived.facts.filter((f) => f.degree > 0).length : 0), [derived]);
   const batchJobs = useMemo(
     () =>
       derived
@@ -294,7 +297,7 @@ function RunPageContent() {
     derived.facts.length >= SUMMARY_MIN_TABLES ? (
       <ModelSummaryCard
         summary={derived.summary}
-        region={evaluation.generation_region}
+        region={generationRegion(evaluation.generation_region, record)}
         project={projectOf(record?.runs[0]?.landing_table ?? evaluation.tables[0]?.landing_table)}
       />
     ) : null;
@@ -303,8 +306,10 @@ function RunPageContent() {
       value={tableFilter}
       onChange={onTableFilter}
       batches={batchJobs}
-      shown={view.order.length}
+      shown={view.matched}
       total={view.total}
+      pinned={view.pinned}
+      layered={layeredTables}
     />
   ) : null;
   const notApplicable = detail.metrics.filter((m) => inapplicableKey(m) !== null).length;
@@ -469,7 +474,10 @@ function RunPageContent() {
                   format={formatCount}
                   footnote={
                     notApplicable
-                      ? `${formatCount(notApplicable)} not applicable (no key declared): nothing to check. The rest is not a pass.`
+                      ? `${formatCount(notApplicable)} not applicable (no key declared): nothing to check.${
+                          // Only when something else was not evaluated: on a forest every one is a key check with no key.
+                          notApplicable < derived.counts.not_evaluated ? " The rest is not a pass." : ""
+                        }`
                       : "Not evaluated is not a pass: see the reasons below."
                   }
                 />

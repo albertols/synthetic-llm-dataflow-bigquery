@@ -82,12 +82,21 @@ export function tableFacts(input: {
   const batchOfTable = new Map<string, number>();
   for (const batch of input.record?.batches ?? []) for (const name of batch.tables) batchOfTable.set(name, batch.index);
   const external = new Set(evaluation.tables.filter((t) => t.role === "external").map((t) => t.name));
+  // One pass over the metric rows, not one per table: a corp-width forest has ~90k rows for 112 tables.
+  const rowsByTable = new Map<string, MetricRow[]>();
+  for (const m of metrics) {
+    const rows = rowsByTable.get(m.table_name);
+    if (rows) rows.push(m);
+    else rowsByTable.set(m.table_name, [m]);
+  }
+  const registryByName = new Map<string, EvaluationRecord["tables"][number]>();
+  for (const t of evaluation.tables) if (t.name && !registryByName.has(t.name)) registryByName.set(t.name, t);
   const out: TableFacts[] = [];
   for (const name of tableNames(evaluation, metrics)) {
     if (external.has(name)) continue;
-    const rows = metrics.filter((m) => m.table_name === name);
+    const rows = rowsByTable.get(name) ?? [];
     const scoreRow = rows.find((m) => m.metric_id === "table.overall_score");
-    const registry = evaluation.tables.find((t) => t.name === name);
+    const registry = registryByName.get(name);
     const keyFailures = rows.filter((m) => ZERO_TOLERANCE_IDS.has(m.metric_id) && m.status === "fail").length;
     const own = declared.get(name);
     out.push({
@@ -157,6 +166,7 @@ export function modelSummary(input: {
   // A launch records only the tables it generated: disabled ones are known only from the whole model.
   const whole = model && (sha12 === null || model.sha12 === sha12) ? model : null;
   const batches = record?.batches ?? [];
+  const batchCount = plannedBatchJobs(batches);
   return {
     model: recordedModel ?? evaluation.relationship_model,
     sha12,
@@ -170,9 +180,18 @@ export function modelSummary(input: {
     edges: graph.edges.length,
     isolated: facts.filter((f) => f.degree === 0).length,
     sourceOverrides: fromRecord ? facts.filter((f) => f.sourceOverride !== null).length : null,
-    batchCount: batches.length ? Math.max(...batches.map((b) => b.count)) : null,
+    batchCount,
     batches,
   };
+}
+
+/**
+ * The batch jobs a whole-model launch planned (`batch.count`, the largest any recorded batch says); null for
+ * a launch in one job. The model summary card and the Generator panel both show it, then how many of them
+ * were recorded when fewer were ("12 · 11 recorded").
+ */
+export function plannedBatchJobs(batches: readonly Pick<RecordBatch, "count">[]): number | null {
+  return batches.length ? Math.max(...batches.map((b) => b.count)) : null;
 }
 
 /**
@@ -228,16 +247,25 @@ export function filterTables(facts: readonly TableFacts[], filter: TableFilter):
 /**
  * What the tiles and the per-table scorecards show under a filter: these tables, in this order.
  * Built from the run's facts only, so a table the evaluation does not cover (no facts, no score,
- * ADR 0036) is never in `order` and never counted in `total`.
+ * ADR 0036) is never in `order` and never counted in `total`. The table the run view is scoped to
+ * (`?table=`) stays shown, pinned first, when the filter would hide it: a selection always has its
+ * tile and its row.
  */
 export interface TableView {
   order: readonly string[];
   visible: ReadonlySet<string>;
+  /** The tables the filter matches (the selected table pinned in `order` is not one of them). */
+  matched: number;
+  /** The selected table kept in view although the filter does not match it; null when none is. */
+  pinned: string | null;
   /** Every table the run covers. */
   total: number;
 }
 
-export function tableView(facts: readonly TableFacts[], filter: TableFilter): TableView {
-  const order = filterTables(facts, filter).map((f) => f.name);
-  return { order, visible: new Set(order), total: facts.length };
+export function tableView(facts: readonly TableFacts[], filter: TableFilter, selected?: string): TableView {
+  const matched = filterTables(facts, filter).map((f) => f.name);
+  const pinned =
+    selected !== undefined && !matched.includes(selected) && facts.some((f) => f.name === selected) ? selected : null;
+  const order = pinned ? [pinned, ...matched] : matched;
+  return { order, visible: new Set(order), matched: matched.length, pinned, total: facts.length };
 }

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { VirtualList, visibleRange } from "./VirtualList";
@@ -42,6 +42,8 @@ describe("VirtualList", () => {
     expect(frame).toHaveAttribute("tabindex", "0");
     expect(frame).toHaveStyle({ height: "288px" });
     const list = within(frame).getByRole("list", { name: "Tables" });
+    // The scrollbar spans every row, rendered or not: 120 rows of 24 px.
+    expect(list).toHaveStyle({ height: "2880px" });
     expect(list.querySelectorAll("li")).toHaveLength(17);
     expect(list.querySelector("li")).toHaveAttribute("aria-setsize", "120");
     fireEvent.scroll(frame, { target: { scrollTop: 24 * 108 } });
@@ -53,6 +55,32 @@ describe("VirtualList", () => {
   it("scrolls a chosen row into view", () => {
     renderList(ITEMS, 99);
     expect(within(screen.getByRole("list", { name: "Tables" })).getByText("T_100")).toBeInTheDocument();
+    // The frame itself moved, not only the rendered window: one row above the chosen one.
+    expect(screen.getByRole("region")).toHaveProperty("scrollTop", 98 * 24);
+  });
+
+  it("keeps a focused row rendered when it scrolls out of the window, so focus never drops to <body>", () => {
+    render(
+      <VirtualList
+        items={ITEMS}
+        rowHeight={24}
+        label="Tables"
+        getKey={(t) => t}
+        renderItem={(t) => <button type="button">{t}</button>}
+      />,
+    );
+    const button = screen.getByRole("button", { name: "T_002" });
+    act(() => button.focus());
+    const frame = screen.getByRole("region");
+    fireEvent.scroll(frame, { target: { scrollTop: 24 * 100 } });
+    const list = within(frame).getByRole("list", { name: "Tables" });
+    expect(within(list).getByText("T_110")).toBeInTheDocument();
+    expect(within(list).queryByText("T_003")).toBeNull();
+    expect(button).toHaveFocus();
+    expect(button.closest("li")).toHaveAttribute("aria-posinset", "2");
+    // Once focus leaves the list, the row leaves the DOM with the rest of the window.
+    act(() => button.blur());
+    expect(within(list).queryByText("T_002")).toBeNull();
   });
 
   it("never renders past the end after a filter shortens the list", () => {

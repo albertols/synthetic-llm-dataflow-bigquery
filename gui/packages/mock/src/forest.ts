@@ -216,11 +216,17 @@ const declaredOf = (t: ForestTable) => ({
   num_rows: t.numRows,
 });
 
-/** One batch job's snapshot: the launch's values, this job's tables as declared, its batch block. */
-function batchSnapshot(values: Record<string, Record<string, unknown>>, b: number): GeneratorSnapshot {
+/**
+ * One batch job's snapshot: the launch's values, this job's tables as declared, its batch block, and the
+ * Dataflow region in its beam block (`run_pipeline.beam_block`): the model DAG's evaluation, by `--run_id`,
+ * records no region, so a job link reads it here.
+ */
+function batchSnapshot(values: Record<string, Record<string, unknown>>, b: number, region: string): GeneratorSnapshot {
   const tables = FOREST_BATCHES[b]!;
+  const snapshot = mockSnapshot(FOREST_SPEC, values);
   return {
-    ...mockSnapshot(FOREST_SPEC, values),
+    ...snapshot,
+    beam: { ...snapshot.beam, region },
     relationships: {
       uri: FOREST_URI,
       model: FOREST_MODEL,
@@ -239,12 +245,13 @@ function forestRuns(
   startMs: number,
   finishedAt: string,
   generatorVersion: string,
+  region: string,
 ): ValidationRunsRow[] {
   const spec = FOREST_SPEC;
   const gate = knobNumber(`blocker_failure_ratio_${spec.env}`, 0.2);
   const digest = mockConfigDigest(values);
   return FOREST_BATCHES.flatMap((tables, b) => {
-    const config = JSON.stringify(batchSnapshot(values, b));
+    const config = JSON.stringify(batchSnapshot(values, b, region));
     return tables.map((name, j): ValidationRunsRow => {
       const t = byName.get(name)!;
       const rows = rowsOf(t);
@@ -360,13 +367,16 @@ export function buildForestLaunch(
   const rng = new Random(seedFrom(seed, spec.id));
   const running = registryBase(spec, rng);
   const base = baseRunId(spec);
+  // The launch's own window and region: its batch jobs ran in them, whatever the evaluation records.
   const startMs = Date.parse(running.generation_started_at!);
+  const finishedAt = running.generation_finished_at!;
+  const region = running.generation_region!;
   const jobIds = FOREST_BATCHES.map((_, b) => {
     const jobRng = new Random(seedFrom("forest-job", b));
     return dataflowJobId(startMs + b * 300_000, (lo, hi) => jobRng.int(lo, hi));
   });
   const values = forestValues();
-  const runs = forestRuns(base, jobIds, values, startMs, running.generation_finished_at!, running.generator_version!);
+  const runs = forestRuns(base, jobIds, values, startMs, finishedAt, running.generator_version!, region);
   running.relationship_model = FOREST_MODEL;
   running.relationship_model_sha = FOREST_RELATIONSHIP_MODEL.sha12;
   running.relationship_model_uri = FOREST_URI;
@@ -374,10 +384,14 @@ export function buildForestLaunch(
   running.base_run_id = base;
   running.run_ids = runs.map((r) => r.run_id);
   // `--run_id <base> --generation_job_ids <the 12 landed jobs>` (ADR 0045): the registry records every
-  // one, the first as generation_job_id — registryBase's single-job default would be stale.
+  // one, the first as generation_job_id — registryBase's single-job default would be stale. The evaluation
+  // resolves with no job (sdfb_evaluation/context/launch.py), so it records no job name, region or window.
   running.generation_job_id = jobIds[0]!;
   running.generation_job_ids = [...jobIds];
-  running.generation_job_name = batchJobName(0);
+  running.generation_job_name = null;
+  running.generation_region = null;
+  running.generation_started_at = null;
+  running.generation_finished_at = null;
   running.generator_config_digest = mockConfigDigest(values);
   // The record supplied the parameters (ADR 0044 D5): the snapshot's values as flags, without
   // landing_table / reference_table, with the whole-model keys of ADR 0045.
@@ -410,8 +424,9 @@ export function buildForestLaunch(
         sourceRows: sourceRowsOf(t),
         rows: rowsOf(t),
       };
+      // scope=manual: the model DAG reads each landing table whole (ADR 0045 D7).
       return {
-        ...tableEntry(spec, facts, run.run_id, run.reference_digest!, false),
+        ...tableEntry(spec, facts, run.run_id, run.reference_digest!, true),
         encoding_plan_digest: planDigest(t),
       };
     }),

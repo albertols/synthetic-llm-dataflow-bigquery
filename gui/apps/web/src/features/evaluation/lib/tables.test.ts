@@ -65,6 +65,22 @@ describe("tableFacts", () => {
     expect(a).toMatchObject({ name: "A_TABLE", pk: "unknown", status: "not_evaluated", batch: null, score: null });
   });
 
+  it("reads the metric rows a few times in all, not once per table (corp width: 112 tables × ~90k rows)", () => {
+    const detail = forestDetail();
+    let reads = 0;
+    const metrics = new Proxy([...detail.metrics], {
+      get(target, key, receiver) {
+        if (typeof key === "string" && /^\d+$/.test(key)) reads += 1;
+        return Reflect.get(target, key, receiver) as unknown;
+      },
+    });
+    const graph = buildGraph(detail);
+    const facts = tableFacts({ detail: { ...detail, metrics }, graph, record: null });
+    expect(facts).toHaveLength(120);
+    expect(facts.find((f) => f.name === "T_004")).toMatchObject({ status: "fail", keyFailures: 1 });
+    expect(reads).toBeLessThanOrEqual(3 * detail.metrics.length);
+  });
+
   it("leaves external parents out", () => {
     const detail = {
       evaluation: evaluation({ tables: [tableEntry("orders"), tableEntry("products", { role: "external" })] }),
@@ -249,5 +265,20 @@ describe("filterTables", () => {
       view.visible.has("T_003"),
       view.visible.has("T_001"),
     ]).toEqual([40, 120, "T_003", true, false]);
+  });
+
+  it("pins the selected table first when the filter would hide it, and counts only the matches", () => {
+    const view = tableView(facts, { pk: "no", sort: "name" }, "T_001");
+    expect([view.order.length, view.matched, view.pinned, view.order[0], view.order[1]]).toEqual([
+      41,
+      40,
+      "T_001",
+      "T_001",
+      "T_003",
+    ]);
+    // A selected table the filter keeps is not pinned; an unknown one (not the run's) is never added.
+    expect(tableView(facts, { pk: "no" }, "T_003")).toMatchObject({ matched: 40, pinned: null });
+    expect(tableView(facts, { pk: "no" }, "products")).toMatchObject({ matched: 40, pinned: null });
+    expect(tableView(facts, { pk: "no" }, "products").order).toHaveLength(40);
   });
 });

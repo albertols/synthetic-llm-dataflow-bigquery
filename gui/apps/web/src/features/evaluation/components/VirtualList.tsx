@@ -8,7 +8,9 @@
  *
  * The scroll offset is state, clamped at render (a filter that shortens the list never leaves the
  * window past its end); a `scrollToIndex` change adjusts that state during render, and the effect
- * only copies it to the DOM, so no effect body calls setState.
+ * only copies it to the DOM, so no effect body calls setState. A row that holds focus stays rendered
+ * when it scrolls out of the window (tracked by the rows' focus and blur events), so focus never
+ * drops to `<body>`.
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
@@ -63,6 +65,8 @@ export function VirtualList<T>({
   const frame = useRef<HTMLDivElement>(null);
   const [scrolled, setScrolled] = useState(0);
   const [followed, setFollowed] = useState<number | undefined>(undefined);
+  // The key of the row that holds focus: it stays rendered outside the window.
+  const [focusedKey, setFocusedKey] = useState<string | null>(null);
   const windowed = items.length > rows;
   const viewport = rows * rowHeight;
   const height = items.length * rowHeight;
@@ -94,6 +98,11 @@ export function VirtualList<T>({
       </ul>
     );
   const { start, end } = visibleRange(scrollTop, viewport, rowHeight, items.length, overscan);
+  const indices = Array.from({ length: end - start }, (_, k) => start + k);
+  const focused = focusedKey === null ? -1 : items.findIndex((item) => getKey(item) === focusedKey);
+  // In index order, so the DOM (and the tab order) stays the list's order.
+  if (focused >= 0 && (focused < start || focused >= end))
+    indices.splice(focused < start ? 0 : indices.length, 0, focused);
   return (
     <div
       ref={frame}
@@ -105,15 +114,22 @@ export function VirtualList<T>({
       style={{ height: viewport }}
     >
       <ul aria-label={label} className={cn("relative m-0 list-none p-0", className)} style={{ height }}>
-        {items.slice(start, end).map((item, k) => {
-          const index = start + k;
+        {indices.map((index) => {
+          const item = items[index]!;
+          const key = getKey(item);
           return (
             <li
-              key={getKey(item)}
+              key={key}
               aria-setsize={items.length}
               aria-posinset={index + 1}
               className="absolute inset-x-0"
               style={{ top: index * rowHeight, height: rowHeight }}
+              // React's focus events also bubble from a portal the row owns (an open popover), so the row
+              // stays while focus is anywhere in it.
+              onFocus={() => setFocusedKey(key)}
+              onBlur={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget)) setFocusedKey(null);
+              }}
             >
               {renderItem(item, index)}
             </li>

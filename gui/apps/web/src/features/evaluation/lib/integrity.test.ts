@@ -2,7 +2,7 @@ import { NO_IDENTITY_REASON, NO_PK_REASON } from "@contracts/applicability";
 import { describe, expect, it } from "vitest";
 
 import { metric } from "../test/fixtures";
-import { integrityUnits, unitsMean } from "./integrity";
+import { integrityUnits, integrityUnitsByTable, unitsMean } from "./integrity";
 
 const T = "A_TABLE";
 
@@ -54,6 +54,34 @@ describe("integrityUnits (the evaluator's roll-up units, Ruling R11)", () => {
     expect(units[3]!.note).toBe("Not applicable — no identity columns declared");
     expect(units[5]!.note).toBe("informational: no score");
     expect(unitsMean(units)).toBeCloseTo((1 + 0.7 + 0.8) / 3, 12);
+  });
+
+  it("keys a foreign key's rows as one unit, each foreign key apart, as the evaluator's unitOf", () => {
+    const units = integrityUnits(
+      [
+        // One edge: its orphan rate and its source orphan rate are one unit (`edge\0<edge>`).
+        metric("relationship.orphan_rate", { table_name: T, edge: "A_TABLE(COL_003) -> B_TABLE(COL_001)", score: 1 }),
+        metric("relationship.orphan_rate_source", {
+          table_name: T,
+          edge: "A_TABLE(COL_003) -> B_TABLE(COL_001)",
+          score: 0.5,
+        }),
+        // Another edge of the same table, measured by the same metric: its own unit.
+        metric("relationship.orphan_rate", { table_name: T, edge: "A_TABLE(COL_004) -> C_TABLE(COL_001)", score: 0.9 }),
+      ],
+      T,
+    );
+    expect(units.map((u) => [u.label, u.state, u.score])).toEqual([
+      ["A_TABLE(COL_003) -> B_TABLE(COL_001)", "counted", 0.75],
+      ["A_TABLE(COL_004) -> C_TABLE(COL_001)", "counted", 0.9],
+    ]);
+  });
+
+  it("groups every table's units in one pass, the same units as one table at a time", () => {
+    const byTable = integrityUnitsByTable(rows);
+    expect([...byTable.keys()].sort()).toEqual(["A_TABLE", "B_TABLE"]);
+    expect(byTable.get(T)).toEqual(integrityUnits(rows, T));
+    expect(byTable.get("B_TABLE")!.map((u) => [u.label, u.state, u.score])).toEqual([["COL_001", "counted", 0]]);
   });
 
   it("a key check not evaluated for another reason is not scored, not N/A", () => {

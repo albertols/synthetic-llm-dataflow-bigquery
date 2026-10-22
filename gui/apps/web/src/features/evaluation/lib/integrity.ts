@@ -41,11 +41,33 @@ function labelOf(row: MetricRow): string {
 
 const ORDER: Record<UnitState, number> = { counted: 0, not_applicable: 1, not_scored: 2 };
 
+/** A row that is one of a table's integrity units' rows: integrity family, below the model, not a roll-up. */
+const isUnitRow = (row: MetricRow) => row.family === "integrity" && row.level !== "model" && !isRollup(row.metric_id);
+
+/** One table's integrity units. */
 export function integrityUnits(metrics: readonly MetricRow[], table: string): IntegrityUnit[] {
-  const groups = new Map<string, { label: string; rows: MetricRow[] }>();
+  return unitsOf(metrics.filter((row) => row.table_name === table && isUnitRow(row)));
+}
+
+/**
+ * Every table's integrity units, from one pass over the metric rows: a scorecard groups them once, never
+ * once per visible row per scroll (a corp-width table has 10–25 times the mock's rows, ADR 0036).
+ */
+export function integrityUnitsByTable(metrics: readonly MetricRow[]): Map<string, IntegrityUnit[]> {
+  const rowsByTable = new Map<string, MetricRow[]>();
   for (const row of metrics) {
-    if (row.table_name !== table || row.family !== "integrity" || row.level === "model" || isRollup(row.metric_id))
-      continue;
+    if (!isUnitRow(row)) continue;
+    const rows = rowsByTable.get(row.table_name);
+    if (rows) rows.push(row);
+    else rowsByTable.set(row.table_name, [row]);
+  }
+  return new Map([...rowsByTable].map(([table, rows]) => [table, unitsOf(rows)]));
+}
+
+/** The units of one table's integrity rows, keyed as the evaluator keys them (`unitOf`). */
+function unitsOf(tableRows: readonly MetricRow[]): IntegrityUnit[] {
+  const groups = new Map<string, { label: string; rows: MetricRow[] }>();
+  for (const row of tableRows) {
     const key = unitOf(row);
     const group = groups.get(key) ?? { label: labelOf(row), rows: [] };
     group.rows.push(row);

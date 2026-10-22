@@ -1,7 +1,8 @@
 /**
  * The table filter bar (ADR 0042): one row above the scorecards, its values in the URL
  * (gui/docs/UX.md). It narrows and orders the isolated-table tiles and the per-table scorecard
- * rows; the roll-ups, the findings and the counts stay the whole run's.
+ * rows; the roll-ups, the findings and the counts stay the whole run's. Its count says so: a
+ * selected table it would hide stays shown, and the tables of the layered graph are not filtered.
  */
 import { Search } from "lucide-react";
 
@@ -20,13 +21,20 @@ export function TableFilters({
   batches,
   shown,
   total,
+  pinned = null,
+  layered = 0,
 }: {
   value: TableFilter;
   onChange: (patch: Partial<TableFilter>) => void;
   /** The batch jobs the run's tables belong to (none: the batch filter is hidden). */
   batches: readonly number[];
+  /** The tables the filter matches, of `total`. */
   shown: number;
   total: number;
+  /** The selected table shown although the filter does not match it. */
+  pinned?: string | null;
+  /** The run's tables drawn in the layered graph, which the bar does not narrow. */
+  layered?: number;
 }) {
   const active = !!(value.query || value.pk || value.status || value.batch !== undefined);
   return (
@@ -94,6 +102,10 @@ export function TableFilters({
       </Select>
       <span className="text-xs text-text-3" aria-live="polite">
         {formatCount(shown)} of {formatCount(total)} tables
+        {pinned ? ` · plus ${pinned}, selected` : ""}
+        {layered
+          ? ` · the ${formatCount(layered)} in the layered graph ${layered === 1 ? "is" : "are"} not filtered`
+          : ""}
       </span>
       {active ? (
         <Button

@@ -2,8 +2,9 @@
  * The model summary card (ADR 0036, ADR 0044, ADR 0045): what the launch declared, in counts: its
  * tables, how many declare a primary key, the foreign keys between them, the isolated ones, the tables
  * read from another source and the batch jobs a whole-model launch was split into, each linked to its
- * Dataflow job. The counts come from the generation record when the run has one, else from the
- * registry and the metric rows; the card says which.
+ * Dataflow job — or, when no region is known (lib/record.ts `generationRegion`), its job id as text. The
+ * counts come from the generation record when the run has one, else from the registry and the metric
+ * rows; the card says which.
  */
 import { InfoHint } from "@/components/InfoHint";
 import { Badge } from "@/components/ui/badge";
@@ -28,7 +29,7 @@ export function ModelSummaryCard({
   project,
 }: {
   summary: ModelSummary;
-  /** The generation's Dataflow region and the landing tables' project, for the job links. */
+  /** The generation's Dataflow region (null: unknown, the job ids show as text) and the landing tables' project. */
   region: string | null;
   project: string | null;
 }) {
@@ -37,7 +38,9 @@ export function ModelSummaryCard({
       ? null
       : summary.batches.length < summary.batchCount
         ? `${formatCount(summary.batches.length)} recorded`
-        : `${batchLabel(0)} … ${batchLabel(summary.batchCount - 1)}`;
+        : summary.batchCount === 1
+          ? batchLabel(0)
+          : `${batchLabel(0)} … ${batchLabel(summary.batchCount - 1)}`;
   return (
     <section aria-label="Model summary" className="grid gap-3 rounded-lg border border-border bg-surface-1 p-4">
       <header className="flex flex-wrap items-center gap-x-2 gap-y-1">
@@ -85,19 +88,26 @@ export function ModelSummaryCard({
           {summary.batches.map((b) => (
             <li key={b.index} className="flex gap-x-1.5">
               {b.job_ids.length ? (
-                b.job_ids.map((jobId, k) => (
-                  <a
-                    key={jobId}
-                    href={dataflowJobUrl(jobId, region, project)}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="inline-flex min-h-6 min-w-6 items-center font-mono text-link underline underline-offset-2"
-                  >
-                    {batchLabel(b.index)}
-                    {k > 0 ? ` (${k + 1})` : ""} ↗
-                    <span className="sr-only"> (Dataflow job {jobId}, opens in a new tab)</span>
-                  </a>
-                ))
+                b.job_ids.map((jobId, k) => {
+                  const label = `${batchLabel(b.index)}${k > 0 ? ` (${k + 1})` : ""}`;
+                  // No region, no link: a console URL without its region does not open the job.
+                  return region ? (
+                    <a
+                      key={jobId}
+                      href={dataflowJobUrl(jobId, region, project)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex min-h-6 min-w-6 items-center font-mono text-link underline underline-offset-2"
+                    >
+                      {label} ↗<span className="sr-only"> (Dataflow job {jobId}, opens in a new tab)</span>
+                    </a>
+                  ) : (
+                    <span key={jobId} className="inline-flex min-h-6 min-w-0 flex-wrap items-center gap-x-1">
+                      <span className="font-mono text-text-2">{label}</span>{" "}
+                      <span className="font-mono [overflow-wrap:anywhere] text-text-3">{jobId}</span>
+                    </span>
+                  );
+                })
               ) : (
                 <span className="font-mono text-text-3">{batchLabel(b.index)}</span>
               )}

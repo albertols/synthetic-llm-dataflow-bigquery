@@ -62,8 +62,9 @@ const nullsFirst = (a: string | null, b: string | null) =>
 
 /**
  * `run_id` belongs to launch `base`: the one-table id itself, a per-table `<base>-NN-<table>`, or a
- * batched launch's `<base>-bNN-MM-<table>` (ADR 0045). The launcher writes positions `{i:02d}`, so
- * a launch or batch of 100 tables or more has three-digit positions from 100 on.
+ * batched launch's `<base>-bNN-MM-<table>` (ADR 0045). The launcher writes 0-based positions
+ * `{i:02d}`, so a launch or batch of 100 tables ends at 99 and three digits start at the 101st table
+ * (position 100).
  */
 export function belongsToLaunch(runId: string, base: string): boolean {
   return (

@@ -413,7 +413,11 @@ test("a forest of 112 isolated tables reads as a bounded grid, with N/A keys, a 
   await expect(stat("Isolated")).toHaveText("112");
   await expect(stat("Source overrides")).toHaveText("6");
   await expect(stat("Batch jobs")).toHaveText("12");
-  await expect(card.getByRole("list", { name: "Batch jobs" }).getByRole("link")).toHaveCount(12);
+  const jobLinks = card.getByRole("list", { name: "Batch jobs" }).getByRole("link");
+  await expect(jobLinks).toHaveCount(12);
+  // The model DAG's evaluation is by --run_id: the registry records no generation_region, so each link
+  // takes the region from its batch job's generation record (the snapshot's beam block).
+  await expect(jobLinks.first()).toHaveAttribute("href", /\/dataflow\/jobs\/europe-west3\/[^/?]+\?project=/);
 
   // The grid: every generated table is a tile, the frame is bounded, nothing scrolls sideways.
   const grid = page.getByRole("region", { name: "Isolated tables: 112" });
@@ -480,7 +484,7 @@ test("a forest of 112 isolated tables reads as a bounded grid, with N/A keys, a 
 
   // A PK-less table: its key checks are not applicable, never a FAIL.
   await search.fill("T_003");
-  const trigger = page.getByRole("button", { name: /^Integrity units of T_003/ });
+  const trigger = page.getByRole("button", { name: /integrity units of T_003:/ });
   await trigger.click();
   const units = page.getByRole("dialog", { name: "Integrity units of T_003" });
   await expect(units).toContainText("Not applicable — no primary key declared");
@@ -489,9 +493,18 @@ test("a forest of 112 isolated tables reads as a bounded grid, with N/A keys, a 
   await expectNoSeriousViolations(page, "integrity units", '[role="dialog"]');
   await page.keyboard.press("Escape");
   // WCAG 2.2 target-size of the popover trigger (the spec's wcag22aa tag), on both projects.
-  await expectNoSeriousViolations(page, "integrity trigger", '[aria-label^="Integrity units of T_003"]');
+  await expectNoSeriousViolations(page, "integrity trigger", '[aria-label*="integrity units of T_003:"]');
   const target = (await trigger.boundingBox())!;
   expect(Math.min(target.width, target.height)).toBeGreaterThanOrEqual(24);
+
+  // The Parameters tab: the 112 declared tables sit in a bounded, focusable frame beside the 12 job links.
+  await page.goto("/evaluation/eval-0043?tab=params");
+  const declared = page.getByRole("region", { name: "Declared tables: 112" });
+  await expect(declared).toBeVisible({ timeout: 45_000 });
+  await expect(page.getByText("112 tables · 12 batch jobs", { exact: true })).toBeVisible();
+  expect((await declared.boundingBox())!.height).toBeLessThanOrEqual(384 + 4); // max-h-96 = 24 rem at 16 px
+  await noHorizontalScroll(page);
+  await expectNoSeriousViolations(page, "forest parameters");
 
   // The Relational tab says why it has nothing to draw.
   await page.goto("/evaluation/eval-0043?tab=relational");

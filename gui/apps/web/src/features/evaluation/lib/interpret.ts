@@ -329,8 +329,10 @@ export function headline(detail: Pick<EvaluationDetail, "evaluation" | "metrics"
   const measured = metrics.filter((m) => !isRollup(m.metric_id));
   const counts = countStatuses(measured);
   const overall = metrics.find((m) => m.metric_id === "model.overall_score")?.value ?? evaluation.overall_score;
+  // ADR 0042: the not-evaluated rows that are key checks with no key declared are named apart.
+  const notApplicable = measured.filter((m) => inapplicableKey(m) !== null).length;
   const parts = [
-    `Overall score ${fmtScore(overall)} over ${countsTotal(counts).toLocaleString("en-US")} measured metrics: ${countsPhrase(counts)}.`,
+    `Overall score ${fmtScore(overall)} over ${countsTotal(counts).toLocaleString("en-US")} measured metrics: ${countsPhrase(counts, ", ", notApplicable)}.`,
   ];
   const failing = measured.filter((m) => m.status === "fail");
   if (failing.length) {

@@ -74,10 +74,21 @@ export function visibleBuckets(counts: StatusCounts) {
   }));
 }
 
-/** "13 fail, 15 warn, 350 pass, 17 info, 3 not evaluated": the parts always sum to `countsTotal`. */
-export function countsPhrase(counts: StatusCounts, separator = ", "): string {
+/**
+ * "13 fail, 15 warn, 350 pass, 17 info, 3 not evaluated": the parts always sum to `countsTotal`. With
+ * `notApplicable` (ADR 0042: key checks with no key declared, a share of the not-evaluated rows) the
+ * not-evaluated part says how many of it: "160 not evaluated (160 not applicable: no key declared)".
+ */
+export function countsPhrase(counts: StatusCounts, separator = ", ", notApplicable = 0): string {
   return visibleBuckets(counts)
-    .map((b) => `${b.count.toLocaleString("en-US")} ${b.label}`)
+    .map(
+      (b) =>
+        `${b.count.toLocaleString("en-US")} ${b.label}${
+          b.key === "not_evaluated" && notApplicable > 0
+            ? ` (${notApplicable.toLocaleString("en-US")} not applicable: no key declared)`
+            : ""
+        }`,
+    )
     .join(separator);
 }
 

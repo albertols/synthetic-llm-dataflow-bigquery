@@ -137,6 +137,21 @@ describe("the isolated-forest launch (ADR 0045)", { timeout: 60_000 }, () => {
     expect(record.config_digests).toHaveLength(1);
   });
 
+  it("is the evaluation by --run_id the model DAG chains: no job, so no region, job name or window; scope manual", () => {
+    // `--run_id <base> --generation_job_ids …` resolves with job=None (sdfb_evaluation/context/launch.py),
+    // and the DAG passes scope=manual (ADR 0045 D7).
+    for (const row of data.registry.filter((r) => r.evaluation_id === FOREST_EVALUATION)) {
+      expect(row.generation_region, row.event).toBeNull();
+      expect(row.generation_job_name, row.event).toBeNull();
+      expect(row.generation_started_at, row.event).toBeNull();
+      expect(row.generation_finished_at, row.event).toBeNull();
+      expect(new Set(row.tables.map((t) => t.scope_mode)), row.event).toEqual(new Set(["manual"]));
+      expect(new Set(row.tables.map((t) => t.scope_status)), row.event).toEqual(new Set(["ok"]));
+    }
+    // The region a job link needs is in each batch job's record: the snapshot's beam block.
+    for (const run of runsOf()) expect(parseSnapshot(run.config)!.beam).toMatchObject({ region: "europe-west3" });
+  });
+
   it("source overrides land in validation_runs.reference_table and the registry's source_table", () => {
     const run = runsOf().find((r) => r.landing_table?.endsWith(".T_007"))!;
     expect(run.reference_table).toBe("demo-project.example_archive.T_007_V2");

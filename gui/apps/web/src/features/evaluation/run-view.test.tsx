@@ -806,6 +806,48 @@ describe("Generator panel (ADR 0044)", () => {
     expect(within(panel).getByRole("button", { name: /download as config\.yaml/i })).toBeEnabled();
   });
 
+  describe("the job link's region: the registry's, else the record's beam.region, else none", () => {
+    const JOB = "2026-10-21_01_02_03-123";
+    /** richDetail without a registry region (an evaluation by --run_id), the snapshot's beam block as given. */
+    function stubWithoutRegion(beam: unknown) {
+      const detail = richDetail();
+      detail.evaluation = { ...detail.evaluation, generation_region: null };
+      const record = generationRecord();
+      stubRun(detail, { [RECORD]: { ...record, snapshot: { ...record.snapshot!, beam } } });
+    }
+    const panel = () => screen.findByRole("region", { name: /generator/i });
+
+    it("links the job in the registry's region", async () => {
+      stubRun(richDetail(), { [RECORD]: generationRecord() });
+      renderAt("/evaluation/eval-t001?tab=params");
+      expect(within(await panel()).getByRole("link", { name: JOB })).toHaveAttribute(
+        "href",
+        `https://console.cloud.google.com/dataflow/jobs/europe-west3/${JOB}?project=p`,
+      );
+    });
+
+    it("falls back to the record snapshot's beam.region", async () => {
+      stubWithoutRegion({ runner: "DataflowRunner", region: "us-central1" });
+      renderAt("/evaluation/eval-t001?tab=params");
+      expect(within(await panel()).getByRole("link", { name: JOB })).toHaveAttribute(
+        "href",
+        `https://console.cloud.google.com/dataflow/jobs/us-central1/${JOB}?project=p`,
+      );
+    });
+
+    it.each([
+      ["an A2-era beam block (no region)", { runner: "DataflowRunner", job_name: "synthetic-sdfb-v0-6-1-m" }],
+      ["no beam block", undefined],
+      ["a malformed beam block", "us-central1"],
+    ])("shows the job id as text, not a link without its region, for %s", async (_, beam) => {
+      stubWithoutRegion(beam);
+      renderAt("/evaluation/eval-t001?tab=params");
+      const generator = within(await panel());
+      expect(generator.queryByRole("link", { name: JOB })).toBeNull();
+      expect(generator.getByText(JOB)).toHaveClass("font-mono");
+    });
+  });
+
   it("version mismatch badge", async () => {
     stubRun(richDetail(), { [RECORD]: generationRecord({ mismatch: true }) });
     renderAt("/evaluation/eval-t001?tab=params");

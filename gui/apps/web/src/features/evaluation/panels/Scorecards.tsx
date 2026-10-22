@@ -10,7 +10,7 @@
  * list renders only its visible rows above twelve tables, and each table's
  * integrity score opens the units it averages (ADR 0036, ADR 0042).
  */
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import type { MetricRow } from "@contracts/api";
 import { inapplicableKey, NOT_APPLICABLE_LABEL } from "@contracts/applicability";
@@ -33,7 +33,7 @@ import { IntegrityUnits } from "../components/IntegrityUnits";
 import { NoiseDowngrade } from "../components/NoiseDowngrade";
 import { StatusCounts } from "../components/StatusCounts";
 import { VirtualList } from "../components/VirtualList";
-import { integrityUnits } from "../lib/integrity";
+import { integrityUnitsByTable, type IntegrityUnit } from "../lib/integrity";
 import { readingOf, undefinedValueText } from "../lib/reading";
 
 export type OpenTarget = { tab: RunTab; column?: string; table?: string };
@@ -149,10 +149,22 @@ function WorstRow({
   );
 }
 
-/** Each per-table row's height (px): the windowed list needs one height for every row. */
-export const TABLE_ROW_PX = 24;
+/**
+ * Each per-table row's height (rem; the row's `h-6`): the windowed list needs one height for every row, in
+ * px, so it is converted at the root's font size — a larger default font size (WCAG 1.4.4) grows the rows
+ * and their positions together, and they never overlap.
+ */
+export const TABLE_ROW_REM = 1.5;
+
+/** The root font size (px), read once per list; 16 where it cannot be read. */
+function rootFontPx(): number {
+  const px = typeof window === "undefined" ? NaN : parseFloat(getComputedStyle(document.documentElement).fontSize);
+  return Number.isFinite(px) && px > 0 ? px : 16;
+}
 
 type TableScore = FamilyCard["tables"][number];
+
+const NO_UNITS: readonly IntegrityUnit[] = [];
 
 /** A family's score per table: windowed above twelve tables (ADR 0036); integrity scores open their units. */
 function TableScores({
@@ -165,10 +177,16 @@ function TableScores({
   selectedTable?: string;
 }) {
   const family = FAMILY_LABEL[card.family] ?? card.family;
+  const [rowPx] = useState(() => TABLE_ROW_REM * rootFontPx());
+  // Grouped once per card: a scroll re-renders only the visible rows, which read this map.
+  const units = useMemo(
+    () => (card.family === "integrity" ? integrityUnitsByTable(card.metrics) : null),
+    [card.family, card.metrics],
+  );
   return (
     <VirtualList
       items={rows}
-      rowHeight={TABLE_ROW_PX}
+      rowHeight={rowPx}
       label={`${family} score per table`}
       frameLabel={`Per-table scores, ${family}: ${rows.length} tables`}
       getKey={(t) => t.table}
@@ -184,8 +202,8 @@ function TableScores({
           <span className="truncate font-mono text-text-2" title={t.table}>
             {t.table}
           </span>
-          {card.family === "integrity" ? (
-            <IntegrityUnits table={t.table} score={t.score} units={integrityUnits(card.metrics, t.table)} />
+          {units ? (
+            <IntegrityUnits table={t.table} score={t.score} units={units.get(t.table) ?? NO_UNITS} />
           ) : (
             <span className="text-right text-text-1 tabular-nums">{fmtScore(t.score)}</span>
           )}

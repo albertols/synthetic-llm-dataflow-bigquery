@@ -48,7 +48,8 @@ export function IntegrityUnits({
       <PopoverTrigger asChild>
         <button
           type="button"
-          aria-label={`Integrity units of ${table}: ${counted.length} counted, ${na.length} not applicable`}
+          // WCAG 2.5.3 label in name: the name starts with the score the button shows.
+          aria-label={`${score !== null && Number.isFinite(score) ? fmtScore(score) : "No score"} — integrity units of ${table}: ${counted.length} counted, ${na.length} not applicable`}
           className="min-h-6 min-w-6 cursor-pointer text-right text-link tabular-nums underline decoration-dotted underline-offset-2"
         >
           {fmtScore(score)}

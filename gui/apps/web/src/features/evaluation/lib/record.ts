@@ -10,6 +10,24 @@ export function dataflowJobUrl(jobId: string, region: string | null, project: st
   return `https://console.cloud.google.com/dataflow/jobs/${where}${encodeURIComponent(jobId)}${query}`;
 }
 
+/**
+ * The region a job link needs: the registry's `generation_region`, else the region the launch recorded in its
+ * snapshot's `beam` block — an evaluation by `--run_id` (every whole-model launch's, ADR 0045) records none.
+ * Read defensively, as every snapshot block (ADR 0044): a `beam` that is not an object, or a region that is
+ * not a non-empty string, is no region, and a record written before `beam.region` has none. Null: render the
+ * job id as text, never a link without its region.
+ */
+export function generationRegion(
+  registry: string | null | undefined,
+  record: Pick<GenerationRecord, "snapshot"> | null | undefined,
+): string | null {
+  if (registry) return registry;
+  const beam: unknown = record?.snapshot?.beam;
+  if (typeof beam !== "object" || beam === null || Array.isArray(beam)) return null;
+  const region = (beam as Record<string, unknown>).region;
+  return typeof region === "string" && region !== "" ? region : null;
+}
+
 /** The project of `project.dataset.table` (or `project:dataset.table`); null for a shorter name. */
 export function projectOf(fqn: string | null | undefined): string | null {
   if (!fqn) return null;

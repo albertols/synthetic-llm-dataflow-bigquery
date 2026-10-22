@@ -497,7 +497,7 @@ export function ModelGraph({
             "From the launch's generation record (ADR 0044): the relationship model as the launch declared it. Node bar = table overall score; arrows point from child to parent.",
           edges: "Rebuilt from the metric rows' edge labels (the model itself is not readable here).",
         }[resolvedFrom] +
-        (graph.tiles.length ? " Tables with no foreign key are tiles: edge colour = overall score." : "")
+        (graph.tiles.length ? " Tables with no foreign key are tiles: left border colour = overall score." : "")
       }
       data={data}
       actions={
@@ -518,10 +518,15 @@ export function ModelGraph({
             table score, low → high
           </span>
           <span>✓ ok · ! warn · ✕ fail · i documented (INFO)</span>
-          <span className="inline-flex items-center gap-0.5">
-            dashed arrow: documented edge <InfoHint concept="eval:documented-edge" />
-          </span>
-          <span>dashed box: external parent</span>
+          {/* Arrows and external parents are drawn only in the layers: a forest of tiles has neither. */}
+          {layered.length ? (
+            <>
+              <span className="inline-flex items-center gap-0.5">
+                dashed arrow: documented edge <InfoHint concept="eval:documented-edge" />
+              </span>
+              <span>dashed box: external parent</span>
+            </>
+          ) : null}
           {graph.tiles.length ? <span>tile: a table with no foreign key (isolated)</span> : null}
           {graph.nodes.some((n) => n.adjustment) ? (
             <span className="inline-flex items-center gap-0.5" data-testid="pk-adjusted-legend">
