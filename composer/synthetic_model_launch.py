@@ -46,13 +46,18 @@ The chain::
 GCS, plans the batches with `sdfb_batches` (the plan each batch's launcher
 recomputes and checks against `batch_count`), mints the launch's base run
 id and builds one Flex Template launch body per batch: `tables=all`,
-`batch_index`, `batch_count`, `run_id=<base>`, the job named `…-bNN`. A
-batch job that ends in any state but DONE fails its own mapped instance;
-the other batches run on. `collect_landed` runs after every batch and hands
-the evaluation the ids of the jobs that landed. The evaluation reads those
-jobs' rows of `validation_runs` by the base run id, so every table is
-compared with the source its row names, a `source_table` override included.
-With `run_evaluation` off, or no batch landed, the evaluation is skipped.
+`batch_index`, `batch_count`, `run_id=<base>`, the job named
+`<job_name>-bNN`, to which the provider appends `-<8 hex>` (its
+`append_job_name`, as on the single-table DAG's launches). The bodies are
+`plan`'s return value, which `start_batch` maps over; the base run id, the
+batch count, the model file, the batches and the banner are pushed under
+their own keys. A batch job that ends in any state but DONE fails its own
+mapped instance; the other batches run on. `collect_landed` runs after
+every batch and hands the evaluation the ids of the jobs that landed. The
+evaluation reads those jobs' rows of `validation_runs` by the base run id,
+so every table is compared with the source its row names, a `source_table`
+override included. With `run_evaluation` off, or no batch landed, the
+evaluation is skipped.
 
 Trigger rules, and why::
 
@@ -83,18 +88,24 @@ the run stays running until the evaluation's launch has been waited for,
 and then it ends failed. With every batch landed the watcher is skipped and
 the run ends as the evaluation's launch did.
 
-Retries: `start_batch` passes `retries=0`; every other task leaves them to
-the environment (Cloud Composer's default is two, five minutes apart), as
-the single-table DAG does. A batch instance waits for its job, so a retry
-would launch the whole batch again: under the same base run id, which
-replays the same rows, and after a BLOCKER, which fails the job once its
-rows have loaded, so an append launch would land them twice. To run a
-failed batch again, fix the cause and clear its `start_batch` instance with
-its downstream tasks (the same body again: under append, rows the failed
-job landed stay). Each running instance holds an Airflow worker slot until its job ends: the
+Retries: `plan` and `start_batch` pass `retries=0`; every other task
+leaves them to the environment (Cloud Composer's default is two, five
+minutes apart), as the single-table DAG does. A PlanError (the model, the
+config file, K) fails the same way every time, so the run fails at once. A
+batch instance waits for its job, so a retry would launch the whole batch
+again: under the same base run id, which replays the same rows, and after a
+BLOCKER, which fails the job once its rows have loaded, so an append launch
+would land them twice. To run a failed batch again, fix the cause and clear
+its `start_batch` instance with its downstream tasks (the same body again:
+under append, rows the failed job landed stay).
+
+Each running instance holds an Airflow worker slot until its job ends: the
 operator is not deferrable (`deferrable` is not passed; the provider's
 default is off unless the environment sets `[operators]
-default_deferrable`).
+default_deferrable`). Killing a running instance — a Composer worker
+restart (an environment update, a pod eviction), or marking it failed —
+cancels that batch's Dataflow job: the operator's `on_kill` cancels the job
+it waits for. With `retries=0` the instance then stays failed.
 
 The evaluation's failure close (`_close_running_row`, the RUNNING row of a
 launch that died) is the single-table DAG's, with the row found by the
@@ -102,7 +113,8 @@ launch's base run id: its statement, constants and helpers are a COPY,
 pinned equal by test — Composer imports each DAG file on its own.
 
 Unverified against an installed provider and Airflow (read in their
-documentation and source, not run): a mapped `DataflowStartFlexTemplateOperator`
+documentation and source, not run): that Airflow parses this file at all
+(the tests read it with `ast`); a mapped `DataflowStartFlexTemplateOperator`
 with `wait_until_finished=True` holding its slot until its job ends and
 failing on any other terminal state; `xcom_pull(task_ids="start_batch")`
 returning the mapped return values in map order without the failed
@@ -669,12 +681,18 @@ def _read_gcs_text(uri: str) -> str:
       bucket_name=bucket, object_name=name).decode("utf-8")
 
 
-@task(task_id="plan", multiple_outputs=True)
-def plan_batches(**context) -> dict:
-  """The launch's plan: the batches, one launch body each, the base run id.
+@task(task_id="plan", retries=0)
+def plan_batches(**context) -> list:
+  """The launch's plan: returns one launch body per batch, and pushes the
+  base run id, the batch count, the model file, the batches and the banner
+  under their own keys.
 
-  Salted like the single-table DAG's run id: a retrigger of the same logical
-  date must not replay the same rows.
+  The bodies are the return value because Airflow maps only over a task's
+  return value (`start_batch` expands over it); `-> list` keeps
+  multiple_outputs off, which a `dict` annotation would turn on. No retries:
+  a PlanError (the model, the config file, K) fails the same way every
+  time. The base run id is salted like the single-table DAG's run id: a
+  retrigger of the same logical date must not replay the same rows.
   """
   import logging
   import uuid
@@ -692,15 +710,24 @@ def plan_batches(**context) -> dict:
       base_run_id=f"{context['dag_run'].run_id}-{uuid.uuid4().hex[:8]}",
       constants=_CONSTANTS)
   logging.info("%s", plan["banner"])
-  return plan
+  ti = context["ti"]
+  for key in ("base_run_id", "batch_count", "relationships_uri", "batches",
+              "banner"):
+    ti.xcom_push(key=key, value=plan[key])
+  return plan["bodies"]
 
 
-@task(task_id="collect_landed", trigger_rule=TriggerRule.ALL_DONE)
+@task(
+    task_id="collect_landed",
+    trigger_rule=TriggerRule.ALL_DONE,
+    multiple_outputs=False)
 def collect_landed(**context) -> dict:
   """After every batch: the ids of the jobs that reached DONE.
 
   A failed mapped instance returned nothing, so its job is not listed.
-  Skips the evaluation when it is off or nothing landed.
+  Skips the evaluation when it is off or nothing landed. The evaluation
+  reads the return value (`…['job_ids']`), so multiple_outputs is off, said
+  here because the `dict` annotation would turn it on.
   """
   if not context["params"]["run_evaluation"]:
     raise AirflowSkipException("run_evaluation is off")
@@ -855,6 +882,7 @@ with models.DAG(
           env_name.upper()],
     params=default_dag_params,
 ) as dag:
+  # The launch bodies: `plan`'s return value, the only XCom Airflow maps over.
   planned = plan_batches()
   # One launch per batch, built in `plan`; each waits for its own job, so
   # `max_active_tis_per_dag` caps the jobs that run at once. No retries: a
@@ -867,7 +895,7 @@ with models.DAG(
       do_xcom_push=True,
       retries=0,
       max_active_tis_per_dag=MAX_PARALLEL_JOBS,
-  ).expand(body=planned["bodies"])
+  ).expand(body=planned)
   landed = collect_landed()
 
   # The evaluation: one CPU-only Dataflow job from the SAME template as the

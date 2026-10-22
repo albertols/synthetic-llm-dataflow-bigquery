@@ -60,6 +60,12 @@ _COPIED_HELPERS = ("_callback_closes_row", "_launched_job_id", "_job_state")
 # The evaluation's template parameters that do not depend on the target.
 _SHARED_EVALUATION_PARAMETERS = ("sdfb_job", "scope", "trigger", "mode",
                                  "output_dataset", "disk_size_gb")
+# What `plan` pushes beside its return value (the bodies), and how the DAG
+# pulls one of them.
+_PLAN_KEYS = {
+    "base_run_id", "batch_count", "relationships_uri", "batches", "banner"
+}
+_PLAN_PULL = re.compile(r"task_ids=['\"]plan['\"], key=['\"](\w+)['\"]")
 # What builds the batch jobs' Dataflow name, in file order.
 _JOB_NAME_ASSIGNMENTS = ("app_domain", "app_name", "_version_slug", "_slug",
                          "_base_job_name", "job_name")
@@ -236,8 +242,37 @@ def test_the_planner_is_the_mirror_beside_it():
   plan = ast.unparse(_task(DAG, "plan"))
   assert "sdfb_batches.planning_inputs" in plan
   assert "sdfb_batches.launch_plan" in plan
-  assert "multiple_outputs=True" in ast.unparse(
-      _task(DAG, "plan").decorator_list[0])
+
+
+def test_plan_returns_the_bodies_and_pushes_the_rest():
+  # Airflow maps only over a task's return value: the bodies are what `plan`
+  # returns, a list (a `dict` annotation would turn multiple_outputs on), and
+  # the other values go out under their own keys.
+  plan = _task(DAG, "plan")
+  decorator = plan.decorator_list[0]
+  assert "multiple_outputs" not in _keywords(decorator)
+  assert ast.unparse(plan.returns) == "list"
+  returns = [n for n in ast.walk(plan) if isinstance(n, ast.Return)]
+  assert len(returns) == 1
+  assert ast.unparse(returns[0].value) == "plan['bodies']"
+  loops = [
+      n for n in ast.walk(plan)
+      if isinstance(n, ast.For) and _calls(n, "xcom_push")
+  ]
+  assert len(loops) == 1
+  pushed = set(ast.literal_eval(loops[0].iter))
+  assert pushed == _PLAN_KEYS
+  # every pull of a `plan` key — Jinja or the callback — names a pushed one
+  pulled = set(_PLAN_PULL.findall(_DAG.read_text(encoding="utf-8")))
+  assert pulled == {"base_run_id", "relationships_uri"}
+  assert pulled <= pushed
+
+
+def test_a_bad_model_fails_the_run_at_once():
+  # A PlanError (the model, the config file, K) is deterministic: retrying
+  # `plan` would only delay the failed run.
+  decorator = _task(DAG, "plan").decorator_list[0]
+  assert ast.literal_eval(_kw(decorator, "retries")) == 0
 
 
 def test_the_plan_runs_on_what_the_dag_declares():
@@ -262,10 +297,9 @@ def test_the_plan_runs_on_what_the_dag_declares():
       base_run_id="manual__x-abcd1234",
       constants=constants)
   assert (k, plan["batch_count"]) == (10, 2)
-  assert set(plan) >= {
-      "base_run_id", "batch_count", "relationships_uri", "batches", "bodies",
-      "banner"
-  }
+  # `plan` returns the bodies and pushes the rest: every key exists
+  assert set(plan) == _PLAN_KEYS | {"bodies"}
+  assert len(plan["bodies"]) == plan["batch_count"]
   json.dumps(plan)  # the task's XComs: plain JSON
 
 
@@ -313,7 +347,18 @@ def test_batches_are_one_mapped_launch_capped_by_the_variable():
   assert cap == "MAX_PARALLEL_JOBS"
   expands = _calls(DAG, "expand")
   assert len(expands) == 1
-  assert "bodies" in ast.unparse(_kw(expands[0], "body"))
+  # The plain output of `plan`, never a custom key (`planned["bodies"]`):
+  # Airflow refuses to map over one when it parses the file.
+  body = _kw(expands[0], "body")
+  assert isinstance(body, ast.Name), ast.unparse(body)
+  sources = [
+      ast.unparse(n.value)
+      for n in ast.walk(DAG)
+      if isinstance(n, ast.Assign) and isinstance(n.targets[0], ast.Name) and
+      n.targets[0].id == body.id
+  ]
+  plan = _task(DAG, "plan")
+  assert sources == [f"{plan.name}()"]
   assert ("Variable.get('SDFB_MAX_PARALLEL_JOBS', default_var='1')"
           in ast.unparse(_assignments(DAG)["MAX_PARALLEL_JOBS"]))
 
@@ -330,6 +375,14 @@ def test_the_evaluation_runs_after_every_batch_on_the_landed_jobs():
   collect = _task(DAG, "collect_landed")
   assert "TriggerRule.ALL_DONE" in ast.unparse(collect.decorator_list[0])
   assert "sdfb_batches.landed_job_ids" in ast.unparse(collect)
+  # Its consumers read the return value (`…['job_ids']`): say so, rather
+  # than let the `dict` annotation turn multiple_outputs on.
+  assert ast.literal_eval(_kw(collect.decorator_list[0],
+                              "multiple_outputs")) is False
+  for function in _functions(DAG).values():
+    tasks = [d for d in function.decorator_list if _calls(d, "task")]
+    if tasks and function.returns and ast.unparse(function.returns) == "dict":
+      assert "multiple_outputs" in _keywords(tasks[0]), function.name
   trigger = _task(DAG, "trigger_evaluation")
   # all_success: skipped with collect_landed (evaluation off, nothing landed)
   assert "trigger_rule" not in _keywords(trigger)
