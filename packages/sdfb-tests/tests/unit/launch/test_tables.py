@@ -70,16 +70,16 @@ def _all(**sections) -> GeneratorConfig:
 
 
 def test_today_has_no_problem():
-  assert model_launch_problems(DEFAULT_CONFIG) == []
+  assert not model_launch_problems(DEFAULT_CONFIG)
 
 
 def test_a_complete_model_launch_has_no_problem():
-  assert model_launch_problems(_all()) == []
-  assert model_launch_problems(
+  assert not model_launch_problems(_all())
+  assert not model_launch_problems(
       _all(launch={
           "batch_index": 2,
           "batch_count": 3
-      })) == []
+      }))
 
 
 def test_the_batch_flags_need_tables_all():
@@ -117,15 +117,18 @@ def test_tables_all_needs_both_datasets(io, problem):
 
 @pytest.mark.parametrize("uri", ["config/relationships", "gs://b/rel/", ""])
 def test_tables_all_needs_one_model_file(uri):
-  (problem,) = model_launch_problems(
-      _all(relational={"relationships_uri": uri}))
+  problems = model_launch_problems(_all(relational={"relationships_uri": uri}))
+  assert len(problems) == 1
+  problem = problems[0]
   assert problem.startswith("--tables=all needs relational.relationships_uri "
                             "to name ONE model file")
 
 
 @pytest.mark.parametrize("key", ["pk_cols", "identity_cols"])
 def test_tables_all_refuses_a_global_key(key):
-  (problem,) = model_launch_problems(_all(relational={key: "COL_001"}))
+  problems = model_launch_problems(_all(relational={key: "COL_001"}))
+  assert len(problems) == 1
+  problem = problems[0]
   assert problem.startswith(f"relational.{key} is not allowed with "
                             "--tables=all")
 

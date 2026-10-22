@@ -60,7 +60,8 @@ def source_fqn(table: str, relations: TableRelations | None,
     return f"{source_dataset}.{name}"
   if override.count(".") + 1 == _FQN_PARTS or source_dataset.count(".") != 1:
     return override
-  return f"{source_dataset.split('.', 1)[0]}.{override}"
+  project = source_dataset.split(".", 1)[0]
+  return f"{project}.{override}"
 
 
 def table_rows(relations: TableRelations | None) -> int | None:

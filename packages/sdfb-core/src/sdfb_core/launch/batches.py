@@ -178,8 +178,10 @@ def launch_banner(launch: ModelLaunch) -> str:
   for batch in launch.batches:
     flag = (f"   [OVERSIZED — one component of {len(batch.tables)} tables]"
             if batch.oversized else "")
+    tables = ", ".join(batch.tables)
     lines.append(f"  {batch.label} | {len(batch.tables):>3} tables | "
-                 f"{', '.join(batch.tables)}{flag}")
+                 f"{tables}{flag}")
   if launch.skipped:
-    lines.append(f"  skipped (enabled: false): {', '.join(launch.skipped)}")
+    skipped = ", ".join(launch.skipped)
+    lines.append(f"  skipped (enabled: false): {skipped}")
   return "\n".join(lines)
