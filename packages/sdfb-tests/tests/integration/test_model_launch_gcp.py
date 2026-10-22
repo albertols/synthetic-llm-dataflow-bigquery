@@ -30,7 +30,7 @@ history is partitioned by `recorded_at`), so both read the launch's DAY
 partitions only (a table with `require_partition_filter` needs it).
 
 Design: docs/DESIGN.md §4 Relational generation
-(ADR 0044, 0045).
+(ADR 0045).
 """
 from __future__ import annotations
 
