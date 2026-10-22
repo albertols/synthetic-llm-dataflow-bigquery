@@ -4,7 +4,7 @@
  */
 import type { EvaluationDetail } from "@contracts/api";
 import type { GenerationRecord } from "@contracts/record";
-import { configure, screen, waitFor, within } from "@testing-library/react";
+import { configure, fireEvent, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
@@ -232,5 +232,39 @@ describe("the Generator panel's relationships card (ADR 0044)", () => {
     expect(card).not.toBeNull();
     expect(within(card).getAllByRole("listitem")).toHaveLength(120);
     expect(within(card).getByText("T_120")).toBeInTheDocument();
+  });
+});
+
+describe("per-table scorecards at scale (ADR 0036)", () => {
+  it("render a window of rows inside a focusable frame, every row reachable by scrolling", async () => {
+    stubForest();
+    renderAt(`/evaluation/${ID}`);
+    const frame = await screen.findByRole("region", { name: "Per-table scores, Integrity: 120 tables" });
+    expect(frame).toHaveAttribute("tabindex", "0");
+    const list = within(frame).getByRole("list", { name: "Integrity score per table" });
+    expect(list.querySelectorAll("li").length).toBeLessThan(30);
+    fireEvent.scroll(frame, { target: { scrollTop: 24 * 110 } });
+    expect(list.querySelector('li[aria-posinset="120"]')).not.toBeNull();
+  });
+
+  it("a table's integrity score lists the units that counted and the ones that were not applicable", async () => {
+    stubForest();
+    // Selected, so its row is scrolled into the window whatever the list's order (Task 8 sorts it).
+    renderAt(`/evaluation/${ID}?table=T_003`);
+    await userEvent.click(await screen.findByRole("button", { name: /^Integrity units of T_003/ }));
+    const units = await screen.findByRole("dialog", { name: "Integrity units of T_003" });
+    expect(units).toHaveTextContent("Counted (1)");
+    expect(units).toHaveTextContent("Row count");
+    expect(units).toHaveTextContent("Not applicable (2)");
+    expect(units).toHaveTextContent("Not applicable — no primary key declared");
+    expect(units).toHaveTextContent("Not applicable — no identity columns declared");
+    expect(units).not.toHaveTextContent("Fail");
+  });
+
+  it("scrolls the selected table's row into view", async () => {
+    stubForest();
+    renderAt(`/evaluation/${ID}?table=T_100`);
+    const frame = await screen.findByRole("region", { name: "Per-table scores, Integrity: 120 tables" });
+    await waitFor(() => expect(within(frame).getByText("T_100")).toBeInTheDocument());
   });
 });

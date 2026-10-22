@@ -6,7 +6,9 @@
  * floor side by side. A PK duplicate rate on a key the launch adjusted
  * (ADR 0038) shows the generator's verdict, both key-repeat shares and the
  * evaluator's own status and value; the card's key-failure count stays the
- * evaluator's, with the number of them on adjusted keys under it.
+ * evaluator's, with the number of them on adjusted keys under it. The per-table
+ * list renders only its visible rows above twelve tables, and each table's
+ * integrity score opens the units it averages (ADR 0036, ADR 0042).
  */
 import type { MetricRow } from "@contracts/api";
 import { inapplicableKey, NOT_APPLICABLE_LABEL } from "@contracts/applicability";
@@ -24,8 +26,11 @@ import { fmtCompared, fmtMetric, fmtScore, scopeLabel } from "../lib/format";
 import type { RunTab } from "../lib/interpret";
 import { tabFor } from "../lib/interpret";
 import type { FamilyCard } from "../lib/model";
+import { IntegrityUnits } from "../components/IntegrityUnits";
 import { NoiseDowngrade } from "../components/NoiseDowngrade";
 import { StatusCounts } from "../components/StatusCounts";
+import { VirtualList } from "../components/VirtualList";
+import { integrityUnits } from "../lib/integrity";
 import { readingOf, undefinedValueText } from "../lib/reading";
 
 export type OpenTarget = { tab: RunTab; column?: string; table?: string };
@@ -141,6 +146,53 @@ function WorstRow({
   );
 }
 
+/** Each per-table row's height (px): the windowed list needs one height for every row. */
+export const TABLE_ROW_PX = 24;
+
+type TableScore = FamilyCard["tables"][number];
+
+/** A family's score per table: windowed above twelve tables (ADR 0036); integrity scores open their units. */
+function TableScores({
+  card,
+  rows,
+  selectedTable,
+}: {
+  card: FamilyCard;
+  rows: readonly TableScore[];
+  selectedTable?: string;
+}) {
+  const family = FAMILY_LABEL[card.family] ?? card.family;
+  return (
+    <VirtualList
+      items={rows}
+      rowHeight={TABLE_ROW_PX}
+      label={`${family} score per table`}
+      frameLabel={`Per-table scores, ${family}: ${rows.length} tables`}
+      getKey={(t) => t.table}
+      scrollToIndex={selectedTable ? rows.findIndex((t) => t.table === selectedTable) : undefined}
+      renderItem={(t) => (
+        <div
+          data-table={t.table}
+          className={cn(
+            "grid h-6 grid-cols-[minmax(0,1fr)_3rem_auto] items-center gap-2 text-xs",
+            selectedTable === t.table && "font-semibold",
+          )}
+        >
+          <span className="truncate font-mono text-text-2" title={t.table}>
+            {t.table}
+          </span>
+          {card.family === "integrity" ? (
+            <IntegrityUnits table={t.table} score={t.score} units={integrityUnits(card.metrics, t.table)} />
+          ) : (
+            <span className="text-right text-text-1 tabular-nums">{fmtScore(t.score)}</span>
+          )}
+          {t.status ? <StatusPill status={t.status} size="sm" /> : <span className="text-text-3">—</span>}
+        </div>
+      )}
+    />
+  );
+}
+
 function Card({
   card,
   selectedTable,
@@ -212,23 +264,7 @@ function Card({
           </span>
         </div>
       </div>
-      {card.tables.length > 1 ? (
-        <ul className="grid gap-1" aria-label={`${FAMILY_LABEL[card.family]} score per table`}>
-          {card.tables.map((t) => (
-            <li
-              key={t.table}
-              className={cn(
-                "grid grid-cols-[minmax(0,1fr)_3rem_auto] items-center gap-2 text-xs",
-                selectedTable === t.table && "font-semibold",
-              )}
-            >
-              <span className="truncate font-mono text-text-2">{t.table}</span>
-              <span className="text-right text-text-1 tabular-nums">{fmtScore(t.score)}</span>
-              {t.status ? <StatusPill status={t.status} size="sm" /> : <span className="text-text-3">—</span>}
-            </li>
-          ))}
-        </ul>
-      ) : null}
+      {card.tables.length > 1 ? <TableScores card={card} rows={card.tables} selectedTable={selectedTable} /> : null}
       <p className="-mb-1 flex items-center gap-0.5 text-[11px] font-medium tracking-wide text-text-3 uppercase">
         Metrics per level
         <InfoHint concept="eval:info-status" />

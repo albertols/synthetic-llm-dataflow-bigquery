@@ -396,6 +396,13 @@ export const concepts = defineConcepts([
     ],
   },
   {
+    id: "eval:integrity-units",
+    title: "Integrity units",
+    purpose:
+      "A table's integrity score is the mean over units: each column once, each table-level check once (row count, key duplicates) and each foreign key where the table is the child once. A unit with nothing scored — a key check with no key declared, an INFO row — is left out, so it neither raises nor lowers the score.",
+    links: [catalogueLink],
+  },
+  {
     id: "eval:documented-edge",
     title: "Documented edge",
     purpose:
