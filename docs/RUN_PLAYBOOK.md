@@ -102,7 +102,7 @@ image carries the code, the template file declares the new parameters).
 |---|---|---|
 | `3_import_dag.yaml` | "Substitute build-time placeholders" | run the same `sed -i -e …` expressions on `composer/synthetic_model_launch.py` (a second `sed -i` with the same `-e` list and that file) |
 | `3_import_dag.yaml` | "Substitute build-time placeholders" — the marker check | run the `grep -nE '\{\{[A-Z_]+\}\}'` check on `composer/synthetic_model_launch.py` too |
-| `3_import_dag.yaml` | "Substitute build-time placeholders" — the resolved-values check | for the model DAG, check `$MODEL_URI`, `$DEFAULT_TABLE_FQN`, `$LANDING_TABLE`, `$DLQ_TABLE` (not `$DDL_URI`: a whole-model launch extracts every schema live and the file has no pin) |
+| `3_import_dag.yaml` | "Substitute build-time placeholders" — the resolved-values check | for the model DAG, check `$MODEL_URI`, `$DEFAULT_TABLE_FQN`, `$LANDING_TABLE`, `$DLQ_TABLE`, `$VALIDATION_RUNS_TABLE` (empty, no batch writes its generation record and the launch's evaluation has nothing to read) — not `$DDL_URI`: a whole-model launch extracts every schema live and the file has no pin |
 | `3_import_dag.yaml` | "Import DAG into Composer" | two more `gcloud composer environments storage dags import` calls, the same flags as the existing one, with `--source=composer/synthetic_model_launch.py` and `--source=composer/sdfb_batches.py` (the latter is not a template: import it unchanged) |
 
 Once per Composer environment, set the Airflow Variable
@@ -817,7 +817,13 @@ nothing here names a real table: §2d's `<project>`, `<quality_dataset>`,
 checklist only reads (their schemas); `<scratch_landing_dataset>`, a dataset
 step 5 creates for this checklist and step 16 deletes — every acceptance run
 lands there, never in `<landing_dataset>`; and, once the DAG has planned,
-`<base>`, the launch's base run id. It closes AC-B-5 of
+`<base>`, the launch's base run id. Every evaluation here is a `--run_id`
+evaluation, which reads `validation_runs` from its output dataset and
+writes its registry into that same dataset: in this checklist
+`<evaluation_dataset>` IS `<quality_dataset>` (the model DAG's
+`evaluation_output_dataset` default, and the dataset `run_model.py`
+prints), so steps 11 and 15 read the registry from `<quality_dataset>`.
+It closes AC-B-5 of
 [ADR 0045](adr/0045-whole-model-launches.md): a model-DAG launch with at
 least two batches, each launched inside the Flex Template's 12-minute
 window, and one evaluation covering every landed table.
@@ -1027,7 +1033,7 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
            ARRAY_LENGTH(run_ids) AS runs, params_source,
            ARRAY(SELECT AS STRUCT name, source_table FROM UNNEST(tables)) AS sources,
            warnings
-    FROM `<project>.<evaluation_dataset>.evaluation_latest`
+    FROM `<project>.<quality_dataset>.evaluation_latest`
     WHERE base_run_id = '<base>';
     ```
 
@@ -1083,11 +1089,11 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
     `sdfb-eval run … --run_id=<a new base> --generation_job_ids=<id>,<id> …
     --scope=manual …` command and, under it,
     `# append --sdk_container_image=<image> --disk_size_gb=200 and the worker options: RUN_PLAYBOOK §9d`.
-    Run the command from the repository root with its `<REGION>` and
-    `<BUCKET>` filled in and §9d step 2b's evaluation options appended (the
-    worker image and the disk are required from a checkout: without the image
-    the evaluation's workers boot Beam's stock image and cannot import
-    `sdfb_evaluation`). Expect one registry row as in step 11 for
+    Run the command from the repository root with its `<BUCKET>` filled in
+    (its `--region` is the launch's) and §9d step 2b's evaluation options
+    appended (the worker image and the disk are required from a checkout:
+    without the image the evaluation's workers boot Beam's stock image and
+    cannot import `sdfb_evaluation`). Expect one registry row as in step 11 for
     `base_run_id = '<a new base>'`, and `run_model.py`'s exit status 0.
 
 14. **The whole model.** Add an empty copy of every table the model enables
@@ -1110,12 +1116,15 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
     ```bash
     SDFB_MODEL_LAUNCH_BASE=<base> \
     SDFB_RECORD_TABLE=<project>.<quality_dataset>.validation_runs \
-    SDFB_REGISTRY_TABLE=<project>.<evaluation_dataset>.evaluation_latest \
+    SDFB_REGISTRY_TABLE=<project>.<quality_dataset>.evaluation_latest \
     SDFB_DATAFLOW_REGION=<region> \
+    SDFB_RECORD_DAY=<launch day> \
     uv run --no-sync python3 -m pytest -m gcp packages/sdfb-tests/tests/integration/test_model_launch_gcp.py -s
     ```
 
-    Expect it to pass and print each batch job's margin.
+    `SDFB_RECORD_DAY` (`YYYY-MM-DD`, step 10's date) keeps both queries to
+    the launch's DAY partitions, as step 10's date filter does. Expect it to
+    pass and print each batch job's margin.
 
 16. **Clean up what the checklist created**, after steps 10, 11 and 15 are
     recorded: the scratch dataset (and only it: check the name before you
@@ -2548,14 +2557,18 @@ uv run --no-sync python3 scripts/launch/run_model.py \
 It refuses `--batch_index`, `--batch_count` and `--job_name` (and any
 abbreviation of them of three or more characters): it sets them per batch.
 It waits for every batch, prints one line per batch
-(`<base>-bNN  OK  job <job id>  <log>`, or `FAILED rc=…`), where `<log>` is
+(`<base>-bNN  OK  job <job id>  <log>`, every id the batch logged,
+comma-separated, when `--multi_table_mode=sequential_jobs` ran one job per
+table; or `FAILED rc=…`), where `<log>` is
 the absolute path of the batch's output, `<checkout>/runs/model-launch/<run
 id>/bNN.log` (a character of the run id outside `[A-Za-z0-9._-]` becomes
 `-`; `--log_dir` puts the logs elsewhere). Then the `sdfb-eval run
 --run_id=<base> --generation_job_ids=<ids> … --scope=manual …` command for
 the landed ones (`--scope=manual`: a `--run_id` evaluation has no labelled
-writes, so `auto` would resolve every table's scope to `unknown`), and under
-it the line
+writes, so `auto` would resolve every table's scope to `unknown`; with FK
+generation on it also passes `--relationships_uri=<the model file>`, as the
+model DAG does, for records that name no model; its `--region` is the
+launch's), and under it the line
 `# append --sdk_container_image=<image> --disk_size_gb=200 and the worker options: RUN_PLAYBOOK §9d`.
 A batch that finished OK but logged no job id marks the command
 `# PARTIAL`. Exit 0: every batch finished; 1: at least one failed, the
@@ -2565,7 +2578,8 @@ with `gcloud dataflow jobs cancel <id> --region=<region>`: stopping a
 launcher does not cancel its job.
 
 **The evaluation options.** Run the printed command from the repository
-root with `<REGION>` and `<BUCKET>` filled in and, appended, the options the
+root with `<BUCKET>` filled in (and `<REGION>`, printed only when the launch
+named no `--region`) and, appended, the options the
 model DAG's evaluation launch gives its CPU workers
 (`composer/synthetic_model_launch.py`, `trigger_evaluation`):
 
