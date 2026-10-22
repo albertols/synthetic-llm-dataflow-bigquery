@@ -915,7 +915,10 @@ _ACCELERATOR = "worker_accelerator="
 
 
 def beam_block(options: PipelineOptions, runner: str) -> dict[str, Any]:
-  """The snapshot's `beam`: the Dataflow options the job ran with."""
+  """The snapshot's `beam`: the Dataflow options the job ran with.
+
+    `region` lets a reader link the job: an evaluation by `--run_id`
+    records no `generation_region` (ADR 0044, ADR 0045)."""
   google = options.view_as(GoogleCloudOptions)
   worker = options.view_as(WorkerOptions)
   experiments = [
@@ -929,6 +932,7 @@ def beam_block(options: PipelineOptions, runner: str) -> dict[str, Any]:
   return {
       "runner": runner,
       "job_name": google.job_name,
+      "region": google.region,
       "machine_type": worker.machine_type,
       "accelerator": accelerator,
       "max_num_workers": worker.max_num_workers,

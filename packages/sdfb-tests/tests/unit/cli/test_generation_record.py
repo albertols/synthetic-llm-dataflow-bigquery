@@ -317,12 +317,15 @@ def _base() -> rp.RecordBase:
 def test_finish_record_reads_the_jobs_beam_options():
   options = PipelineOptions([
       "--runner=DataflowRunner", "--job_name=synthetic-sdfb-v0-6-1-m",
-      "--machine_type=g2-standard-8", "--max_num_workers=4",
-      "--experiments=use_runner_v2", f"--experiments=worker_accelerator={_L4}",
+      "--region=europe-west3", "--machine_type=g2-standard-8",
+      "--max_num_workers=4", "--experiments=use_runner_v2",
+      f"--experiments=worker_accelerator={_L4}",
       "--experiments=use_network_tags=tag-a"
   ])
   beam_ = rp.beam_block(options, "DataflowRunner")
   assert beam_["job_name"] == "synthetic-sdfb-v0-6-1-m"
+  # The GUI's job links need it: a `--run_id` evaluation records no region.
+  assert beam_["region"] == "europe-west3"
   assert beam_["machine_type"] == "g2-standard-8"
   assert beam_["max_num_workers"] == 4
   assert beam_["accelerator"] == _L4
@@ -347,3 +350,4 @@ def test_a_direct_runner_record_reads_no_job():
   record = rp.finish_record(_base(), options, runner="DirectRunner")
   assert record.columns["job_name"] is None
   assert record.read_job_id is False
+  assert json.loads(record.columns["config"])["beam"]["region"] is None
