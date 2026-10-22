@@ -84,9 +84,17 @@ export interface GenerationRecord {
   worker_versions: string[];
   version_mismatch: boolean;
   config_digests: string[];
+  /**
+   * Every table the launch's rows declare, unioned over each row's snapshot (a batched launch writes
+   * one snapshot per job, each holding only that job's tables), by name.
+   */
+  declared_tables: DeclaredTable[];
+  /** One entry per batch job whose rows carry a `batch` block, by index; [] for a launch in one job. */
+  batches: RecordBatch[];
 }
 
-type LaunchKeys = Pick<EvaluationDataHistoryRow, "evaluation_id" | "run_ids" | "base_run_id" | "generation_job_id">;
+type LaunchKeys = Pick<EvaluationDataHistoryRow, "evaluation_id" | "run_ids" | "base_run_id" | "generation_job_id"> &
+  Partial<Pick<EvaluationDataHistoryRow, "generation_job_ids">>;
 
 const isObject = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -114,12 +122,107 @@ export function parseSnapshot(text: string | null | undefined): GeneratorSnapsho
   return { ...rest, overridden: overridden.filter((o) => isObject(o) && typeof o.key === "string") };
 }
 
-/** A row of this evaluation's launch: its job id, a run id it lists, or its base run id. */
+// ------------------------------------------------- whole-model launches (ADR 0045) --
+
+/** A foreign key as the launch declared it (`TableRelations.fk[]`). */
+export interface DeclaredEdge {
+  cols: string[];
+  ref: string;
+  ref_cols: string[];
+  enforced: boolean;
+}
+
+/**
+ * A table as the launch declared it: the snapshot's `relationships.tables[name]`
+ * (`TableRelations.model_dump(mode="json")`, ADR 0045 D2). Since ADR 0045 every row carries
+ * `source_table` and `num_rows` (null when unset); rows written before it have neither, and read as
+ * null. Tolerant: any other key a generator does not write reads as its default.
+ */
+export interface DeclaredTable {
+  name: string;
+  pk: string[];
+  identity: string[];
+  fk: DeclaredEdge[];
+  /** null: the snapshot does not say. */
+  enabled: boolean | null;
+  /** `[project.]dataset.table` the launch read instead of `<io.source_dataset>.<name>`; null = the default. */
+  source_table: string | null;
+  /** Rows the launch generated for this table instead of `generation.num_rows`; null = the default. */
+  num_rows: number | null;
+}
+
+/** One Dataflow job of a whole-model launch: the snapshot's `batch` block and the rows that carry it. */
+export interface RecordBatch {
+  index: number;
+  /** How many batch jobs the launch planned (`batch.count`). */
+  count: number;
+  /** This job's tables, as its snapshot lists them. */
+  tables: string[];
+  job_ids: string[];
+  run_ids: string[];
+}
+
+const strings = (value: unknown): string[] =>
+  Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : [];
+
+/** `relationships.tables` of a snapshot, by name; entries that are not objects are skipped. */
+export function parseDeclaredTables(snapshot: GeneratorSnapshot | null): DeclaredTable[] {
+  const tables = snapshot?.relationships?.tables;
+  if (!isObject(tables)) return [];
+  const out: DeclaredTable[] = [];
+  for (const [name, raw] of Object.entries(tables)) {
+    if (!isObject(raw)) continue;
+    const fk = (Array.isArray(raw.fk) ? raw.fk : [])
+      .filter(isObject)
+      .map((e) => ({
+        cols: strings(e.cols),
+        ref: typeof e.ref === "string" ? e.ref : "",
+        ref_cols: strings(e.ref_cols),
+        enforced: e.enforced !== false,
+      }))
+      .filter((e) => e.ref !== "" && e.cols.length > 0);
+    const rows = raw.num_rows;
+    out.push({
+      name,
+      pk: strings(raw.pk),
+      identity: strings(raw.identity),
+      fk,
+      enabled: typeof raw.enabled === "boolean" ? raw.enabled : null,
+      source_table: typeof raw.source_table === "string" && raw.source_table !== "" ? raw.source_table : null,
+      num_rows: typeof rows === "number" && Number.isInteger(rows) && rows >= 1 ? rows : null,
+    });
+  }
+  return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/** The snapshot's `batch` block (`{index, count, tables}`), or null (`batch: null`, absent or malformed). */
+export function parseBatch(
+  snapshot: GeneratorSnapshot | null,
+): { index: number; count: number; tables: string[] } | null {
+  const batch = snapshot?.batch;
+  if (!isObject(batch)) return null;
+  const { index, count } = batch;
+  if (typeof index !== "number" || !Number.isInteger(index) || index < 0) return null;
+  if (typeof count !== "number" || !Number.isInteger(count) || count <= index) return null;
+  return { index, count, tables: strings(batch.tables) };
+}
+
+/**
+ * The evaluation's Dataflow jobs: `generation_job_ids` (ADR 0045 — every batch job that landed), else, for a
+ * registry row written before that column (it reads `[]`), the one `generation_job_id`.
+ */
+function launchJobs(e: Pick<LaunchKeys, "generation_job_id" | "generation_job_ids">): Set<string> {
+  const listed = e.generation_job_ids ?? [];
+  if (listed.length) return new Set(listed);
+  return new Set(e.generation_job_id ? [e.generation_job_id] : []);
+}
+
+/** A row of this evaluation's launch: one of its job ids, a run id it lists, or its base run id. */
 export function isLaunchRow(
   row: Pick<ValidationRunsRow, "run_id" | "job_id">,
   e: Omit<LaunchKeys, "evaluation_id">,
 ): boolean {
-  if (row.job_id && e.generation_job_id && row.job_id === e.generation_job_id) return true;
+  if (row.job_id && (row.job_id === e.generation_job_id || !!e.generation_job_ids?.includes(row.job_id))) return true;
   if (e.run_ids.includes(row.run_id)) return true;
   const base = e.base_run_id;
   return !!base && (row.run_id === base || row.run_id.startsWith(`${base}-`));
@@ -127,18 +230,21 @@ export function isLaunchRow(
 
 /**
  * The record an evaluation's generation wrote, from the `validation_runs` rows `runs.forEvaluation` returned
- * (newest first). Rows of another launch are dropped, and — once any row names the evaluation's Dataflow job —
- * so is a row that names another job, even under a run id the evaluation lists (a reused `--run_id`). The first
- * snapshot in run-id order is the launch's (every table of one job carries the same one).
+ * (newest first). Rows of another launch are dropped, and — once any row names one of the evaluation's Dataflow
+ * jobs (`launchJobs`) — so is a row that names a job it does not list, even under a run id the evaluation lists:
+ * a reused `--run_id`, or a whole-model launch's batch job that FAILED after writing its rows and so was not
+ * evaluated (ADR 0045; the evaluator's `rows_of_jobs` rule). A row with no job id stays. A single-job evaluation
+ * is a set of one. The first snapshot in run-id order is the launch's (every table of one job carries the same
+ * one; a batched launch's is batch 0's); `declared_tables` and `batches` read every row's.
  */
 export function buildGenerationRecord(evaluation: LaunchKeys, rows: readonly ValidationRunsRow[]): GenerationRecord {
-  const job = evaluation.generation_job_id;
+  const jobs = launchJobs(evaluation);
   const candidates = rows.filter((row) => isLaunchRow(row, evaluation));
-  const ownJob = !!job && candidates.some((row) => row.job_id === job);
+  const ownJob = candidates.some((row) => !!row.job_id && jobs.has(row.job_id));
   const seen = new Set<string>();
   const latest: ValidationRunsRow[] = [];
   for (const row of candidates) {
-    if (ownJob && row.job_id && row.job_id !== job) continue;
+    if (ownJob && row.job_id && !jobs.has(row.job_id)) continue;
     if (seen.has(row.run_id)) continue;
     seen.add(row.run_id);
     latest.push(row);
@@ -157,6 +263,21 @@ export function buildGenerationRecord(evaluation: LaunchKeys, rows: readonly Val
   const launcher = snapshot?.launcher?.version;
   const launcherVersion = typeof launcher === "string" ? launcher : null;
   const workerVersions = distinct(latest.map((r) => r.generator_version));
+  // Whole-model launches (ADR 0045): every row's snapshot, not only the first one's — each batch job's
+  // snapshot holds that job's tables and its `batch` block.
+  const declared = new Map<string, DeclaredTable>();
+  const batches = new Map<number, RecordBatch>();
+  for (const row of latest) {
+    const parsed = parseSnapshot(row.config);
+    if (!parsed) continue;
+    for (const table of parseDeclaredTables(parsed)) if (!declared.has(table.name)) declared.set(table.name, table);
+    const batch = parseBatch(parsed);
+    if (!batch) continue;
+    const entry = batches.get(batch.index) ?? { ...batch, job_ids: [], run_ids: [] };
+    if (row.job_id && !entry.job_ids.includes(row.job_id)) entry.job_ids.push(row.job_id);
+    entry.run_ids.push(row.run_id);
+    batches.set(batch.index, entry);
+  }
   return {
     evaluation_id: evaluation.evaluation_id,
     runs: latest.map((r) => ({
@@ -175,6 +296,8 @@ export function buildGenerationRecord(evaluation: LaunchKeys, rows: readonly Val
     worker_versions: workerVersions,
     version_mismatch: launcherVersion !== null && workerVersions.some((v) => v !== launcherVersion),
     config_digests: distinct(latest.map((r) => r.config_digest)),
+    declared_tables: [...declared.values()].sort((a, b) => a.name.localeCompare(b.name)),
+    batches: [...batches.values()].sort((a, b) => a.index - b.index),
   };
 }
 

@@ -674,5 +674,7 @@ export function generationRecord(
     worker_versions: [worker],
     version_mismatch: !!options.mismatch,
     config_digests: ["0123456789ab"],
+    declared_tables: [],
+    batches: [],
   };
 }

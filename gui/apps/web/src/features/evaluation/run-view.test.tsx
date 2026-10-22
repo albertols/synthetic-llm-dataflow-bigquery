@@ -62,6 +62,8 @@ function stubRun(detail = richDetail(), extra: Record<string, unknown> = {}) {
       worker_versions: [],
       version_mismatch: false,
       config_digests: [],
+      declared_tables: [],
+      batches: [],
     },
     ...extra,
   });

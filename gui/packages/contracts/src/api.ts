@@ -308,6 +308,26 @@ export const generatorSnapshotSchema = z.looseObject({
   batch: z.unknown().optional(),
 });
 
+const declaredTableSchema = z.object({
+  name: z.string(),
+  pk: z.array(z.string()),
+  identity: z.array(z.string()),
+  fk: z.array(
+    z.object({ cols: z.array(z.string()), ref: z.string(), ref_cols: z.array(z.string()), enforced: z.boolean() }),
+  ),
+  enabled: z.boolean().nullable(),
+  source_table: z.string().nullable(),
+  num_rows: z.int().positive().nullable(),
+});
+
+const recordBatchSchema = z.object({
+  index: z.int().nonnegative(),
+  count: z.int().positive(),
+  tables: z.array(z.string()),
+  job_ids: z.array(z.string()),
+  run_ids: z.array(z.string()),
+});
+
 /** `GET /api/evaluations/:id/record` — the generation record (contracts `buildGenerationRecord`). */
 export const generationRecordSchema = z.object({
   evaluation_id: z.string(),
@@ -329,6 +349,8 @@ export const generationRecordSchema = z.object({
   worker_versions: z.array(z.string()),
   version_mismatch: z.boolean(),
   config_digests: z.array(z.string()),
+  declared_tables: z.array(declaredTableSchema),
+  batches: z.array(recordBatchSchema),
 });
 
 // ------------------------------------------------------------------ trend --

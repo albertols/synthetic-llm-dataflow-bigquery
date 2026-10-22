@@ -6,6 +6,8 @@ import {
   buildGenerationRecord,
   configDiff,
   flattenValues,
+  parseBatch,
+  parseDeclaredTables,
   parseGeneratorVersion,
   parseSnapshot,
 } from "./record";
@@ -155,6 +157,166 @@ describe("buildGenerationRecord", () => {
     expect(record.snapshot).toBeNull();
     expect(record.launcher_version).toBeNull();
     expect(record.version_mismatch).toBe(false);
+  });
+});
+
+describe("declared tables and batch jobs (whole-model launches, ADR 0045 D7)", () => {
+  const LAUNCH = {
+    evaluation_id: "e2",
+    run_ids: [],
+    base_run_id: "L",
+    generation_job_id: "J0",
+    generation_job_ids: ["J0", "J1"],
+  };
+  const B00 = { index: 0, count: 2, tables: ["T_A", "T_B"] };
+  // As B writes them (`TableRelations.model_dump(mode="json")`): both keys always present, null when unset.
+  const TABLES_B00 = {
+    T_A: {
+      pk: ["COL_001"],
+      identity: [],
+      fk: [],
+      enabled: true,
+      note: "",
+      source_table: "example_archive.T_A_V2",
+      num_rows: null,
+    },
+    T_B: { pk: [], identity: [], fk: [], enabled: true, note: "", source_table: null, num_rows: null },
+  };
+  const snap = (batch: unknown, tables: Record<string, unknown>) =>
+    JSON.stringify({ ...SNAPSHOT, relationships: { model: "m", sha12: "s", tables }, batch });
+  const one = (name: string) => ({
+    [name]: { pk: [], identity: [], fk: [], enabled: true, note: "", source_table: null, num_rows: null },
+  });
+
+  it("unions every row's declared tables and groups the rows by batch job", () => {
+    const record = buildGenerationRecord(LAUNCH, [
+      row({
+        run_id: "L-b01-00-T_C",
+        job_id: "J1",
+        // An A2-era table entry (no source_table / num_rows keys) reads as null.
+        config: snap({ index: 1, count: 2, tables: ["T_C"] }, { T_C: { pk: [], identity: [], fk: [], enabled: true } }),
+      }),
+      row({ run_id: "L-b00-01-T_B", job_id: "J0", config: snap(B00, TABLES_B00) }),
+      row({ run_id: "L-b00-00-T_A", job_id: "J0", config: snap(B00, TABLES_B00) }),
+    ]);
+    expect(record.declared_tables.map((t) => [t.name, t.pk, t.source_table])).toEqual([
+      ["T_A", ["COL_001"], "example_archive.T_A_V2"],
+      ["T_B", [], null],
+      ["T_C", [], null],
+    ]);
+    expect(record.batches).toEqual([
+      { index: 0, count: 2, tables: ["T_A", "T_B"], job_ids: ["J0"], run_ids: ["L-b00-00-T_A", "L-b00-01-T_B"] },
+      { index: 1, count: 2, tables: ["T_C"], job_ids: ["J1"], run_ids: ["L-b01-00-T_C"] },
+    ]);
+  });
+
+  it("a batch whose rows are missing is absent; the count still says how many were planned", () => {
+    const record = buildGenerationRecord(LAUNCH, [
+      row({ run_id: "L-b00-00-T_A", job_id: "J0", config: snap(B00, TABLES_B00) }),
+    ]);
+    expect(record.batches.map((b) => [b.index, b.count])).toEqual([[0, 2]]);
+  });
+
+  it("leaves out the rows of a batch job the evaluation did not cover; a row with no job id stays", () => {
+    const record = buildGenerationRecord({ ...LAUNCH, generation_job_ids: ["J0"] }, [
+      row({ run_id: "L-b00-00-T_A", job_id: "J0", config: snap({ index: 0, count: 3, tables: ["T_A"] }, one("T_A")) }),
+      // b01's job FAILED after writing its row (a BLOCKER): B's model DAG did not list it.
+      row({ run_id: "L-b01-00-T_C", job_id: "J1", config: snap({ index: 1, count: 3, tables: ["T_C"] }, one("T_C")) }),
+      row({ run_id: "L-b02-00-T_D", job_id: null, config: snap({ index: 2, count: 3, tables: ["T_D"] }, one("T_D")) }),
+    ]);
+    expect(record.batches.map((b) => b.index)).toEqual([0, 2]);
+    expect(record.declared_tables.map((t) => t.name)).toEqual(["T_A", "T_D"]);
+    // The failed job's row leaves A2's fields too: the record is the rows of the jobs the evaluation lists.
+    expect(record.runs.map((r) => r.run_id)).toEqual(["L-b00-00-T_A", "L-b02-00-T_D"]);
+    expect(record.runs).toHaveLength(2);
+  });
+
+  it("an unlisted job's row under a listed run id is dropped", () => {
+    const listed = { ...LAUNCH, run_ids: ["L-b00-00-T_A", "L-b01-00-T_C"] };
+    // Newest first: job K relaunched under the same --run_id after this launch's batch job J1.
+    const record = buildGenerationRecord(listed, [
+      row({
+        run_id: "L-b01-00-T_C",
+        job_id: "K",
+        config_digest: "dK",
+        config: snap({ index: 0, count: 1, tables: ["T_X"] }, one("T_X")),
+      }),
+      row({
+        run_id: "L-b01-00-T_C",
+        job_id: "J1",
+        config_digest: "d",
+        config: snap({ index: 1, count: 2, tables: ["T_C"] }, one("T_C")),
+      }),
+      row({
+        run_id: "L-b00-00-T_A",
+        job_id: "J0",
+        config_digest: "d",
+        config: snap({ index: 0, count: 2, tables: ["T_A"] }, one("T_A")),
+      }),
+    ]);
+    expect(record.runs.map((r) => [r.run_id, r.job_id])).toEqual([
+      ["L-b00-00-T_A", "J0"],
+      ["L-b01-00-T_C", "J1"],
+    ]);
+    expect(record.config_digests).toEqual(["d"]);
+    expect(record.declared_tables.map((t) => t.name)).toEqual(["T_A", "T_C"]);
+    expect(record.batches.map((b) => [b.index, b.job_ids])).toEqual([
+      [0, ["J0"]],
+      [1, ["J1"]],
+    ]);
+  });
+
+  it("keeps a row by any listed job id alone", () => {
+    const record = buildGenerationRecord(LAUNCH, [row({ run_id: "X-b01-00-T_C", job_id: "J1" })]);
+    expect(record.runs.map((r) => r.run_id)).toEqual(["X-b01-00-T_C"]);
+  });
+
+  it("a pre-migration row (`generation_job_ids: []`) narrows to `generation_job_id`", () => {
+    const record = buildGenerationRecord({ ...LAUNCH, generation_job_ids: [] }, [
+      row({ run_id: "L-00-T_A", job_id: "K", config_digest: "dK" }),
+      row({ run_id: "L-00-T_A", job_id: "J0", config_digest: "dJ" }),
+      row({ run_id: "L-01-T_B", job_id: "J1", config_digest: "dJ1" }),
+    ]);
+    expect(record.runs.map((r) => [r.run_id, r.job_id])).toEqual([["L-00-T_A", "J0"]]);
+    expect(record.config_digests).toEqual(["dJ"]);
+  });
+
+  it("reads B's optional keys only when they are well formed", () => {
+    const parsed = parseDeclaredTables({
+      relationships: {
+        tables: {
+          T_A: {
+            pk: ["COL_001", 7],
+            fk: [{ cols: ["COL_002"], ref: "T_B", ref_cols: ["COL_001"], enforced: false }, { cols: [] }],
+            num_rows: 0,
+            source_table: "",
+          },
+          T_B: { enabled: "yes", num_rows: 5000 },
+          T_C: "not an object",
+        },
+      },
+    });
+    expect(parsed).toEqual([
+      {
+        name: "T_A",
+        pk: ["COL_001"],
+        identity: [],
+        fk: [{ cols: ["COL_002"], ref: "T_B", ref_cols: ["COL_001"], enforced: false }],
+        enabled: null,
+        source_table: null,
+        num_rows: null,
+      },
+      { name: "T_B", pk: [], identity: [], fk: [], enabled: null, source_table: null, num_rows: 5000 },
+    ]);
+  });
+
+  it("is empty for a snapshot without relationships or batch, and for a malformed batch", () => {
+    expect(parseDeclaredTables(null)).toEqual([]);
+    expect(parseBatch({ batch: null })).toBeNull();
+    expect(parseBatch({ batch: { index: 2, count: 2, tables: [] } })).toBeNull();
+    expect(parseBatch({ batch: { index: "0", count: 1 } })).toBeNull();
+    const record = buildGenerationRecord(LAUNCH, [row({ run_id: "L-00-T_A", config: JSON.stringify(SNAPSHOT) })]);
+    expect([record.declared_tables, record.batches]).toEqual([[], []]);
   });
 });
 
