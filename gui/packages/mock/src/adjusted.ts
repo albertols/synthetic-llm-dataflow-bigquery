@@ -46,16 +46,18 @@ import {
   type RelationshipModel,
   type ValidationRunsRow,
 } from "@synthetic-platform/contracts";
-import {
-  headlineCounts,
-  modelFamilyScores,
-  Random,
-  seedFrom,
-  sha256Hex,
-  type FamilyScores,
-} from "@synthetic-platform/stats";
+import { Random, seedFrom, sha256Hex } from "@synthetic-platform/stats";
 
-import { edgeMetrics, familyRows, TableEvaluator, tableRollups, type TableContext } from "./evaluate";
+import {
+  attributeMetrics,
+  edgeMetrics,
+  exactTableContext,
+  finalEvent,
+  modelRollup,
+  TableEvaluator,
+  tableRollups,
+  type Evaluated,
+} from "./evaluate";
 import { baseRunId, isoMicros, tableRunIds } from "./ids";
 import { MODEL_URIS, type EvalSpec, type Quality } from "./storyline";
 import { synthesize } from "./synth";
@@ -217,7 +219,7 @@ ADJUSTED_RELATIONSHIP_MODEL.sha12 = sha256Hex(JSON.stringify(ADJUSTED_RELATIONSH
 
 // ------------------------------------------------------------------ rows --
 
-const key = (name: string, role: "pk" | "fk"): ColumnDef => ({
+export const key = (name: string, role: "pk" | "fk"): ColumnDef => ({
   name,
   bqType: "INT64",
   kind: "identifier",
@@ -225,12 +227,26 @@ const key = (name: string, role: "pk" | "fk"): ColumnDef => ({
   role,
 });
 /** The same three attribute columns on every table: enough for column, pair and row metrics. */
-const ATTRIBUTES: ColumnDef[] = [
+export const ATTRIBUTES: ColumnDef[] = [
   { name: "COL_010", bqType: "FLOAT64", kind: "numeric", plan: "numeric" },
   { name: "COL_011", bqType: "STRING", kind: "categorical", plan: "categorical" },
   { name: "COL_012", bqType: "TIMESTAMP", kind: "temporal", plan: "temporal" },
 ];
+/** The numeric ↔ categorical pair the attributes are drawn as (`attributeRow`). */
+export const ATTRIBUTE_PAIRS: [string, string][] = [["COL_011", "COL_010"]];
 const LEVELS = ["K1", "K2", "K3", "K4", "K5"];
+
+/** The three attribute columns of one row, drawn in the order this launch has always drawn them. */
+export function attributeRow(rng: Random): Row {
+  const level = rng.weighted([0.42, 0.27, 0.16, 0.1, 0.05]);
+  return {
+    // The amount depends a little on the level (a numeric ↔ categorical pair).
+    COL_010: rng.bernoulli(0.02) ? null : Math.round(Math.exp(rng.normal(4 + level * 0.1, 0.6)) * 100) / 100,
+    COL_011: LEVELS[level]!,
+    COL_012: isoFromEpoch(T0 + (T1 - T0) * rng.uniform() ** 0.7),
+  };
+}
+
 const SAMPLE_ROWS = 600;
 
 function tableDef(t: AdjustedTable): TableDef {
@@ -243,21 +259,18 @@ function tableDef(t: AdjustedTable): TableDef {
     // A key column the driving edge also draws is listed once, as the FK it is generated from.
     columns: [...keys.map((name) => key(name, fk.has(name) ? "fk" : "pk")), ...ATTRIBUTES],
     row(rng, i) {
-      const level = rng.weighted([0.42, 0.27, 0.16, 0.1, 0.05]);
+      const attributes = attributeRow(rng);
       const row: Row = {};
       for (const name of keys) row[name] = fk.has(name) ? 1 + ((i * 7919) % 100_000) : i + 1;
-      // The amount depends a little on the level (a numeric ↔ categorical pair).
-      row.COL_010 = rng.bernoulli(0.02) ? null : Math.round(Math.exp(rng.normal(4 + level * 0.1, 0.6)) * 100) / 100;
-      row.COL_011 = LEVELS[level]!;
-      row.COL_012 = isoFromEpoch(T0 + (T1 - T0) * rng.uniform() ** 0.7);
-      return row;
+      return Object.assign(row, attributes);
     },
   };
 }
 
 // ------------------------------------------------------------ the launch --
 
-const QUALITY: Quality = {
+/** No leak, drift or collapse: the launch's rows follow their source (also the isolated-forest launch's). */
+export const CLEAN_QUALITY: Quality = {
   valueLeak: 0,
   rowLeak: 0,
   exposureLeak: 0,
@@ -270,7 +283,16 @@ const QUALITY: Quality = {
   temporalBlend: false,
 };
 
-function specOf(index: number, evaluatedAt: string, trigger: EvalSpec["trigger"], durationMinutes: number): EvalSpec {
+/**
+ * The spec of an evaluation of this launch (b1_rag, exact mode, `dev`). The isolated-forest launch's
+ * spec spreads it and sets its own rows, uniqueness mode and tables (forest.ts).
+ */
+export function specOf(
+  index: number,
+  evaluatedAt: string,
+  trigger: EvalSpec["trigger"],
+  durationMinutes: number,
+): EvalSpec {
   return {
     index,
     id: `eval-${String(index).padStart(4, "0")}`,
@@ -295,7 +317,7 @@ function specOf(index: number, evaluatedAt: string, trigger: EvalSpec["trigger"]
     // Not `relational`: that flag means the thelook model to the storyline's builders.
     tables: LAUNCH.map((t) => t.name),
     relational: false,
-    quality: QUALITY,
+    quality: CLEAN_QUALITY,
   };
 }
 
@@ -304,7 +326,8 @@ const CHAINED = specOf(41, "2026-09-13T09:02:11.418253Z", "chained", 38);
 const MISWIRED = specOf(42, "2026-09-13T10:02:26.730911Z", "composer", 36);
 export const ADJUSTED_EVALUATIONS = [CHAINED.id, MISWIRED.id] as const;
 
-const knobNumber = (id: string, fallback: number) => Number(knobs.knobs.find((k) => k.id === id)?.value ?? fallback);
+export const knobNumber = (id: string, fallback: number) =>
+  Number(knobs.knobs.find((k) => k.id === id)?.value ?? fallback);
 
 /** The launch's `validation_runs` rows, as `build_run_summary` folds them (ADR 0038 D3, D4). */
 function validationRuns(base: string, runIds: Map<string, string>, finishedAt: string): ValidationRunsRow[] {
@@ -357,9 +380,32 @@ function validationRuns(base: string, runIds: Map<string, string>, finishedAt: s
 
 type TableEntry = EvaluationDataHistoryRow["tables"][number];
 
-function tableEntry(
+/** What a registry `tables[]` entry says of a launched table, besides its run id and reference digest. */
+export interface EntryFacts {
+  name: string;
+  role: NonNullable<TableEntry["role"]>;
+  /** The table the launch sampled. */
+  sourceTable: string;
+  sourceRows: number;
+  /** Rows the launch landed, as many as it was asked for. */
+  rows: number;
+}
+
+const factsOf = (t: AdjustedTable): EntryFacts => ({
+  name: t.name,
+  role: t.parent ? "driven" : "root",
+  sourceTable: sourceFqn(t.name),
+  sourceRows: t.sourceRows,
+  rows: t.rows,
+});
+
+/**
+ * The registry `tables[]` entry of a launched table the evaluation read whole, its reference verified
+ * (the isolated-forest launch's too); `manual`: the evaluation's scope came from manual input.
+ */
+export function tableEntry(
   spec: EvalSpec,
-  t: AdjustedTable,
+  t: EntryFacts,
   runId: string | null,
   digest: string,
   manual: boolean,
@@ -367,9 +413,9 @@ function tableEntry(
   return {
     name: t.name,
     landing_table: landingFqn(t.name),
-    source_table: sourceFqn(t.name),
+    source_table: t.sourceTable,
     run_id: runId,
-    role: t.parent ? "driven" : "root",
+    role: t.role,
     scope_mode: manual ? "manual" : "table",
     scope_status: "ok",
     scope_ok: true,
@@ -394,13 +440,6 @@ function tableEntry(
   };
 }
 
-interface Evaluated {
-  metrics: EvaluationMetricsRow[];
-  profiles: EvaluationProfilesRow[];
-  flags: EvaluationRowFlagsRow[];
-  scores: Map<string, FamilyScores>;
-}
-
 /** Every table's metric rows: columns, pairs and rows from generated samples; keys and edges from LAUNCH. */
 function evaluate(spec: EvalSpec, entries: readonly TableEntry[], seed: number): Evaluated {
   const out: Evaluated = { metrics: [], profiles: [], flags: [], scores: new Map() };
@@ -413,48 +452,13 @@ function evaluate(spec: EvalSpec, entries: readonly TableEntry[], seed: number):
     const holdout = source.slice(SAMPLE_ROWS / 2);
     const parentKeys = new Map((t.parent?.cols ?? []).map((c) => [c, SAMPLE_ROWS]));
     const synthetic = synthesize({ table, source, reference, spec, pools: new Map(), rows: SAMPLE_ROWS, parentKeys });
-    const ctx: TableContext = {
-      spec,
-      table,
-      evaluatedAt: spec.evaluatedAt,
-      landingTable: entry.landing_table,
-      sourceTable: entry.source_table,
-      source,
-      synthetic,
-      reference,
-      holdout,
-      pools: new Map(),
-      textDraws: new Map(),
-      nSource: t.sourceRows,
-      nSynthetic: t.rows,
-      rowsSynthetic: t.rows,
-      rowsExpected: t.rows,
-      nReference: spec.referenceRowsLimit,
-      sampleRate: null,
-      encodingPlanDigest: entry.encoding_plan_digest!,
-      referenceVerified: true,
-      profiledNullFraction: new Map(),
-      rng: new Random(seedFrom(seed, spec.id, t.name)),
-    };
+    const samples = { source, synthetic, reference, holdout };
+    const ctx = exactTableContext(spec, table, entry, samples, new Random(seedFrom(seed, spec.id, t.name)));
     const ev = new TableEvaluator(ctx);
-    for (const column of table.columns) {
-      ev.typeValidity(column);
-      ev.nullAndEmpty(column);
-      if (column.role) continue;
-      if (column.kind === "numeric") ev.numeric(column, false);
-      else if (column.kind === "temporal") ev.numeric(column, true);
-      else ev.categorical(column);
-    }
-    ev.pairs(
-      table.columns.filter((c) => c.kind === "numeric" || c.kind === "temporal"),
-      [["COL_011", "COL_010"]],
-    );
-    ev.rows();
-    const distances = ev.result.columnDistances;
-    const meanDistance = distances.reduce((a, b) => a + b, 0) / Math.max(distances.length, 1);
+    const detectionShift = attributeMetrics(ev, ATTRIBUTE_PAIRS);
     // The evaluator reads the DECLARED model: it counts duplicates over the declared key whether
     // or not the launch still treated it as one.
-    ev.tableLevel(Math.min(0.45, 0.02 + meanDistance), {
+    ev.tableLevel(detectionShift, {
       columns: t.pk,
       duplicateRows: t.duplicateRows,
       distinctKeys: t.distinctKeys,
@@ -484,32 +488,16 @@ function evaluate(spec: EvalSpec, entries: readonly TableEntry[], seed: number):
     out.flags.push(...ev.result.flags);
   }
   // The model roll-up, on the root table's context (no rows of its own).
-  const root = tableDef(LAUNCH[0]!);
-  const model = new TableEvaluator({
-    spec,
-    table: root,
-    evaluatedAt: spec.evaluatedAt,
-    landingTable: null,
-    sourceTable: null,
-    source: [],
-    synthetic: [],
-    reference: [],
-    holdout: [],
-    pools: new Map(),
-    textDraws: new Map(),
-    nSource: 0,
-    nSynthetic: 0,
-    rowsSynthetic: 0,
-    rowsExpected: 1,
-    nReference: spec.referenceRowsLimit,
-    sampleRate: null,
-    encodingPlanDigest: entries[0]!.encoding_plan_digest!,
-    referenceVerified: true,
-    profiledNullFraction: new Map(),
-    rng: new Random(seedFrom(seed, spec.id, "model")),
-  });
-  familyRows(model, ADJUSTED_MODEL, modelFamilyScores([...out.scores.values()]), "model");
-  out.metrics.push(...model.result.metrics);
+  out.metrics.push(
+    ...modelRollup(
+      spec,
+      tableDef(LAUNCH[0]!),
+      entries[0]!.encoding_plan_digest!,
+      ADJUSTED_MODEL,
+      [...out.scores.values()],
+      new Random(seedFrom(seed, spec.id, "model")),
+    ),
+  );
   return out;
 }
 
@@ -575,32 +563,12 @@ export function buildAdjustedLaunch(
     }
     const digestOf = (name: string) => launchRuns.find((r) => r.landing_table === landingFqn(name))!.reference_digest!;
     running.tables = LAUNCH.map((t, i) =>
-      tableEntry(spec, t, miswired && i > 0 ? null : runIds.get(t.name)!, digestOf(t.name), miswired),
+      tableEntry(spec, factsOf(t), miswired && i > 0 ? null : runIds.get(t.name)!, digestOf(t.name), miswired),
     );
     out.registry.push(structuredClone(running));
 
-    const final = structuredClone(running);
-    final.event = "FINAL";
-    final.finished_at = isoMicros(Date.parse(spec.evaluatedAt) + spec.durationMinutes * 60_000);
-    final.recorded_at = final.finished_at;
-    const evaluated = evaluate(spec, final.tables, seed);
-    for (const entry of final.tables) entry.table_score = evaluated.scores.get(entry.name ?? "")?.overall ?? null;
-    const model = modelFamilyScores([...evaluated.scores.values()]);
-    const counts = headlineCounts(evaluated.metrics);
-    final.overall_score = model.overall;
-    final.fidelity_score = model.fidelity;
-    final.privacy_score = model.privacy;
-    final.integrity_score = model.integrity;
-    final.diversity_score = model.diversity;
-    final.metrics_total = counts.total;
-    final.metrics_pass = counts.pass;
-    final.metrics_warn = counts.warn;
-    final.metrics_fail = counts.fail;
-    final.metrics_not_evaluated = counts.not_evaluated;
-    final.metrics_info = counts.info;
-    const rows = LAUNCH.reduce((acc, t) => acc + t.sourceRows + t.rows, 0);
-    final.bq_bytes_processed = Math.round(rows * 164);
-    final.predicted_shuffle_gb = Math.round((rows * 96) / 1e7) / 100;
+    const evaluated = evaluate(spec, running.tables, seed);
+    const final = finalEvent(spec, running, evaluated);
     final.warnings = miswired
       ? [
           "launch context: no launch_config log entry for the job; tables and scope come from manual input",

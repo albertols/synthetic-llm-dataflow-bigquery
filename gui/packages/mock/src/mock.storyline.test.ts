@@ -49,6 +49,7 @@ import {
   createMockDataset,
   EDGES,
   edgeLabel,
+  FOREST_EVALUATION,
   MOCK_RELATIONSHIP_MODEL,
   STORYLINE,
   type MockDataset,
@@ -87,9 +88,9 @@ function profile(
 }
 
 describe("the storyline", { timeout: 60_000 }, () => {
-  it("has 40 evaluations over 8 weeks, RUNNING then FINAL (plus the two of the adjusted-keys launch)", () => {
+  it("has 40 evaluations over 8 weeks, RUNNING then FINAL (plus the two of the adjusted-keys launch and the isolated-forest one)", () => {
     expect(STORYLINE).toHaveLength(40);
-    expect(latest.size).toBe(STORYLINE.length + ADJUSTED_EVALUATIONS.length);
+    expect(latest.size).toBe(STORYLINE.length + ADJUSTED_EVALUATIONS.length + 1);
     const dates = [...latest.values()].map((r) => r.evaluated_at).sort();
     expect(dates[0]!.slice(0, 10)).toBe("2026-08-03");
     expect(dates.at(-1)!.slice(0, 10)).toBe("2026-09-27");
@@ -496,7 +497,10 @@ describe("the mock mirrors what the pipeline writes", { timeout: 60_000 }, () =>
 
   it("per-table run ids are <base>-NN-<table> in generation order; one table keeps the base", () => {
     const adjusted = new Set<string>(ADJUSTED_EVALUATIONS);
-    for (const row of [...latest.values()].filter((r) => !adjusted.has(r.evaluation_id))) {
+    // The forest's batched ids (<base>-bNN-MM-<table>) are pinned by mock.forest.test.ts.
+    for (const row of [...latest.values()].filter(
+      (r) => !adjusted.has(r.evaluation_id) && r.evaluation_id !== FOREST_EVALUATION,
+    )) {
       const base = row.base_run_id!;
       if (row.relationship_model)
         expect(row.run_ids).toEqual([`${base}-00-users`, `${base}-01-orders`, `${base}-02-order_items`]);
@@ -732,7 +736,8 @@ describe("the adjusted-keys launch (ADR 0038)", { timeout: 60_000 }, () => {
 
 describe("the generation record (ADR 0044)", { timeout: 60_000 }, () => {
   it("records every storyline launch, consistently with its registry row", () => {
-    const recorded = data.registry.filter((r) => r.generator_version);
+    // The forest's rows carry twelve job ids, one per batch: mock.forest.test.ts pins them.
+    const recorded = data.registry.filter((r) => r.generator_version && r.evaluation_id !== FOREST_EVALUATION);
     expect(recorded.length).toBeGreaterThan(0);
     for (const e of recorded) {
       const runs = data.validationRuns.filter((r) => e.run_ids.includes(r.run_id));

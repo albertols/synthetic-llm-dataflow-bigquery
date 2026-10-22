@@ -481,9 +481,10 @@ describe("the BigQuery provider", { timeout: 60_000 }, () => {
     expect(res.headers["x-data-source"]).toBe("bigquery");
     expect(Number(res.headers["x-bq-bytes-estimate"])).toBe(6 * 12_345_678);
     const facets = facetsSchema.parse(res.json());
-    // The stub's registry is the mock's: the storyline's 40 and the adjusted-keys launch's two.
+    // The stub's registry is the mock's: the storyline's 40, the adjusted-keys launch's two and the
+    // isolated-forest launch's one.
     expect(facets.counts).toMatchObject({ evaluations: latest.size, runs: 215, metrics: 900 });
-    expect(latest.size).toBe(42);
+    expect(latest.size).toBe(43);
     const health = await app.inject({ url: "/api/health", headers: { host: "127.0.0.1:8787" } });
     expect(health.json()).toMatchObject({ mode: "bigquery", project: "demo-project" });
     await app.close();

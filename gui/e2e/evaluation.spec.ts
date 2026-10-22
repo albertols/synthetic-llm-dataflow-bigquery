@@ -54,9 +54,9 @@ test("filter the list, open a run, open a column drawer, then compare two runs",
 
   await page.goto("/evaluation");
   await expect(page.getByRole("heading", { level: 1, name: "Evaluations" })).toBeVisible();
-  // The first request warms the mock (a few seconds on a busy machine). 42: the storyline's 40
-  // and the two evaluations of the adjusted-keys launch.
-  await expect(page.getByRole("heading", { level: 2, name: "42 evaluations" })).toBeVisible({ timeout: 45_000 });
+  // The first request warms the mock (a few seconds on a busy machine). 43: the storyline's 40,
+  // the two evaluations of the adjusted-keys launch and the isolated-forest launch's one.
+  await expect(page.getByRole("heading", { level: 2, name: "43 evaluations" })).toBeVisible({ timeout: 45_000 });
   await expectNoSeriousViolations(page, "list");
 
   // Filter: engine = b2_library (a multi-select combobox; the filter lives in the URL).
@@ -66,7 +66,7 @@ test("filter the list, open a run, open a column drawer, then compare two runs",
   await page.getByRole("option", { name: /b2_library/ }).click();
   await page.keyboard.press("Escape");
   await expect.poll(async () => (await routeSearch(page)).engine).toEqual(["b2_library"]);
-  await expect(page.getByRole("heading", { level: 2, name: /^\d+ evaluations?$/ })).not.toHaveText("42 evaluations");
+  await expect(page.getByRole("heading", { level: 2, name: /^\d+ evaluations?$/ })).not.toHaveText("43 evaluations");
   await expect(page.getByRole("button", { name: "Remove filter Engine: b2_library" })).toBeVisible();
   await noHorizontalScroll(page);
 

@@ -95,6 +95,8 @@ export function matchesFilter(row: EvaluationSummary, f: EvaluationFilterParsed)
       row.base_run_id,
       row.generation_job_id,
       row.generation_job_name,
+      // Every batch job of a whole-model launch, not only the first (ADR 0045).
+      ...row.generation_job_ids,
       ...row.run_ids,
     ];
     if (!haystack.some((s) => s?.toLowerCase().includes(q))) return false;

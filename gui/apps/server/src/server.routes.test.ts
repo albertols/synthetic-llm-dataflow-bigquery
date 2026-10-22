@@ -33,7 +33,7 @@ import {
   type EvaluationAdjustments,
   type Facets,
 } from "@synthetic-platform/contracts";
-import { ADJUSTED_EVALUATIONS, getMockDataset, STORYLINE } from "@synthetic-platform/mock";
+import { ADJUSTED_EVALUATIONS, FOREST_EVALUATION, getMockDataset, STORYLINE } from "@synthetic-platform/mock";
 import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -46,8 +46,8 @@ import { buildComparison, latestPerEvaluation } from "./providers/shared";
 let app: FastifyInstance;
 let staticDir: string;
 let facets: Facets;
-/** Every evaluation the mock holds: the storyline's, and the adjusted-keys launch's two. */
-const EVALUATIONS = STORYLINE.length + ADJUSTED_EVALUATIONS.length;
+/** Every evaluation the mock holds: the storyline's, the adjusted-keys launch's two and the isolated-forest launch's one. */
+const EVALUATIONS = STORYLINE.length + ADJUSTED_EVALUATIONS.length + 1;
 
 beforeAll(async () => {
   staticDir = mkdtempSync(join(tmpdir(), "spa-"));
@@ -96,9 +96,9 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
   });
 
   it("/api/facets lists every filter option", () => {
-    // The storyline's 40 and the two evaluations of the adjusted-keys launch.
+    // The storyline's 40, the two evaluations of the adjusted-keys launch and the isolated-forest launch's one.
     expect(facets.counts.evaluations).toBe(EVALUATIONS);
-    expect(facets.relationship_models).toEqual(["adjusted_keys_demo", "thelook_demo"]);
+    expect(facets.relationship_models).toEqual(["adjusted_keys_demo", "isolated_forest_demo", "thelook_demo"]);
     expect(facets.engines).toEqual(["b1_rag", "b2_library"]);
     expect(facets.tables).toEqual(expect.arrayContaining(["users", "orders", "order_items", "user_features"]));
     expect(facets.latest?.evaluation_id).toBe("eval-0039");
@@ -176,6 +176,14 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
     // from/to are ISO timestamps (with offset) or dates; anything else is a 400.
     await get("/api/evaluations?from=yesterday", apiErrorSchema, 400);
     await get("/api/evaluations?to=2026-09-01T10:00:00", apiErrorSchema, 400);
+  });
+
+  it("/api/evaluations?q finds a whole-model evaluation by any of its batch jobs, not only the first (ADR 0045)", async () => {
+    const forest = latestPerEvaluation(getMockDataset().registry).find((r) => r.evaluation_id === FOREST_EVALUATION)!;
+    const b05 = forest.generation_job_ids[5]!;
+    expect(b05).not.toBe(forest.generation_job_id);
+    const page = await get(`/api/evaluations?q=${encodeURIComponent(b05)}`, evaluationPageSchema);
+    expect(page.items.map((e) => e.evaluation_id)).toEqual([FOREST_EVALUATION]);
   });
 
   it("timestamps keep their microseconds end to end", async () => {
@@ -304,6 +312,16 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
     const filtered = await get("/api/runs?engine=b2_library&status=PASSED", z.array(validationRunSchema));
     expect(filtered.every((r) => r.engine === "b2_library" && r.status === "PASSED")).toBe(true);
     await get("/api/dlq", apiErrorSchema, 400);
+  });
+
+  it("/api/runs?base_run_id lists a whole-model launch's batched rows, <base>-bNN-MM-<table> (ADR 0045)", async () => {
+    // The per-table (eval-0021) and one-table (eval-0032) launches: the test above, unchanged.
+    const forest = await get(`/api/evaluations/${FOREST_EVALUATION}`, evaluationDetailSchema);
+    const base = forest.evaluation.base_run_id!;
+    const batched = await get(`/api/runs?base_run_id=${base}`, z.array(validationRunSchema));
+    expect(batched).toHaveLength(112);
+    expect(batched.every((r) => new RegExp(`^${base}-b\\d{2}-\\d{2}-T_\\d{3}$`).test(r.run_id))).toBe(true);
+    expect(new Set(batched.map((r) => r.run_id))).toEqual(new Set(forest.evaluation.run_ids));
   });
 
   it("/api/source-stats keys snapshots by (digest, tier, profiler_version, run_id)", async () => {
@@ -472,6 +490,25 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
   it("/api/evaluations/:id/record is a 404 for an unknown id", async () => {
     const res = await inject("/api/evaluations/nope/record");
     expect(res.statusCode).toBe(404);
+  });
+
+  it("/api/evaluations/eval-0043/record reads the whole-model launch's 112 tables and 12 batch jobs", async () => {
+    const record = await get("/api/evaluations/eval-0043/record", generationRecordSchema);
+    expect(record.declared_tables).toHaveLength(112);
+    expect(record.batches).toHaveLength(12);
+    expect(record.batches[11]!.tables).toEqual(["T_118", "T_119"]);
+  });
+
+  it("/api/relationships serves the forest's whole model in mock mode, disabled tables included", async () => {
+    const { models } = await get("/api/relationships", relationshipsResponseSchema);
+    const forest = models.find((m) => m.model === "isolated_forest_demo")!;
+    expect(forest.origin).toBe("mock");
+    expect(forest.tables).toHaveLength(120);
+    expect(forest.tables.filter((t) => !t.enabled)).toHaveLength(8);
+    // ADR 0045's RelationTable keys pass relationshipModelSchema (D2).
+    expect(forest.tables.filter((t) => t.source_table)).toHaveLength(6);
+    // The committed sample (config/relationships/example_isolated_forest.yaml) is another model, not this one.
+    expect(models.find((m) => m.model === "isolated_forest_example")?.origin).toBe("committed_example");
   });
 
   it("the adjustments join falls back from run id to launch base to generation window, never across launches", async () => {

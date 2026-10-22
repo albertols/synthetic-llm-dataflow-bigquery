@@ -16,7 +16,10 @@
 import {
   catalogueById,
   LIFT_COUNT_KEYS,
+  NO_IDENTITY_REASON,
+  NO_PK_REASON,
   type CatalogueMetric,
+  type EvaluationDataHistoryRow,
   type EvaluationMetricsRow,
   type EvaluationProfilesRow,
   type EvaluationRowFlagsRow,
@@ -34,6 +37,7 @@ import {
   expectedDistinct,
   fisherZDeltaFloor,
   foldedAbsInterval,
+  headlineCounts,
   histogram,
   isAggregateMetric,
   jsdBits,
@@ -41,6 +45,7 @@ import {
   ksBracket,
   ksCritical,
   miBiasNats,
+  modelFamilyScores,
   newcombe,
   nmi,
   normalize,
@@ -62,6 +67,7 @@ import {
   type FamilyScores,
 } from "@synthetic-platform/stats";
 
+import { isoMicros } from "./ids";
 import type { EvalSpec } from "./storyline";
 import { epoch, FREE_TEXT_POOL_MAX, textUniverse, type Pool } from "./synth";
 import type { ColumnDef, Row, TableDef, Value } from "./thelook";
@@ -1531,9 +1537,10 @@ export class TableEvaluator {
   // ----------------------------------------------------------------- table --
 
   /**
-   * `keys`: a launch whose declared-key counts are known (adjusted.ts) writes the PK row as the
-   * evaluator's `_key_duplicates` does — the rate with its counts in `detail` — and, having
-   * declared no identity, a `not_evaluated` identity row. Without it, the storyline's draw.
+   * `keys`: a launch whose declared-key counts are known (adjusted.ts, forest.ts) writes the PK row as
+   * the evaluator's `_key_duplicates` does — the rate with its counts in `detail` — and, having
+   * declared no identity, a `not_evaluated` identity row. `keys.columns` empty: the table declares no
+   * primary key (the evaluator's not-evaluated row). Without `keys`, the storyline's draw.
    */
   tableLevel(detectionShift: number, keys?: KeyCounts) {
     const { rowsSynthetic, rowsExpected, nSynthetic } = this.ctx;
@@ -1545,19 +1552,23 @@ export class TableEvaluator {
     });
     const pk = this.ctx.table.columns.find((c) => c.role === "pk");
     if (keys) {
-      this.metric("table.pk_duplicate_rate", {
-        value: keys.duplicateRows / rowsSynthetic,
-        nSource: null,
-        nSynthetic: rowsSynthetic,
-        detail: {
-          duplicate_rows: keys.duplicateRows,
-          distinct_keys: keys.distinctKeys,
-          null_key_rows: 0,
-          key_columns: keys.columns,
-          null_key_note: NULL_KEY_NOTE,
-        },
-      });
-      this.notEvaluated("table.identity_duplicate_rate", NO_IDENTITY, { nSource: null, nSynthetic: null });
+      // The declared key's counts as the evaluator's `_key_duplicates` reports them; a table that
+      // declares no key gets its not-evaluated row with the evaluator's own reason.
+      if (keys.columns.length)
+        this.metric("table.pk_duplicate_rate", {
+          value: keys.duplicateRows / rowsSynthetic,
+          nSource: null,
+          nSynthetic: rowsSynthetic,
+          detail: {
+            duplicate_rows: keys.duplicateRows,
+            distinct_keys: keys.distinctKeys,
+            null_key_rows: 0,
+            key_columns: keys.columns,
+            null_key_note: NULL_KEY_NOTE,
+          },
+        });
+      else this.notEvaluated("table.pk_duplicate_rate", NO_PK_REASON, { nSource: null, nSynthetic: null });
+      this.notEvaluated("table.identity_duplicate_rate", NO_IDENTITY_REASON, { nSource: null, nSynthetic: null });
     } else {
       // Drawn whether or not the table has a key: the seeded stream stays where it was.
       const dupRate =
@@ -1646,6 +1657,147 @@ export function tableRollups(ev: TableEvaluator): FamilyScores {
   return scores;
 }
 
+// ------------------------------------- launches evaluated from samples (adjusted.ts, forest.ts) --
+
+type RegistryTable = EvaluationDataHistoryRow["tables"][number];
+
+/**
+ * The context of a table the evaluation read whole (exact mode), with a verified reference and no
+ * free-text pools: the row counts and digests come from its registry entry.
+ */
+export function exactTableContext(
+  spec: EvalSpec,
+  table: TableDef,
+  entry: RegistryTable,
+  samples: Pick<TableContext, "source" | "synthetic" | "reference" | "holdout">,
+  rng: Random,
+): TableContext {
+  return {
+    spec,
+    table,
+    evaluatedAt: spec.evaluatedAt,
+    landingTable: entry.landing_table,
+    sourceTable: entry.source_table,
+    ...samples,
+    pools: new Map(),
+    textDraws: new Map(),
+    nSource: entry.rows_source!,
+    nSynthetic: entry.rows_synthetic!,
+    rowsSynthetic: entry.rows_synthetic!,
+    rowsExpected: entry.rows_expected!,
+    nReference: spec.referenceRowsLimit,
+    sampleRate: null,
+    encodingPlanDigest: entry.encoding_plan_digest!,
+    referenceVerified: true,
+    profiledNullFraction: new Map(),
+    rng,
+  };
+}
+
+/**
+ * Every column's type validity and nulls, every non-key column's marginal, the pairs (each numeric or
+ * temporal pair, and `categoricalPairs`) and the row metrics — in that order, the draws' order. Returns
+ * the detection shift `tableLevel` reads: 0.02 plus the mean column distance, at most 0.45.
+ */
+export function attributeMetrics(ev: TableEvaluator, categoricalPairs: [string, string][]): number {
+  const { columns } = ev.ctx.table;
+  for (const column of columns) {
+    ev.typeValidity(column);
+    ev.nullAndEmpty(column);
+    if (column.role) continue;
+    if (column.kind === "numeric") ev.numeric(column, false);
+    else if (column.kind === "temporal") ev.numeric(column, true);
+    else ev.categorical(column);
+  }
+  ev.pairs(
+    columns.filter((c) => c.kind === "numeric" || c.kind === "temporal"),
+    categoricalPairs,
+  );
+  ev.rows();
+  const distances = ev.result.columnDistances;
+  const meanDistance = distances.reduce((a, b) => a + b, 0) / Math.max(distances.length, 1);
+  return Math.min(0.45, 0.02 + meanDistance);
+}
+
+/** The `model.*_score` rows under `model`, written on `table`'s context with no rows of its own. */
+export function modelRollup(
+  spec: EvalSpec,
+  table: TableDef,
+  encodingPlanDigest: string,
+  model: string,
+  scores: readonly FamilyScores[],
+  rng: Random,
+): EvaluationMetricsRow[] {
+  const ev = new TableEvaluator({
+    spec,
+    table,
+    evaluatedAt: spec.evaluatedAt,
+    landingTable: null,
+    sourceTable: null,
+    source: [],
+    synthetic: [],
+    reference: [],
+    holdout: [],
+    pools: new Map(),
+    textDraws: new Map(),
+    nSource: 0,
+    nSynthetic: 0,
+    rowsSynthetic: 0,
+    rowsExpected: 1,
+    nReference: spec.referenceRowsLimit,
+    sampleRate: null,
+    encodingPlanDigest,
+    referenceVerified: true,
+    profiledNullFraction: new Map(),
+    rng,
+  });
+  familyRows(ev, model, modelFamilyScores(scores), "model");
+  return ev.result.metrics;
+}
+
+/** A launch evaluation's rows, and each table's family scores. */
+export interface Evaluated {
+  metrics: EvaluationMetricsRow[];
+  profiles: EvaluationProfilesRow[];
+  flags: EvaluationRowFlagsRow[];
+  scores: Map<string, FamilyScores>;
+}
+
+/**
+ * The FINAL registry event of an exact-mode evaluation, from its RUNNING event and its rows: each
+ * table's overall score, the model's family scores, the headline counts (aggregate rows excluded,
+ * R37 and R43), and the bytes and shuffle of reading every source and synthetic row. Warnings and
+ * status are the caller's.
+ */
+export function finalEvent(
+  spec: Pick<EvalSpec, "evaluatedAt" | "durationMinutes">,
+  running: EvaluationDataHistoryRow,
+  evaluated: Evaluated,
+): EvaluationDataHistoryRow {
+  const final = structuredClone(running);
+  final.event = "FINAL";
+  final.finished_at = isoMicros(Date.parse(spec.evaluatedAt) + spec.durationMinutes * 60_000);
+  final.recorded_at = final.finished_at;
+  for (const entry of final.tables) entry.table_score = evaluated.scores.get(entry.name ?? "")?.overall ?? null;
+  const model = modelFamilyScores([...evaluated.scores.values()]);
+  const counts = headlineCounts(evaluated.metrics);
+  final.overall_score = model.overall;
+  final.fidelity_score = model.fidelity;
+  final.privacy_score = model.privacy;
+  final.integrity_score = model.integrity;
+  final.diversity_score = model.diversity;
+  final.metrics_total = counts.total;
+  final.metrics_pass = counts.pass;
+  final.metrics_warn = counts.warn;
+  final.metrics_fail = counts.fail;
+  final.metrics_not_evaluated = counts.not_evaluated;
+  final.metrics_info = counts.info;
+  const rows = final.tables.reduce((acc, t) => acc + (t.rows_source ?? 0) + (t.rows_synthetic ?? 0), 0);
+  final.bq_bytes_processed = Math.round(rows * 164);
+  final.predicted_shuffle_gb = Math.round((rows * 96) / 1e7) / 100;
+  return final;
+}
+
 /** The declared primary key's counts on the landed table (what the evaluator's `_key_duplicates` reports). */
 export interface KeyCounts {
   /** The declared PK columns (`detail.key_columns`). */
@@ -1656,9 +1808,8 @@ export interface KeyCounts {
   distinctKeys: number;
 }
 
-/** `_NULL_KEY_NOTE` and `_NO_IDENTITY` of sdfb_evaluation/beam/membership.py, verbatim. */
+/** `_NULL_KEY_NOTE` of sdfb_evaluation/beam/membership.py, verbatim. */
 const NULL_KEY_NOTE = "rows whose key has a NULL part are not duplicates; a NULL key is its own integrity defect";
-const NO_IDENTITY = "no identity columns declared in the relationship model";
 
 /** One foreign-key edge as the relationship producers read it. */
 export interface EdgeReading {

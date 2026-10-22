@@ -31,6 +31,7 @@ import {
 
 import { ADJUSTED_EVALUATIONS, buildAdjustedLaunch } from "./adjusted";
 import { edgeMetrics, familyRows, TableEvaluator, tableRollups, type TableContext } from "./evaluate";
+import { buildForestLaunch } from "./forest";
 import {
   baseRunId,
   dataflowJobId,
@@ -554,12 +555,21 @@ export function createMockDataset(seed = 20260928): MockDataset {
   profiles.push(...adjusted.profiles);
   flags.push(...adjusted.flags);
 
+  // The isolated-forest launch (ADR 0045) and its one evaluation: 112 unrelated tables in 12
+  // batch jobs, next to the storyline rather than inside it (forest.ts).
+  const forest = buildForestLaunch(seed, registryBase);
+  registry.push(...forest.registry);
+  metrics.push(...forest.metrics);
+  profiles.push(...forest.profiles);
+  flags.push(...forest.flags);
+
   const runs = buildRuns(STORYLINE, seed);
-  const validationRuns = [...runs.validationRuns, ...adjusted.validationRuns];
+  const validationRuns = [...runs.validationRuns, ...adjusted.validationRuns, ...forest.validationRuns];
   const { dlq, fanoutStats } = runs;
   let rag: RagSet[] | null = null;
   return {
-    generatedWith: { seed, evaluations: STORYLINE.length + ADJUSTED_EVALUATIONS.length },
+    // + the isolated-forest launch's one (eval-0043)
+    generatedWith: { seed, evaluations: STORYLINE.length + ADJUSTED_EVALUATIONS.length + 1 },
     registry: canonicalize(registry, "evaluation_data_history"),
     metrics: canonicalize(metrics, "evaluation_metrics"),
     profiles: canonicalize(profiles, "evaluation_profiles"),

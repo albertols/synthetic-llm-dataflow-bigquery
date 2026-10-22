@@ -28,6 +28,7 @@ import type {
 } from "@synthetic-platform/contracts";
 import {
   ADJUSTED_RELATIONSHIP_MODEL,
+  FOREST_RELATIONSHIP_MODEL,
   getMockDataset,
   MOCK_RELATIONSHIP_MODEL,
   type MockDataset,
@@ -59,9 +60,12 @@ import type { DataProvider, ProfileFilter, RagChunks, RagChunksFilter, SourceSta
 const nullsFirst = (a: string | null, b: string | null) =>
   a === b ? 0 : a === null ? -1 : b === null ? 1 : a < b ? -1 : a > b ? 1 : 0;
 
-/** `run_id` belongs to launch `base`: the one-table id itself, or a per-table `<base>-NN-<table>`. */
+/**
+ * `run_id` belongs to launch `base`: the one-table id itself, a per-table `<base>-NN-<table>`, or a
+ * batched launch's `<base>-bNN-MM-<table>` (ADR 0045).
+ */
 export function belongsToLaunch(runId: string, base: string): boolean {
-  return runId === base || (runId.startsWith(`${base}-`) && /^\d{2}-.+$/.test(runId.slice(base.length + 1)));
+  return runId === base || (runId.startsWith(`${base}-`) && /^(b\d{2,}-)?\d{2}-.+$/.test(runId.slice(base.length + 1)));
 }
 
 type JsonValue = NonNullable<DlqSummary["sample"]>["raw_record"];
@@ -85,8 +89,8 @@ export class MockProvider implements DataProvider {
   }
 
   relationshipModels(): Promise<RelationshipModel[]> {
-    // The storyline's model, and the adjusted-keys launch's (ADR 0038): both invented.
-    return Promise.resolve([MOCK_RELATIONSHIP_MODEL, ADJUSTED_RELATIONSHIP_MODEL]);
+    // The storyline's model, the adjusted-keys launch's (ADR 0038) and the isolated-forest launch's: all invented.
+    return Promise.resolve([MOCK_RELATIONSHIP_MODEL, ADJUSTED_RELATIONSHIP_MODEL, FOREST_RELATIONSHIP_MODEL]);
   }
 
   private latest() {

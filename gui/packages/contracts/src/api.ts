@@ -483,7 +483,10 @@ export type Comparison = z.infer<typeof comparisonSchema>;
 
 export const runFilterSchema = z.object({
   run_ids: csv(z.string()),
-  /** A launch: its per-table rows are `<base>-NN-<table>` (a one-table launch writes `<base>` itself). */
+  /**
+   * A launch: its per-table rows are `<base>-NN-<table>`, or `<base>-bNN-MM-<table>` for a whole-model
+   * launch in batch jobs (ADR 0045); a one-table launch writes `<base>` itself.
+   */
   base_run_id: z.string().optional(),
   landing_table: csv(z.string()),
   engine: csv(z.string()),
@@ -787,7 +790,8 @@ export const relationshipModelSchema = z.object({
  * `GET /api/relationships` — the relationship models a registry row's
  * `relationship_model` can resolve to: the committed sample models
  * (generated/relationships.json, `origin: "committed_example"`) and, in mock mode,
- * the mock's invented `thelook_demo` (`origin: "mock"`). Real models are gitignored
+ * the mock's invented `thelook_demo`, `adjusted_keys_demo` and `isolated_forest_demo`
+ * (`origin: "mock"`). Real models are gitignored
  * or on GCS and never served; when a row's model is not listed, rebuild the graph
  * from the metric rows' `edge` labels (`parseEdge`).
  */
