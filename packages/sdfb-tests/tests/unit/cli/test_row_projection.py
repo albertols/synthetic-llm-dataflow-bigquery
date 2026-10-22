@@ -478,8 +478,6 @@ def _rows_and_keys():
 def test_the_launcher_projects_the_whole_launch_from_its_specs(caplog):
   """`report_row_projection` turns the resolved specs into the block —
     every count matching that launch's `rows_detail`."""
-  import logging
-
   from sdfb_beam.cli.run_pipeline import report_row_projection
 
   rows, keys = _rows_and_keys()
@@ -497,8 +495,6 @@ def test_the_launcher_projects_the_whole_launch_from_its_specs(caplog):
 
 
 def test_one_milestone_per_table_and_one_for_the_total(caplog):
-  import logging
-
   from sdfb_beam.cli.run_pipeline import report_row_projection
 
   rows, keys = _rows_and_keys()
@@ -517,8 +513,6 @@ def test_one_milestone_per_table_and_one_for_the_total(caplog):
 
 
 def test_every_warning_is_a_greppable_milestone_too(caplog):
-  import logging
-
   from sdfb_beam.cli.run_pipeline import report_row_projection
 
   rows, keys = _rows_and_keys()
@@ -536,8 +530,6 @@ def test_every_warning_is_a_greppable_milestone_too(caplog):
 
 
 def test_a_clean_launch_logs_the_block_and_no_warning_milestone(caplog):
-  import logging
-
   from sdfb_beam.cli.run_pipeline import report_row_projection
 
   with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
@@ -556,10 +548,6 @@ def test_the_projection_is_logged_before_the_graph_is_built(
     monkeypatch, caplog):
   """Ordering is the whole point: an operator sizing a run must read
     the projection BEFORE the DAG exists, not in the job's aftermath."""
-  import logging
-
-  import sdfb_beam.cli.run_pipeline as rp
-
   seen: dict[str, str] = {}
 
   def _fake_build(p, specs):
