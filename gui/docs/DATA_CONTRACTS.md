@@ -289,6 +289,9 @@ nothing, and a row with a base run id joins that launch or nothing._
   are ambiguous and give `unknown`, not the newer row. A Beam table spec
   (`project:dataset.table`) and the dotted name are one landing table.
   Several rows of one run (a retried write) are one launch: the newest is read.
+- **Batched run ids.** Steps 2 and 3 do not parse a whole-model launch's
+  `<base>-bNN-MM-<table>` ids, and need not: the evaluation of such a launch
+  lists every table's run id, so step 1 joins each table.
 - **The verdict is the generator's.** `faithful` is the stored
   `repeat_share_within_tolerance = true`; `under` / `over` is the sign of the
   delta when it is `false`; an excluded rule with no share is `unmeasured`
@@ -326,9 +329,54 @@ zod-free `buildGenerationRecord`, `src/record.ts`). It is read through
 (`validation_runs.config`) is tolerant: every block optional, unknown keys pass
 through, and a malformed or missing `config` is the "no snapshot" state. The
 record route reads the same rows and keeps only this launch's (`isLaunchRow`:
-the generation job id, a listed run id, or the base run id), so a neighbouring
+one of its generation job ids, a listed run id, or the base run id), so a neighbouring
 launch's snapshot never appears. A 404 means an unknown evaluation id; a launch
 written before the record is a 200 with `snapshot: null`.
+
+The record narrows by the evaluation's job **set**: `generation_job_ids`
+(ADR 0045), else, for a registry row written before that column (it reads
+`[]`), `[generation_job_id]`. Once a row names one of those jobs, a row that
+names any other job is left out: a reused run id, or a whole-model launch's
+batch job that FAILED after writing its rows and so was not evaluated. A row
+with no `job_id` stays, as the evaluator's `rows_of_jobs` keeps it. So A2's
+`runs`, `worker_versions` and `config_digests` cover every listed job of a
+multi-job evaluation, and a single-job evaluation is a set of one.
+
+A whole-model launch writes one snapshot per batch job, each holding only that
+job's tables, so the record also unions every row's snapshot
+(`buildGenerationRecord`, `src/record.ts`):
+
+```ts
+type GenerationRecord = {
+  // … A2's fields …
+  declared_tables: DeclaredTable[]; // every row's relationships.tables, by name
+  batches: RecordBatch[]; // one per batch.index: {index, count, tables, job_ids, run_ids}
+};
+type DeclaredTable = {
+  name: string;
+  pk: string[];
+  identity: string[];
+  fk: { cols: string[]; ref: string; ref_cols: string[]; enforced: boolean }[];
+  enabled: boolean | null;
+  source_table: string | null; // ADR 0045
+  num_rows: number | null; // ADR 0045
+};
+```
+
+A batch whose job wrote no row is absent from `batches`; its `count` still says
+how many jobs the launch planned, which is how the model summary card says
+`N recorded` ([UX](UX.md#isolated-tables-whole-model-launches)). The job
+narrowing above applies to both fields: a batch job the evaluation does not
+list contributes no declared table and no batch.
+
+## Key checks with nothing to check
+
+`src/applicability.ts` holds the evaluator's two reasons, verbatim
+(`_NO_PK`, `_NO_IDENTITY` of `sdfb_evaluation/beam/membership.py`;
+`applicability.test.ts` reads that file and fails on drift).
+`inapplicableKey(row)` is `"pk"` / `"identity"` only for a not-evaluated key
+check with exactly that reason; the views show it as "Not applicable"
+([UX](UX.md#isolated-tables-whole-model-launches)).
 
 ## How to add a metric
 
@@ -433,7 +481,9 @@ Fetched rows are cached in memory (LRU) and never persisted.
   never typed. One declared exception: the adjusted-keys launch replays
   recorded row and key counts, typed once in `adjusted.ts` (`LAUNCH`); every
   share, rate, delta, DLQ count, gate ratio and verdict is derived from them
-  (see below).
+  (see below); and the isolated-forest launch types its two tables'
+  duplicate-key counts once in `forest.ts` (`duplicateRows`); everything else
+  there is computed.
 
 ### The mock world (`packages/mock`)
 
@@ -443,13 +493,18 @@ Fetched rows are cached in memory (LRU) and never persisted.
   `order_items.user_id → users.id` is **documented** (`enforced: false`), so
   its `relationship.orphan_rate` is `info` (score null) next to a non-zero
   `relationship.orphan_rate_source`. Invented, so not in
-  `relationships.json`: the BFF serves it (and `adjusted_keys_demo`, below)
-  from `/api/relationships` in mock mode. Project `demo-project`: sources in `synthetic_source`, landings in
+  `relationships.json`: the BFF serves it (with `adjusted_keys_demo` and
+  `isolated_forest_demo`, below) from `/api/relationships` in mock mode. Project `demo-project`: sources in `synthetic_source`, landings in
   `synthetic_data`. Plus `user_features`, a 200-column table launched alone
   with no relationship model (role `standalone`).
 - **Identifiers as the pipeline writes them:** per-table run ids
   `<base>-00-users`, `<base>-01-orders`, `<base>-02-order_items`
-  (`run_pipeline.plan_launch`; the one-table launch keeps `<base>`); reference
+  (`run_pipeline.plan_launch`; the one-table launch keeps `<base>`), and a
+  whole-model launch's `<base>-bNN-MM-<table>` (below). Positions are
+  `{i:02d}` from `00`, so from the 101st table of a launch or batch they have
+  three digits (`<base>[-bNN]-100-<table>`); the runs list's `base_run_id`
+  filter accepts two digits or more, with or without `-bNN`, in SQL and in the
+  mock (`belongsToLaunch`); reference
   digests per (table, sample size, source snapshot) — the tier is not in the
   digest, so the August digests are profiled on the sample tier by the first
   August launch and on the exact tier by `eval-0021` (2026-08-31); `users` also
@@ -493,14 +548,33 @@ Fetched rows are cached in memory (LRU) and never persisted.
   ratio without the excluded rule. The evaluator's PK rows carry their counts
   in `detail` (`duplicate_rows`, `distinct_keys`, `null_key_rows`,
   `key_columns`), as `_key_duplicates` writes them; the storyline's PK rows
-  predate that and carry none. Two evaluations read the launch, so the mock
-  holds 42: `eval-0041`, chained to it (every table joins by its run id;
+  predate that and carry none. Two evaluations read the launch (42 with the
+  storyline's 40): `eval-0041`, chained to it (every table joins by its run id;
   `model_adjusted` is NULL, which the run view fills from `validation_runs`),
   and `eval-0042`, a composer evaluation handed an evaluator job as its
   generation job (one run id, no base run id, the evaluator's window: the
   other six tables are `unknown`, and the run view shows the wrong-job
   callout). `mock.storyline.test.ts` ("the adjusted-keys launch") recomputes
   every derived number and holds the six verdicts.
+- **The isolated-forest launch** (`forest.ts`, `eval-0043`, ADR 0045):
+  `isolated_forest_demo`, 120 invented tables `T_001 … T_120` with no foreign
+  key — every 15th `enabled: false` (8), every third with no primary key, six
+  `source_table` and five `num_rows` overrides — generated as 112 tables in 12
+  batch jobs (`<base>-bNN-MM-<table>`, one snapshot per job with its `batch`
+  block), evaluated once by the chained evaluation whose registry row lists
+  the twelve `generation_job_ids`; so the mock holds 43 evaluations. A batch
+  job runs as `<job_name>-bNN` (`sdfb_batches.batch_job_name`), to which the
+  Composer provider appends `-<8 hex>`; the mock writes
+  `synthetic-sdfb-model-v0-5-3-gemma4-e4b-bNN`, without the suffix, as its
+  single-table job names omit it. Its slug is the mock's model id
+  (`gemma4-e4b`), where the real DAG's `model_slug` is `{family}-{model}` from
+  the model URI (`gemma4-gemma4-e4b`). Rules on the table's number decide every
+  fact, so tests name tables; the launch runs streaming uniqueness, so T_004
+  and T_008 land a few duplicate keys (their PK checks FAIL). The BFF serves
+  the whole model from `/api/relationships` in mock mode, so the card counts
+  its disabled tables. `mock.forest.test.ts` holds the shape, and the forest
+  test of `e2e/evaluation.spec.ts` reads it through the views
+  (`forest-view.test.tsx` uses its own fixture, `forestDetail`).
 - **Computation** (`evaluate.ts`): profiles are counts drawn at the stated n
   from the generated rows' distributions; every metric is a `packages/stats`
   function of those profiles (KS bracket, PIT-W1, TVD, JSD, PSI, rate-ratio

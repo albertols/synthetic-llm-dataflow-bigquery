@@ -213,7 +213,11 @@ duplicate rate on a key the launch adjusted
 ([ADR 0038](../docs/adr/0038-measured-conflicts-adjust-the-model.md)) is shown
 with the generator's verdict (faithful, under- or over-reproduced) next to the
 evaluator's status, never as a bare FAIL
-([how it reads](docs/UX.md#adjusted-keys-adr-0038)).
+([how it reads](docs/UX.md#adjusted-keys-adr-0038)). A whole-model launch of
+100+ unrelated tables reads as a bounded grid of tiles, with a model summary
+card, per-table search and filters, and its key checks with no key declared
+shown as Not applicable
+([how it reads](docs/UX.md#isolated-tables-whole-model-launches)).
 
 ![EVALUATION compare: three runs side by side, with the notice that they are not directly comparable and why](docs/assets/evaluation-compare-1440.png)
 

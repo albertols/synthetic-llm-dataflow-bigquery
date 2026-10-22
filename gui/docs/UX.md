@@ -138,6 +138,9 @@ Follow the dataviz method: pick the form first, colour last.
 - **A PK duplicate rate on a key the launch adjusted goes through
   `AdjustmentPill`** next to (or, for a readable verdict, in place of) the
   evaluator's pill: [Adjusted keys](#adjusted-keys-adr-0038).
+- **A key check with no key declared** reads `Not applicable`, a neutral
+  `StatusPill`, never `not_evaluated`'s "Not evaluated":
+  [Isolated tables](#isolated-tables-whole-model-launches).
 - `LevelChip` for FIELD, COLUMN, PAIR, ROW, TABLE, RELATIONSHIP, MODEL.
 - The top nav always shows the data source: **MOCK** or **BIGQUERY
   <project>**. Views that show a BigQuery bytes estimate (from the BFF's
@@ -255,6 +258,101 @@ Where it shows, in the order a reader meets it:
 another evaluation's `evaluation_job_id`, a danger callout under the header
 says so: scope and adjustments are then joined to the wrong job, and the
 tables' verdicts read `Adjusted?`.
+
+## Isolated tables (whole-model launches)
+
+**Claim: a launch of 100+ unrelated tables reads as one bounded grid of
+tiles; every table stays reachable by search and filter, and a key check with
+no key declared reads "Not applicable", never empty or FAIL.** A whole-model
+launch ([ADR 0045](../../docs/adr/0045-whole-model-launches.md),
+[DESIGN §4.5](../../docs/DESIGN.md#45-whole-model-launches)) generates
+every enabled table of one relationship model, and such a model may declare
+no foreign key at all; drawn as layers, 100 such tables were one column that
+the frame scaled to unreadable.
+
+_A table with a foreign key is drawn in the layered graph; a table with none
+is a tile in a bounded grid, so a forest of 100+ tables is one screen, not one
+column:_
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  subgraph comp["🔗 a table with a foreign key · degree ≥ 1"]
+    C1["⚪ users · orders<br/>a self-reference<br/>an external parent"]:::data --> C2["⚙️ layered SVG<br/>parents left<br/>children right"]:::cpu
+  end
+  subgraph iso["⚪ a table with none · degree 0"]
+    I1["⚪ T_001 … T_112"]:::data --> I2["⚙️ tile grid<br/>about 10 per row<br/>≤ 12 rows, then it scrolls"]:::cpu
+  end
+```
+
+_One panel per placement (`features/evaluation/lib/graph.ts`, `buildGraph`): a
+node is `layer` when an edge names it as child or parent, else `tile`. A
+component is laid out as if the tiles were not there (`graph.test.ts` pins the
+thelook coordinates with and without isolated tables); a table that references
+itself, and an external parent, stay in the layers. A table the evaluation
+does not cover and with no foreign key (a served model's disabled table) is
+not drawn at all: the model card counts it. From ten tiles the model graph
+takes the full row._
+
+- **A tile** is a button that scopes the run view to its table: name, `PK` /
+  `no PK` / `PK ?`, the status glyph and overall score, `⇄` for a
+  `source_table` override, the batch job (`b03`), and the `PK adj.` chip when
+  the launch adjusted the key ([above](#adjusted-keys-adr-0038)). Its status
+  is FAIL when a zero-tolerance key check failed (duplicate keys, orphans),
+  else its overall score's. Its left edge is the score colour; the words say
+  everything the colour does, and its accessible name says them in full.
+- **Not applicable.** When the relationship model declares no primary key (or
+  no identity columns), the evaluator writes the key check as not evaluated
+  with the reason `no primary key declared in the relationship model`
+  (`… no identity columns …`). Only those two reasons read as not applicable:
+  a neutral `Not applicable` pill (`StatusPill`, `tone="neutral"`) with
+  **"Not applicable — no primary key declared"** (or "… no identity columns
+  declared") in the scorecards' "Look first" (ranked last) and in the
+  integrity units; one grouped finding per kind, ranked last in the
+  Interpretation ("N tables declare no primary key (…): the uniqueness check
+  is not applicable — nothing to check, not a gap."); `no PK` on the tile. The
+  Not evaluated tile's footnote says how many of its rows are not applicable.
+  Any other reason (sampled mode, no rows) stays "Not evaluated". Stored
+  statuses and counts are the evaluator's.
+- **The model summary card** (from two tables, above the scorecards): tables,
+  primary keys declared and none, edges, isolated tables, source overrides and
+  batch jobs, each job linked to the Dataflow console (`b00 ↗`). It says
+  whether it reads the generation record
+  ([ADR 0044](../../docs/adr/0044-generation-record.md)) or the registry and
+  the metric rows; without a record, source overrides and batch jobs read
+  `—`. Under Batch jobs it says `N recorded` when the record holds fewer batch
+  jobs than the launch planned (a job wrote no row, or the evaluation does not
+  list it), else `b00 … bNN`. Disabled tables are counted only
+  when the GUI can read the whole model with the record's `sha12`: a launch
+  records only what it generated, so a real model (never served) reads
+  "disabled: not recorded". The evaluation list's job cell and the Parameters
+  tab's `generation_job` row keep the registry's `generation_job_id`, the
+  first batch job; the card lists them all, and the list's search finds any of
+  them.
+- **The Relational tab** of a launch that declared no foreign key says
+  "Isolated tables — no relationships declared. Integrity is scored per
+  table: columns, row count, keys where declared."
+- **Filters** (from ten tables) sit in one row above the scorecards and live
+  in the URL (`tq`, `pk`, `ts`, `batch`, `tsort`): **Find a table** (name
+  search), **Primary key** (Any key · PK · No PK), **Table status** (All · Pass
+  · Warn · Fail · Not evaluated), **Batch job** (when the tables have one) and
+  the order (Worst first · By name). They narrow the tiles and the per-table
+  scorecard rows only; roll-ups, findings and counts stay the whole run's, and
+  the bar says "N of M tables". A filter that matches nothing says "No table
+  matches the filters."; **Clear filters** resets all but the order, and a
+  stale value in a shared link is dropped.
+- **Per-table scorecards** render only their visible rows above twelve tables,
+  inside a focusable frame (keyboard scrolling; the selected table scrolls into
+  view). Each table's integrity score opens the units it averages: those that
+  counted and those that were not applicable (and any not scored).
+- **Without a served model** the graph is drawn from the declared tables of
+  the launch's generation record, and its description says so. The run
+  header's Tables in scope scrolls inside its frame above twelve tables.
 
 ## Data on screen
 

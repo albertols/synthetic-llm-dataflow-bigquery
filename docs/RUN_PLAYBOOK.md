@@ -1160,6 +1160,200 @@ Record the outcome (the base run id, the job ids, the margins, the step 10
 and step 11 query output) under `runs/<base>/` as usual, and report it back
 on the branch.
 
+### 2f. Corp acceptance of the isolated-tables views (C)
+
+Runs once on the corp project, after §2d and §2e, from a checkout of
+`feat/config-record-model-launch` that holds this phase's GUI commits. It
+rebuilds no image, template or DAG and launches nothing: it reads what §2e's
+launches wrote, and the GUI is read-only
+([ADR 0042](adr/0042-self-hosted-platform-gui.md)), so nothing here writes to
+BigQuery. Every name in angle brackets is yours and nothing here names a real
+table: §2d's `<project>`, `<quality_dataset>` and `<location>`; §2e's
+`<region>` and `<base>`, the base run id of §2e step 14's whole-model launch;
+`<launch day>`, that launch's date (`YYYY-MM-DD`); and `<evaluation id>`, the
+`evaluation_id` of its registry row (§2e step 11's query, for that `<base>`).
+Every evaluation of §2e is a `--run_id` evaluation, which reads
+`validation_runs` from its output dataset and writes its registry and its
+metric rows into that same dataset: here too `<evaluation_dataset>` IS
+`<quality_dataset>`, so the GUI and every query below read
+`<quality_dataset>`. §2e step 1 must have migrated the registry: the GUI's
+evaluation list reads `generation_job_ids` on every registry row.
+
+Steps 2–7 read the evaluation of §2e step 14 (the whole model): the filter bar
+shows from ten tables and the per-table lists scroll from thirteen, so §2e
+step 6's five-table evaluation shows the card and five tiles only. Step 8
+reads an older evaluation, step 9 §2e step 12's.
+
+*Start the GUI, read the whole-model run view top-down as the GUI lays it
+out, then two other evaluations:*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  Q[("🗄️ registry · metrics<br/>validation_runs")]:::store
+  G["⚙️ 1 GUI<br/>read-only"]:::cpu
+  C["⚪ 2 model card"]:::data
+  T["⚪ 3 tile grid"]:::data
+  N["🛡️ 4 Not applicable"]:::cpu
+  F["⚪ 5 filters<br/>in the URL"]:::data
+  S["⚪ 6 per-table<br/>scorecards"]:::data
+  R["⚪ 7 Relational tab"]:::data
+  O["⚪ 8 an older<br/>evaluation"]:::data
+  X["🛡️ 9 a failed<br/>batch"]:::cpu
+  Q --> G --> C --> T --> N --> F --> S --> R --> O --> X
+```
+
+1. **Start the GUI** on the corp project as §2d step 11 does: one
+   `QUALITY_DATASET` for the registry, the metric rows and `validation_runs`.
+
+   ```bash
+   cd gui
+   npm ci && npm run build
+   DATA_SOURCE=bigquery GCP_PROJECT=<project> QUALITY_DATASET=<quality_dataset> BQ_LOCATION=<location> npm start
+   ```
+
+   Open the Evaluations list, filter **Relationship model** to your model (or
+   type `<base>`, or any batch job's id, into the search box), and open the
+   evaluation of §2e step 14's launch. The list's job cell shows one job, the
+   registry's `generation_job_id` (b00's): by design, the card of step 2 lists
+   them all.
+
+2. **The Model card** (the Overview tab, above the scorecards). Expect:
+   - its header: your model's name, the badge `sha12 <sha12>` equal to the
+     `relationships_digest` of §2e step 10's rows (the `sha=` of the
+     launcher's `relationships_loaded` line), and "from the generation record
+     (ADR 0044)";
+   - **Tables** = the landed tables of the launch, with "disabled: not
+     recorded" under it: the GUI serves only the committed example models, so
+     it cannot read your model whole (by design);
+   - **Primary key** "N declared" and "M none" = the enabled tables of your
+     model file with and without a `pk:` (no "unknown");
+   - **Edges** = the `fk:` entries of the enabled tables (0 for a model of
+     unrelated tables), and **Isolated** = the tables with no foreign key in or
+     out (all of them, then);
+   - **Source overrides** = the enabled tables with a `source_table:`;
+   - **Batch jobs** = the batch jobs the plan made (`batch.count`; the
+     `MODEL LAUNCH PLAN` banner of §2e step 7), with `b00 … bNN` under it, and
+     one link `bNN ↗` per batch job. A link opens that job id in the Dataflow
+     console. A `--run_id` evaluation records no `generation_region`, so the
+     link carries the job id and `?project=` but no region.
+
+   Cross-check against the launch's rows:
+
+   ```sql
+   SELECT COUNT(DISTINCT run_id) AS tables,
+          COUNT(DISTINCT job_id) AS jobs,
+          COUNT(DISTINCT JSON_VALUE(config, '$.batch.index')) AS batches,
+          MAX(CAST(JSON_VALUE(config, '$.batch.count') AS INT64)) AS planned
+   FROM `<project>.<quality_dataset>.validation_runs`
+   WHERE launch_run_id = '<base>'
+     AND created_at >= TIMESTAMP('<launch day>');
+   ```
+
+   Expect `tables` = **Tables**, `planned` = **Batch jobs**, and `batches` =
+   `jobs` = the number of `bNN ↗` links; §2e step 11's `generation_job_ids`
+   holds the same ids, in batch order (each link's URL carries its id). In the
+   console a batch job is named `<job name>-bNN-<8 hex>`: the model DAG's
+   `<job_name>-bNN`, plus the Composer provider's suffix. Match a link to its
+   job by the id, not the name.
+
+3. **The tile grid** (the Model graph card, which takes the full width from
+   ten tiles). Expect "Isolated tables · N" over one tile per table with no
+   foreign key (a component's tables are drawn as layers above it), at most
+   twelve tile rows tall and scrolling inside its frame. The page never scrolls
+   sideways, at a phone-width window (390 px) too. A tile reads the table's
+   name, `PK` or `no PK`, its status glyph and overall score, `⇄` when it has
+   a `source_table` (hover: `source override: <table>`) and its `bNN`. A
+   click scopes every section to that table; a second click shows all tables.
+
+4. **Not applicable.** Type a PK-less table's name into **Find a table**,
+   then click its integrity score in the Integrity scorecard's per-table list.
+   The popover "Integrity of <table> · <score>" lists, under "Not applicable",
+   "Not applicable — no primary key declared" (and "Not applicable — no
+   identity columns declared" when the table declares no identity), and no
+   Fail. Clear the search. Also expect the Not evaluated tile's footnote
+   "<n> not applicable (no key declared): nothing to check. The rest is not a
+   pass.", and, last in the Interpretation (**Show all … findings**), one
+   finding "<n> tables declare no primary key (…): the uniqueness check is not
+   applicable — nothing to check, not a gap." with a neutral `Not applicable`
+   pill (the identity one just before it). Cross-check the evaluator's rows:
+
+   ```sql
+   SELECT metric_id, COUNT(*) AS not_applicable
+   FROM `<project>.<quality_dataset>.evaluation_metrics`
+   WHERE evaluation_id = '<evaluation id>'
+     AND evaluated_at >= TIMESTAMP('<launch day>')
+     AND status = 'not_evaluated'
+     AND JSON_VALUE(detail, '$.reason') IN (
+       'no primary key declared in the relationship model',
+       'no identity columns declared in the relationship model')
+   GROUP BY metric_id;
+   ```
+
+   The metric rows sit beside the registry: for this `--run_id` evaluation,
+   in `<quality_dataset>` (the intro). Expect `table.pk_duplicate_rate` =
+   step 2's Primary key "none" = that finding's count, and the two rows
+   adding up to the footnote's `<n>`.
+
+5. **Filters** (one row above the scorecards). **Primary key: No PK** leaves
+   exactly the "none" tiles and the bar reads "M of N tables"; **Batch job:
+   bNN** leaves exactly that batch's tables (step 2's query with
+   `AND STARTS_WITH(run_id, '<base>-bNN-')` counts them); **Table status:
+   Fail** leaves only tiles marked ✕ (none when no table failed); a search
+   that matches nothing says "No table matches the filters."; **Clear
+   filters** brings every table back. The filters narrow the tiles and the
+   per-table scorecard rows only; the roll-ups, findings and counts stay the
+   whole run's. The URL carries them (`tq`, `pk`, `ts`, `batch`, `tsort`):
+   copy it into a new tab for the same view; change `ts=` to a word that is
+   not a status and every table shows again.
+
+6. **Per-table scorecards.** Above twelve tables each scorecard's per-table
+   list scrolls inside its own frame (the Integrity one is named "Per-table
+   scores, Integrity: N tables"). Scroll one to its end: the last table is
+   there. Tab into a frame: the arrow keys scroll it. Click a tile far down
+   the grid: its row scrolls into view in each list.
+
+7. **The Relational tab.** A launch that declared no foreign key reads
+   "Isolated tables — no relationships declared" and "Integrity is scored per
+   table: columns, row count, keys where declared." A model with components
+   shows their orphan rates as before, without that note.
+
+8. **An older evaluation**, one written before §2d's migration (no
+   generation record) with two tables or more: its card says "from the
+   registry and the metric rows (no generation record)", **Source overrides**
+   and **Batch jobs** read `—`, a PK row that carries the evaluator's no-key
+   reason reads Not applicable (and `no PK` on a tile), and every tab still
+   renders.
+
+9. **The failure path**: the evaluation of §2e step 12's launch (b00 stopped
+   by preflight, b01 landed). Its card reads **Batch jobs** `2` with `1
+   recorded` under it (in general: Batch jobs N, N−1 recorded), one link
+   `b01 ↗`, and no tile, row or link for b00's tables; nothing errors.
+
+**If it fails** — what each line means and the one fix:
+
+| You see | It means | Fix |
+| :-- | :-- | :-- |
+| the evaluation list fails with `Unrecognized name: generation_job_ids` | the registry or its views lack ADR 0045's column | §2e step 1 |
+| no Model card, no tiles, and the Generator panel (Parameters tab) shows one job link only | a GUI built before this phase | step 1 from this branch's checkout |
+| §2e step 14's card says "from the registry and the metric rows (no generation record)" | the GUI found no row of the launch with a snapshot: it reads `validation_runs` from another dataset than the launch wrote, or the rows lack the record columns | `QUALITY_DATASET` = the dataset of `validation_runs` (step 1); §2e step 10's query |
+| "disabled: not recorded" under **Tables** | the GUI serves only the committed example models; your model is not one | none: by design |
+| the list's job cell, or the Parameters row `generation_job`, names b00's job only | they show the registry's `generation_job_id`, the first listed job | none: by design (the card lists every job) |
+| a `bNN` with no `↗` | that batch's rows carry no `job_id` (`generation_record_job_id … source=none`, §2d step 8) | nothing to fix in the run; report it |
+| a `bNN ↗` opens the console but not the job | the link has no region: a `--run_id` evaluation records no `generation_region` | open the job from the console's job list in `<region>`; report it |
+| a card count differs from the step 2 or step 4 query | the GUI and the rows disagree | report it with both outputs and the evaluation id |
+| no filter bar, or no scrolling per-table list | the evaluation has fewer than ten tables (the bar), or twelve or fewer (the frames) | use §2e step 14's evaluation |
+
+Record the outcome (the evaluation ids, the step 2 and step 4 query output,
+screenshots of the card, the grid, the popover, the filter bar and the
+Relational tab, at 1440 px and at a phone width) under `runs/<base>/` as
+usual, and report it back on the branch.
+
 ---
 
 ## 3. Dataflow options
@@ -2601,6 +2795,14 @@ evaluation's workers otherwise boot Beam's stock image and cannot import
 `--generation_job_ids` narrows ONE evaluation to those batch jobs' rows,
 unlike the standalone evaluation DAG's `generation_job_ids` param, which
 fans out one evaluation per job.
+
+Under `--multi_table_mode=sequential_jobs` every job of a CLI batch runs, one
+after another, under the batch's Dataflow name `sdfb-<base>-bNN` (sanitized):
+when its workers record no `job_id` (`generation_record_job_id …
+source=none`, §2d step 8), evaluate the model by `--run_id=<base>`, as the
+printed command does, not by one of those job ids, since an evaluation by job
+id then matches the rows by that shared name and can take the batch's other
+jobs' rows too.
 
 **3. Read the launchers' logs** (§7, whole-model launches):
 `model_launch_plan` (the plan, once per launcher), `model_batch batch=bNN …
