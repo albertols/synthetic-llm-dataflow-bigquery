@@ -9,14 +9,17 @@
  * - `relational`: the relationship-model / DLQ-rule types and `parseEdge` / `formatEdge` / `findEdge`.
  * - `adjustments`: ADR 0038 model adjustments — the verdict of a `validation_runs` row and its
  *   join to an evaluation's tables.
+ * - `applicability`: a key check with no key declared (the evaluator's "no … declared" reasons).
+ * - `record`: ADR 0044 generation record — the snapshot, `buildGenerationRecord` and `configDiff` (zod-free);
+ *   ADR 0045's declared tables and batch jobs (`parseDeclaredTables`, `parseBatch`).
  * - `api`: the BFF's request/response contract; `payloads`: profile payload shapes;
  *   `sourceStats`: the profiler entry; `knobs`, `knobs.schema`: the knob file; `vectors`:
  *   the binary chunk envelope.
  *
  * The web app does NOT import this barrel (it would pull classic zod into the shell):
  * it imports types from `@contracts/<module>` and values only from dependency-free
- * modules (`vectors`, `concept`, `relational`, `adjustments`, `timestamps`, `generated/catalogue`, `generated/knobs`,
- * `generated/relationships`, `generated/dlqRules`).
+ * modules (`vectors`, `concept`, `relational`, `adjustments`, `applicability`, `record`, `timestamps`,
+ * `generated/catalogue`, `generated/knobs`, `generated/relationships`, `generated/dlqRules`).
  */
 export * from "./concept";
 export * from "./concept.schema";
@@ -28,7 +31,9 @@ export * from "./knobs.schema";
 export * from "./vectors";
 export * from "./relational";
 export * from "./adjustments";
+export * from "./applicability";
 export * from "./timestamps";
+export * from "./record";
 export * from "../generated/schemas";
 export { catalogue, catalogueById, catalogueFamilies, catalogueLevels, catalogueVersion } from "../generated/catalogue";
 export type {

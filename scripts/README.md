@@ -6,13 +6,15 @@ root. Current scopes:
 | Scope | Owns |
 |---|---|
 | `doc/` | figure/report generators for documentation (`make_<topic>_figures.py`; see `.claude/skills/visual-first-documentation/SKILL.md`) and `sync_design_refs.py` (the generated `Design:` docstring line that maps a module's ADR citations to `docs/DESIGN.md` sections, also in CI) |
+| `config/` | generator-config tools (master goldens capture: `capture_master_goldens.py`; `config_digest.py` prints a config file's digest — ADR 0044) |
 | `e2e/` | integration-test analysis, GCP probes, sample fetch, crosschecks, redaction |
 | `evaluation/` | tooling for the standalone `packages/sdfb-evaluation/` project: `make_parity_goldens.py` (root env; regenerates `packages/sdfb-evaluation/tests/fixtures/parity/goldens.json`, the two-sided golden file that pins the eval project's `sdfb_core`/`sdfb_beam` mirrors — `--check` verifies without writing) |
+| `launch/` | orchestrating launches from a checkout: `run_model.py` plans a whole relationships model into batch jobs exactly as the launcher does and runs them at most `launch.max_parallel_jobs` at a time (ADR 0045); `--dry_run` prints the plan |
 | `release/` | post-merge versioning + release reports (see `.github/workflows/release_tag_report.yaml`) |
 | `relationships/` | reading/rendering `config/relationships/` models offline (`card.py` prints exactly what a launch would plan — ADR 0032) |
 | `dsg/` | the Dataflow Solution Guides replica: `precheck.py` (sensitive-content gate, also in CI), `headers.py` (Apache-2.0 licence header on every source file, also in CI; the sync rewrites its holder line) and `sync.py` (golden source → DSG PR; ADR 0040, skill `.claude/skills/dsg-sync/`) |
 
-Future scopes (`ddl/`, `gcp/`, `automation/`, `config/`, …) are created on
+Future scopes (`ddl/`, `gcp/`, `automation/`, …) are created on
 first need. Root-level scripts (`extract_ddl.py`, `deployment_prerequisites.py`,
 `derive_landing_schema.py`, `hello_synthetic_mlx.py`,
 `run_tableset.py`) are grandfathered and move to a scope when next touched.

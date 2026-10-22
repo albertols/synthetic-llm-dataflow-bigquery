@@ -92,13 +92,7 @@ RUN mkdir -p /out \
 # ---------------------------------------------------------------------------
 FROM ${BEAM_SDK_IMAGE}
 
-# Git commit this image was built from — stamped into every launcher and
-# worker log as the `build_info` milestone (2026-08-21 four-run cycle:
-# same-day runs were indistinguishable by build from the logs alone).
-ARG GIT_COMMIT_ARG="unknown"
-
 ENV DEBIAN_FRONTEND=noninteractive \
-    SDFB_BUILD_COMMIT=$GIT_COMMIT_ARG \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     UV_NO_CACHE=1 \
@@ -215,6 +209,17 @@ ENV SDFB_SDK_CONTAINER_IMAGE=$SDFB_SDK_CONTAINER_IMAGE_ARG
 # The evaluator's driver reads its own variable for the same purpose. Same
 # value, same build argument: an evaluation job's workers run THIS image too.
 ENV SDFB_EVAL_SDK_CONTAINER_IMAGE=$SDFB_SDK_CONTAINER_IMAGE_ARG
+
+# Build identity (ADR 0044): the commit and branch this image was built from.
+# sdfb_core.version reads them where no git checkout exists (every image) and
+# log_build_info stamps them, with the generator version, on every launcher
+# and worker log (2026-08-21 four-run cycle: same-day runs were
+# indistinguishable by build). Declared late, like the image coordinate
+# above, so a per-commit value never invalidates the cached `uv sync` layer.
+ARG GIT_COMMIT_ARG="unknown"
+ARG SDFB_BUILD_BRANCH_ARG="unknown"
+ENV SDFB_BUILD_COMMIT=$GIT_COMMIT_ARG \
+    SDFB_BUILD_BRANCH=$SDFB_BUILD_BRANCH_ARG
 
 # Dispatch entrypoint: launcher binary for the Flex launch role, /opt/apache/beam/boot
 # for the worker harness role. See docker/entrypoint.sh and the header comment.

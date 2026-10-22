@@ -64,6 +64,8 @@ include:
   - config/relationships/*_example.yaml
   - config/models.yml
   - config/thresholds.yml
+  - config/generator.yaml
+  - config/generator.personal.example.yaml
   - docker/**
   # One design document ships. The decision records (docs/adr/) and the
   # per-topic design docs stay in the source repository: links to them are
@@ -84,6 +86,7 @@ include:
   - scripts/derive_landing_schema.py
   - scripts/deployment_prerequisites.py
   - scripts/relationships/card.py
+  - scripts/config/config_digest.py
 
 exclude:
   - "**/__pycache__/**"
@@ -99,6 +102,7 @@ exclude:
   # bundles, figure scripts, the personal-GCP layer, the Composer DAG, this
   # sync itself). The sync fails if a shipped test loads an unshipped script.
   - packages/sdfb-tests/tests/unit/scripts/test_b1_rag_walkthrough.py
+  - packages/sdfb-tests/tests/unit/scripts/test_bump_generator_version.py
   - packages/sdfb-tests/tests/unit/scripts/test_build_full_report.py
   - packages/sdfb-tests/tests/unit/scripts/test_dsg_*.py
   - packages/sdfb-tests/tests/unit/scripts/test_e2e_*.py
@@ -109,6 +113,7 @@ exclude:
   - packages/sdfb-tests/tests/unit/scripts/test_make_release_*.py
   - packages/sdfb-tests/tests/unit/scripts/test_redact*.py
   - packages/sdfb-tests/tests/unit/scripts/test_redaction.py
+  - packages/sdfb-tests/tests/unit/scripts/test_run_model.py
   # Renders the evaluator's metric catalogue (which ships) into its design
   # document with scripts/doc/; the document and the script stay here.
   - packages/sdfb-tests/tests/unit/scripts/test_render_eval_catalogue.py
@@ -121,6 +126,7 @@ exclude:
   - packages/sdfb-tests/tests/unit/validation/test_freetext_rules.py
   # Reads composer/ (not shipped); the golden source's CI keeps covering it.
   - packages/sdfb-tests/tests/unit/docker/test_launch_surfaces.py
+  - packages/sdfb-tests/tests/unit/composer/**
 
 # Explicit test -> script pairs the automatic `"scripts" / ...` detection
 # cannot see.

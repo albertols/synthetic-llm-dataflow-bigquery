@@ -20,7 +20,10 @@ Airflow DAG params and Airflow Variables — operators don't need to re-import
 the DAG to change them.
 
 Substitution markers (workflow 3 seds these at import time):
-  {{PROJECT_VERSION}}         project version of the sdfb-beam package being deployed
+  {{PROJECT_VERSION}}         the version the template is named after
+                              (sdfb-<version>-template.json); a Release build
+                              takes GENERATOR_VERSION_BASE from
+                              sdfb_core/version.py (ADR 0044, RUN_PLAYBOOK §0a)
   {{DAG_VERSION}}             {{PROJECT_VERSION}}_<ISO timestamp> (unique DAG id)
   {{ENV}}                     dev | uat | prd
   {{GCS_DATAFLOW_STAGING}}    <env>-…-dataflow-staging bucket name
@@ -98,7 +101,13 @@ failed `trigger_evaluation` again.
 `trigger_evaluation` evaluates what the launch generated: the launched table
 (`seed_table`) and its enabled group of tables in the relationship model, or
 that table alone; each landed table is read whole and compared with the table
-of the same name in the source dataset. The comments inside its `parameters`
+of the same name in the source dataset. When the launch wrote its generation
+record (a `validation_runs` table with the ADR 0044 columns), the evaluator
+takes the tables, their datasets, the relationship model and
+`reference_rows_limit` from that record instead, so a `config_uri` file that
+changed them is evaluated as generated; this DAG's values are the fallback (no
+record, a job the evaluator cannot read, a record spanning several datasets).
+The comments inside its `parameters`
 say, for every parameter, where the value comes from and what the evaluator
 does with it, and the block above the operator lists the evaluator's options
 this DAG leaves at their defaults. In short:
@@ -108,8 +117,8 @@ this DAG leaves at their defaults. In short:
   `roles/bigquery.resourceViewer`. The generation job's id is passed as the
   launch's identity: the evaluator reads the Dataflow job resource and
   nothing else about the job (needs `roles/dataflow.viewer`; without it the
-  run goes on with a warning and no window). With the window it also runs
-  ONE query on the generator's `validation_runs` table (below).
+  run goes on with a warning and no window). With the window it also reads
+  this launch's rows of the generator's `validation_runs` table (below).
 - `scope=manual` reads each landing table WHOLE: with this DAG's
   `write_disposition` "overwrite" that is this launch's rows, with "append"
   it also includes the rows of earlier launches.
@@ -122,17 +131,18 @@ this DAG leaves at their defaults. In short:
   row.exposure_lift among them). The rebuilt sample is only trusted when it
   matches the digest the generator recorded in its `validation_runs` row, so
   the launch also passes `validation_runs_table`: the evaluator reads this
-  launch's rows of it (landing table and the job's window, one query) and
-  those metrics are evaluated. Without that table, or when the job's window
+  launch's rows of it (the job's window) and those metrics are evaluated. A
+  generation record on those rows replaces the 10000 this DAG passes with the
+  launch's own value. Without that table, or when the job's window
   cannot be read, they come out "not evaluated" with the reason on the row.
   Every other metric is evaluated on all rows either way.
 - A landing table named differently from its source (a custom
   `SDFB_LANDING_TABLE` name) is not found: the evaluation looks for the
   source's name in the landing dataset.
 - What stays lost: the launch's log, so a model the launch adjusted
-  (ADR 0038) is not seen and the table list is the seed's, not the launch's
-  own record. The service account also needs read on the generator's
-  `validation_runs` table.
+  (ADR 0038) is not seen; and, without a generation record, the table list
+  is the seed's, not the launch's own. The service account also needs read on
+  the generator's `validation_runs` table.
 
 `trigger_evaluation` submits the job and does not wait, and nothing in the
 chain waits for the evaluation to finish: the evaluation job writes its own
@@ -758,6 +768,24 @@ default_dag_params = {
             "rebuild and no BigQuery metadata edit — it is the ONLY "
             "source of relational truth.",
         ),
+    "config_uri":
+        Param(
+            default="",
+            type="string",
+            description="gs:// path to a generator config YAML (ADR 0043). "
+            "Keys it sets win over every param of this DAG; params fill "
+            "the keys it leaves out. Empty = no file — the launch behaves "
+            "exactly as before. The chained evaluation (run_evaluation) "
+            "follows the file: it takes the launch's tables, relationship "
+            "model and reference_rows_limit from the generation record in "
+            "validation_runs (ADR 0044). It falls back to this DAG's params "
+            "only when the launch wrote no record (the table lacks the "
+            "columns or its schema was unreadable; the launcher then logs "
+            "config_sets_evaluation_input for each key the file set), or "
+            "when the evaluation cannot read the generation job (no "
+            "roles/dataflow.viewer; its warnings then say the record could "
+            "not be read).",
+        ),
     "run_evaluation":
         Param(
             default=True,
@@ -765,9 +793,12 @@ default_dag_params = {
             description="On by default. False: the DAG launches generation "
             "and nothing else. True: after the generation job reaches "
             "DONE this DAG launches the evaluator as a second, CPU-only "
-            "Dataflow job from the same template. It evaluates the launched "
-            "table and, with generate_fk_relationships true, the rest of "
-            "its group of tables in the relationship model; each landed "
+            "Dataflow job from the same template. It evaluates what the "
+            "launch generated: the tables, datasets, relationship model and "
+            "reference_rows_limit its generation record in validation_runs "
+            "names (ADR 0044), else the launched table and, with "
+            "generate_fk_relationships true, the rest of its group of "
+            "tables in the relationship model; each landed "
             "table is read whole (with write_disposition append that "
             "includes earlier launches' rows). While it waits (for the "
             "generation job, then for the evaluation's launch to be over) "
@@ -1150,6 +1181,7 @@ with models.DAG(
                   "fk_parent_landing": "{{ params.fk_parent_landing }}",
                   "generate_fk_relationships": "{{ params.generate_fk_relationships }}",
                   "relationships_uri": "{{ params.relationships_uri }}",
+                  "config_uri": "{{ params.config_uri }}",
                   "multi_table_mode": "{{ params.multi_table_mode }}",
                   "uniqueness_mode": "{{ params.uniqueness_mode }}",
                   "pool_seed_strategy": "{{ params.pool_seed_strategy }}",
@@ -1341,9 +1373,10 @@ with models.DAG(
                       "evaluation",
                   # The generation job's Dataflow id: the same expression the
                   # wait sensor uses (the XCom `id` of start_sdfb). It is the
-                  # launch's IDENTITY, not a source of tables: the evaluator
-                  # reads the Dataflow job resource (id, name, region, start
-                  # and end) and nothing else about the job, never its log.
+                  # launch's IDENTITY: the evaluator reads the Dataflow job
+                  # resource (id, name, region, start and end) and nothing else
+                  # about the job, never its log; the job's validation_runs rows
+                  # (validation_runs_table below) are found by it.
                   # The row keeps the id and the window, so the run is listed
                   # in the view evaluation_latest_per_job. The window also
                   # pins each source table as of the job's create time (a
@@ -1354,9 +1387,12 @@ with models.DAG(
                   "generation_job_id":
                       generation_job_id,
                   # The launched table: the last part of the DAG param
-                  # table_fqn. It names the tables to evaluate: with a
-                  # relationship model, this table and its enabled group;
-                  # else this table alone.
+                  # table_fqn. It names the tables to evaluate when the
+                  # generation wrote no record (ADR 0044): with a relationship
+                  # model, this table and its enabled group; else this table
+                  # alone. With a record, the record names them (the launch's
+                  # tables, in run order), and a warning says so when they
+                  # differ from this table's group.
                   "seed_table":
                       "{{ params.table_fqn.rsplit('.', 1)[-1] }}",
                   # The relationship model, the DAG param of the same name
@@ -1366,7 +1402,9 @@ with models.DAG(
                   # file, or no model naming the seed, evaluates the seed
                   # alone (with a warning). Empty when the DAG param
                   # generate_fk_relationships is "false": an isolated
-                  # generation is evaluated as one table.
+                  # generation is evaluated as one table. A generation record
+                  # replaces it with the model the launch used, or with none
+                  # when the launch generated without one.
                   "relationships_uri":
                       "{{ params.relationships_uri "
                       "if params.generate_fk_relationships == 'true' "
@@ -1375,12 +1413,14 @@ with models.DAG(
                   # the generation's landing table (marker SDFB_LANDING_TABLE,
                   # whatever table name it ends in). Each table is read as
                   # <landing_dataset>.<its source name>, so a landing table
-                  # named differently from its source is not found.
+                  # named differently from its source is not found. A
+                  # generation record's landing dataset replaces it.
                   "landing_dataset":
                       "{{ '{{SDFB_LANDING_TABLE}}'.rsplit('.', 1)[0] }}",
                   # Where the SOURCE tables are: the DAG param source_dataset,
                   # else the dataset of table_fqn. Each synthetic table is
-                  # compared with the table of the same name here.
+                  # compared with the table of the same name here. A
+                  # generation record's source dataset replaces it.
                   "reference_dataset":
                       "{{ params.source_dataset or params.table_fqn.rsplit('.', 1)[0] }}",
                   # How the landing rows are isolated. A named table has no
@@ -1405,27 +1445,35 @@ with models.DAG(
                   # R and H must be the same size, so the source table needs
                   # at least twice this many rows; with fewer, the
                   # nearest-neighbour metrics are not evaluated. Each half
-                  # needs at least 2000 rows, and the value must equal the
-                  # generation's. The rebuilt sample is only
-                  # trusted when it matches the generator's recorded digest;
-                  # see validation_runs_table below.
+                  # needs at least 2000 rows. The value must equal the
+                  # generation's: a generation record carries it and replaces
+                  # this one (a config_uri file may have changed it), so 10000
+                  # is the fallback for a launch without a record. The rebuilt
+                  # sample is only trusted when it matches the generator's
+                  # recorded digest; see validation_runs_table below.
                   "reference_rows_limit":
                       "10000",
                   # The generator's validation-runs table: the same value
                   # start_sdfb passes (the marker SDFB_VALIDATION_RUNS_TABLE).
                   # With the job's window known, the evaluator reads THIS
                   # launch's rows of it (the rows created for the landing
-                  # tables inside the window): one query, no log. The
-                  # reference_digest on a row is what verifies the rebuilt
+                  # tables inside the window, or that name the job): no log.
+                  # The reference_digest on a row is what verifies the rebuilt
                   # sample, which is what lets the reference-based privacy
                   # metrics (listed at reference_rows_limit) be evaluated;
-                  # it also brings the run ids. Needs read on this table.
+                  # it also brings the run ids. When the rows carry the
+                  # generation record (the ADR 0044 columns), the record names
+                  # what is evaluated: the tables, their datasets, the
+                  # relationship model and reference_rows_limit, each value
+                  # that differs from the one above a warning. Needs read on
+                  # this table.
                   # If the table cannot be read, or the window is unknown
                   # (the Dataflow job could not be read), the run goes on
                   # with a warning and those metrics are "not evaluated"
-                  # with the reason on the row. If the window holds rows of
-                  # several launches, the latest launch's rows are used and
-                  # a warning says so.
+                  # with the reason on the row. Rows that name another job
+                  # are dropped, with a warning naming them; if rows that name
+                  # no job (older rows) hold several launches, the latest
+                  # launch's rows are used and a warning says so.
                   "validation_runs_table":
                       validation_runs_table,
                   # Recorded in the registry row: what started the

@@ -28,19 +28,38 @@ uses `B` itself (`sdfb_beam.cli.run_pipeline.plan_launch`):
 window, with the base and the position recovered from each run id; it is
 the one launch-context source that survives log retention.
 
+Each row carries the generation record when the generator wrote it
+(ADR 0044): the Dataflow job, the generator version and a JSON snapshot of
+the launch's config. The read is `SELECT *`, so a table created before
+those columns works too — its rows simply have none of them.
+`runs_of_job` finds one Dataflow job's rows without knowing its tables.
+
+A whole-model launch (ADR 0045) runs batch jobs `B-bNN`, their tables
+`B-bNN-MM-<table>`, so each row splits to the base `B-bNN`; the launch
+they belong to is the row's recorded `launch_run_id`, `B`
+(`context.launch`). `rows_of_jobs` keeps the rows of the batch jobs that
+landed.
+
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §4 Relational generation;
+§7 Validation and the dead-letter queue
+(ADR 0044, 0045).
 """
 
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import timedelta
 from typing import Any
 
 from sdfb_evaluation.context.jobs import iso_timestamp, parse_timestamp
 
-__all__ = ["runs_for", "split_run_id"]
+__all__ = [
+    "RECORD_READ_COLUMNS", "of_job", "rows_of_jobs", "runs_for", "runs_of_job",
+    "split_run_id"
+]
 
 _DATASET_RE = re.compile(
     r"([a-z][a-z0-9-]{4,28}[a-z0-9])[.:]([A-Za-z0-9_]{1,1024})")
@@ -50,6 +69,51 @@ _INDEX_RE = re.compile(r"(?P<base>.+)-(?P<index>\d{2,})")
 _RUNS_WINDOW_PAD = timedelta(minutes=10)
 _COLUMNS = ("run_id", "landing_table", "reference_table", "reference_digest",
             "valid_count", "num_rows_requested", "status", "created_at")
+# Read when present: three columns every validation_runs has always had, and
+# the generation record's fourteen (ADR 0044).
+RECORD_READ_COLUMNS = ("engine", "model_uri", "env", "job_id", "job_name",
+                       "launch_run_id", "generator_version", "launched_at",
+                       "embedder_uri", "retrieval_method", "similarity", "seed",
+                       "source_stats", "relationships_uri",
+                       "relationships_digest", "config_digest", "config")
+
+
+def of_job(row_job_id: str | None, row_job_name: str | None, job_id: str | None,
+           job_name: str | None) -> bool:
+  """A row written by this Dataflow job: its recorded id, or — when the
+  worker could not read the id — its recorded name."""
+  if row_job_id:
+    return bool(job_id) and row_job_id == job_id
+  return bool(job_name) and row_job_name == job_name
+
+
+def _source(quality_dataset: str, table_name: str) -> str:
+  match = _DATASET_RE.fullmatch(quality_dataset or "")
+  if match is None:
+    raise ValueError(f"expected the quality dataset as project.dataset, got "
+                     f"{quality_dataset!r}")
+  if _TABLE_NAME_RE.fullmatch(table_name or "") is None:
+    raise ValueError(f"malformed table name {table_name!r}")
+  return f"`{match.group(1)}.{match.group(2)}.{table_name}`"
+
+
+def _shaped(rows: Any) -> list[dict]:
+  out = []
+  for row in rows:
+    record = {
+        column: row.get(column) for column in (*_COLUMNS, *RECORD_READ_COLUMNS)
+    }
+    record["created_at"] = iso_timestamp(record["created_at"])
+    record["launched_at"] = iso_timestamp(record["launched_at"])
+    base, index = split_run_id(
+        str(record["run_id"]), str(record["landing_table"]))
+    record["base_run_id"] = base
+    record["table_index"] = index
+    out.append(record)
+  return sorted(
+      out,
+      key=lambda r: (-1 if r["table_index"] is None else r["table_index"], r[
+          "created_at"] or "", r["run_id"]))
 
 
 def split_run_id(run_id: str, landing_table: str) -> tuple[str, int | None]:
@@ -91,20 +155,16 @@ def runs_for(bq: Any,
   Returns:
     Rows with `run_id`, `landing_table`, `reference_table`,
     `reference_digest`, `valid_count`, `num_rows_requested`, `status`,
-    `created_at` (RFC 3339), plus `base_run_id` and `table_index` from
-    `split_run_id`; ordered by position, then creation time. Rows of
-    OTHER launches that wrote the same tables in the window are returned
-    too — the caller decides which base is its own.
+    `created_at` (RFC 3339), every `RECORD_READ_COLUMNS` value (None when
+    the table or the row lacks it; `launched_at` as RFC 3339), plus
+    `base_run_id` and `table_index` from `split_run_id`; ordered by
+    position, then creation time. Rows of OTHER launches that wrote the
+    same tables in the window are returned too — the caller decides which
+    base is its own.
   """
-  match = _DATASET_RE.fullmatch(quality_dataset or "")
-  if match is None:
-    raise ValueError(f"expected the quality dataset as project.dataset, got "
-                     f"{quality_dataset!r}")
-  if _TABLE_NAME_RE.fullmatch(table_name or "") is None:
-    raise ValueError(f"malformed table name {table_name!r}")
+  source = _source(quality_dataset, table_name)
   if not landing_tables and not base_run_id:
     return []
-  source = f"`{match.group(1)}.{match.group(2)}.{table_name}`"
   params: dict[str, Any] = {}
   matches = []
   if landing_tables:
@@ -121,22 +181,67 @@ def runs_for(bq: Any,
   if window[1]:
     params["end"] = parse_timestamp(window[1]) + _RUNS_WINDOW_PAD
     clauses.append("created_at <= @end")
-  columns = ", ".join(_COLUMNS)
   where = " AND ".join(clauses)
-  sql = (f"SELECT {columns}\n"
+  sql = (f"SELECT *\n"
          f"FROM {source}\n"
          f"WHERE {where}\n"
          "ORDER BY created_at, run_id")
-  out = []
-  for row in bq.query(sql, params):
-    record = {column: row.get(column) for column in _COLUMNS}
-    record["created_at"] = iso_timestamp(record["created_at"])
-    base, index = split_run_id(
-        str(record["run_id"]), str(record["landing_table"]))
-    record["base_run_id"] = base
-    record["table_index"] = index
-    out.append(record)
-  return sorted(
-      out,
-      key=lambda r: (-1 if r["table_index"] is None else r["table_index"], r[
-          "created_at"] or "", r["run_id"]))
+  return _shaped(bq.query(sql, params))
+
+
+def runs_of_job(bq: Any,
+                *,
+                quality_dataset: str,
+                job_id: str | None,
+                job_name: str | None,
+                window: tuple[str | None, str | None],
+                table_name: str = "validation_runs") -> list[dict]:
+  """One Dataflow job's own rows (ADR 0044), for a caller that does not
+  know the job's tables: every row created inside the job's window (both
+  bounds required, each padded by ten minutes), kept when `of_job` says the
+  job wrote it. A table without the record columns returns no row — never
+  an error. Rows shaped and ordered as `runs_for` shapes them."""
+  source = _source(quality_dataset, table_name)
+  if not (window[0] and window[1]) or not (job_id or job_name):
+    return []
+  params = {
+      "start": parse_timestamp(window[0]) - _RUNS_WINDOW_PAD,
+      "end": parse_timestamp(window[1]) + _RUNS_WINDOW_PAD,
+  }
+  sql = (f"SELECT *\n"
+         f"FROM {source}\n"
+         "WHERE created_at >= @start AND created_at <= @end\n"
+         "ORDER BY created_at, run_id")
+  own = [
+      row for row in bq.query(sql, params)
+      if of_job(row.get("job_id"), row.get("job_name"), job_id, job_name)
+  ]
+  return _shaped(own)
+
+
+def rows_of_jobs(rows: Sequence[Mapping[str, Any]], job_ids: Sequence[str],
+                 notes: list[str]) -> list[Mapping[str, Any]]:
+  """A whole-model launch's rows written by the listed batch jobs
+  (ADR 0045): a row whose recorded `job_id` is not listed is dropped; a row
+  with no `job_id` (the worker could not read it, ADR 0044) is kept —
+  nothing says which job wrote it, so it may be an unlisted batch's. Each
+  case is a note.
+
+  By id only, unlike `of_job`, which falls back to the row's `job_name`:
+  the callers (the model DAG, `scripts/launch/run_model.py`) know only the
+  ids of the batch jobs that landed, so there is no name to match."""
+  wanted = set(job_ids)
+  dropped = sorted(
+      str(r["run_id"])
+      for r in rows
+      if r.get("job_id") and r["job_id"] not in wanted)
+  unattributed = sorted(str(r["run_id"]) for r in rows if not r.get("job_id"))
+  if dropped:
+    notes.append(f"validation_runs rows of jobs not in generation_job_ids "
+                 f"were not evaluated: {dropped}")
+  if unattributed:
+    notes.append(f"validation_runs rows that carry no job id were evaluated "
+                 f"(nothing says which job wrote them; they may include "
+                 f"batches not listed in --generation_job_ids): "
+                 f"{unattributed}")
+  return [r for r in rows if not r.get("job_id") or r["job_id"] in wanted]

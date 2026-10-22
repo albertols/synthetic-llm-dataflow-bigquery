@@ -28,6 +28,9 @@ A target (plan, run) is exactly one of
     --job_id J --region R          a generation Dataflow job
     --run_id B                     a launch by its base run id, from the
                                    validation_runs of --output_dataset
+    --run_id B [--generation_job_ids J1,J2]
+                                   a whole-model launch (ADR 0045): only
+                                   the rows those batch jobs wrote
     --tables A,B --landing_dataset L --reference_dataset D
       [--relationships_uri U]      tables named by hand
 
@@ -88,8 +91,9 @@ is Beam's to read.)
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
-Design: docs/DESIGN.md §11 Evaluation (sdfb-evaluation)
-(ADR 0041).
+Design: docs/DESIGN.md §4 Relational generation;
+§7 Validation and the dead-letter queue; §11 Evaluation (sdfb-evaluation)
+(ADR 0041, 0044, 0045).
 """
 
 from __future__ import annotations
@@ -240,6 +244,15 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
       "as --generation_job_id, because the template launcher does not pass "
       "a parameter named job_id (ADR 0041)")
   group.add_argument(
+      "--generation_job_ids",
+      dest="job_ids",
+      type=_csv,
+      help="with --run_id alone (a whole-model launch's base run id, "
+      "ADR 0045): the Dataflow ids of its batch jobs that landed, "
+      "comma-separated. Only the rows those jobs wrote are evaluated (a row "
+      "that carries no job id is kept, with a note); the registry row "
+      "records every id, the first as generation_job_id")
+  group.add_argument(
       "--run_id",
       type=_text,
       help="the generation launch's base run id (validation_runs of "
@@ -256,7 +269,9 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
       help="the table a launch targeted: evaluate what that launch "
       "generated, which is its enabled component in the relationship model "
       "(--relationships_uri), or the table alone when no model names it or "
-      "none is given. Needs --landing_dataset and --reference_dataset")
+      "none is given; with --generation_job_id and --validation_runs_table, "
+      "the job's validation_runs record, when present, names the tables "
+      "instead (ADR 0044). Needs --landing_dataset and --reference_dataset")
   group.add_argument(
       "--landing_dataset",
       type=_text,
@@ -271,22 +286,29 @@ def _add_target(parser: argparse.ArgumentParser) -> None:
       type=_positive,
       help="the generation's reference sample size (its "
       "--reference_rows_limit): it sizes the reference panel behind the "
-      "privacy metrics, which a hand-named target cannot read from the "
-      "launch's records. Without it those metrics are not evaluated")
+      "privacy metrics. A target named by --tables or --relationships_uri "
+      "cannot read it from the launch's records; on the seed path "
+      "(--seed_table with --generation_job_id and --validation_runs_table) "
+      "the generation record's value, when present, replaces it (ADR 0044). "
+      "With a value from neither, those metrics are not evaluated")
   group.add_argument(
       "--validation_runs_table",
       type=_bq_table,
       help="the generator's validation-runs table, project.dataset.table: "
       "with --generation_job_id next to --seed_table, this launch's rows of "
       "it (in the job's window) give the digest that verifies the reference "
-      "sample, so the metrics that compare with it are evaluated. Fills what "
-      "the launch's own records leave open")
+      "sample, so the metrics that compare with it are evaluated, and their "
+      "generation record, when present, names the tables, datasets, "
+      "relationship model and --reference_rows_limit that were generated "
+      "(ADR 0044). Fills what the launch's own records leave open")
   group.add_argument(
       "--relationships_uri",
       type=_text,
       help="the relationship model file or directory (local or gs://), "
       "when the launch's own records name none; alone (with "
-      "--landing_dataset and --reference_dataset) it also names the tables")
+      "--landing_dataset and --reference_dataset) it also names the tables. "
+      "On the seed path a generation record that states relationships off "
+      "overrides it when the record names the tables (ADR 0044)")
   group.add_argument("--fixture_dir", type=_text, help=argparse.SUPPRESS)
 
 
@@ -500,6 +522,11 @@ def _check_target(parser: argparse.ArgumentParser,
                                                            args.tables),
                                ("--seed_table", args.seed_table)) if value
   ]
+  job_ids = getattr(args, "job_ids", None)
+  if job_ids and (not args.run_id or args.job_id or args.tables or
+                  args.seed_table):
+    parser.error("--generation_job_ids goes with --run_id alone (a "
+                 "whole-model launch's base run id, ADR 0045)")
   if args.fixture_dir:
     if targets:
       parser.error("--fixture_dir is its own target")

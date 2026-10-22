@@ -14,8 +14,8 @@
 """ADR 0035: the FK key-sample cap preflight sizes for a child's PK is
 what the composer broadcasts — per edge, in-set parents only.
 
-Design: docs/DESIGN.md §4 Relational generation
-(ADR 0030, 0035, 0037).
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
+(ADR 0030, 0035, 0037, 0043).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
@@ -28,9 +28,9 @@ from sdfb_beam.cli.run_pipeline import (
     conditional_rest_of,
     in_set_parent_edges,
 )
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.relationships import RelationshipRegistry
-from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
 
 _MODEL = """
 model: m
@@ -74,7 +74,8 @@ def test_edges_without_a_sized_cap_keep_the_floor():
       in_set_names={"B_TABLE", "C_TABLE"},
       key_sample_caps={},
   )
-  assert edges[0].key_sample_cap == FK_KEY_SAMPLE_FLOOR
+  assert edges[
+      0].key_sample_cap == DEFAULT_CONFIG.relational.fk_key_sample_floor
 
 
 # --- ADR 0037: independent / conditional edges reach the composer ------
@@ -442,3 +443,30 @@ def test_two_conditional_edges_to_different_parents_get_distinct_ids():
   assert sorted(
       conditional_rest_of(registry, "proj.synthetic_data.CH_TABLE",
                           roles)) == ["(K)->Q_TABLE", "(K)->R_TABLE"]
+
+
+def test_the_request_bound_and_floor_follow_the_config():
+  """ADR 0043: `max_conditional_values_per_request` and
+    `fk_key_sample_floor` are read from the launch config, not constants."""
+  from sdfb_core.config.model import GeneratorConfig
+
+  config = GeneratorConfig.model_validate({
+      "relational": {
+          "max_conditional_values_per_request": 6_400,
+          "fk_key_sample_floor": 321,
+      }
+  })
+  registry = _reg(_DIAMOND, "diamond")
+  edges = in_set_parent_edges(
+      registry,
+      "proj.synthetic_data.BOTTOM_TABLE",
+      in_set_names=_DIAMOND_NAMES,
+      key_sample_caps={},
+      edge_roles=registry.edge_roles("BOTTOM_TABLE"),
+      keys_per_batch=5000,
+      table_schema=_schema(("T", "REQUIRED"), ("L", "REQUIRED"),
+                           ("R", "NULLABLE")),
+      config=config,
+  )
+  assert [e.keys_per_batch for e in edges] == [100, 100]  # 6_400 // 64
+  assert {e.key_sample_cap for e in edges} == {321}

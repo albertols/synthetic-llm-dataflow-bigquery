@@ -18,8 +18,9 @@ Loaded via importlib (the script is not a package module). Offline-only: the
 BigQuery surface is a fake injected through the module's `bq_client`
 indirection — no GCP credentials, no network.
 
-Design: docs/DESIGN.md §5 Fidelity; §11 Evaluation (sdfb-evaluation)
-(ADR 0020, 0041).
+Design: docs/DESIGN.md §5 Fidelity; §7 Validation and the dead-letter queue;
+§11 Evaluation (sdfb-evaluation)
+(ADR 0020, 0041, 0044).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
@@ -653,20 +654,20 @@ def _run13j(monkeypatch, *names, extra=("--templates-bucket", "b"), gcs=None):
 
 def _main_template():
   version = _mod.generator_version(_REPO_ROOT)
-  assert version, "packages/sdfb-beam/pyproject.toml names no version"
+  assert version, "sdfb_core/version.py names no base version"
   return f"sdfb-{version}-template.json"
 
 
 def test_generator_version_is_the_one_the_template_is_named_after(tmp_path):
-  """The template build names the object after the sdfb-beam package's
-    version (a release) or `latest` (a development build)."""
-  package = tmp_path / "packages" / "sdfb-beam"
-  package.mkdir(parents=True)
-  (package / "pyproject.toml"
-  ).write_text('[project]\nname = "sdfb-beam"\nversion = "1.2.3"\n')
+  """A release names its template after sdfb_core.version's base
+    (ADR 0044), read from the file without importing it."""
+  module = tmp_path / "packages" / "sdfb-core" / "src" / "sdfb_core"
+  module.mkdir(parents=True)
+  (module / "version.py").write_text('GENERATOR_VERSION_BASE = "1.2.3"\n')
   assert _mod.generator_version(tmp_path) == "1.2.3"
   assert _mod.generator_version(tmp_path / "nowhere") is None
-  assert _mod.generator_version(_REPO_ROOT)
+  from sdfb_core.version import GENERATOR_VERSION_BASE
+  assert _mod.generator_version(_REPO_ROOT) == GENERATOR_VERSION_BASE
 
 
 @needs_evaluator
@@ -988,3 +989,116 @@ def test_step13_label_key_relative_or_other_form_names_the_three_forms(
     assert by["13k"].status == _mod.ACTION, bad
     for form in ("gs://", "projects/P/secrets/S/versions/V", "absolute"):
       assert form in by["13k"].action, (bad, form)
+
+
+_VR_FQN = "p.synthetic_data_quality.validation_runs"
+
+
+def _vr_schema_names():
+  return [
+      f["name"] for f in json.loads((_REPO_ROOT / "config" / "bq_schema" /
+                                     "synthetic_data_quality" /
+                                     "validation_runs.schema.json").read_text())
+  ]
+
+
+def _run4(monkeypatch, columns):
+  fake = _FakeBQ(tables={
+      _VR_FQN:
+          SimpleNamespace(schema=[SimpleNamespace(name=c) for c in columns])
+  })
+  _patch_bq(monkeypatch, fake)
+  ctx = _mod.Ctx(args=_mod.parse_args(_BASE_ARGV))
+  _mod.step4_bq_tables(ctx)
+  return {r.step: r for r in ctx.results}
+
+
+def test_4d_flags_a_validation_runs_without_the_record_columns(monkeypatch):
+  """ADR 0044: the generator degrades without the columns (21-column row,
+    one WARNING), so a drifted table is an ACTION naming the one command."""
+  row = _run4(monkeypatch, _vr_schema_names()[:21])["4d"]
+  assert row.status == _mod.ACTION
+  assert "missing columns: job_id" in row.resource
+  assert ("bq update --schema "
+          "config/bq_schema/synthetic_data_quality/validation_runs.schema.json "
+          "p:synthetic_data_quality.validation_runs") in row.action
+
+
+def test_4d_is_ok_with_every_column(monkeypatch):
+  row = _run4(monkeypatch, _vr_schema_names())["4d"]
+  assert row.status == _mod.OK
+  assert f"{len(_vr_schema_names())} cols" in row.resource
+
+
+def _run4_args(monkeypatch, fake, *extra):
+  _patch_bq(monkeypatch, fake)
+  ctx = _mod.Ctx(args=_mod.parse_args([*_BASE_ARGV, *extra]))
+  _mod.step4_bq_tables(ctx)
+  return {r.step: r for r in ctx.results}
+
+
+def test_4d_without_a_readable_schema_file_does_not_crash(
+    monkeypatch, tmp_path):
+  """A custom --schemas-dir without the file: the table exists, so 4d is OK
+    and says the columns were not compared (as step 13 does)."""
+  fake = _FakeBQ(
+      tables={_VR_FQN: SimpleNamespace(schema=[SimpleNamespace(name="x")])})
+  row = _run4_args(monkeypatch, fake, "--schemas-dir", str(tmp_path))["4d"]
+  assert row.status == _mod.OK
+  assert "columns not compared (schema file unusable)" in row.resource
+
+
+def test_4d_with_malformed_schema_json_does_not_crash(monkeypatch, tmp_path):
+  d = tmp_path / "synthetic_data_quality"
+  d.mkdir()
+  (d / "validation_runs.schema.json").write_text("{not json")
+  fake = _FakeBQ(
+      tables={_VR_FQN: SimpleNamespace(schema=[SimpleNamespace(name="x")])})
+  row = _run4_args(monkeypatch, fake, "--schemas-dir", str(tmp_path))["4d"]
+  assert row.status == _mod.OK
+  assert "columns not compared (schema file unusable)" in row.resource
+
+
+def test_4d_reports_a_missing_table_as_an_action(monkeypatch):
+  row = _run4_args(monkeypatch, _FakeBQ(tables={}))["4d"]
+  assert row.status == _mod.ACTION
+  assert "not found" in row.resource
+
+
+def test_4d_skips_when_get_table_raises(monkeypatch):
+
+  class _Boom(_FakeBQ):
+
+    def get_table(self, fqn):
+      if fqn == _VR_FQN:
+        raise RuntimeError("denied")
+      return super().get_table(fqn)
+
+  row = _run4_args(monkeypatch, _Boom())["4d"]
+  assert row.status == _mod.SKIP
+  assert "denied" in row.resource
+
+
+def test_13_names_the_exact_update_when_only_columns_are_missing(monkeypatch):
+  """A registry table missing only columns gets the one `bq update` that
+    appends them: the evaluator's load jobs carry the committed schema and
+    fail until it runs (ADR 0044)."""
+  bq = _FakeBQ(
+      datasets={_EVAL_DS},
+      tables=_provisioned(evaluation_data_history={"drop": ("params_source",)}))
+  _, by = _run13(monkeypatch, bq)
+  row = by["13c"]
+  assert row.status == _mod.ACTION
+  assert ("bq update --schema packages/sdfb-evaluation/src/sdfb_evaluation/"
+          "schemas/evaluation_data_history.schema.json "
+          "p:synthetic_data_quality.evaluation_data_history") in row.action
+
+
+def test_13_keeps_the_general_remedy_for_a_retyped_column(monkeypatch):
+  bq = _FakeBQ(
+      datasets={_EVAL_DS},
+      tables=_provisioned(
+          evaluation_data_history={"retype": ("params_source", "INT64")}))
+  _, by = _run13(monkeypatch, bq)
+  assert "bq update --schema" not in by["13c"].action
+  assert "Columns can be added with" in by["13c"].action

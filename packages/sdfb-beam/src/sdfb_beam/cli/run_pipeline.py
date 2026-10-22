@@ -34,9 +34,9 @@ REFs:
   - docs/MODEL_LAYOUT.md
 
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
-§6 Throughput; §8 Configuration
+§6 Throughput; §7 Validation and the dead-letter queue; §8 Configuration
 (ADR 0019, 0022, 0023, 0024, 0027, 0028, 0029, 0030, 0031, 0032, 0034, 0035,
-0036, 0037, 0038, 0039).
+0036, 0037, 0038, 0039, 0043, 0044, 0045).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -49,14 +49,18 @@ Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import functools
 import json
 import logging
 import os
 import re
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 import apache_beam as beam
 # Side-effect import: populates ENGINE_REGISTRY at import time.
@@ -72,7 +76,19 @@ from apache_beam.options.pipeline_options import (
     StandardOptions,
     WorkerOptions,
 )
+from google.cloud import bigquery
 from sdfb_core.codegen import derive_bq_load_schema
+from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
+from sdfb_core.config.resolve import (
+    PROVENANCE_FILE,
+    ConfigError,
+    ConfigResolution,
+    missing_required,
+    namespace_values,
+    parse_config_text,
+    resolve,
+)
+from sdfb_core.config.salt import pool_store_model_key, salted, settings_salt
 from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.model_adjustment import (
     ModelAdjustment,
@@ -95,8 +111,22 @@ from sdfb_core.contracts.row_projection import (
     projection_warnings,
 )
 from sdfb_core.engines.b1_rag.profile import profile_columns
+from sdfb_core.engines.base import escalating_temperatures
 from sdfb_core.engines.fanout import conditional_edge_id
-from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
+from sdfb_core.launch.batches import (
+    ModelLaunch,
+    ModelLaunchError,
+    batch_label,
+    batch_run_id,
+    launch_banner,
+    plan_model_launch,
+)
+from sdfb_core.launch.tables import (
+    TABLES_ALL,
+    model_launch_problems,
+    source_fqn,
+    table_rows,
+)
 from sdfb_core.observability import (
     log_build_info,
     log_milestone,
@@ -109,8 +139,21 @@ from sdfb_core.rag.chunking import (
     resolve_row_docs_limit,
 )
 from sdfb_core.rag.embedding import embedder_identity
-from sdfb_core.stats import PROFILER_VERSION, profile_source_table, stats_rows
+from sdfb_core.record import (
+    LaunchRecord,
+    bq_update_command,
+    build_snapshot,
+    launch_record,
+    missing_record_columns,
+    relationships_block,
+)
+from sdfb_core.stats import profile_source_table, stats_rows
+from sdfb_core.stats.source_stats import (
+    PROFILER_VERSION,
+    stats_profiler_version,
+)
 from sdfb_core.validation import Thresholds
+from sdfb_core.version import generator_version
 
 from sdfb_beam.cli.preflight import (
     DEFAULT_FK_CANDIDATE_CAP,
@@ -123,6 +166,7 @@ from sdfb_beam.cli.preflight import (
 from sdfb_beam.ddl import extract_table_schema
 from sdfb_beam.dofns.uniqueness import MODE_STREAMING, UNIQUENESS_MODES
 from sdfb_beam.io.bq_sources import load_reference_rows
+from sdfb_beam.io.config import read_config_text
 from sdfb_beam.io.digest import compute_reference_digest
 from sdfb_beam.io.fanout_stats import (
     BigQueryFanoutStatsStore,
@@ -137,10 +181,7 @@ from sdfb_beam.io.fk_pools import (
     parent_landing_fqn,
     per_column_view,
 )
-from sdfb_beam.io.relationships import (
-    DEFAULT_RELATIONSHIPS_URI,
-    load_relationship_registry,
-)
+from sdfb_beam.io.relationships import load_relationship_registry
 from sdfb_beam.io.source_values import (
     BigQuerySourceValueStore,
     pool_source_overlap,
@@ -173,13 +214,15 @@ _DEFAULT_WORKER_DISK_GB = 200
 # them per bundle ("Retrieving state 62 times costed 60 seconds",
 # 2026-09-07 R7). 512 MB on an n1-highmem-8 is a rounding error.
 _DEFAULT_STATE_CACHE_MB = 512
+# Dataflow's job-name limit (`sanitize_job_name`, `batch_job_name`).
+_JOB_NAME_MAX = 63
 
 # batch_size is rows-per-element. At the historic fixed default of 16, a 1M-row
 # run produced 62,500 elements and paid per-element Python overhead 62,500
 # times over instead of amortising it across vectorized draws (2026-07-26
 # E2E). Scale toward ~1,000 elements, but never below the historic default so
 # small runs — and their goldens — are untouched.
-DEFAULT_BATCH_SIZE = 16
+DEFAULT_BATCH_SIZE = DEFAULT_CONFIG.generation.batch_size
 _TARGET_ELEMENTS = 1_000
 
 # ADR 0036: keys per fan-out request element. A near-zero measured mean
@@ -200,10 +243,6 @@ _EDGE_MODES = {
     "independent": "side_input",
     "conditional": "conditional",
 }
-# ADR 0037 §7 — a fan-out request carries `keys_per_batch * M` candidate
-# tuples per conditional edge; `keys_per_batch` is lowered so the whole
-# request stays under this many values, whatever the cap is set to.
-_MAX_CONDITIONAL_VALUES_PER_REQUEST = 100_000
 
 # WS5 §3 — the seeding experiment's only variable. Three arms off ONE build
 # so the E2E runs differ in exactly one thing.
@@ -285,10 +324,10 @@ def resolve_batch_size(requested: int, num_rows: int) -> int:
 def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides the CLI surface
     argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
   p = argparse.ArgumentParser(
-      description="Synthetic Dataflow BigQuery — pipeline launcher")
+      description="Synthetic Dataflow BigQuery — pipeline launcher",
+      argument_default=argparse.SUPPRESS)
   p.add_argument(
       "--ddl_uri",
-      default="",
       help="gs:// or local path to _ddl.json — the OFFLINE "
       "FALLBACK only (ADR 0027 D2). Live extraction is "
       "authoritative at every launch: structure from "
@@ -302,13 +341,11 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "(ddl_pin_drift/ddl_pin_fresh).")
   p.add_argument(
       "--reference_table",
-      required=True,
       help="FQN of source table for live SELECT reference rows")
-  p.add_argument("--reference_rows_limit", type=int, default=10_000)
+  p.add_argument("--reference_rows_limit", type=int)
   p.add_argument(
       "--rag_row_docs_limit",
       type=parse_rag_row_docs_limit,
-      default=MAX_ROW_DOC_ROWS,
       help="B.1 RAG: how many reference rows (the first N of the "
       "fingerprint-ordered sample) are embedded as row documents — "
       "the in-worker exemplar index, the rag_chunks row_doc prefix "
@@ -318,16 +355,13 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "missing rows when --build_rag_layer is on (ADR 0019).")
   p.add_argument(
       "--landing_table",
-      required=True,
       help="BQ table for synthetic rows (project.dataset.table). "
       "Accepts a comma-separated list for multi-table "
       "launches (ADR 0029 scenarios): each table runs "
       "sequentially with a suffixed run_id.")
-  p.add_argument(
-      "--dlq_table", required=True, help="BQ DLQ table (project.dataset.table)")
+  p.add_argument("--dlq_table", help="BQ DLQ table (project.dataset.table)")
   p.add_argument(
       "--write_disposition",
-      default="append",
       choices=["append", "overwrite"],
       help="Landing-table write mode. append = WRITE_APPEND "
       "(default, today's behavior); overwrite = "
@@ -335,7 +369,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "validation_runs and rag_chunks always append.")
   p.add_argument(
       "--create_if_not_exists",
-      default="false",
       help="true/1/yes: create the landing table on first "
       "write (CREATE_IF_NEEDED) carrying the landing "
       "schema derived in-pipeline from the DDL. Anything "
@@ -348,10 +381,9 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "because the FILE_LOADS load-job API rejects them "
       "at runtime. Pre-provision the table out-of-band "
       "(e.g. `bq mk`/DDL) if those constraints matter.")
-  p.add_argument("--num_rows", type=int, required=True)
+  p.add_argument("--num_rows", type=int)
   p.add_argument(
       "--autoscaling",
-      default="auto",
       choices=list(_AUTOSCALING_MODES),
       help="auto (default) = a fleet sized by --initial_workers "
       "stays that size (autoscaling_algorithm=NONE), "
@@ -363,7 +395,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "stages, ADR 0034 D9).")
   p.add_argument(
       "--initial_workers",
-      default="",
       help="Initial Dataflow worker count (ADR 0034). Empty = "
       "Dataflow's own default: the 2026-08-29 R6 pair "
       "started on 2 workers and autoscaled to 4 only ~4 min "
@@ -375,48 +406,38 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
   p.add_argument(
       "--batch_size",
       type=int,
-      default=DEFAULT_BATCH_SIZE,
       help="Rows per element. Left at the default, this scales "
       "with --num_rows toward ~1,000 elements (never below "
       "the default). Pass an explicit value to pin it.")
-  p.add_argument("--similarity", type=float, default=0.5)
+  p.add_argument("--similarity", type=float)
   p.add_argument(
       "--seed",
-      default="",
       help="Explicit base RNG seed (int). Empty = derive per "
       "(run_id, batch_id) — never replays across runs "
       "because run_id is salted per trigger.")
-  p.add_argument("--run_id", required=True)
+  p.add_argument("--run_id")
   p.add_argument(
       "--identity_cols",
-      default="",
       help="Comma-separated per-row-unique columns synthesized "
       "fresh each row (PK/UUID); never sampled from "
       "reference data")
   p.add_argument(
       "--pk_cols",
-      default="",
       help="Comma-separated declared primary-key columns; "
       "duplicate PK tuples divert to the DLQ "
       "(rule_id=pk.duplicate, BLOCKER). Empty disables.")
-  p.add_argument(
-      "--engine",
-      default="b1_rag",
-      help="Engine name registered in ENGINE_REGISTRY")
+  p.add_argument("--engine", help="Engine name registered in ENGINE_REGISTRY")
   p.add_argument(
       "--model_uri",
-      required=True,
       help="gs://<bucket>/synthetic/models/<family>/<model>/<version>/")
   p.add_argument(
       "--embedder_uri",
-      default="",
       help="gs://<bucket>/synthetic/models/embedders/<model>/<version>/ "
       "for the B.1 RAG embedder (optional; empty → HashingEmbedder)")
   p.add_argument(
       "--build_rag_layer",
       nargs="?",
       const="true",
-      default="",
       help="true/false (bare flag = true). Populate "
       "synthetic_rag.rag_chunks from this run's "
       "reference sample (skipped if the reference_digest "
@@ -425,7 +446,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "pass --build_rag_layer=true.")
   p.add_argument(
       "--rag_chunks_table",
-      default="",
       help="FQN of synthetic_rag.rag_chunks. Enables the "
       "read-instead-of-reembed path; with "
       "--build_rag_layer also enables population.")
@@ -433,7 +453,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "--build_pool_layer",
       nargs="?",
       const="true",
-      default="",
       help="true/false (bare flag = true). Build free-text "
       "pools in their own branch and persist them to "
       "--freetext_pools_table (skipped if this "
@@ -442,13 +461,11 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "process's setup().")
   p.add_argument(
       "--freetext_pools_table",
-      default="",
       help="FQN of synthetic_rag.freetext_pools. Enables the "
       "read-instead-of-rebuild path; with "
       "--build_pool_layer also enables the build branch.")
   p.add_argument(
       "--uniqueness_mode",
-      default="exact",
       choices=list(UNIQUENESS_MODES),
       help="exact = divert every duplicate to the DLQ behind "
       "ONE full-row shuffle barrier (default; PK/identity "
@@ -464,14 +481,12 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "--write_disposition=overwrite.")
   p.add_argument(
       "--fk_fanout_stats_table",
-      default="",
       help="FQN of synthetic_data_quality.fk_fanout_stats (ADR 0036 cache of "
       "the SOURCE fan-out histogram + PK cells per driving edge). "
       "Empty = measure every launch, never cache.")
   p.add_argument(
       "--fk_candidate_cap",
       type=validate_candidate_cap,
-      default=DEFAULT_FK_CANDIDATE_CAP,
       help="ADR 0037: Top-M candidates kept per SHARED value on a "
       "CONDITIONAL edge (an edge sharing columns with the "
       "driving edge — a diamond branch). A hot shared key "
@@ -482,14 +497,12 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "request under ~100k candidate values.")
   p.add_argument(
       "--driven_uniqueness_mode",
-      default="streaming",
       choices=list(UNIQUENESS_MODES),
       help="Uniqueness mode for a DRIVEN child without identity columns "
       "(ADR 0036): its PK is unique by construction, so `streaming` "
       "measures duplicates without the landing-path barrier.")
   p.add_argument(
       "--on_model_conflict",
-      default=ON_CONFLICT_ADJUST,
       choices=list(ON_MODEL_CONFLICT_MODES),
       help="What a MEASURED contradiction between the "
       "relationship model and the SOURCE does (ADR "
@@ -506,7 +519,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "ADR 0035 capacity gate stop under BOTH settings.")
   p.add_argument(
       "--pool_seed_strategy",
-      default="centroid",
       choices=list(POOL_SEED_STRATEGIES),
       help="How the 8 free-text prompt seeds are chosen. "
       "centroid = control (densest region, today). "
@@ -517,7 +529,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "--pool_pattern_guidance",
       nargs="?",
       const="true",
-      default="",
       help="true/false (bare flag = true). Constrain "
       "identifier-ish free-text pool completions at "
       "decode time with a charset/length regex "
@@ -526,7 +537,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "format gate protects pools either way.")
   p.add_argument(
       "--freetext_expansion",
-      default="identifiers",
       choices=["off", "identifiers", "all"],
       help="Shape-preserving expander for free-text columns "
       "(2026-08-05 spec C3). off = pool draws only "
@@ -538,14 +548,12 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "docs/designs/2026-08-05-freetext-expansion-modes.md")
   p.add_argument(
       "--prompt_constraints",
-      default="on",
       choices=["on", "off"],
       help="Attach per-column llm_prompt_constraint (parsed "
       "from column-description JSON) to pool prompts "
       "(spec C5). Prefix-cache-safe constant suffix.")
   p.add_argument(
       "--prompt_debug",
-      default="off",
       choices=["off", "redacted", "full"],
       help="Log each built pool prompt as a "
       "freetext_pool_prompt milestone (ADR 0024). "
@@ -554,7 +562,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "reach Dataflow logs, debug runs only.")
   p.add_argument(
       "--source_stats",
-      default="sample",
       choices=["off", "sample", "exact"],
       help="Compute per-column source_table_stats from the "
       "reference sample (driver-side, zero DAG cost). "
@@ -564,18 +571,15 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "off disables entirely.")
   p.add_argument(
       "--source_stats_table",
-      default="",
       help="BQ table for source_table_stats rows "
       "(project.dataset.table); empty skips the BQ write. "
       "Existing (table, digest) rows are never rewritten.")
   p.add_argument(
       "--source_stats_json",
-      default="",
       help="gs:// or local path for the stats JSON artifact; "
       "empty skips it.")
   p.add_argument(
       "--generate_fk_relationships",
-      default="true",
       help="true (default): declared relationships are "
       "honored — a launch expands to the table's whole "
       "FK component (parents first) and children sample "
@@ -586,14 +590,12 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "ADR 0029.")
   p.add_argument(
       "--fk_parent_landing",
-      default="",
       help="EXPERT OVERRIDE only (ADR 0029): parents are "
       "assumed landed in the --landing_table dataset and "
       "this derives automatically. Set it only when "
       "parents land in a DIFFERENT project.dataset.")
   p.add_argument(
       "--multi_table_mode",
-      default="single_job",
       choices=["single_job", "sequential_jobs"],
       help="How a multi-table plan executes (ADR 0030). "
       "single_job (default): every planned table in ONE "
@@ -603,7 +605,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "debugging).")
   p.add_argument(
       "--relationships_uri",
-      default=DEFAULT_RELATIONSHIPS_URI,
       help="Where the relational models live (ADR 0032): a "
       "folder or a single YAML file, local or gs://. "
       "Default: the config/relationships folder packaged "
@@ -613,22 +614,15 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "read for it.")
   p.add_argument(
       "--validation_runs_table",
-      default="",
       help="BQ table for the run-level summary row "
       "(project.dataset.table); empty skips the write")
   p.add_argument(
-      "--env",
-      default="dev",
-      help="Environment tier selecting thresholds (dev|uat|prd)")
+      "--env", help="Environment tier selecting thresholds (dev|uat|prd)")
   p.add_argument(
-      "--thresholds_uri",
-      default="config/thresholds.yml",
-      help="gs:// or local path to thresholds.yml")
-  p.add_argument(
-      "--client_type", default="vllm", choices=["vllm", "mlx", "fake"])
+      "--thresholds_uri", help="gs:// or local path to thresholds.yml")
+  p.add_argument("--client_type", choices=["vllm", "mlx", "fake"])
   p.add_argument(
       "--vllm_dtype",
-      default="auto",
       choices=["auto", "float16", "bfloat16"],
       help="vLLM --dtype override. auto = checkpoint dtype "
       "(bf16 for Gemma/Qwen). float16 is REQUIRED on T4 "
@@ -636,19 +630,179 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "gemma-family models (fp16 Gemma emits empty output)")
   p.add_argument(
       "--vllm_max_model_len",
-      default="8192",
       help="vLLM --max-model-len cap. Without it vLLM sizes the "
       "KV cache for the checkpoint's NATIVE context "
       "(Qwen3-2507: 262K → 36GiB KV, kills the T4 "
       "EngineCore at startup). 8192 fits every registry "
       "model/GPU pairing and dwarfs the synthesis prompts. "
       "Empty = no cap (native context).")
-  args, beam_args = p.parse_known_args(argv)
+  p.add_argument(
+      "--tables",
+      choices=["explicit", "all"],
+      help="Which tables the launch generates (ADR 0045). explicit "
+      "(default): --landing_table and every table its components pull in. "
+      "all: every enabled table of the ONE model file --relationships_uri "
+      "names, read from --source_dataset and landed in --landing_dataset, "
+      "in batch jobs of at most --max_tables_per_job tables.")
+  p.add_argument(
+      "--source_dataset",
+      help="With --tables=all: the project.dataset every table's source is "
+      "read from under its own name, unless the model gives it a "
+      "source_table (ADR 0045).")
+  p.add_argument(
+      "--landing_dataset",
+      help="With --tables=all: the project.dataset every table lands in "
+      "(ADR 0045).")
+  p.add_argument(
+      "--max_tables_per_job",
+      type=int,
+      help="With --tables=all: the most tables one Dataflow job generates; "
+      "a connected component is never split, so a larger one gets a job of "
+      "its own (ADR 0045).")
+  p.add_argument(
+      "--max_parallel_jobs",
+      type=int,
+      help="Batch jobs scripts/launch/run_model.py runs at once (ADR 0045). "
+      "A launcher runs one job; the Composer model DAG reads the Airflow "
+      "Variable SDFB_MAX_PARALLEL_JOBS.")
+  p.add_argument(
+      "--prep_workers",
+      type=int,
+      help="Threads a multi-table launcher reads schemas, reference "
+      "samples and source stats on (ADR 0045). 1 = one table after "
+      "another, as before.")
+  p.add_argument(
+      "--batch_index",
+      type=int,
+      help="With --tables=all: the batch this job generates (b00 is 0). "
+      "Set by the model DAG and scripts/launch/run_model.py; a flag only "
+      "(ADR 0045).")
+  p.add_argument(
+      "--batch_count",
+      type=int,
+      help="With --batch_index: how many batches the orchestrator planned; "
+      "the launcher plans again and stops when its own count differs "
+      "(ADR 0045).")
+  p.add_argument(
+      "--config_uri",
+      help="gs:// or local path to a generator config file (ADR 0043). "
+      "Keys it sets win over the same flags; flags fill the keys it leaves "
+      "out. Empty = no file. Reference: config/generator.yaml.")
+  typed, beam_args = p.parse_known_args(argv)
+  typed_values = vars(typed)
+  config_uri = str(typed_values.pop("config_uri", "") or "").strip()
+  file_values = None
+  if config_uri:
+    try:
+      text = read_config_text(config_uri)
+    except OSError as e:
+      p.error(f"could not read --config_uri {config_uri}: {e}")
+    else:
+      try:
+        file_values = parse_config_text(text, source=config_uri)
+      except ConfigError as e:
+        p.error(str(e))
+  try:
+    resolution = resolve(typed_values, file_values, config_uri=config_uri)
+  except ConfigError as e:
+    p.error(str(e))
+  missing = missing_required(resolution.config)
+  if missing:
+    p.error("the following arguments are required: " +
+            ", ".join(f"--{dest}" for dest in missing))
+  # ADR 0045 — what the launch modes refuse, before any BigQuery read.
+  problems = model_launch_problems(resolution.config)
+  if problems:
+    p.error("; ".join(problems))
+  args = argparse.Namespace(
+      **namespace_values(resolution),
+      config_uri=config_uri,
+      config_resolution=resolution)
   if parse_bool_flag(args.build_rag_layer) and not args.rag_chunks_table:
     p.error("--build_rag_layer requires --rag_chunks_table")
   if parse_bool_flag(args.build_pool_layer) and not args.freetext_pools_table:
     p.error("--build_pool_layer requires --freetext_pools_table")
   return args, beam_args
+
+
+def config_of(args: argparse.Namespace) -> GeneratorConfig:
+  """The launch's resolved config; the defaults for a hand-built namespace."""
+  resolution = getattr(args, "config_resolution", None)
+  return resolution.config if resolution is not None else DEFAULT_CONFIG
+
+
+def resolve_embedder_identity(args: argparse.Namespace) -> tuple[str, str]:
+  """`embedder_identity` with the version salted by the chunk-shaping config.
+
+  Salted ONCE here, so the population branch and the engine's store read see
+  the same `embedder_version`; empty salt (the defaults) leaves it unchanged.
+  """
+  embedder_id, version = embedder_identity(args.embedder_uri)
+  return embedder_id, salted(version,
+                             settings_salt(config_of(args), "rag_chunks"))
+
+
+CACHES = ("freetext_pools", "rag_chunks", "source_stats", "fk_fanout_stats")
+
+
+def launch_cache_keys(args: argparse.Namespace,
+                      registry: RelationshipRegistry | None) -> dict[str, str]:
+  """The value of each store's salted key column for this launch (ADR 0044):
+    `freetext_pools.model_uri`, `rag_chunks.embedder_version`,
+    `source_table_stats.profiler_version`, `fk_fanout_stats.model_sha`.
+    Unchanged from master at the default settings (ADR 0043)."""
+  config = config_of(args)
+  _, embedder_version = resolve_embedder_identity(args)
+  sha = (registry or RelationshipRegistry()).sha12()
+  return {
+      "freetext_pools": pool_store_model_key(args.model_uri, config),
+      "rag_chunks": embedder_version,
+      "source_stats": stats_profiler_version(config),
+      "fk_fanout_stats": salted(sha, settings_salt(config, "fk_fanout_stats")),
+  }
+
+
+def cache_keys_of(
+    args: argparse.Namespace,
+    registry: RelationshipRegistry | None = None) -> dict[str, str]:
+  """The keys `main` computed for this launch, else computed now (a
+    namespace built by hand)."""
+  keys = getattr(args, "_cache_keys", None)
+  return dict(keys) if keys is not None else launch_cache_keys(args, registry)
+
+
+# The keys a chained Composer evaluation takes from its own DAG params when
+# the launch writes no generation record. With the record it reads them
+# from validation_runs (ADR 0044), whatever the file set.
+_EVALUATION_INPUT_KEYS = ("io.reference_table", "io.landing_table",
+                          "relational.relationships_uri",
+                          "relational.generate_fk_relationships",
+                          "sampling.reference_rows_limit")
+
+
+def log_config_resolution(resolution: ConfigResolution) -> None:
+  """One line for the resolution, one WARNING row per flag a file overrode."""
+  counts: dict[str, int] = {}
+  for origin in resolution.provenance.values():
+    counts[origin] = counts.get(origin, 0) + 1
+  logger.info("config_resolved uri=%s file=%d flag=%d default=%d",
+              resolution.config_uri or "-", counts.get("file", 0),
+              counts.get("flag", 0), counts.get("default", 0))
+  for item in resolution.overridden:
+    logger.warning("config_override key=%s typed=%r file=%r (the file wins)",
+                   item.key, item.typed, item.file)
+
+
+def warn_unrecorded_evaluation_inputs(resolution: ConfigResolution,
+                                      reason: str) -> None:
+  """With no generation record, a chained evaluation falls back to its DAG
+    params: one WARNING per evaluation input the file set."""
+  for key in _EVALUATION_INPUT_KEYS:
+    if resolution.provenance.get(key) == PROVENANCE_FILE:
+      logger.warning(
+          "config_sets_evaluation_input key=%s (no generation record is "
+          "written — %s — so a chained evaluation reads the DAG param, not "
+          "the file)", key, reason)
 
 
 def resolve_thresholds(thresholds_uri: str, env: str) -> Thresholds:
@@ -664,6 +818,162 @@ def resolve_thresholds(thresholds_uri: str, env: str) -> Thresholds:
         e,
     )
     return Thresholds(env=env, blocker_failure_ratio=1.0)
+
+
+def read_table_columns(table_fqn: str) -> frozenset[str]:
+  """A live BigQuery table's column names."""
+  table = table_fqn.replace(":", ".", 1)
+  return frozenset(f.name for f in bigquery.Client().get_table(table).schema)
+
+
+def record_supported(table_fqn: str, resolution: ConfigResolution) -> bool:
+  """Whether this launch can write the generation record (ADR 0044).
+
+    A table without the record columns — or one whose schema cannot be
+    read — gets today's 21-column row: an un-migrated table behaves exactly
+    as before instead of FILE_LOADS rejecting the row at the end of a long
+    job. Never raises."""
+  if not table_fqn:
+    warn_unrecorded_evaluation_inputs(resolution, "no --validation_runs_table")
+    return False
+  try:
+    live = read_table_columns(table_fqn)
+  except Exception as exc:  # pylint: disable=broad-exception-caught  # the record is optional: no failure here may stop a launch
+    logger.warning(
+        "generation_record_degraded table=%s reason=%s — its schema could "
+        "not be read (%s: %s); writing today's 21-column row. Check the "
+        "table, or add the record columns with:\n  %s", table_fqn,
+        "schema_unreadable",
+        type(exc).__name__, exc, bq_update_command(table_fqn))
+    warn_unrecorded_evaluation_inputs(resolution,
+                                      "validation_runs schema unreadable")
+    return False
+  missing = missing_record_columns(live)
+  if missing:
+    logger.warning(
+        "generation_record_degraded table=%s reason=missing_columns "
+        "missing=%s — writing today's 21-column row. Add the columns once "
+        "with:\n  %s", table_fqn, ",".join(missing),
+        bq_update_command(table_fqn))
+    warn_unrecorded_evaluation_inputs(resolution,
+                                      "validation_runs lacks the columns")
+    return False
+  return True
+
+
+@dataclass(frozen=True)
+class RecordBase:
+  """The generation record before a launch's jobs start (ADR 0044): what
+    every job of the launch shares. `finish_record` adds each job's own."""
+  resolution: ConfigResolution
+  launch_run_id: str
+  derived: Mapping[str, Any]
+  thresholds: Mapping[str, Any]
+  relationships: Mapping[str, Any]
+  relationships_digest: str | None
+  launcher_version: str
+
+
+def prepare_record_base(args: argparse.Namespace,
+                        registry: RelationshipRegistry | None,
+                        plan: LaunchPlan) -> RecordBase | None:
+  """The launch's record base, or None when no record can be written.
+
+    `derived.cache_keys` are the keys `main` stored for the launch
+    (`args._cache_keys`): the record states the key each cache was read and
+    written under, never a recomputation of it."""
+  resolution: ConfigResolution = args.config_resolution
+  if not record_supported(args.validation_runs_table, resolution):
+    return None
+  reg = registry or RelationshipRegistry()
+  thresholds = resolve_thresholds(args.thresholds_uri, args.env)
+  return RecordBase(
+      resolution=resolution,
+      launch_run_id=args.run_id,
+      derived={
+          "temperature_ladder": list(escalating_temperatures()),
+          "profiler_version": PROFILER_VERSION,
+          "cache_keys": cache_keys_of(args, reg),
+      },
+      thresholds={
+          "uri": args.thresholds_uri,
+          "env": thresholds.env,
+          "blocker_failure_ratio": thresholds.blocker_failure_ratio,
+      },
+      relationships=relationships_block(reg, args.relationships_uri,
+                                        [r.landing_table for r in plan.runs]),
+      relationships_digest=reg.sha12() if reg.models else None,
+      launcher_version=generator_version(),
+  )
+
+
+# Network topology is infrastructure, not generation config (the
+# evaluator's `_PARAM_DROP_KEYS`): never recorded.
+_UNRECORDED_EXPERIMENTS = ("use_network_tags=",
+                           "use_network_tags_for_flex_templates=")
+_ACCELERATOR = "worker_accelerator="
+
+
+def beam_block(options: PipelineOptions, runner: str) -> dict[str, Any]:
+  """The snapshot's `beam`: the Dataflow options the job ran with.
+
+    `region` lets a reader link the job: an evaluation by `--run_id`
+    records no `generation_region` (ADR 0044, ADR 0045)."""
+  google = options.view_as(GoogleCloudOptions)
+  worker = options.view_as(WorkerOptions)
+  experiments = [
+      e for e in (options.view_as(DebugOptions).experiments or [])
+      if not e.startswith(_UNRECORDED_EXPERIMENTS)
+  ]
+  service = list(google.dataflow_service_options or [])
+  accelerator = next((x[len(_ACCELERATOR):]
+                      for x in [*experiments, *service]
+                      if x.startswith(_ACCELERATOR)), None)
+  return {
+      "runner": runner,
+      "job_name": google.job_name,
+      "region": google.region,
+      "machine_type": worker.machine_type,
+      "accelerator": accelerator,
+      "max_num_workers": worker.max_num_workers,
+      "num_workers": worker.num_workers,
+      "autoscaling_algorithm": worker.autoscaling_algorithm,
+      "experiments": sorted(experiments),
+  }
+
+
+def finish_record(base: RecordBase,
+                  options: PipelineOptions,
+                  *,
+                  runner: str,
+                  batch: Mapping[str, Any] | None = None) -> LaunchRecord:
+  """One Dataflow job's record, built just before its graph: `launched_at`
+    is now, `job_name` the one the job runs under (Ruling 2, 3)."""
+  beam_ = beam_block(options, runner)
+  snapshot = build_snapshot(
+      base.resolution,
+      derived=base.derived,
+      thresholds=base.thresholds,
+      relationships=base.relationships,
+      beam=beam_,
+      launcher_version=base.launcher_version,
+      batch=batch)
+  return launch_record(
+      snapshot,
+      job_name=beam_["job_name"] if runner == "DataflowRunner" else None,
+      launch_run_id=base.launch_run_id,
+      launched_at=datetime.now(tz=UTC).isoformat(),
+      relationships_digest=base.relationships_digest,
+      read_job_id=runner == "DataflowRunner")
+
+
+def attach_record(specs: Sequence[TableSpec],
+                  record: LaunchRecord) -> list[TableSpec]:
+  """Every table of the job writes the same record."""
+  return [
+      dataclasses.replace(
+          s, config=dataclasses.replace(s.config, record=record)) for s in specs
+  ]
 
 
 def resolve_num_workers(value: str | int | None) -> int | None:
@@ -1223,6 +1533,8 @@ def resolve_fanout(
     stats_store,
     bq_client,
     effective_pk: tuple[str, ...] = (),
+    config: GeneratorConfig = DEFAULT_CONFIG,
+    source_dataset: str | None = None,
 ) -> tuple[dict | None, dict[FkEdge, str]]:
   """``(FanoutPlan payload or None, edge roles)`` for one table (ADR
     0036). Measures (or reads the cache) for the driving edge only when
@@ -1233,7 +1545,10 @@ def resolve_fanout(
     schema (P2) before any BigQuery call, and a measurement failure is
     reported as a preflight ``SystemExit`` (never an escaping traceback)
     so the relational runner's collect-then-fail loop can report it
-    alongside every other table's stop."""
+    alongside every other table's stop. With ``source_dataset`` (ADR
+    0045) the driving parent is measured on its own source, override
+    included; without it, on the child's source dataset under the
+    parent's name — the two agree for a model without overrides."""
   roles = registry.edge_roles(landing_table)  # RelationshipError propagates
   driving = next((e for e, r in roles.items() if r == "driving"), None)
   if driving is None or driving.ref.rsplit(".", 1)[-1] not in in_set_names:
@@ -1251,8 +1566,9 @@ def resolve_fanout(
   # so P5 stood down for evidence that did not exist and P4 fell
   # through — worse than before ADR 0038 (2026-09-13).
   pk = tuple(effective_pk) or (tuple(relations.pk) if relations else ())
-  profiles = profile_columns(table_schema,
-                             reference_rows) if reference_rows else {}
+  profiles = (
+      profile_columns(table_schema, reference_rows, config=config)
+      if reference_rows else {})
   # The columns another edge fills are NOT measured as cells — the
   # same `edge_supplied_members` call P4 makes, so the measurement and
   # the check can never disagree (ADR 0037 ruling 12).
@@ -1263,11 +1579,18 @@ def resolve_fanout(
       known=edge_supplied_members(
           pk, roles, conditional_rest_of(registry, landing_table, roles)).known,
   )
-  source_parent = derive_source_fqn(
-      parent_landing_fqn(driving.ref, derive_fk_parent_landing(landing_table)),
-      source_table,
-  )
-  sha = registry.sha12()
+  if source_dataset is None:
+    source_parent = derive_source_fqn(
+        parent_landing_fqn(driving.ref,
+                           derive_fk_parent_landing(landing_table)),
+        source_table,
+    )
+  else:
+    # ADR 0045: the parent's own source, `source_table` override included.
+    source_parent = source_fqn(driving.ref, registry.relations(driving.ref),
+                               source_dataset)
+  # Same expression as `launch_cache_keys` (fk_fanout_stats): keep in step.
+  sha = salted(registry.sha12(), settings_salt(config, "fk_fanout_stats"))
   edge_label = _edge_label(driving)
   measured = _cache_read(stats_store, landing_table, source_table,
                          tuple(driving.cols), sha)
@@ -1404,6 +1727,9 @@ class TableRun:
   source_table: str
   run_id: str
   fk_parent_landing: str
+  # ADR 0045 — the model's own row count for this table; None = the
+  # launch's --num_rows (and always None for a driven child).
+  num_rows: int | None = None
 
 
 @dataclass(frozen=True)
@@ -1419,6 +1745,9 @@ def plan_launch(
     generate_fk_relationships: bool,
     registry: RelationshipRegistry,
     run_id: str,
+    *,
+    source_dataset: str | None = None,
+    model_launch: bool = False,
 ) -> LaunchPlan:
   """The launch scenarios, resolved to an ordered per-table plan.
 
@@ -1436,6 +1765,13 @@ def plan_launch(
        concurrent isolated generation, no relationships anywhere.
        many tables + true  → the union of their components. Rare and
        expensive, so it says so.
+
+    Each run's source is the model's `source_table` for that table when it
+    sets one, else `source_dataset` (default: the reference table's
+    dataset) plus the table's name, and its rows the model's `num_rows`,
+    else the launch's (ADR 0045). A whole-model batch (`model_launch`)
+    suffixes every run id — `<run_id>-MM-<table>` for a one-table batch too
+    — and gets no many-targets advice: the planner chose its tables.
     """
   warnings: list[str] = []
   if generate_fk_relationships:
@@ -1452,7 +1788,7 @@ def plan_launch(
       warnings.append(
           f"the relational model expanded this launch to {expanded} "
           f"(declared in config/relationships; parents generate first)")
-    if len(landing_tables) > 1:
+    if len(landing_tables) > 1 and not model_launch:
       warnings.append(f"{len(landing_tables)} targets WITH relationships: the "
                       f"launch covers {len(ordered)} tables in one job. Pass "
                       f"--generate_fk_relationships=false for independent "
@@ -1471,16 +1807,18 @@ def plan_launch(
           f"UNVERIFIED for this run")
     scenario = "isolated" if len(ordered) == 1 else "multi_isolated"
 
-  multi = len(ordered) > 1
+  dataset = source_dataset or reference_table.rsplit(".", 1)[0]
+  multi = len(ordered) > 1 or model_launch
   runs = tuple(
       TableRun(
           landing_table=t,
-          source_table=derive_source_fqn(t, reference_table),
+          source_table=source_fqn(t, registry.relations(t), dataset),
           run_id=(
               f"{run_id}-{i:02d}-{t.rsplit('.', 1)[-1]}" if multi else run_id),
           fk_parent_landing=(
               derive_fk_parent_landing(t) if generate_fk_relationships and
               registry.enforced_edges(t) else ""),
+          num_rows=table_rows(registry.relations(t)),
       ) for i, t in enumerate(ordered))
   return LaunchPlan(scenario=scenario, runs=runs, warnings=tuple(warnings))
 
@@ -1532,7 +1870,8 @@ def log_relationship_model(
   )
 
 
-def log_model_adjustments(adjustments: Sequence[ModelAdjustment],) -> None:
+def log_model_adjustments(adjustments: Sequence[ModelAdjustment], *,
+                          tolerance: float) -> None:
   """Announce every ADR 0038 adjustment, loudly and twice.
 
     The BANNER is one multi-line WARNING block in the relationship
@@ -1548,7 +1887,7 @@ def log_model_adjustments(adjustments: Sequence[ModelAdjustment],) -> None:
     return
   log_milestone_text(
       "model_adjustments",
-      adjustment_banner(adjustments),
+      adjustment_banner(adjustments, tolerance),
       level=logging.WARNING,
       count=len(adjustments),
       tables=",".join(a.table_name for a in adjustments),
@@ -1637,6 +1976,8 @@ def report_model_adjustments(
     registry: RelationshipRegistry,
     options: PipelineOptions,
     run_id: str,
+    *,
+    config: GeneratorConfig,
 ) -> tuple[ModelAdjustment, ...]:
   """Every table's adjustments, announced ONCE for the whole launch.
 
@@ -1648,7 +1989,8 @@ def report_model_adjustments(
   adjustments = tuple(a for s in specs for a in s.adjustments)
   if not adjustments:
     return ()
-  log_model_adjustments(adjustments)
+  log_model_adjustments(
+      adjustments, tolerance=config.guardrails.repeat_share_tolerance)
   emit_effective_model(registry, adjustments, options, run_id)
   return adjustments
 
@@ -1659,6 +2001,7 @@ def table_projections(
     launch_rows: int,
     rows_by_landing: Mapping[str, int] | None = None,
     keys_by_landing: Mapping[str, int] | None = None,
+    root_rows: Mapping[str, int] | None = None,
 ) -> tuple[TableProjection, ...]:
   """Each resolved spec's projected record count, in generation order
     (ADR 0039).
@@ -1672,6 +2015,7 @@ def table_projections(
     """
   rows_by_landing = rows_by_landing or {}
   keys_by_landing = keys_by_landing or {}
+  root_rows = root_rows or {}
   projections: list[TableProjection] = []
   for spec in specs:
     driving = next((e for e in spec.parent_edges if e.mode == "fanout"), None)
@@ -1686,6 +2030,8 @@ def table_projections(
           project_table(
               spec.config.landing_table,
               launch_rows=launch_rows,
+              # ADR 0045: a root the model gives its own num_rows.
+              model_rows=root_rows.get(spec.config.landing_table),
               adjusted=bool(spec.adjustments),
               repeat_share=repeat_share,
           ))
@@ -1718,6 +2064,7 @@ def report_row_projection(
     launch_rows: int,
     rows_by_landing: Mapping[str, int] | None = None,
     keys_by_landing: Mapping[str, int] | None = None,
+    root_rows: Mapping[str, int] | None = None,
 ) -> tuple[TableProjection, ...]:
   """How many rows this launch will generate, announced ONCE, before
     the graph is built (ADR 0039).
@@ -1736,6 +2083,7 @@ def report_row_projection(
       launch_rows=launch_rows,
       rows_by_landing=rows_by_landing,
       keys_by_landing=keys_by_landing,
+      root_rows=root_rows,
   )
   if not projections:
     return ()
@@ -1796,6 +2144,315 @@ def report_row_projection(
   return projections
 
 
+def warn_unused_launch_keys(args: argparse.Namespace) -> None:
+  """One WARNING per key the launch's `launch.tables` mode does not read
+    (ADR 0045, Ruling 10)."""
+  if getattr(args, "tables", "explicit") == TABLES_ALL:
+    unused = (("io.reference_table", getattr(args, "reference_table", None)),
+              ("io.landing_table", getattr(args, "landing_table", None)),
+              ("io.ddl_uri", getattr(args, "ddl_uri", "")))
+    reason = ("launch.tables all reads each table from io.source_dataset "
+              "(or its source_table), lands it in io.landing_dataset and "
+              "extracts every schema live")
+  else:
+    unused = (("io.source_dataset", getattr(args, "source_dataset", "")),
+              ("io.landing_dataset", getattr(args, "landing_dataset", "")))
+    reason = "launch.tables explicit reads io.reference_table and io.landing_table"
+  for key, value in unused:
+    if value:
+      log_milestone(
+          "launch_option_unused",
+          level=logging.WARNING,
+          key=key,
+          value=value,
+          reason=reason)
+
+
+def _run_overrides(plan: LaunchPlan,
+                   registry: RelationshipRegistry) -> dict[str, dict[str, Any]]:
+  """Each planned table the model overrides (ADR 0045): its resolved
+    source when the model names one, its rows when the model sets them."""
+  out: dict[str, dict[str, Any]] = {}
+  for run in plan.runs:
+    relations = registry.relations(run.landing_table)
+    values: dict[str, Any] = {}
+    if relations is not None and relations.source_table is not None:
+      values["source_table"] = run.source_table
+    if run.num_rows is not None:
+      values["num_rows"] = run.num_rows
+    if values:
+      out[run.landing_table.rsplit(".", 1)[-1]] = values
+  return out
+
+
+def log_launch_plan(args: argparse.Namespace,
+                    plan: LaunchPlan,
+                    generate_fk: bool,
+                    registry: RelationshipRegistry,
+                    *,
+                    extra: Mapping[str, Any] | None = None) -> None:
+  """What a launch will generate, stated before any table is prepared:
+    the plan's warnings, `launch_scenario`, one `table_override` per table
+    the model overrides (ADR 0045) and the `launch_config` block (ADR 0030),
+    whose `resolved` gains `extra` (a whole-model batch's identity)."""
+  for warning in plan.warnings:
+    logger.warning("launch plan: %s", warning)
+  log_milestone(
+      "launch_scenario",
+      scenario=plan.scenario,
+      tables=len(plan.runs),
+      order=",".join(r.landing_table.rsplit(".", 1)[-1] for r in plan.runs),
+      generate_fk_relationships=generate_fk,
+  )
+  overrides = _run_overrides(plan, registry)
+  for name, values in overrides.items():
+    log_milestone("table_override", table=name, **values)
+  resolved: dict[str, Any] = {
+      "scenario": plan.scenario,
+      "generate_fk_relationships": generate_fk,
+      "multi_table_mode": args.multi_table_mode,
+      "tables_in_order": [r.landing_table for r in plan.runs],
+      "run_ids": [r.run_id for r in plan.runs],
+      "fk_parent_landing_derived": [
+          r.fk_parent_landing or "(none)" for r in plan.runs
+      ],
+      "warnings": list(plan.warnings),
+  }
+  if overrides:
+    resolved["overrides"] = overrides
+  resolved.update(extra or {})
+  # ONE human-readable block stating every enabled/disabled config of
+  # this execution (ADR 0030): pasted _full_report.md +
+  # worker_logs.jsonl answer "what was on?" without arg archaeology.
+  log_milestone_pretty(
+      "launch_config",
+      {
+          **{
+              k: v
+              for k, v in sorted(vars(args).items())
+              if not k.startswith("_") and k not in ("model_client",
+                                                     "config_resolution")
+          },
+          "resolved": resolved,
+      },
+      scenario=plan.scenario,
+  )
+
+
+def _execute_plan(plan: LaunchPlan, args: argparse.Namespace,
+                  beam_argv: list[str], registry: RelationshipRegistry,
+                  targets: Sequence[str]) -> int:
+  """Run a resolved plan: a multi-table `single_job` plan as ONE Dataflow
+    job (ADR 0030), anything else one job per table, parents first,
+    stopping at the first failure (children never run without parents)."""
+  if len(plan.runs) > 1 and args.multi_table_mode == "single_job":
+    return _run_relational_job(plan, args, beam_argv, registry=registry)
+  for i, run in enumerate(plan.runs):
+    table_args = argparse.Namespace(**vars(args))
+    # Underscored on purpose: an internal Namespace channel read back via
+    # getattr(), never a CLI flag.
+    table_args._multi_table_plan = len(plan.runs) > 1  # pylint: disable=protected-access
+    table_args.landing_table = run.landing_table
+    table_args.reference_table = run.source_table
+    table_args.run_id = run.run_id
+    table_args.fk_parent_landing = (
+        args.fk_parent_landing or run.fk_parent_landing)
+    if run.num_rows is not None:
+      table_args.num_rows = run.num_rows  # ADR 0045: the model's rows
+    # The --ddl_uri pin describes the FIRST target only; siblings
+    # extract live (authoritative per ADR 0027 D2).
+    if run.landing_table != targets[0]:
+      table_args.ddl_uri = ""
+    rc = _run_one_table(table_args, beam_argv, registry=registry)
+    if rc != 0:
+      logger.error(
+          "table %s failed (rc=%d) — aborting the remaining %d "
+          "planned tables (children never run without parents)",
+          run.landing_table,
+          rc,
+          len(plan.runs) - i - 1,
+      )
+      return rc
+  return 0
+
+
+# The image's Flex Template entry (docker/Dockerfile) — set in every process
+# of the image, never in a checkout's shell: it tells a Flex launcher, which
+# runs ONE Dataflow job, from the CLI (ADR 0045, Ruling 16).
+_FLEX_ENTRY_ENV = "FLEX_TEMPLATE_PYTHON_PY_FILE"
+
+
+def on_flex() -> bool:
+  """Whether this launcher runs as the image's Flex Template entry."""
+  return bool(os.environ.get(_FLEX_ENTRY_ENV))
+
+
+def log_model_launch(launch: ModelLaunch) -> None:
+  """The whole plan, once per launcher (ADR 0045): one text block, and a
+    WARNING for each component larger than K."""
+  log_milestone_text(
+      "model_launch_plan",
+      launch_banner(launch),
+      model=launch.model,
+      tables=len(launch.selected),
+      skipped=len(launch.skipped),
+      batches=len(launch.batches),
+      max_tables_per_job=launch.max_tables_per_job,
+  )
+  for batch in launch.batches:
+    if batch.oversized:
+      log_milestone(
+          "model_batch_oversized",
+          level=logging.WARNING,
+          batch=batch.label,
+          tables=len(batch.tables),
+          max_tables_per_job=launch.max_tables_per_job,
+          note="one connected component is larger than max_tables_per_job: "
+          "it runs whole, as one job, never split (ADR 0045)",
+      )
+
+
+def chosen_batches(args: argparse.Namespace, launch: ModelLaunch) -> list[int]:
+  """The batches this launcher runs (ADR 0045 D4): the one the
+    orchestrator named, after checking its count; the only one; or, on the
+    CLI, every batch in sequence. A Flex launch runs one job, so it refuses
+    a multi-batch plan without --batch_index."""
+  count = len(launch.batches)
+  if args.batch_index is not None:
+    if args.batch_count != count:
+      log_milestone(
+          "model_batch_count_mismatch",
+          level=logging.ERROR,
+          planned=args.batch_count,
+          replanned=count,
+          max_tables_per_job=launch.max_tables_per_job,
+      )
+      raise SystemExit(
+          f"[model launch] this job was planned as batch {args.batch_index} "
+          f"of {args.batch_count}, but {launch.source} now plans {count} "
+          f"batch(es) at max_tables_per_job={launch.max_tables_per_job}: the "
+          f"model or K changed between planning and launch. Re-plan: "
+          f"trigger the model DAG again, or rerun scripts/launch/run_model.py.")
+    return [args.batch_index]
+  if count == 1:
+    return [0]
+  if on_flex():
+    raise SystemExit(
+        f"[model launch] {len(launch.selected)} enabled tables of "
+        f"{launch.model} plan {count} batch jobs of at most "
+        f"{launch.max_tables_per_job} tables, and a Flex launch runs one "
+        f"Dataflow job. Launch the model DAG "
+        f"(composer/synthetic_model_launch.py) or "
+        f"scripts/launch/run_model.py, which give each batch its "
+        f"--batch_index, or raise launch.max_tables_per_job to "
+        f"{len(launch.selected)} for one job.")
+  log_milestone(
+      "model_batches_in_sequence",
+      level=logging.WARNING,
+      batches=count,
+      note="no --batch_index on the CLI: the batches run one after another; "
+      "scripts/launch/run_model.py runs them in parallel",
+  )
+  return list(range(count))
+
+
+def _run_model(args: argparse.Namespace, beam_argv: list[str]) -> int:
+  """`launch.tables: all` (ADR 0045): plan every enabled table of the one
+    model into batches and run the batches this launcher owns. On the CLI
+    a failed batch does not stop the next one (Ruling 15); the launch then
+    ends naming every failed batch."""
+  registry = load_relationship_registry(args.relationships_uri)
+  try:
+    launch = plan_model_launch(registry, args.max_tables_per_job)
+  except ModelLaunchError as exc:
+    raise SystemExit(f"[model launch] {exc}") from exc
+  warn_unused_launch_keys(args)
+  log_model_launch(launch)
+  # A1 ruling R14 / ADR 0044: the launch's cache keys, once — every batch
+  # reads and writes the same stores.
+  args._cache_keys = launch_cache_keys(args, registry)  # pylint: disable=protected-access
+  # ADR 0045: the dataset each table's (and a driving parent's) source is
+  # read from, unless the model names another.
+  args._source_dataset = args.source_dataset  # pylint: disable=protected-access
+  chosen = chosen_batches(args, launch)
+  if len(chosen) == 1:
+    return _run_batch(args, beam_argv, registry, launch, chosen[0])
+  failures: list[str] = []
+  for index in chosen:
+    label = launch.batches[index].label
+    try:
+      rc = _run_batch(args, beam_argv, registry, launch, index)
+    except (Exception, SystemExit) as exc:  # pylint: disable=broad-exception-caught  # batches are independent (ADR 0045)
+      logger.exception("batch %s failed", label)
+      log_milestone("model_batch_failed", level=logging.ERROR, batch=label)
+      failures.append(f"{label}: {type(exc).__name__}: {exc}")
+      continue
+    if rc != 0:
+      log_milestone(
+          "model_batch_failed", level=logging.ERROR, batch=label, rc=rc)
+      failures.append(f"{label}: rc={rc}")
+  if failures:
+    raise SystemExit(f"{len(failures)} of {len(chosen)} batches failed; the "
+                     f"others ran:\n" + "\n".join(f"- {f}" for f in failures))
+  return 0
+
+
+def _run_batch(args: argparse.Namespace, beam_argv: list[str],
+               registry: RelationshipRegistry, launch: ModelLaunch,
+               index: int) -> int:
+  """One batch of a whole-model launch as a launch of its own (ADR 0045):
+    job run id `<base>-bNN`, table run ids `<base>-bNN-MM-<table>`, the
+    generation record's `launch_run_id` the base (A2's
+    `prepare_record_base` reads `args.run_id` before the batch id replaces
+    it) and its snapshot's `batch` block."""
+  batch = launch.batches[index]
+  base = args.run_id
+  generate_fk = parse_bool_flag(args.generate_fk_relationships)
+  targets = [f"{args.landing_dataset}.{name}" for name in batch.tables]
+  plan = plan_launch(
+      targets,
+      args.reference_table or "",
+      generate_fk,
+      registry,
+      batch_run_id(base, index),
+      source_dataset=args.source_dataset,
+      model_launch=True)
+  batch_args = argparse.Namespace(**vars(args))
+  # The batch's targets: the single-job runner reads its pin owners here.
+  batch_args.landing_table = ",".join(targets)
+  # A pin describes one table; a model launch extracts every schema live.
+  batch_args.ddl_uri = ""
+  batch_args._record_batch = {  # pylint: disable=protected-access
+      "index": index,
+      "count": len(launch.batches),
+      "tables": list(batch.tables),
+  }
+  # ADR 0044 — one record per batch job, its launch_run_id the base.
+  batch_args._record_base = prepare_record_base(batch_args, registry, plan)  # pylint: disable=protected-access
+  batch_args.run_id = batch_run_id(base, index)
+  # The Dataflow name of every job of this batch, unless --job_name is given.
+  batch_args._batch_job_name = batch_job_name(base, index)  # pylint: disable=protected-access
+  log_milestone(
+      "model_batch",
+      batch=batch.label,
+      index=index,
+      count=len(launch.batches),
+      tables=len(batch.tables),
+      run_id=batch_args.run_id,
+      launch_run_id=base,
+  )
+  log_launch_plan(
+      batch_args,
+      plan,
+      generate_fk,
+      registry,
+      extra={
+          "launch_run_id": base,
+          "batch": batch_args._record_batch,  # pylint: disable=protected-access
+      })
+  return _execute_plan(plan, batch_args, beam_argv, registry, targets)
+
+
 def resolve_landing_dispositions(write_disposition: str,
                                  create_if_not_exists: bool) -> tuple[str, str]:
   """Landing-sink ``(write, create)`` dispositions (WS4 §6a/§6c).
@@ -1817,7 +2474,20 @@ def sanitize_job_name(prefix: str, run_id: str) -> str:
     (e.g. ``scheduled__2026-05-20T00:00:00+00:00``) that are all illegal."""
   slug = re.sub(r"[^a-z0-9]+", "-", run_id.lower()).strip("-")
   name = f"{prefix}-{slug}" if slug else prefix
-  return name[:63].rstrip("-")
+  return name[:_JOB_NAME_MAX].rstrip("-")
+
+
+def batch_job_name(base_run_id: str, index: int) -> str:
+  """A whole-model batch job's Dataflow name, ``sdfb-<base>-bNN``
+    (ADR 0045 D4): the base's name is shortened so the ``-bNN`` suffix stays
+    whole inside 63 characters — the model DAG's rule
+    (``composer/sdfb_batches.py::batch_job_name``) — so two batches of one
+    launch running side by side never share a name, however long the base.
+    Every job of the batch takes it (a one-table batch, each
+    ``sequential_jobs`` job in turn)."""
+  suffix = f"-{batch_label(index)}"
+  name = sanitize_job_name("sdfb", base_run_id)
+  return name[:_JOB_NAME_MAX - len(suffix)].rstrip("-") + suffix
 
 
 def _pin_autoscaling(worker_options, autoscaling: str,
@@ -1845,6 +2515,7 @@ def configure_pipeline_options(
     run_id: str,
     num_workers: int | None = None,
     autoscaling: str = "auto",
+    default_job_name: str | None = None,
 ) -> None:
   """Set runner-dependent options.
 
@@ -1853,8 +2524,9 @@ def configure_pipeline_options(
     deps + source, so it just adds startup cost.
 
     The flex launcher already passes a valid ``--job_name`` (from the DAG's
-    ``jobName``), so we only synthesize one — sanitized from ``run_id`` — when
-    it's absent (e.g. a direct DataflowRunner launch).
+    ``jobName``), so we only synthesize one — ``default_job_name`` (a
+    whole-model batch's ``batch_job_name``), else sanitized from ``run_id`` —
+    when it's absent (e.g. a direct DataflowRunner launch).
 
     ``sdk_container_image`` pins Runner v2 *workers* to THIS image. The Flex
     Template's ``--image`` only sets the *launcher*; the worker harness image
@@ -1874,7 +2546,7 @@ def configure_pipeline_options(
   if runner == "DataflowRunner":
     gco = options.view_as(GoogleCloudOptions)
     if not gco.job_name:
-      gco.job_name = sanitize_job_name("sdfb", run_id)
+      gco.job_name = default_job_name or sanitize_job_name("sdfb", run_id)
     worker_options = options.view_as(WorkerOptions)
     if not worker_options.max_cache_memory_usage_mb:
       worker_options.max_cache_memory_usage_mb = _DEFAULT_STATE_CACHE_MB
@@ -1961,6 +2633,8 @@ def _resolve_table_fanout(
         stats_store=stats_store,
         bq_client=None,
         effective_pk=effective_pk_of(registry, args.landing_table, args),
+        config=config_of(args),
+        source_dataset=getattr(args, "_source_dataset", None),
     )
   except RelationshipError as exc:
     raise SystemExit(f"[preflight P2] {args.landing_table}: {exc}") from exc
@@ -2090,6 +2764,7 @@ def _load_reference_and_preflight(
     registry: RelationshipRegistry,
     in_set_landing: frozenset[str] = frozenset(),
     landing_schema=None,
+    prepared: TablePrep | None = None,
 ):
   """Eager reference read + relational preflight (ADR 0032): the
     table's relations come from `config/relationships/`, pk/identity
@@ -2097,13 +2772,18 @@ def _load_reference_and_preflight(
     and unknown columns fail fast — all driver-side, before any graph
     exists. ADR 0036: resolves the driving edge's roles and, when its
     parent is in-set, its measured (or cached) source fan-out — carried
-    into `preflight` so a driven child's row count derives from it."""
-  logger.info("Loading reference rows from %s (limit=%d)", args.reference_table,
-              args.reference_rows_limit)
-  reference_rows = load_reference_rows(
-      table=args.reference_table,
-      limit=args.reference_rows_limit,
-  )
+    into `preflight` so a driven child's row count derives from it.
+    ADR 0045: with `prepared`, the reference sample and the source stats
+    were read ahead on a prep thread; everything else runs here."""
+  if prepared is None:
+    logger.info("Loading reference rows from %s (limit=%d)",
+                args.reference_table, args.reference_rows_limit)
+    reference_rows = load_reference_rows(
+        table=args.reference_table,
+        limit=args.reference_rows_limit,
+    )
+  else:
+    reference_rows = prepared.reference_rows  # read ahead (ADR 0045)
   in_set_names = {t.rsplit(".", 1)[-1] for t in in_set_landing}
   # ADR 0035: an in-set parent lands at most its own resolved row
   # count. ADR 0036: a driven parent's count may itself be DERIVED
@@ -2162,6 +2842,7 @@ def _load_reference_and_preflight(
       # Fix H3: a driven child is sized off its parent's DISTINCT
       # landed keys — an adjusted parent lands fewer than it has rows.
       fk_parent_distinct_keys=fk_parent_distinct_keys,
+      config=config_of(args),
       blocker_failure_ratio=thresholds.blocker_failure_ratio,
       fanout=fanout,
       edge_roles=edge_roles,
@@ -2205,7 +2886,10 @@ def _load_reference_and_preflight(
   if parse_bool_flag(args.generate_fk_relationships) and external_fk:
     parent_landing = args.fk_parent_landing or derive_fk_parent_landing(
         args.landing_table)
-    fk_key_pools = load_fk_key_pools(external_fk, parent_landing)
+    fk_key_pools = load_fk_key_pools(
+        external_fk,
+        parent_landing,
+        limit=config_of(args).relational.fk_key_sample_floor)
     fk_pools = per_column_view(fk_key_pools)
     assert_fk_pools_nonempty(external_fk, fk_pools, parent_landing)
     args.fk_parent_landing = parent_landing  # ctx fk_edges read it
@@ -2214,7 +2898,8 @@ def _load_reference_and_preflight(
     # arrive as side inputs; still derive for the fk_edges metadata.
     args.fk_parent_landing = args.fk_parent_landing or (
         derive_fk_parent_landing(args.landing_table))
-  source_distinct = _emit_source_stats(args, table_schema, reference_rows, pf)
+  source_distinct = _emit_source_stats(
+      args, table_schema, reference_rows, pf, prepared=prepared)
   return (
       reference_rows,
       pf,
@@ -2226,20 +2911,24 @@ def _load_reference_and_preflight(
   )
 
 
-def _emit_source_stats(args, table_schema, reference_rows,
-                       pf) -> dict[str, int]:
-  """WS-B: one profiling pass over the already-loaded reference sample —
-    milestone always, JSON artifact and BQ rows when configured. A digest
-    that already has rows is skipped (pool-store exists() idiom).
+@dataclass(frozen=True)
+class SourceStats:
+  """One table's source stats as computed — profiled from the reference
+    sample and, under `exact`, completed by the aggregate scan (ADR 0022) —
+    before anything is written."""
+  stats: dict[str, Any]
+  source_distinct: dict[str, int]
 
-    Returns per-column EXACT distinct counts when ``--source_stats=exact``
-    ran (ADR 0022 — they feed free-text pool sizing via
-    ``GenerationContext.source_distinct``); empty dict otherwise.
-    """
+
+def compute_source_stats(args, table_schema, reference_rows,
+                         relations) -> SourceStats | None:
+  """The stats `_emit_source_stats` writes, computed and not written: a
+    prep thread may run this (ADR 0045) — profiling and BigQuery reads only."""
   if args.source_stats == "off" or not reference_rows:
-    return {}
+    return None
+  config = config_of(args)
   stats = profile_source_table(
-      table_schema, reference_rows, relations=pf.relations)
+      table_schema, reference_rows, relations=relations, config=config)
   source_distinct: dict[str, int] = {}
   if args.source_stats == "exact":
     from sdfb_beam.io.exact_stats import compute_exact_stats
@@ -2247,7 +2936,8 @@ def _emit_source_stats(args, table_schema, reference_rows,
     # A failed exact pass degrades LOUDLY to sample-tier stats: the run
     # is still valid, just without exact pool sizing.
     try:
-      stats = compute_exact_stats(args.reference_table, table_schema, stats)
+      stats = compute_exact_stats(
+          args.reference_table, table_schema, stats, sampling=config.sampling)
     except Exception as exc:  # pylint: disable=broad-exception-caught
       log_milestone(
           "source_stats_exact_failed",
@@ -2266,6 +2956,19 @@ def _emit_source_stats(args, table_schema, reference_rows,
           table=args.reference_table,
           columns=len(source_distinct),
       )
+  return SourceStats(stats=stats, source_distinct=source_distinct)
+
+
+def write_source_stats(args, table_schema, reference_rows,
+                       computed: SourceStats | None) -> dict[str, int]:
+  """The milestone always, the JSON artifact and the store rows when
+    configured; a digest that already has rows is skipped (pool-store
+    exists() idiom). Returns the exact distinct counts (ADR 0022 — they feed
+    free-text pool sizing via `GenerationContext.source_distinct`)."""
+  if computed is None:
+    return {}
+  stats, source_distinct = computed.stats, computed.source_distinct
+  config = config_of(args)
   sparse = sorted(stats.items(), key=lambda kv: -kv[1]["empty_fraction"])[:5]
   log_milestone(
       "source_table_stats",
@@ -2286,7 +2989,7 @@ def _emit_source_stats(args, table_schema, reference_rows,
     if store.exists(
         table_schema.fqn,
         digest,
-        profiler_version=PROFILER_VERSION,
+        profiler_version=stats_profiler_version(config),
         stats_tier=achieved_tier,
     ):
       log_milestone("source_stats_skipped", reference_digest=digest[:12])
@@ -2300,8 +3003,92 @@ def _emit_source_stats(args, table_schema, reference_rows,
   return source_distinct
 
 
-def warm_pools_trusted(pool_store, source_value_store, reference_digest: str,
-                       model_uri: str) -> bool:
+def _emit_source_stats(args,
+                       table_schema,
+                       reference_rows,
+                       pf,
+                       *,
+                       prepared: TablePrep | None = None) -> dict[str, int]:
+  """WS-B: one profiling pass over the already-loaded reference sample —
+    milestone always, JSON artifact and BQ rows when configured.
+
+    With `prepared` (ADR 0045) the computation already ran on a prep thread;
+    the write happens here, after preflight, exactly where it always has."""
+  computed = (
+      prepared.stats if prepared is not None else compute_source_stats(
+          args, table_schema, reference_rows, pf.relations))
+  return write_source_stats(args, table_schema, reference_rows, computed)
+
+
+@dataclass(frozen=True)
+class TablePrep:
+  """What one table's prep READS, done ahead on a prep thread (ADR 0045):
+    both schemas, the reference sample and the computed source stats.
+    Nothing here writes."""
+  schemas: tuple[TableSchema, TableSchema | None]
+  reference_rows: list[dict]
+  stats: SourceStats | None
+
+
+def prefetch_table_prep(args, registry: RelationshipRegistry) -> TablePrep:
+  """A prep thread's work for one table (ADR 0045): BigQuery reads and
+    pure profiling only — no model, no embedder (the transformers v5
+    lazy-import race of 2026-07-30 is why nothing else runs here)."""
+  schemas = resolve_schemas(args.ddl_uri, args.reference_table,
+                            args.landing_table)
+  logger.info("Loading reference rows from %s (limit=%d)", args.reference_table,
+              args.reference_rows_limit)
+  rows = load_reference_rows(
+      table=args.reference_table, limit=args.reference_rows_limit)
+  stats = compute_source_stats(args, schemas[0], rows,
+                               registry.relations(args.landing_table))
+  return TablePrep(schemas=schemas, reference_rows=rows, stats=stats)
+
+
+class PrepReadAhead:
+  """Each table's prep reads on `workers` threads (ADR 0045). Nothing
+    starts until the first table asks; then every table's reads are
+    submitted, and each table's prep takes its own, in plan order, where the
+    sequential prep would have read them. A read that failed raises there."""
+
+  def __init__(self, table_args: Sequence[argparse.Namespace],
+               registry: RelationshipRegistry, workers: int):
+    self._args = list(table_args)
+    self._registry = registry
+    self._workers = workers
+    self._pool: ThreadPoolExecutor | None = None
+    self._futures: list[Future[TablePrep]] = []
+
+  def prep(self, index: int) -> TablePrep:
+    if self._pool is None:
+      # Logged first, so it heads the prep threads' own lines.
+      log_milestone(
+          "launch_prep_parallel", workers=self._workers, tables=len(self._args))
+      self._pool = ThreadPoolExecutor(
+          max_workers=self._workers, thread_name_prefix="sdfb-prep")
+      self._futures = [
+          self._pool.submit(prefetch_table_prep, args, self._registry)
+          for args in self._args
+      ]
+    return self._futures[index].result()
+
+  def close(self) -> None:
+    """`shutdown(wait=True, cancel_futures=True)`: the reads not yet started
+    are cancelled and the ones in flight are waited for, so no prep thread is
+    left alive. A read that already finished for a table the prep never
+    reached (an earlier table failed first) was paid for and is dropped
+    unseen, its result or its error with it."""
+    if self._pool is not None:
+      self._pool.shutdown(wait=True, cancel_futures=True)
+
+
+def warm_pools_trusted(pool_store,
+                       source_value_store,
+                       reference_digest: str,
+                       model_uri: str,
+                       *,
+                       config: GeneratorConfig,
+                       pool_key: str | None = None) -> bool:
   """False ⇒ the persisted pools overlap the live source and were
     deleted for a clean rebuild; True ⇒ keep the warm path.
 
@@ -2312,9 +3099,15 @@ def warm_pools_trusted(pool_store, source_value_store, reference_digest: str,
     (pools are an optimisation) and an append-rebuild without a clean
     delete would leave stale rows racing the rebuilt ones in `fetch`.
     """
+  key = pool_key or pool_store_model_key(model_uri, config)
   try:
-    overlap = pool_source_overlap(pool_store, source_value_store,
-                                  reference_digest, model_uri)
+    overlap = pool_source_overlap(
+        pool_store,
+        source_value_store,
+        reference_digest,
+        model_uri,
+        config=config,
+        pool_key=key)
   except Exception as exc:  # pylint: disable=broad-exception-caught
     log_milestone(
         "pool_taint_check_error",
@@ -2334,7 +3127,7 @@ def warm_pools_trusted(pool_store, source_value_store, reference_digest: str,
       },
   )
   try:
-    pool_store.delete(reference_digest, model_uri)
+    pool_store.delete(reference_digest, key)
   except Exception as exc:  # pylint: disable=broad-exception-caught
     log_milestone(
         "pool_taint_delete_error",
@@ -2355,11 +3148,14 @@ def resolve_pool_layer(args, reference_rows: list[dict]) -> tuple:
     """
   if not (parse_bool_flag(args.build_pool_layer) and args.freetext_pools_table):
     return None, None
+  config = config_of(args)
   digest = compute_reference_digest(reference_rows)
   pool_store = BigQueryFreeTextPoolStore(args.freetext_pools_table)
+  pool_key = cache_keys_of(args)["freetext_pools"]
   # Full-domain novelty rejection for the build branch, and the
   # taint preflight for the warm path (2026-08-05/07 E2E findings).
-  source_value_store = BigQuerySourceValueStore(args.reference_table)
+  source_value_store = BigQuerySourceValueStore(
+      args.reference_table, cap=config.free_text.source_domain_cap)
   # A MISSING pool table must not surface as a cryptic NotFound out of
   # the driver — that is exactly how TEST_1 (2026-07-25 16:38) died on
   # a 404. The table is never auto-created (the CREATE_IF_NEEDED
@@ -2367,7 +3163,7 @@ def resolve_pool_layer(args, reference_rows: list[dict]) -> tuple:
   # say what to run. The READ path degrades silently and correctly on
   # its own; only an explicit --build_pool_layer reaches here.
   try:
-    already_built = pool_store.exists(digest, args.model_uri)
+    already_built = pool_store.exists(digest, pool_key)
   except Exception as exc:
     proj, ds, tbl = args.freetext_pools_table.split(".", 2)
     raise SystemExit(
@@ -2382,8 +3178,13 @@ def resolve_pool_layer(args, reference_rows: list[dict]) -> tuple:
     # exists() alone let the 2026-08-07 10M warm run replay the
     # memorized 2026-08-05 pools; a warm store must also prove it
     # holds no live source values before it is trusted.
-    already_built = warm_pools_trusted(pool_store, source_value_store, digest,
-                                       args.model_uri)
+    already_built = warm_pools_trusted(
+        pool_store,
+        source_value_store,
+        digest,
+        args.model_uri,
+        config=config,
+        pool_key=pool_key)
   if already_built:
     log_milestone(
         "pool_build_skipped",
@@ -2409,6 +3210,10 @@ def main(argv: list[str] | None = None) -> int:
   # two same-day runs were indistinguishable by build from the logs.)
   log_build_info("launcher")
   args, beam_argv = parse_args(argv or sys.argv[1:])
+  log_config_resolution(args.config_resolution)
+  if args.tables == TABLES_ALL:
+    # ADR 0045 — every enabled table of one model, batch by batch.
+    return _run_model(args, beam_argv)
 
   # ADR 0029 rev B — resolve the launch scenario BEFORE any per-table
   # work: minimal inputs (landing table(s) + one flag), everything
@@ -2421,72 +3226,22 @@ def main(argv: list[str] | None = None) -> int:
   registry = load_relationship_registry(args.relationships_uri)
   plan = plan_launch(targets, args.reference_table, generate_fk, registry,
                      args.run_id)
-  for warning in plan.warnings:
-    logger.warning("launch plan: %s", warning)
-  log_milestone(
-      "launch_scenario",
-      scenario=plan.scenario,
-      tables=len(plan.runs),
-      order=",".join(r.landing_table.rsplit(".", 1)[-1] for r in plan.runs),
-      generate_fk_relationships=generate_fk,
-  )
-  # ONE human-readable block stating every enabled/disabled config of
-  # this execution (ADR 0030): pasted _full_report.md +
-  # worker_logs.jsonl answer "what was on?" without arg archaeology.
-  log_milestone_pretty(
-      "launch_config",
-      {
-          **{
-              k: v
-              for k, v in sorted(vars(args).items())
-              if not k.startswith("_") and k != "model_client"
-          },
-          "resolved": {
-              "scenario": plan.scenario,
-              "generate_fk_relationships": generate_fk,
-              "multi_table_mode": args.multi_table_mode,
-              "tables_in_order": [r.landing_table for r in plan.runs],
-              "run_ids": [r.run_id for r in plan.runs],
-              "fk_parent_landing_derived":
-                  [r.fk_parent_landing or "(none)" for r in plan.runs],
-              "warnings": list(plan.warnings),
-          },
-      },
-      scenario=plan.scenario,
-  )
+  # A1 ruling R14 / ADR 0044: every cache key of the launch, computed once.
+  args._cache_keys = launch_cache_keys(args, registry)  # pylint: disable=protected-access
+  # ADR 0044 — one schema check per launch; None writes today's row.
+  args._record_base = prepare_record_base(args, registry, plan)  # pylint: disable=protected-access
+  # ADR 0045 — the dataset a sibling's and a driving parent's source is
+  # read from (a model's source_table overrides it per table).
+  args._source_dataset = args.reference_table.rsplit(".", 1)[0]  # pylint: disable=protected-access
+  warn_unused_launch_keys(args)
+  log_launch_plan(args, plan, generate_fk, registry)
   for target in targets:
     log_relationship_model(
         target,
         registry,
         mode="relational" if generate_fk else "isolated",
     )
-  if len(plan.runs) > 1 and args.multi_table_mode == "single_job":
-    return _run_relational_job(plan, args, beam_argv, registry=registry)
-  for i, run in enumerate(plan.runs):
-    table_args = argparse.Namespace(**vars(args))
-    # Underscored on purpose: an internal Namespace channel read back via
-    # getattr(), never a CLI flag.
-    table_args._multi_table_plan = len(plan.runs) > 1  # pylint: disable=protected-access
-    table_args.landing_table = run.landing_table
-    table_args.reference_table = run.source_table
-    table_args.run_id = run.run_id
-    table_args.fk_parent_landing = (
-        args.fk_parent_landing or run.fk_parent_landing)
-    # The --ddl_uri pin describes the FIRST target only; siblings
-    # extract live (authoritative per ADR 0027 D2).
-    if run.landing_table != targets[0]:
-      table_args.ddl_uri = ""
-    rc = _run_one_table(table_args, beam_argv, registry=registry)
-    if rc != 0:
-      logger.error(
-          "table %s failed (rc=%d) — aborting the remaining %d "
-          "planned tables (children never run without parents)",
-          run.landing_table,
-          rc,
-          len(plan.runs) - i - 1,
-      )
-      return rc
-  return 0
+  return _execute_plan(plan, args, beam_argv, registry, targets)
 
 
 def nullability_schema(landing_schema, source_schema):
@@ -2679,6 +3434,7 @@ def in_set_parent_edges(
     generation_schema=None,
     candidate_cap: int = DEFAULT_FK_CANDIDATE_CAP,
     effective_pk: tuple[str, ...] = (),
+    config: GeneratorConfig = DEFAULT_CONFIG,
 ) -> tuple[FkEdgeSpec, ...]:
   """This table's enforced edges whose parent generates in the same
     job, as composer specs. ``key_sample_caps`` (preflight P4, ADR 0035)
@@ -2696,7 +3452,9 @@ def in_set_parent_edges(
     ``candidate_cap`` is ``--fk_candidate_cap``.
 
     With conditional edges present ``keys_per_batch`` is LOWERED so one
-    request never carries more than ~100k candidate values (design §7) —
+    request never carries more than
+    ``relational.max_conditional_values_per_request`` candidate values
+    (ADR 0037 §7; 100k by default, design §7) —
     the cap itself is the operator's knob and is never touched. Once
     ``cap x edges`` passes that ceiling on its own the bound degenerates
     to one key per request and stops bounding anything, which is a
@@ -2706,10 +3464,11 @@ def in_set_parent_edges(
       fk for fk in registry.enforced_edges(landing_table)
       if fk.ref.rsplit(".", 1)[-1] in in_set_names
   ]
+  max_values = config.relational.max_conditional_values_per_request
   n_conditional = sum(1 for fk in edges if roles.get(fk) == "conditional")
   if n_conditional:
     per_request = candidate_cap * n_conditional
-    bound = _MAX_CONDITIONAL_VALUES_PER_REQUEST // per_request
+    bound = max_values // per_request
     if bound < 1:
       # Fix wave G5: the bound has STOPPED bounding. The floor below
       # pins it at ONE key per request, and that one key still
@@ -2725,7 +3484,7 @@ def in_set_parent_edges(
           candidate_cap=candidate_cap,
           conditional_edges=n_conditional,
           tuples_per_request=per_request,
-          ceiling=_MAX_CONDITIONAL_VALUES_PER_REQUEST,
+          ceiling=max_values,
           note="--fk_candidate_cap x conditional edges already "
           "exceeds the per-request candidate ceiling at ONE key per "
           "request, so keys_per_batch cannot bound the request any "
@@ -2753,7 +3512,7 @@ def in_set_parent_edges(
             # conditional edge's co-parent.
             parent_pk=tuple(parent.pk) if parent else (),
             key_sample_cap=key_sample_caps.get(
-                tuple(fk.cols), FK_KEY_SAMPLE_FLOOR),
+                tuple(fk.cols), config.relational.fk_key_sample_floor),
             mode=_EDGE_MODES.get(role, "side_input"),
             keys_per_batch=keys_per_batch,
             overlap=(registry.edge_overlap(landing_table, fk)
@@ -2890,14 +3649,18 @@ def _prepare_table_spec(
     model_client,
     in_set_landing: frozenset[str] = frozenset(),
     registry: RelationshipRegistry | None = None,
+    prep: Callable[[], TablePrep] | None = None,
 ) -> TableSpec:
   """Everything one table needs, driver-side: schema, preflight, FK
     pools (EXTERNAL parents only — in-set parents arrive as in-DAG side
     inputs, ADR 0030), stores, sinks, config. Shared by the
-    single-table runner and the single-job relational runner."""
-  table_schema, landing_schema = resolve_schemas(args.ddl_uri,
-                                                 args.reference_table,
-                                                 args.landing_table)
+    single-table runner and the single-job relational runner. `prep`
+    hands over this table's reads when a `PrepReadAhead` ran them
+    (ADR 0045)."""
+  prepared = prep() if prep is not None else None
+  table_schema, landing_schema = (
+      prepared.schemas if prepared is not None else resolve_schemas(
+          args.ddl_uri, args.reference_table, args.landing_table))
   # ADR 0037 §4 ruling B: the conditional NULL policy reads the SINK's
   # column modes. `table_schema`'s modes mirror the SOURCE (only the
   # description surfaces are overlaid from the landing table), so the
@@ -2937,6 +3700,7 @@ def _prepare_table_spec(
       registry,
       in_set_landing=in_set_landing,
       landing_schema=landing_schema,
+      prepared=prepared,
   )
   log_relationship_model(args.landing_table, registry, mode=fk_mode)
 
@@ -2969,7 +3733,7 @@ def _prepare_table_spec(
   logger.info("Thresholds (env=%s): blocker_failure_ratio=%.4f", thresholds.env,
               thresholds.blocker_failure_ratio)
 
-  embedder_id, embedder_version = embedder_identity(args.embedder_uri)
+  embedder_id, embedder_version = resolve_embedder_identity(args)
 
   rag_row_docs_limit = resolve_launch_row_docs_limit(args, reference_rows)
   rag_chunks_sink = None
@@ -3011,6 +3775,8 @@ def _prepare_table_spec(
 
   config = PipelineConfig(
       table_schema=table_schema,
+      generator_config=config_of(args),
+      pool_store_key=cache_keys_of(args, registry)["freetext_pools"],
       engine_name=args.engine,
       model_client=model_client,
       num_rows=num_rows,
@@ -3144,6 +3910,7 @@ def _prepare_table_spec(
       # ADR 0038 adjustment: reading the registry here would hand the
       # composer a key the source disproved and preflight dropped.
       effective_pk=pf.pk_cols,
+      config=config_of(args),
   )
 
   return TableSpec(
@@ -3174,6 +3941,7 @@ def _run_one_table(
       args.run_id,
       num_workers=resolve_num_workers(getattr(args, "initial_workers", "")),
       autoscaling=getattr(args, "autoscaling", "auto"),
+      default_job_name=getattr(args, "_batch_job_name", None),
   )
   cross_process = resolve_cross_process(
       runner,
@@ -3196,13 +3964,32 @@ def _run_one_table(
       cross_process=cross_process,
   )
   spec = _prepare_table_spec(args, model_client, registry=registry)
-  report_model_adjustments([spec], registry or RelationshipRegistry(), options,
-                           args.run_id)
+  report_model_adjustments([spec],
+                           registry or RelationshipRegistry(),
+                           options,
+                           args.run_id,
+                           config=config_of(args))
   # ADR 0039 — one root table, so the projection is `--num_rows` and
   # nothing else. It is printed anyway: the block is where an operator
   # reads what a launch will generate, and a single-table launch must
-  # not be the one shape that stays silent.
-  report_row_projection([spec], launch_rows=args.num_rows)
+  # not be the one shape that stays silent. ADR 0045: the model's own
+  # num_rows is already in `args.num_rows` (`_execute_plan`); `root_rows`
+  # makes the block say the model sized the root.
+  model_rows = table_rows(
+      (registry or RelationshipRegistry()).relations(args.landing_table))
+  report_row_projection([spec],
+                        launch_rows=args.num_rows,
+                        root_rows=(None if model_rows is None else {
+                            spec.config.landing_table: model_rows
+                        }))
+  record_base = getattr(args, "_record_base", None)
+  if record_base is not None:
+    (spec,) = attach_record([spec],
+                            finish_record(
+                                record_base,
+                                options,
+                                runner=runner,
+                                batch=getattr(args, "_record_batch", None)))
 
   with beam.Pipeline(options=options) as p:
     result = build_pipeline(
@@ -3222,6 +4009,39 @@ def _run_one_table(
         result["reference_digest"],
     )
   return 0
+
+
+def _relational_table_args(
+    plan, args, rows_by_landing: dict[str, int],
+    distinct_keys_by_landing: dict[str, int]) -> list[argparse.Namespace]:
+  """Each planned table's namespace for the single job, built before any
+    table is prepared so its reads can run ahead (ADR 0045). The two dicts
+    are shared, filled by `_run_relational_job` in plan order."""
+  # The --ddl_uri pin describes the USER'S target table(s) — closure
+  # siblings extract live only (2026-08-22 launch: the first PLANNED
+  # table, a parent, wrongly inherited the target's pin and logged
+  # spurious ddl_pin_drift).
+  pin_owners = set(parse_landing_tables(args.landing_table))
+  table_args_list = []
+  for run in plan.runs:
+    table_args = argparse.Namespace(**vars(args))
+    table_args.landing_table = run.landing_table
+    table_args.reference_table = run.source_table
+    table_args.run_id = run.run_id
+    table_args.fk_parent_landing = (
+        args.fk_parent_landing or run.fk_parent_landing)
+    if run.num_rows is not None:
+      table_args.num_rows = run.num_rows  # ADR 0045: the model's rows
+    # Underscored on purpose: an internal Namespace channel read back via
+    # getattr(), never a CLI flag.
+    # pylint: disable-next=protected-access
+    table_args._rows_by_landing = rows_by_landing
+    # pylint: disable-next=protected-access
+    table_args._distinct_keys_by_landing = distinct_keys_by_landing
+    if run.landing_table not in pin_owners:
+      table_args.ddl_uri = ""  # pin describes the target only
+    table_args_list.append(table_args)
+  return table_args_list
 
 
 def _run_relational_job(
@@ -3245,6 +4065,7 @@ def _run_relational_job(
       args.run_id,
       num_workers=resolve_num_workers(getattr(args, "initial_workers", "")),
       autoscaling=getattr(args, "autoscaling", "auto"),
+      default_job_name=getattr(args, "_batch_job_name", None),
   )
   cross_process = resolve_cross_process(
       runner,
@@ -3263,11 +4084,6 @@ def _run_relational_job(
       cross_process=cross_process,
   )
   in_set = frozenset(r.landing_table for r in plan.runs)
-  # The --ddl_uri pin describes the USER'S target table(s) — closure
-  # siblings extract live only (2026-08-22 launch: the first PLANNED
-  # table, a parent, wrongly inherited the target's pin and logged
-  # spurious ddl_pin_drift).
-  pin_owners = set(parse_landing_tables(args.landing_table))
   specs = []
   prep_failures: list[tuple[str, str]] = []
   # ADR 0036: a grandchild's derived row count depends on its parent's
@@ -3279,40 +4095,45 @@ def _run_relational_job(
   # what its children fan out over — the same number as its rows unless
   # its `pk:` was adjusted away.
   distinct_keys_by_landing: dict[str, int] = {}
-  for run in plan.runs:
-    table_args = argparse.Namespace(**vars(args))
-    table_args.landing_table = run.landing_table
-    table_args.reference_table = run.source_table
-    table_args.run_id = run.run_id
-    table_args.fk_parent_landing = (
-        args.fk_parent_landing or run.fk_parent_landing)
-    # Underscored on purpose: an internal Namespace channel read back via
-    # getattr(), never a CLI flag.
-    # pylint: disable-next=protected-access
-    table_args._rows_by_landing = rows_by_landing
-    # pylint: disable-next=protected-access
-    table_args._distinct_keys_by_landing = distinct_keys_by_landing
-    if run.landing_table not in pin_owners:
-      table_args.ddl_uri = ""  # pin describes the target only
-    # Collect-then-fail (2026-08-22 launch lesson): one table's
-    # preflight stop must not HIDE the remaining tables' constraint
-    # reports and blockers — prep everything, abort once with all.
-    try:
-      specs.append(
-          _prepare_table_spec(
-              table_args,
-              model_client,
-              in_set_landing=in_set,
-              registry=registry,
-          ))
-      rows_by_landing[specs[-1].config.landing_table] = (
-          specs[-1].config.num_rows)
-      distinct_keys_by_landing[specs[-1].config.landing_table] = (
-          distinct_keys_landed(specs[-1].config.num_rows,
-                               specs[-1].adjustments))
-    except SystemExit as exc:
-      logger.error("prep failed for %s: %s", run.landing_table, exc)
-      prep_failures.append((run.landing_table, str(exc)))
+  table_args_list = _relational_table_args(plan, args, rows_by_landing,
+                                           distinct_keys_by_landing)
+  # ADR 0045 — the reads run ahead on prep_workers threads; everything
+  # cross-table below still runs table by table, in plan order. One worker
+  # (or a hand-built namespace) is the sequence of before: no thread.
+  workers = int(getattr(args, "prep_workers", 1) or 1)
+  read_ahead = (
+      PrepReadAhead(table_args_list, registry or RelationshipRegistry(),
+                    workers)
+      if workers > 1 and len(table_args_list) > 1 else None)
+  try:
+    for index, (run, table_args) in enumerate(
+        zip(plan.runs, table_args_list, strict=True)):
+      prep_kwargs = ({
+          "prep": functools.partial(read_ahead.prep, index)
+      } if read_ahead is not None else {})
+      # Collect-then-fail (2026-08-22 launch lesson): one table's
+      # preflight stop must not HIDE the remaining tables' constraint
+      # reports and blockers — prep everything, abort once with all.
+      try:
+        specs.append(
+            _prepare_table_spec(
+                table_args,
+                model_client,
+                in_set_landing=in_set,
+                registry=registry,
+                **prep_kwargs,
+            ))
+        rows_by_landing[specs[-1].config.landing_table] = (
+            specs[-1].config.num_rows)
+        distinct_keys_by_landing[specs[-1].config.landing_table] = (
+            distinct_keys_landed(specs[-1].config.num_rows,
+                                 specs[-1].adjustments))
+      except SystemExit as exc:
+        logger.error("prep failed for %s: %s", run.landing_table, exc)
+        prep_failures.append((run.landing_table, str(exc)))
+  finally:
+    if read_ahead is not None:
+      read_ahead.close()
   if prep_failures:
     summary = "\n".join(f"- {t}: {e}" for t, e in prep_failures)
     raise SystemExit(f"{len(prep_failures)} of {len(plan.runs)} planned tables "
@@ -3335,8 +4156,12 @@ def _run_relational_job(
   # ADR 0038 — say what this launch generated with, before it
   # generates anything: the banner, one milestone per adjustment, and
   # the effective model handed back as YAML.
-  report_model_adjustments(specs, registry or RelationshipRegistry(), options,
-                           args.run_id)
+  report_model_adjustments(
+      specs,
+      registry or RelationshipRegistry(),
+      options,
+      args.run_id,
+      config=config_of(args))
   # ADR 0039 — and say how many rows that model will GENERATE, per
   # table and in total, while there is still time to stop.
   report_row_projection(
@@ -3344,6 +4169,11 @@ def _run_relational_job(
       launch_rows=args.num_rows,
       rows_by_landing=rows_by_landing,
       keys_by_landing=distinct_keys_by_landing,
+      root_rows={
+          r.landing_table: r.num_rows
+          for r in plan.runs
+          if r.num_rows is not None
+      },
   )
   total_edges = sum(len(s.parent_edges) for s in specs)
   log_milestone(
@@ -3373,6 +4203,15 @@ def _run_relational_job(
         "marked [DISABLED] hands out no keys. Flip the flag in "
         "config/relationships to change it.",
     )
+  record_base = getattr(args, "_record_base", None)
+  if record_base is not None:
+    specs = attach_record(
+        specs,
+        finish_record(
+            record_base,
+            options,
+            runner=runner,
+            batch=getattr(args, "_record_batch", None)))
   with beam.Pipeline(options=options) as p:
     results = build_relational_pipeline(p, specs)
     logger.info(

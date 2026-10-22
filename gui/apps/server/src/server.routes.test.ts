@@ -20,8 +20,11 @@ import {
   evaluationProfilesRowSchema,
   facetsSchema,
   freetextPoolSchema,
+  GENERATOR_VERSION_RE,
+  generationRecordSchema,
   healthSchema,
   knobsFileSchema,
+  parseGeneratorVersion,
   relationshipsResponseSchema,
   sourceStatsSchema,
   trendPointSchema,
@@ -30,7 +33,7 @@ import {
   type EvaluationAdjustments,
   type Facets,
 } from "@synthetic-platform/contracts";
-import { ADJUSTED_EVALUATIONS, getMockDataset, STORYLINE } from "@synthetic-platform/mock";
+import { ADJUSTED_EVALUATIONS, FOREST_EVALUATION, getMockDataset, STORYLINE } from "@synthetic-platform/mock";
 import type { FastifyInstance } from "fastify";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { z } from "zod";
@@ -38,12 +41,13 @@ import { z } from "zod";
 import { buildApp } from "./app";
 import { loadConfig } from "./config";
 import { MockProvider } from "./providers/mock";
+import { buildComparison, latestPerEvaluation } from "./providers/shared";
 
 let app: FastifyInstance;
 let staticDir: string;
 let facets: Facets;
-/** Every evaluation the mock holds: the storyline's, and the adjusted-keys launch's two. */
-const EVALUATIONS = STORYLINE.length + ADJUSTED_EVALUATIONS.length;
+/** Every evaluation the mock holds: the storyline's, the adjusted-keys launch's two and the isolated-forest launch's one. */
+const EVALUATIONS = STORYLINE.length + ADJUSTED_EVALUATIONS.length + 1;
 
 beforeAll(async () => {
   staticDir = mkdtempSync(join(tmpdir(), "spa-"));
@@ -53,6 +57,14 @@ beforeAll(async () => {
   facets = facetsSchema.parse((await inject("/api/facets")).json());
   // Building the seeded mock dataset is CPU-bound: 120 s ran out once at load average ~450.
 }, 300_000);
+
+function mockEvaluationWithRecord(): string {
+  return latestPerEvaluation(getMockDataset().registry).find((r) => r.generator_version)!.evaluation_id;
+}
+
+function mockEvaluationWithoutRecord(): string {
+  return latestPerEvaluation(getMockDataset().registry).find((r) => r.generator_version === null)!.evaluation_id;
+}
 
 /** Requests arrive with the Host a browser on this machine sends (the guard refuses others). */
 function inject(url: string, headers: Record<string, string> = {}, method: "GET" | "POST" = "GET") {
@@ -84,14 +96,54 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
   });
 
   it("/api/facets lists every filter option", () => {
-    // The storyline's 40 and the two evaluations of the adjusted-keys launch.
+    // The storyline's 40, the two evaluations of the adjusted-keys launch and the isolated-forest launch's one.
     expect(facets.counts.evaluations).toBe(EVALUATIONS);
-    expect(facets.relationship_models).toEqual(["adjusted_keys_demo", "thelook_demo"]);
+    expect(facets.relationship_models).toEqual(["adjusted_keys_demo", "isolated_forest_demo", "thelook_demo"]);
     expect(facets.engines).toEqual(["b1_rag", "b2_library"]);
     expect(facets.tables).toEqual(expect.arrayContaining(["users", "orders", "order_items", "user_features"]));
     expect(facets.latest?.evaluation_id).toBe("eval-0039");
     expect(facets.rag.length).toBeGreaterThan(0);
     expect(facets.source_tables.length).toBeGreaterThan(3);
+  });
+
+  it("/api/evaluations filters by generator version, branch and config digest", async () => {
+    const recorded = latestPerEvaluation(getMockDataset().registry).find((r) => r.generator_version)!;
+    const branch = parseGeneratorVersion(recorded.generator_version)!.branch;
+    const all = await get("/api/evaluations?limit=500", evaluationPageSchema);
+    // The filters can only be told from a no-op if the mock holds a null-version row and several values.
+    expect(all.items.some((e) => e.generator_version === null)).toBe(true);
+    expect(new Set(all.items.map((e) => e.generator_version).filter(Boolean)).size).toBeGreaterThan(1);
+    expect(new Set(all.items.map((e) => e.generator_config_digest).filter(Boolean)).size).toBeGreaterThan(1);
+    const cases: [string, (e: (typeof all.items)[number]) => boolean][] = [
+      [
+        `generator_version=${encodeURIComponent(recorded.generator_version!)}`,
+        (e) => e.generator_version === recorded.generator_version,
+      ],
+      [
+        `generator_branch=${encodeURIComponent(branch)}`,
+        (e) => parseGeneratorVersion(e.generator_version)?.branch === branch,
+      ],
+      [
+        `config_digest=${recorded.generator_config_digest}`,
+        (e) => e.generator_config_digest === recorded.generator_config_digest,
+      ],
+    ];
+    for (const [query, matches] of cases) {
+      const page = await get(`/api/evaluations?${query}&limit=500`, evaluationPageSchema);
+      expect(page.items.length).toBeGreaterThan(0);
+      expect(page.items.every(matches), query).toBe(true);
+      expect(page.items.some((e) => e.evaluation_id === recorded.evaluation_id)).toBe(true);
+      expect(page.items.some((e) => e.generator_version === null)).toBe(false);
+      expect(page.total).toBeLessThan(all.total);
+    }
+    const none = await get("/api/evaluations?generator_branch=no-such-branch&limit=500", evaluationPageSchema);
+    expect(none.items).toHaveLength(0);
+  });
+
+  it("/api/facets lists the generator versions, branches and config digests", () => {
+    expect(facets.generator_versions.length).toBeGreaterThan(0);
+    expect(facets.generator_branches).toContain("master");
+    expect(facets.config_digests.length).toBeGreaterThan(0);
   });
 
   it("/api/evaluations pages, filters and sorts", async () => {
@@ -124,6 +176,14 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
     // from/to are ISO timestamps (with offset) or dates; anything else is a 400.
     await get("/api/evaluations?from=yesterday", apiErrorSchema, 400);
     await get("/api/evaluations?to=2026-09-01T10:00:00", apiErrorSchema, 400);
+  });
+
+  it("/api/evaluations?q finds a whole-model evaluation by any of its batch jobs, not only the first (ADR 0045)", async () => {
+    const forest = latestPerEvaluation(getMockDataset().registry).find((r) => r.evaluation_id === FOREST_EVALUATION)!;
+    const b05 = forest.generation_job_ids[5]!;
+    expect(b05).not.toBe(forest.generation_job_id);
+    const page = await get(`/api/evaluations?q=${encodeURIComponent(b05)}`, evaluationPageSchema);
+    expect(page.items.map((e) => e.evaluation_id)).toEqual([FOREST_EVALUATION]);
   });
 
   it("timestamps keep their microseconds end to end", async () => {
@@ -182,6 +242,35 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
     await get("/api/compare", apiErrorSchema, 400);
   });
 
+  it("lines a pre-record evaluation up with a record-backed one by the flat key (final review M2)", () => {
+    const [first, second] = latestPerEvaluation(getMockDataset().registry);
+    const engine = String((second!.generation_params as Record<string, unknown>).engine);
+    const snapshot = {
+      config_version: 1,
+      values: { generation: { engine, similarity: 0.7 }, sampling: { reference_rows_limit: 5000 } },
+      provenance: { "generation.similarity": "file" },
+    };
+    const a = { ...first!, generation_params: snapshot };
+    const comparison = buildComparison([a.evaluation_id, second!.evaluation_id], [a, second!], []);
+    const param = (path: string) => comparison.params.find((p) => p.path === path);
+    // The record's inner keys are the old flat CLI names: the same key, one row, not two half-empty ones.
+    expect(param("generation_params.engine")).toMatchObject({ values: [engine, engine], differs: false });
+    expect(param("generation_params.similarity")?.values[0]).toBe(0.7);
+    expect(param("generation_params.reference_rows_limit")?.values[0]).toBe(5000);
+  });
+
+  it("flattens a record snapshot's values by key, never its blocks (ADR 0044)", () => {
+    const [first, second] = latestPerEvaluation(getMockDataset().registry);
+    const snapshot = { config_version: 1, values: { generation: { similarity: 0.7 } }, provenance: {} };
+    const a = { ...first!, generation_params: snapshot };
+    const comparison = buildComparison([a.evaluation_id, second!.evaluation_id], [a, second!], []);
+    expect(comparison.params.some((p) => p.path.startsWith("generation_params.values."))).toBe(false);
+    expect(comparison.params.some((p) => p.path.startsWith("generation_params.provenance"))).toBe(false);
+    expect(comparison.params.some((p) => p.path === "generator_version")).toBe(true);
+    // a flat generation_params (the second row's) is still flattened
+    expect(comparison.params.some((p) => p.path === "generation_params.engine")).toBe(true);
+  });
+
   it("/api/trend returns one metric across evaluations, oldest first", async () => {
     const points = await get(
       "/api/trend?metric_id=column.ks&table=orders&column=created_at",
@@ -223,6 +312,16 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
     const filtered = await get("/api/runs?engine=b2_library&status=PASSED", z.array(validationRunSchema));
     expect(filtered.every((r) => r.engine === "b2_library" && r.status === "PASSED")).toBe(true);
     await get("/api/dlq", apiErrorSchema, 400);
+  });
+
+  it("/api/runs?base_run_id lists a whole-model launch's batched rows, <base>-bNN-MM-<table> (ADR 0045)", async () => {
+    // The per-table (eval-0021) and one-table (eval-0032) launches: the test above, unchanged.
+    const forest = await get(`/api/evaluations/${FOREST_EVALUATION}`, evaluationDetailSchema);
+    const base = forest.evaluation.base_run_id!;
+    const batched = await get(`/api/runs?base_run_id=${base}`, z.array(validationRunSchema));
+    expect(batched).toHaveLength(112);
+    expect(batched.every((r) => new RegExp(`^${base}-b\\d{2}-\\d{2}-T_\\d{3}$`).test(r.run_id))).toBe(true);
+    expect(new Set(batched.map((r) => r.run_id))).toEqual(new Set(forest.evaluation.run_ids));
   });
 
   it("/api/source-stats keys snapshots by (digest, tier, profiler_version, run_id)", async () => {
@@ -372,6 +471,46 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
     await get("/api/evaluations/nope/adjustments", apiErrorSchema, 404);
   });
 
+  it("/api/evaluations/:id/record returns the generation record (ADR 0044)", async () => {
+    const withRecord = mockEvaluationWithRecord(); // the first storyline evaluation whose launch carries a record
+    const res = await inject(`/api/evaluations/${withRecord}/record`);
+    expect(res.statusCode).toBe(200);
+    const record = generationRecordSchema.parse(res.json());
+    expect(record.snapshot?.values?.generation).toBeDefined();
+    expect(record.launcher_version).toMatch(GENERATOR_VERSION_RE);
+    expect(record.config_digests).toHaveLength(1);
+  });
+
+  it("/api/evaluations/:id/record is an empty record for a launch written before it", async () => {
+    const res = await inject(`/api/evaluations/${mockEvaluationWithoutRecord()}/record`);
+    expect(res.statusCode).toBe(200);
+    expect(generationRecordSchema.parse(res.json()).snapshot).toBeNull();
+  });
+
+  it("/api/evaluations/:id/record is a 404 for an unknown id", async () => {
+    const res = await inject("/api/evaluations/nope/record");
+    expect(res.statusCode).toBe(404);
+  });
+
+  it("/api/evaluations/eval-0043/record reads the whole-model launch's 112 tables and 12 batch jobs", async () => {
+    const record = await get("/api/evaluations/eval-0043/record", generationRecordSchema);
+    expect(record.declared_tables).toHaveLength(112);
+    expect(record.batches).toHaveLength(12);
+    expect(record.batches[11]!.tables).toEqual(["T_118", "T_119"]);
+  });
+
+  it("/api/relationships serves the forest's whole model in mock mode, disabled tables included", async () => {
+    const { models } = await get("/api/relationships", relationshipsResponseSchema);
+    const forest = models.find((m) => m.model === "isolated_forest_demo")!;
+    expect(forest.origin).toBe("mock");
+    expect(forest.tables).toHaveLength(120);
+    expect(forest.tables.filter((t) => !t.enabled)).toHaveLength(8);
+    // ADR 0045's RelationTable keys pass relationshipModelSchema (D2).
+    expect(forest.tables.filter((t) => t.source_table)).toHaveLength(6);
+    // The committed sample (config/relationships/example_isolated_forest.yaml) is another model, not this one.
+    expect(models.find((m) => m.model === "isolated_forest_example")?.origin).toBe("committed_example");
+  });
+
   it("the adjustments join falls back from run id to launch base to generation window, never across launches", async () => {
     // Registry rows the evaluator can write for the SAME launch, knowing less each time.
     const data = getMockDataset();
@@ -463,7 +602,19 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
 
   it("/api/knobs and /api/catalogue serve the generated contracts", async () => {
     const knobs = await get("/api/knobs", knobsFileSchema);
-    expect(knobs.channels).toHaveLength(8);
+    expect(knobs.channels.map((c) => c.id)).toEqual([
+      "io",
+      "launch",
+      "sampling",
+      "generation",
+      "free_text",
+      "rag",
+      "guardrails",
+      "relational",
+      "serving",
+      "evaluation",
+    ]);
+    expect(knobs.knobs).toHaveLength(108);
     const catalogue = await get("/api/catalogue", catalogueResponseSchema);
     expect(catalogue.metrics).toHaveLength(79);
   });

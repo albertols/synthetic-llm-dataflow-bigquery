@@ -46,8 +46,8 @@ pytestmark = pytest.mark.skipif(
 )
 
 _CHANNELS = {
-    "sampling", "generation", "free_text", "rag", "guardrails", "relational",
-    "serving", "evaluation"
+    "io", "launch", "sampling", "generation", "free_text", "rag", "guardrails",
+    "relational", "serving", "evaluation"
 }
 
 
@@ -98,7 +98,7 @@ def test_every_knob_is_complete_and_in_a_known_channel(knobs):
       assert key in knob, (knob["id"], key)
     assert knob["channel"] in _CHANNELS
     assert set(knob["settable_via"]) <= {
-        "cli", "composer", "flex", "constant", "derived"
+        "cli", "composer", "flex", "config", "constant", "derived"
     }
   channels_used = {knob["channel"] for knob in knobs["knobs"]}
   assert channels_used == _CHANNELS
@@ -106,8 +106,7 @@ def test_every_knob_is_complete_and_in_a_known_channel(knobs):
 
 def test_values_are_imported_from_code_not_retyped(knobs):
   from sdfb_beam.cli import run_pipeline
-  from sdfb_core.engines import generation_plan
-  from sdfb_core.engines.b1_rag import engine as b1_engine
+  from sdfb_core.config.model import DEFAULT_CONFIG
   from sdfb_core.rag import chunking
   from sdfb_core.rag.embedding import BgeEmbedder, HashingEmbedder
   from sdfb_core.stats import source_stats
@@ -115,13 +114,13 @@ def test_values_are_imported_from_code_not_retyped(knobs):
   by_id = _by_id(knobs)
   assert by_id["rag_row_docs_limit"]["value"] == chunking.MAX_ROW_DOC_ROWS
   assert by_id["rag_row_docs_limit"]["settable_via"] == [
-      "cli", "composer", "flex"
+      "cli", "composer", "flex", "config"
   ]
   assert (by_id["max_free_text_values_per_column"]["value"] ==
-          chunking.MAX_FREE_TEXT_VALUES_PER_COLUMN)
+          DEFAULT_CONFIG.rag.max_free_text_values_per_column)
   assert by_id["free_text_pool_max"][
-      "value"] == generation_plan.FREE_TEXT_POOL_MAX
-  assert by_id["rag_top_k"]["value"] == b1_engine._DEFAULT_TOP_K
+      "value"] == DEFAULT_CONFIG.free_text.free_text_pool_max
+  assert by_id["rag_top_k"]["value"] == DEFAULT_CONFIG.rag.rag_top_k
   assert by_id["hashing_embedder_dim"]["value"] == HashingEmbedder().dim
   assert by_id["bge_embedder_dim"]["value"] == BgeEmbedder("/nowhere").dim
   assert by_id["profiler_version"]["value"] == source_stats.PROFILER_VERSION
@@ -151,8 +150,8 @@ def test_cli_knobs_carry_their_launch_surfaces(knobs):
   assert similarity["cli_flag"] == "--similarity"
   assert {"cli", "composer", "flex"} <= set(similarity["settable_via"])
   assert similarity["composer_param"] == "similarity"
-  # A constant is never turnable.
-  assert by_id["free_text_pool_max"]["settable_via"] == ["constant"]
+  # A promoted constant is set from a config file only (ADR 0043).
+  assert by_id["free_text_pool_max"]["settable_via"] == ["config"]
   # Composer and CLI defaults can differ; both are reported.
   assert by_id["vllm_dtype"]["value"] == "auto"
   assert by_id["vllm_dtype"]["composer_default"] == "float16"
@@ -323,6 +322,7 @@ def test_check_ignores_line_shifts_but_not_values(knobs_module, tmp_path):
 def test_check_fails_on_value_drift_in_every_file(knobs_module, tmp_path):
   for name, tamper in (
       ("knobs.json", lambda d: d["knobs"][0].update(value="tampered")),
+      ("knob_guides.json", lambda d: d["guides"]["seed"].update(up="tampered")),
       ("relationships.json",
        lambda d: d["models"][0]["tables"][0].update(pk=["tampered"])),
       ("dlq_rules.json", lambda d: d["rules"][0].update(severity="INFO")),
@@ -506,3 +506,111 @@ def test_golden_check_detects_drift(golden_module, tmp_path):
 
 def test_the_committed_golden_files_are_current(golden_module):
   assert golden_module.main(["--check"]) == 0
+
+
+# ------------------------------------------------- config model (ADR 0043) --
+
+
+@pytest.fixture(scope="module")
+def outputs(knobs_module):
+  return knobs_module.build_all()
+
+
+def test_generator_knobs_come_from_the_catalogue(outputs):
+  knobs = _by_id(outputs["knobs.json"])
+  assert knobs["pool_values_per_call"][
+      "config_key"] == "free_text.pool_values_per_call"
+  assert "config" in knobs["pool_values_per_call"]["settable_via"]
+  assert knobs["pool_values_per_call"]["source"].startswith(
+      "packages/sdfb-core/src/sdfb_core/config/model.py:")
+  assert "config" in knobs["similarity"]["settable_via"]
+  assert knobs["profiler_version"]["settable_via"] == ["constant"]
+  assert "reference_table" in knobs and knobs["reference_table"][
+      "channel"] == "io"
+
+
+def test_every_generator_knob_has_a_guide(outputs):
+  ids = {
+      k["id"]
+      for k in outputs["knobs.json"]["knobs"]
+      if k["channel"] != "evaluation"
+  }
+  assert set(outputs["knob_guides.json"]["guides"]) == ids
+  assert len(ids) == 97
+
+
+def test_knob_values_are_unchanged(knobs_module, outputs):
+  from sdfb_tests import config_parity as cp
+
+  constants = json.loads(
+      (cp.GOLDENS_DIR / "constants.json").read_text(encoding="utf-8"))
+  knobs = _by_id(outputs["knobs.json"])
+  for knob, value in constants.items():
+    assert knobs_module._jsonable(knobs[knob]["value"]) == value, knob
+
+
+def test_launch_identity_is_a_flag_only(outputs):
+  doc = outputs["knobs.json"]
+  assert [c["id"] for c in doc["channels"][:2]] == ["io", "launch"]
+  run_id = _by_id(doc)["run_id"]
+  # A config file may not set it (resolve refuses), so no config key.
+  assert (run_id["channel"], run_id["settable_via"]) == ("launch",
+                                                         ["cli", "flex"])
+  assert "config_key" not in run_id and run_id["required"]
+
+
+def test_guides_are_the_catalogue_rendered(outputs):
+  guides = outputs["knob_guides.json"]["guides"]
+  margin = guides["fk_key_sample_margin"]
+  # Placeholders are filled with the model's defaults.
+  assert "at 10" in margin["purpose"] and "4.8 %" in margin["purpose"]
+  assert "{{" not in margin["formula"]
+  # Optional fields are dropped when the catalogue leaves them empty.
+  assert set(guides["seed"]) == {"purpose", "up", "down"}
+  refs = [ref for guide in guides.values() for ref in guide.get("refs", [])]
+  assert {
+      "kind": "doc",
+      "label": "Article 2 — the 10k sample, its knobs and their aftermath",
+      "path": "docs/articles/02-type-system-freetext-resolution.md",
+      "line": 262,
+  } in refs
+  for ref in refs:
+    assert set(ref) in ({"kind", "label",
+                         "url"}, {"kind", "label", "path", "line"}), ref
+    assert "path" not in ref or (_REPO / ref["path"]).is_file(), ref
+  for knob in outputs["knobs.json"]["knobs"]:
+    for path in knob["docs"]:
+      assert (_REPO / path).is_file(), (knob["id"], path)
+
+
+def test_the_relationships_export_carries_the_model_launch_keys(outputs):
+  """ADR 0045: a table's source_table / num_rows reach the GUI when the
+    model sets them, and only then: every other export is as before."""
+  models = {m["model"]: m for m in outputs["relationships.json"]["models"]}
+  forest = {t["name"]: t for t in models["isolated_forest_example"]["tables"]}
+  assert forest["T_RATES"]["source_table"] == "other_ds.RATES_V2"
+  assert forest["T_RATES"]["num_rows"] == 5000
+  assert "source_table" not in forest["T_ACCOUNTS"]
+  assert forest["T_LEGACY"]["enabled"] is False
+  for name in ("example_retail", "example_star_diamond", "gcp_public_thelook"):
+    for table in models[name]["tables"]:
+      assert "source_table" not in table and "num_rows" not in table
+
+
+def test_the_model_launch_knobs(outputs):
+  """ADR 0045: the six settable keys are flags and config keys; the two
+    batch keys are launch identity; the generation DAG's evaluation-only
+    `source_dataset` param is no surface of the generator's key."""
+  knobs = _by_id(outputs["knobs.json"])
+  assert knobs["tables"]["channel"] == "launch"
+  assert knobs["tables"]["choices"] == ["explicit", "all"]
+  assert knobs["max_tables_per_job"]["config_key"] == (
+      "launch.max_tables_per_job")
+  assert "flex" not in knobs["max_parallel_jobs"]["settable_via"]
+  assert knobs["source_dataset"]["channel"] == "io"
+  assert "composer" not in knobs["source_dataset"]["settable_via"]
+  assert "composer_param" not in knobs[
+      "source_dataset"]  # `_knob` drops empties
+  for key in ("batch_index", "batch_count"):
+    assert "config_key" not in knobs[key]
+    assert knobs[key]["settable_via"] == ["cli", "flex"]

@@ -13,33 +13,54 @@
 #  limitations under the License.
 """`job_id` → "what did generation job X write, with which parameters".
 
-Five sources, each answering what it can, in this order of precedence:
+Five sources, each answering what it can:
 
     source                       answers                                 lost when
     ───────────────────────────  ──────────────────────────────────────  ─────────────────────
-    1 BigQuery JOBS labels       tables written + commit windows + rows  no resourceViewer
-    2 launch_config log entry    every launch argument, table order,     log retention, or a
+    1 validation_runs record     the resolved config snapshot, job id,   a table or launch
+      (ADR 0044)                 generator version, run ids, digests      before ADR 0044
+    2 BigQuery JOBS labels       tables written + commit windows + rows  no resourceViewer
+    3 launch_config log entry    every launch argument, table order,     log retention, or a
                                  run ids (+ relationships_loaded sha,    launch predating it
                                  model_adjustment_model uri)
-    3 Dataflow job parameters    the launch arguments (display data)     job retention (~30 d)
-    4 validation_runs            run ids, reference digests, valid rows  --validation_runs_table ""
+    4 Dataflow job parameters    the launch arguments (display data)     job retention (~30 d)
     5 manual                     anything still missing                  —
 
-`params` (→ the registry's `generation_params`) comes from the first of
-2 → 3 → 5 that has any; `params_source` records which, in the registry's
-vocabulary: `jobs_labels+logs` (2, with 1 resolved), `logs` (2 without
-1), `dataflow_params` (3), `manual` (5). Manual input only FILLS gaps: a
-manual value that disagrees with a resolved one is ignored and warned
-about. Every fallback taken is a warning on the context — nothing is
-dropped silently.
+`params` (→ the registry's typed filters) is filled in that order, each
+source filling only the keys still missing: the record (its snapshot's
+`values`, or its typed columns on a row without a snapshot) → the
+`launch_config` log, else the Dataflow display data → manual. A manual value
+that disagrees with a resolved one is ignored and warned about. The
+caller's tables are never replaced here. `params_source`, in the
+registry's vocabulary, is `validation_runs` when the record supplied the
+snapshot, or the only params besides manual input (ADR 0044);
+otherwise the launch's own source, as before the record:
+`jobs_labels+logs` (the `launch_config` log, with JOBS labels resolved),
+`logs` (the log without them), `dataflow_params` (the display data) or
+`manual`. With a snapshot, `generation_params` is the snapshot itself.
+When rows of the launch's tables name their Dataflow job, only the job's
+own rows are its runs. Every fallback taken is a warning on the context —
+nothing is dropped silently.
 
 One path reads less: `resolve_launch(job_only=True)`, for a job id given
 next to hand-named tables (`--seed_table T --generation_job_id J`), reads
-only source 3's job resource for the job's id, name, region and window — no
-log, no JOBS labels — and takes the rest from `manual`. Given the
-generator's `validation_runs_table` and with the window known, it also reads
-this launch's rows of that table (source 4, one query), which carry the
-reference digests.
+only source 4's job resource for the job's id, name, region and window — no
+log, no JOBS labels — and takes the rest from the job's `validation_runs`
+record and from `manual`. Given the generator's `validation_runs_table` and
+with the window known, it reads this launch's rows of that table (one
+query), which carry the reference digests and, since ADR 0044, the record.
+`job_record` reads a job's record before its tables are known: the job,
+then the rows of that table in the job's window that name the job
+(`runs_of_job`), of the job's own launch when only its name matched them
+(a Composer job name is the same for every launch of a model) — the seed
+path's first step, where the record names what is evaluated
+(`cli.driver`).
+
+A whole-model launch (ADR 0045) runs batch jobs `B-bNN`, their tables
+`B-bNN-MM-<table>`: a batch's rows belong to the launch `B` — by their
+recorded `launch_run_id`, else by the `-bNN` suffix of their run ids'
+base (`_launch_of`) — so `--run_id B` reads every batch, and a batch's
+own run id `B-bNN` only its own rows.
 
 `tables_in_order` never silently narrows a relational launch to its
 `--landing_table` target:
@@ -66,15 +87,22 @@ manual input are still tried, and `JobNotFoundError` is raised only when
 none of them resolves a table.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §4 Relational generation;
+§7 Validation and the dead-letter queue; §8 Configuration
+(ADR 0043, 0044, 0045).
 """
 
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import math
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 from sdfb_evaluation.context.bq import BqApiError
@@ -92,12 +120,21 @@ from sdfb_evaluation.context.jobs import (
     parse_timestamp,
     writes_by_beam_job,
 )
-from sdfb_evaluation.context.runs import runs_for, split_run_id
+from sdfb_evaluation.context.runs import (
+    of_job,
+    runs_for,
+    runs_of_job,
+    split_run_id,
+)
 
 __all__ = [
+    "GenerationRecord",
     "LaunchContext",
     "RunRecord",
     "UnresolvedLaunchError",
+    "job_record",
+    "record_of",
+    "record_params",
     "resolve_launch",
 ]
 
@@ -168,6 +205,11 @@ def _text(value: Any) -> str | None:
   return text or None
 
 
+def _raw_text(value: Any) -> str | None:
+  """Text kept as written: "" is a value (no embedder, relationships off)."""
+  return None if value is None else str(value)
+
+
 def _dotted(table: str) -> str:
   return table.strip().replace(":", ".", 1)
 
@@ -189,6 +231,26 @@ def _as_float(value: Any) -> float:
   if not math.isfinite(number):
     raise ValueError("not finite")
   return number
+
+
+def _optional_float(value: Any) -> float | None:
+  try:
+    return None if value is None else _as_float(value)
+  except (TypeError, ValueError):
+    return None
+
+
+def _snapshot(value: Any) -> dict[str, Any] | None:
+  """`validation_runs.config` parsed: a JSON object, else None."""
+  if isinstance(value, Mapping):
+    return dict(value)
+  if not isinstance(value, str) or not value.strip():
+    return None
+  try:
+    parsed = json.loads(value)
+  except ValueError:
+    return None
+  return parsed if isinstance(parsed, dict) else None
 
 
 def _embedder_id(uri: Any) -> str:
@@ -257,7 +319,8 @@ def _typed(params: Mapping[str, Any], write_disposition: str | None,
 
 @dataclass(frozen=True)
 class RunRecord:
-  """One table's `validation_runs` row: what the generation DAG measured."""
+  """One table's `validation_runs` row: what the generation DAG measured,
+  and — since ADR 0044 — the generation record (None on older rows)."""
   landing_table: str
   run_id: str
   reference_table: str | None = None
@@ -266,6 +329,24 @@ class RunRecord:
   num_rows_requested: int | None = None
   status: str | None = None
   created_at: str | None = None
+  engine: str | None = None
+  model_uri: str | None = None
+  env: str | None = None
+  job_id: str | None = None
+  job_name: str | None = None
+  launch_run_id: str | None = None
+  generator_version: str | None = None
+  launched_at: str | None = None
+  embedder_uri: str | None = None
+  retrieval_method: str | None = None
+  similarity: float | None = None
+  seed: str | None = None
+  source_stats: str | None = None
+  relationships_uri: str | None = None
+  relationships_digest: str | None = None
+  config_digest: str | None = None
+  config: Mapping[str, Any] | None = field(
+      default=None, compare=False, hash=False, repr=False)
 
   @classmethod
   def from_row(cls, row: Mapping[str, Any]) -> RunRecord:
@@ -274,19 +355,182 @@ class RunRecord:
       value = row.get(key)
       return None if value is None else int(value)
 
+    def text(key: str) -> str | None:
+      return _text(row.get(key))
+
     return cls(
         landing_table=_dotted(str(row["landing_table"])),
         run_id=str(row["run_id"]),
-        reference_table=_text(row.get("reference_table")),
-        reference_digest=_text(row.get("reference_digest")),
+        reference_table=text("reference_table"),
+        reference_digest=text("reference_digest"),
         valid_count=count("valid_count"),
         num_rows_requested=count("num_rows_requested"),
-        status=_text(row.get("status")),
-        created_at=_text(row.get("created_at")))
+        status=text("status"),
+        created_at=text("created_at"),
+        engine=text("engine"),
+        model_uri=text("model_uri"),
+        env=text("env"),
+        job_id=text("job_id"),
+        job_name=text("job_name"),
+        launch_run_id=text("launch_run_id"),
+        generator_version=text("generator_version"),
+        launched_at=text("launched_at"),
+        embedder_uri=_raw_text(row.get("embedder_uri")),
+        retrieval_method=text("retrieval_method"),
+        similarity=_optional_float(row.get("similarity")),
+        seed=text("seed"),
+        source_stats=text("source_stats"),
+        relationships_uri=_raw_text(row.get("relationships_uri")),
+        relationships_digest=text("relationships_digest"),
+        config_digest=text("config_digest"),
+        config=_snapshot(row.get("config")))
 
   @property
   def base_and_index(self) -> tuple[str, int | None]:
     return split_run_id(self.run_id, self.landing_table)
+
+  def written_by(self, job_id: str | None, job_name: str | None) -> bool:
+    """This row's record names the Dataflow job (`runs.of_job`)."""
+    return of_job(self.job_id, self.job_name, job_id, job_name)
+
+
+_TRUTHY = frozenset({"true", "1", "yes"})
+
+
+def _truthy(value: Any) -> bool:
+  return value is not None and str(value).strip().lower() in _TRUTHY
+
+
+def _is_snapshot(config: Mapping[str, Any] | None) -> bool:
+  """A parsed `config` this reader can use: an object with a `values`
+  block (ADR 0044). Anything else — another format, or a newer
+  generator's — is no snapshot."""
+  return config is not None and isinstance(config.get("values"), Mapping)
+
+
+@dataclass(frozen=True)
+class GenerationRecord:
+  """A generation job's `validation_runs` rows — every run it was given, in
+  run order — and the config snapshot they carry (ADR 0044); every table of
+  one job carries the same snapshot."""
+  runs: tuple[RunRecord, ...]
+  snapshot: Mapping[str, Any] = field(compare=False, hash=False, repr=False)
+
+  def value(self, section: str, key: str) -> Any:
+    values = self.snapshot.get("values")
+    block = values.get(section) if isinstance(values, Mapping) else None
+    return block.get(key) if isinstance(block, Mapping) else None
+
+  @property
+  def generates_relationships(self) -> bool:
+    """The snapshot states `generate_fk_relationships` as true."""
+    return _truthy(self.value("relational", "generate_fk_relationships"))
+
+  @property
+  def relationships_off(self) -> bool:
+    """The snapshot states `generate_fk_relationships`, and not as true. A
+    snapshot that does not state it says nothing about relationships."""
+    flag = self.value("relational", "generate_fk_relationships")
+    return flag is not None and not _truthy(flag)
+
+  @property
+  def relationships_uri(self) -> str | None:
+    """The model the launch generated with; None when relationships were
+    off (an isolated generation is evaluated as one) or when the snapshot
+    names no model."""
+    if self.relationships_off:
+      return None
+    return _text(self.value("relational", "relationships_uri"))
+
+  @property
+  def reference_rows_limit(self) -> int | None:
+    value = self.value("sampling", "reference_rows_limit")
+    try:
+      return None if value is None else _as_int(value)
+    except (TypeError, ValueError):
+      return None
+
+  @property
+  def landing_tables(self) -> tuple[str, ...]:
+    return tuple(r.landing_table for r in self.runs)
+
+  def cache_key(self, cache: str) -> str | None:
+    """The key the launch read and wrote that store under (A1 ruling R11)."""
+    derived = self.snapshot.get("derived")
+    keys = derived.get("cache_keys") if isinstance(derived, Mapping) else None
+    return _text(keys.get(cache)) if isinstance(keys, Mapping) else None
+
+
+def record_of(runs: Sequence[RunRecord]) -> GenerationRecord | None:
+  """The record these runs carry: the first snapshot in run order."""
+  ordered = sorted(
+      runs, key=lambda r: (r.base_and_index[1] or 0, r.created_at or ""))
+  for run in ordered:
+    if run.config is not None and _is_snapshot(run.config):
+      return GenerationRecord(runs=tuple(ordered), snapshot=run.config)
+  return None
+
+
+# Which tables a launch generated is said by the record's ROWS (each one's
+# landing_table and reference_table) and, on the job-only path, by the
+# caller — never by the launch-level flags, which name only the targets of a
+# relational closure. Left out of the record's params so `_order` and the
+# caller's tables decide exactly as before.
+_RECORD_PARAM_EXCLUDED = frozenset({"landing_table", "reference_table"})
+
+
+def record_params(runs: Sequence[RunRecord],
+                  notes: list[str] | None = None) -> dict[str, Any]:
+  """The generation parameters the record states, under launch-argument
+  names: the snapshot's `values` flattened (a key keeps its CLI name inside
+  its section, ADR 0043) minus the two table-naming flags, plus
+  `derived.profiler_version`, with `relationships_uri` "" when the snapshot
+  states relationships were off. A null value is a derived default the
+  snapshot does not pin (ADR 0043), so it states nothing and a later source
+  may fill the key. Without a snapshot, the first run's typed columns. A
+  row that has a `config_digest` but no parseable `config`, or a `config`
+  with no `values` block, is a note."""
+  record = record_of(runs)
+  if record is not None:
+    params: dict[str, Any] = {}
+    for block in record.snapshot["values"].values():
+      if isinstance(block, Mapping):
+        params.update({
+            k: v
+            for k, v in block.items()
+            if k not in _RECORD_PARAM_EXCLUDED and v is not None
+        })
+    derived = record.snapshot.get("derived")
+    if isinstance(derived, Mapping) and derived.get("profiler_version"):
+      params["profiler_version"] = derived["profiler_version"]
+    if record.relationships_off:
+      params["relationships_uri"] = ""
+    return params
+  if notes is not None:
+    for run in runs:
+      if run.config is not None:
+        notes.append(f"{run.landing_table}: validation_runs.config has no "
+                     "values block (another format, or a newer generator's); "
+                     "the record's typed columns are used")
+      elif run.config_digest:
+        notes.append(f"{run.landing_table}: validation_runs has a "
+                     "config_digest but its config could not be parsed; the "
+                     "record's typed columns are used")
+  ordered = sorted(runs, key=lambda r: (r.base_and_index[1] or 0))
+  if not ordered:
+    return {}
+  first = ordered[0]
+  typed = {
+      "engine": first.engine,
+      "model_uri": first.model_uri,
+      "env": first.env,
+      "embedder_uri": first.embedder_uri,
+      "pool_seed_strategy": first.retrieval_method,
+      "similarity": first.similarity,
+      "seed": first.seed,
+      "source_stats": first.source_stats,
+  }
+  return {k: v for k, v in typed.items() if v is not None}
 
 
 def _manual(manual: Mapping[str, Any] | None) -> tuple[dict, dict]:
@@ -339,9 +583,11 @@ def _manual_value(key: str, value: Any) -> Any:
 def _resolved_mismatch(launch_config: Mapping[str, Any]) -> str | None:
   """Why the launch_config's resolved table list and run ids disagree, or
   None. `plan_launch` names run i of a multi-table launch
-  `{run_id}-{i:02d}-{table}`; a single table runs as `{run_id}` itself.
-  Lines the launcher logged in the same instant can come back reordered
-  and still parse — this is the check that catches it."""
+  `{run_id}-{i:02d}-{table}`; a single table runs as `{run_id}` itself,
+  or — a whole-model batch of one table (ADR 0045) — as
+  `{run_id}-00-{table}`. Lines the launcher logged in the same instant can
+  come back reordered and still parse — this is the check that catches
+  it."""
   resolved = launch_config.get("resolved")
   if not isinstance(resolved, Mapping):
     return None
@@ -351,9 +597,12 @@ def _resolved_mismatch(launch_config: Mapping[str, Any]) -> str | None:
     return f"{len(tables)} tables but {len(run_ids)} run ids"
   base = _text(launch_config.get("run_id"))
   if len(tables) == 1:
-    if base is not None and run_ids[0] != base:
-      return f"the single run id {run_ids[0]!r} is not the run_id {base!r}"
-    return None
+    short = tables[0].rsplit(".", 1)[-1]
+    batch = f"{base}-00-{short}"  # a whole-model batch of one table
+    if base is None or run_ids[0] in (base, batch):
+      return None
+    return (f"the single run id {run_ids[0]!r} is not the run_id {base!r} "
+            f"(nor a one-table batch's {batch!r})")
   for index, (table, run_id) in enumerate(zip(tables, run_ids, strict=True)):
     short = table.rsplit(".", 1)[-1]
     suffix = f"-{index:02d}-{short}"
@@ -364,23 +613,52 @@ def _resolved_mismatch(launch_config: Mapping[str, Any]) -> str | None:
   return None
 
 
+# ADR 0045 — a whole-model launch runs batch jobs `<base>-bNN`, their tables
+# `<base>-bNN-MM-<table>`; a row's split base is then `<base>-bNN`.
+_BATCH = re.compile(r"(?P<launch>.+)-b(?P<batch>\d{2,})")
+
+
+def _launch_of(record: RunRecord, base: str | None) -> str:
+  """The launch a validation_runs row belongs to (Ruling 3 of ADR 0045).
+  With the asked `base`: that base when the row's recorded `launch_run_id`
+  (ADR 0044) or its run id's base names it, or — only on a row without a
+  record — when its run id's base is that base with a whole-model batch
+  suffix (`<base>-bNN`); else the row's own base. A recorded batch row
+  names its launch itself, and a row that records another launch (one
+  whose own run id merely ends like a batch, `<base>-b12`) is that
+  launch's. A row without a record cannot tell the two apart, so the
+  suffix decides for it. Without a base: the recorded launch, else the run
+  id's base."""
+  split = record.base_and_index[0]
+  if base is not None:
+    if base in (record.launch_run_id, split):
+      return base
+    match = _BATCH.fullmatch(split) if record.launch_run_id is None else None
+    if match is not None and match.group("launch") == base:
+      return base
+    return split
+  return record.launch_run_id or split
+
+
 def _pick_runs(records: list[RunRecord], base: str | None,
                notes: list[str]) -> tuple[str | None, list[RunRecord]]:
   """(base, this launch's records): other launches' rows are dropped
-  loudly; with no base known, the most recently created one is taken."""
+  loudly; with no base known, the most recently created one is taken. A
+  row's launch is `_launch_of`'s: a whole-model batch's rows are its
+  launch's (ADR 0045)."""
   if not records:
     return base, []
   if base is None:
     latest = max(records, key=lambda r: r.created_at or "")
-    base = latest.base_and_index[0]
-    bases = sorted({r.base_and_index[0] for r in records})
+    base = _launch_of(latest, None)
+    bases = sorted({_launch_of(r, None) for r in records})
     if len(bases) > 1:
       notes.append(f"validation_runs holds rows of {len(bases)} launches "
                    f"({bases}) for these tables in the window and the "
                    f"launch's own run id is unknown; taking the latest, "
                    f"{base} — pass manual base_run_id to choose")
-  own = [r for r in records if r.base_and_index[0] == base]
-  others = sorted(r.run_id for r in records if r.base_and_index[0] != base)
+  own = [r for r in records if _launch_of(r, base) == base]
+  others = sorted(r.run_id for r in records if _launch_of(r, base) != base)
   if others:
     notes.append(f"validation_runs rows of another launch in the window were "
                  f"ignored: {others} — they wrote to the same landing tables "
@@ -394,6 +672,25 @@ def _pick_runs(records: list[RunRecord], base: str | None,
   return base, list(latest_by_table.values())
 
 
+def _job_rows(records: list[RunRecord], job_id: str | None,
+              job_name: str | None, notes: list[str]) -> list[RunRecord]:
+  """The rows whose record names this Dataflow job (ADR 0044), when any
+  does — another job's rows of the same tables in the window are dropped
+  loudly, never taken for this launch's; else every row, as before the
+  record (`_pick_runs` then decides by run id)."""
+  mine = [r for r in records if r.written_by(job_id, job_name)]
+  if not mine:
+    return records
+  others = sorted(
+      r.run_id for r in records if not r.written_by(job_id, job_name))
+  if others:
+    notes.append(f"validation_runs rows written by another Dataflow job in "
+                 f"the window were ignored: {others} — they wrote to the "
+                 f"same landing tables as job {job_id or job_name}; check the "
+                 "scope for contamination")
+  return mine
+
+
 def _milestone_fields(milestones: Mapping[str, Sequence[Mapping[str, str]]],
                       name: str) -> list[Mapping[str, str]]:
   return list(milestones.get(name) or [])
@@ -404,9 +701,10 @@ class LaunchContext:
   """What generation job X wrote, with which parameters.
 
   The rev-1 fields plus `params_source` and `writes`; `runs` (the
-  per-table `validation_runs` rows), `model_adjusted` (None = unknown)
-  and `warnings` (every fallback taken) complete what the registry and
-  the planner read.
+  per-table `validation_runs` rows), `model_adjusted` (None = unknown),
+  `warnings` (every fallback taken) and `generation_job_ids` (a
+  whole-model launch's batch jobs, ADR 0045) complete what the registry
+  and the planner read.
   """
   generation_job_id: str | None
   job_name: str | None
@@ -419,15 +717,21 @@ class LaunchContext:
   reference_table: str | None
   write_disposition: str | None
   relationships_uri: str | None
-  params: dict[str, Any] = field(hash=False)  # → generation_params
+  # → the typed filters; also generation_params when the record has no
+  # snapshot
+  params: dict[str, Any] = field(hash=False)
   model_sha: str | None
   model_name: str | None
   adjusted_model_uri: str | None
-  params_source: str  # jobs_labels+logs | logs | dataflow_params | manual
+  # validation_runs | jobs_labels+logs | logs | dataflow_params | manual
+  params_source: str
   writes: tuple[JobWrite, ...]
   runs: tuple[RunRecord, ...] = ()
   model_adjusted: bool | None = None
   warnings: tuple[str, ...] = ()
+  # ADR 0045 — the generation jobs this evaluation covers: a whole-model
+  # launch's batch jobs (generation_job_id is the first); empty otherwise.
+  generation_job_ids: tuple[str, ...] = ()
 
   def typed_filters(self) -> dict[str, Any]:
     """The registry's generation-filter columns (`engine` … `vllm_dtype`
@@ -447,6 +751,24 @@ class LaunchContext:
     wanted = _dotted(landing_table)
     return next((r for r in self.runs if r.landing_table == wanted), None)
 
+  @property
+  def record(self) -> GenerationRecord | None:
+    """The generation record of this launch's runs (ADR 0044), if any."""
+    return record_of(self.runs)
+
+  @property
+  def generator_version(self) -> str | None:
+    return next((r.generator_version for r in self.runs if r.generator_version),
+                None)
+
+  @property
+  def config_digest(self) -> str | None:
+    return next((r.config_digest for r in self.runs if r.config_digest), None)
+
+  def cache_key(self, cache: str) -> str | None:
+    record = self.record
+    return record.cache_key(cache) if record is not None else None
+
   @classmethod
   def from_sources(
       cls,
@@ -458,6 +780,7 @@ class LaunchContext:
       runs: Sequence[Mapping[str, Any]] = (),
       milestones: Mapping[str, Sequence[Mapping[str, str]]] | None = None,
       warnings: Sequence[str] = (),
+      record_runs: Sequence[RunRecord] | None = None,
   ) -> LaunchContext:
     """Assemble a context from whatever the sources returned.
 
@@ -471,6 +794,8 @@ class LaunchContext:
         `model_adjustment_model` entries; None when the launch log was not
         read (then `model_adjusted` stays unknown).
       warnings: notes already collected by the caller.
+      record_runs: the runs whose record fills the params first; default:
+        this launch's own runs, picked from `runs`.
 
     Raises:
       ValueError: a malformed manual mapping (the message names the
@@ -491,12 +816,27 @@ class LaunchContext:
           "reordered in Cloud Logging; falling back to the Dataflow job "
           "parameters, validation_runs and labelled writes")
       launch_config = None
-    params, source = _params(job, launch_config, bool(writes_t), manual_params,
-                             notes)
+    launch_params, source = _launch_params(job, launch_config, bool(writes_t))
+    # the launch's run id, else manual's (manual fills only a missing key)
+    run_id = (launch_params
+              if "run_id" in launch_params else manual_params).get("run_id")
+    # The runs are picked first (their record fills the params), but their
+    # notes follow the params' notes, in the order a launch without a record
+    # has always warned in.
+    run_notes: list[str] = []
+    identity = job or {}
+    records = _job_rows([RunRecord.from_row(r) for r in runs],
+                        _text(identity.get("id")), _text(identity.get("name")),
+                        run_notes)
+    base, own = _pick_runs(records, _text(run_id), run_notes)
+    filled_from = own if record_runs is None else list(record_runs)
+    params, source = _params(
+        record_params(filled_from, notes),
+        record_of(filled_from) is not None, launch_params, source,
+        manual_params, notes)
+    notes.extend(run_notes)
     resolved = (launch_config or {}).get("resolved")
     resolved = resolved if isinstance(resolved, Mapping) else {}
-    base, own = _pick_runs([RunRecord.from_row(r) for r in runs],
-                           _text(params.get("run_id")), notes)
     tables, own, run_ids = _order(resolved, own, params, writes_t, notes)
 
     window = DataflowJobs.window(job) if job is not None else (None, None)
@@ -541,29 +881,46 @@ class LaunchContext:
         **values)
 
 
-def _params(job: Mapping[str, Any] | None,
-            launch_config: Mapping[str, Any] | None, has_writes: bool,
-            manual_params: Mapping[str, Any],
-            notes: list[str]) -> tuple[dict[str, Any], str]:
-  """(generation params, params_source): launch_config → Dataflow display
-  data → manual, then manual FILLS missing keys (never overrides)."""
+def _launch_params(job: Mapping[str, Any] | None,
+                   launch_config: Mapping[str, Any] | None,
+                   has_writes: bool) -> tuple[dict[str, Any], str]:
+  """(params, source) of the launch's own records: the `launch_config` log,
+  else the Dataflow display data; ({}, "manual") when neither answers."""
   job_params = DataflowJobs.params(job) if job is not None else {}
   if launch_config is not None:
-    params = dict(launch_config)
-    source = "jobs_labels+logs" if has_writes else "logs"
-  elif job_params:
-    params, source = job_params, "dataflow_params"
-  else:
-    params, source = {}, "manual"
-    if not manual_params:
-      notes.append("no generation parameters resolved from any source; "
-                   "the registry's generation filters stay NULL")
-  for key, value in manual_params.items():
+    return dict(launch_config), ("jobs_labels+logs" if has_writes else "logs")
+  if job_params:
+    return dict(job_params), "dataflow_params"
+  return {}, "manual"
+
+
+def _params(record: Mapping[str, Any], full_record: bool,
+            launch: Mapping[str, Any], source: str, manual: Mapping[str, Any],
+            notes: list[str]) -> tuple[dict[str, Any], str]:
+  """(generation params, params_source), filled in order (ADR 0044): the
+  record → the launch's own records → manual, each only where a key is
+  still missing. The record names the source when it carried the snapshot,
+  or when nothing but manual input would have. A manual value that
+  disagrees is a note naming the source that supplied the kept value — the
+  launch's own when it states the same value, as before the record."""
+  params = dict(record)
+  supplied_by = dict.fromkeys(record, "validation_runs")
+  for key, value in launch.items():
+    if key not in params:
+      params[key] = value
+    if params[key] == value:
+      supplied_by[key] = source
+  if record and (full_record or source == "manual"):
+    source = "validation_runs"
+  if not params and not manual:
+    notes.append("no generation parameters resolved from any source; "
+                 "the registry's generation filters stay NULL")
+  for key, value in manual.items():
     if key not in params:
       params[key] = value
     elif params[key] != value:
-      notes.append(f"manual params.{key}={value!r} ignored: the {source} "
-                   f"value {params[key]!r} is kept")
+      notes.append(f"manual params.{key}={value!r} ignored: the "
+                   f"{supplied_by[key]} value {params[key]!r} is kept")
   return params, source
 
 
@@ -659,17 +1016,24 @@ def _check_positions(own: Sequence[RunRecord], n_tables: int,
                      notes: list[str]) -> None:
   """Warn when the launch's run positions (NN) have gaps, or point past
   the tables resolved — both mean tables of the launch are unaccounted
-  for."""
-  indices = sorted({
-      index for index in (r.base_and_index[1] for r in own) if index is not None
-  })
-  if not indices:
+  for. Positions are checked per run-id base: a whole-model launch's
+  batches (`<base>-bNN`, ADR 0045) each number their tables from 00, so a
+  gap is named by its batch, and past-the-tables cannot be told across
+  batches (checked only for one base, as before)."""
+  groups: dict[str, set[int]] = {}
+  for record in own:
+    split, index = record.base_and_index
+    if index is not None:
+      groups.setdefault(split, set()).add(index)
+  for split, indices in sorted(groups.items()):
+    gaps = sorted(set(range(max(indices) + 1)) - indices)
+    if gaps:
+      where = "this launch" if len(groups) == 1 else f"batch {split}"
+      notes.append(f"validation_runs has no row for position(s) {gaps} of "
+                   f"{where} (run ids …-NN-<table>): those tables' runs "
+                   "failed, expired or were never recorded")
+  if len(groups) != 1:
     return
-  gaps = sorted(set(range(indices[-1] + 1)) - set(indices))
-  if gaps:
-    notes.append(f"validation_runs has no row for position(s) {gaps} of this "
-                 "launch (run ids …-NN-<table>): those tables' runs failed, "
-                 "expired or were never recorded")
   beyond = sorted(
       r.run_id for r in own if (r.base_and_index[1] or 0) >= n_tables)
   if beyond:
@@ -847,9 +1211,15 @@ def _job_identity(bq: Any, jobs: DataflowJobs, job_id: str, region: str,
   window known, this launch's rows of that table are read too — the one
   query, `runs_for` over the landing tables and the window, no run-id base
   — and carry the reference digests the privacy panel is verified against.
-  They are attached to the context, not given to `from_sources`: the run
-  rows must not decide the table list (`_order` would narrow it to the
-  tables that have a row); the caller's tables stay the tables."""
+  Rows whose record names this job are kept over another job's in the same
+  window (ADR 0044); among the rest, the caller's run id (`params.run_id`,
+  else `base_run_id`) picks the launch, else the latest one does. They are
+  attached to the context, and given to
+  `from_sources` only as `record_runs`, whose record fills the params
+  first: the run rows must not decide the table list (`_order` would
+  narrow it to the tables that have a row); the caller's tables stay the
+  tables. `params_source` is then `validation_runs` when the job's rows
+  carry a record, else `manual`."""
   notes: list[str] = []
   job: dict[str, Any] = {"id": job_id, "location": region}
   window: tuple[str | None, str | None] = (None, None)
@@ -868,21 +1238,147 @@ def _job_identity(bq: Any, jobs: DataflowJobs, job_id: str, region: str,
   tables = [_dotted(str(t)) for t in fields.get("tables_in_order") or ()]
   records: list[RunRecord] = []
   if window[0] and "validation_runs_table" in params:
-    records = [
+    records = _job_rows([
         RunRecord.from_row(r)
         for r in _read_runs(bq, params, tables, window, None, notes)
-    ]
-  base, own = _pick_runs(records, None, notes)
+    ], job_id, _text(job.get("name")), notes)
+  # the caller's run id decides, as on the full path; else the latest launch
+  base, own = _pick_runs(
+      records,
+      _text(params.get("run_id")) or fields.get("base_run_id"), notes)
   position = {t: i for i, t in enumerate(tables)}
   own.sort(key=lambda r: position.get(r.landing_table, len(tables)))
   _check_positions(own, len(tables), notes)
   context = LaunchContext.from_sources(
-      job=job, launch_config=None, writes=(), manual=manual, warnings=notes)
+      job=job,
+      launch_config=None,
+      writes=(),
+      manual=manual,
+      warnings=notes,
+      record_runs=own)
   return dataclasses.replace(
       context,
       base_run_id=base,
       runs=tuple(own),
       run_ids=tuple(r.run_id for r in own))
+
+
+# What reading a Dataflow job can raise: no usable credentials (`make_session`'s
+# RuntimeError; GcpApiError is one too), a malformed project, region or job id
+# (ValueError), a job that is not there (JobNotFoundError, a LookupError) or
+# not readable (PermissionError).
+_JOB_READ_ERRORS = (RuntimeError, ValueError, LookupError, PermissionError)
+
+
+def _moment(value: str | None) -> datetime | None:
+  try:
+    return None if value is None else parse_timestamp(value)
+  except ValueError:
+    return None
+
+
+def _own_launch(runs: list[RunRecord], job_name: str | None, end: str | None,
+                notes: list[str]) -> list[RunRecord]:
+  """The rows of the job's own launch (final review I2). Rows that recorded
+  a job id are this job's (`of_job` matched them by it) and say which launch
+  it ran. Rows matched by `job_name` alone are kept only for that launch —
+  or, when no row recorded the id, for the launch stamped last at or before
+  the job's end: a Composer job name is the same for every launch of a
+  model, so the job's padded window can hold another launch's rows under
+  it, and `launched_at` is stamped before the job runs (after the job was
+  created on a Flex launch, just before it on a direct submission). No
+  launch stamped by then: the latest one, with a note. Another launch's
+  rows are dropped with a note naming them."""
+  named = [r for r in runs if not r.job_id]
+  launches = {r.launch_run_id or "" for r in named}
+  own = {r.launch_run_id or "" for r in runs if r.job_id}
+  if not named or (len(launches) == 1 and (not own or launches <= own)):
+    return runs
+  why = "its rows that recorded the job id name it"
+  if not own:
+    # per launch: (the latest launched_at it states, its latest row)
+    stamps: dict[str, tuple[datetime | None, str]] = {}
+    for r in named:
+      when, created = stamps.get(r.launch_run_id or "", (None, ""))
+      stamped = _moment(r.launched_at)
+      if stamped is not None and (when is None or stamped > when):
+        when = stamped
+      stamps[r.launch_run_id or ""] = (when, max(created, r.created_at or ""))
+    bound = _moment(end)
+    before = [
+        launch for launch, (when, _) in stamps.items()
+        if when is not None and bound is not None and when <= bound
+    ]
+    floor = datetime.min.replace(tzinfo=UTC)
+    pick = max(
+        before or stamps,
+        key=lambda launch: (stamps[launch][0] or floor, stamps[launch][1]))
+    own = {pick}
+    if before:
+      why = f"the last launched at or before the job's end, {end}"
+    elif bound is None:
+      why = "the job's end is unknown, so the latest is taken"
+    else:
+      why = (f"no launch states it was launched at or before the job's end, "
+             f"{end}, so the latest is taken")
+  dropped = sorted(
+      r.run_id for r in named if (r.launch_run_id or "") not in own)
+  if dropped:
+    kept = ", ".join(sorted(own))
+    notes.append(f"validation_runs rows of another launch under the job name "
+                 f"{job_name!r}, without a job id, were ignored: {dropped} — "
+                 f"a Composer job name is the same for every launch of a "
+                 f"model; the record is the job's own launch's, {kept} "
+                 f"({why})")
+  return [r for r in runs if r.job_id or (r.launch_run_id or "") in own]
+
+
+def job_record(*,
+               bq: Any,
+               session_factory: Callable[[str], Any],
+               project: str,
+               region: str,
+               job_id: str,
+               validation_runs_table: str,
+               notes: list[str] | None = None) -> GenerationRecord | None:
+  """The generation record of one Dataflow job (ADR 0044), for the seed
+  path, whose caller has not named its tables yet: the job's window and
+  name, then its own `validation_runs` rows (`runs_of_job`), of its own
+  launch (`_own_launch`). None when the job, the window or the table cannot
+  be read, or the rows carry no snapshot — never raises; the job-only
+  resolution reads both again and reports those failures. A job or table
+  that could not be read, and another launch's rows under the job's name,
+  are each a sentence in `notes` (final review M4, I2)."""
+  notes = notes if notes is not None else []
+
+  def unread(what: str, exc: Exception) -> None:
+    notes.append(f"the generation record of Dataflow job {job_id} could not "
+                 f"be read ({what} could not be read: {exc}): the seed's "
+                 "tables and the given inputs are evaluated (ADR 0044)")
+
+  try:
+    jobs = DataflowJobs(session_factory(project), project, region)
+    job = jobs.get(job_id)
+  except _JOB_READ_ERRORS as exc:
+    unread("the job", exc)
+    return None
+  dataset, _, name = _dotted(validation_runs_table).rpartition(".")
+  job_name = _text(job.get("name"))
+  window = jobs.window(job)
+  try:
+    runs = [
+        RunRecord.from_row(r) for r in runs_of_job(
+            bq,
+            quality_dataset=dataset,
+            table_name=name,
+            job_id=job_id,
+            job_name=job_name,
+            window=window)
+    ]
+  except _BQ_SOURCE_ERRORS as exc:
+    unread(validation_runs_table, exc)
+    return None
+  return record_of(_own_launch(runs, job_name, window[1], notes))
 
 
 def resolve_launch(*,
@@ -901,7 +1397,8 @@ def resolve_launch(*,
   BigQuery JOBS labels (tables written, windows, rows) → `validation_runs`
   (run ids, digests, valid counts; matched by landing table and by the
   launch's run-id base) → `manual`; assembled by
-  `LaunchContext.from_sources`, which records `params_source`. Every
+  `LaunchContext.from_sources`, which fills the params record-first (the
+  module docstring) and records `params_source`. Every
   BigQuery source failure (403, 404, 400, 5xx) degrades to a warning.
 
   Args:
@@ -918,10 +1415,12 @@ def resolve_launch(*,
       JOBS labels, not even as calls that may fail — and take everything
       else from `manual`. The one exception: with `validation_runs_table`
       in the manual params and the window known, this launch's rows of that
-      table are read (one query) for the reference digests. A job that
-      cannot be read is a warning and no window (and no `validation_runs`
-      read). Needs `job_id` and tables in `manual`; `params_source` is
-      then `manual`.
+      table are read (one query) for the reference digests and the
+      generation record, whose params come before `manual`'s (ADR 0044).
+      A job that cannot be read is a warning and no window (and no
+      `validation_runs` read). Needs `job_id` and tables in `manual`;
+      `params_source` is then `validation_runs` when the job's rows carry
+      a record, else `manual`.
 
   Raises:
     JobNotFoundError: the job is not in `region` (or past Dataflow's

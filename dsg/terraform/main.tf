@@ -207,6 +207,7 @@ export LANDING_DATASET=${local.landing_dataset}
 export QUALITY_DATASET=${local.quality_dataset}
 export RAG_DATASET=${local.rag_dataset}
 export RELATIONSHIPS_URI=${local.relationships_uri}
+export CONFIG_URI=${var.config_uri}
 export NUM_ROWS=${var.num_rows}
 
 export MAX_DATAFLOW_WORKERS=${local.max_dataflow_workers}

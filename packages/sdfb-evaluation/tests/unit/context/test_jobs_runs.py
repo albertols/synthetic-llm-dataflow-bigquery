@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
@@ -25,7 +26,14 @@ from sdfb_evaluation.context.jobs import (
     foreign_writes,
     writes_by_beam_job,
 )
-from sdfb_evaluation.context.runs import runs_for, split_run_id
+from sdfb_evaluation.context.runs import (
+    RECORD_READ_COLUMNS,
+    of_job,
+    rows_of_jobs,
+    runs_for,
+    runs_of_job,
+    split_run_id,
+)
 
 JOB_ID = "2026-09-13_06_10_16-9000000000000000017"
 WINDOW = ("2026-09-13T13:10:16.512345Z", "2026-09-13T14:02:41.118204Z")
@@ -266,3 +274,152 @@ def test_runs_for_by_base_alone(fake_bq):
   [(sql, params)] = bq.queries
   assert "landing_tables" not in params and "@landing_tables" not in sql
   assert "created_at" not in sql.split("WHERE", 1)[1].split("ORDER")[0]
+
+
+_QDS = "demo-project.synthetic_data_quality"
+_RUN = {
+    "run_id": "thelook-0913-a1b2c3-00-users",
+    "landing_table": f"{DS}.users",
+    "reference_table": "bigquery-public-data.thelook_ecommerce.users",
+    "reference_digest": "d" * 64,
+    "valid_count": 5000,
+    "num_rows_requested": 5000,
+    "status": "PASSED",
+    "created_at": "2026-09-13T13:41:02.000000Z",
+}
+_RECORD = {
+    "engine": "b1_rag",
+    "model_uri": "gs://b/synthetic/models/m/v1/",
+    "env": "dev",
+    "job_id": "job-1",
+    "job_name": "synthetic-sdfb-v0-6-1-m",
+    "launch_run_id": "thelook-0913-a1b2c3",
+    "generator_version": "0.6.1-master-edcfdcd",
+    "launched_at": "2026-09-13T13:10:00.000000Z",
+    "embedder_uri": "",
+    "retrieval_method": "centroid",
+    "similarity": 0.5,
+    "seed": "derived",
+    "source_stats": "sample",
+    "relationships_uri": "config/relationships",
+    "relationships_digest": "abcdefabcdef",
+    "config_digest": "0123456789ab",
+    "config": json.dumps({
+        "config_version": 1,
+        "values": {}
+    }),
+}
+
+
+def test_runs_for_selects_star_and_reads_the_record(fake_bq):
+  bq = fake_bq(responses=[("validation_runs", [{**_RUN, **_RECORD}])])
+  (row,) = runs_for(
+      bq, quality_dataset=_QDS, landing_tables=[f"{DS}.users"], window=WINDOW)
+  ((sql, _),) = bq.queries
+  assert sql.startswith("SELECT *\n")
+  assert len(RECORD_READ_COLUMNS) == 17
+  for column in RECORD_READ_COLUMNS:
+    assert row[column] == _RECORD[column], column
+
+
+def test_a_row_without_the_record_reads_none(fake_bq):
+  bq = fake_bq(responses=[("validation_runs", [_RUN])])
+  (row,) = runs_for(
+      bq, quality_dataset=_QDS, landing_tables=[f"{DS}.users"], window=WINDOW)
+  assert all(row[c] is None for c in RECORD_READ_COLUMNS)
+  assert row["valid_count"] == 5000
+
+
+def test_runs_of_job_matches_the_id(fake_bq):
+  other = {**_RUN, **_RECORD, "run_id": "other-00-users", "job_id": "job-2"}
+  bq = fake_bq(responses=[("validation_runs", [{**_RUN, **_RECORD}, other])])
+  rows = runs_of_job(
+      bq,
+      quality_dataset=_QDS,
+      job_id="job-1",
+      job_name="synthetic-sdfb-v0-6-1-m",
+      window=WINDOW)
+  assert [r["run_id"] for r in rows] == [_RUN["run_id"]]
+  ((sql, params),) = bq.queries
+  assert "created_at >= @start AND created_at <= @end" in sql
+  assert "landing_tables" not in params and "base" not in params
+
+
+def test_runs_of_job_matches_the_name_when_the_id_is_missing(fake_bq):
+  nameless = {**_RUN, **_RECORD, "job_id": None}
+  bq = fake_bq(responses=[("validation_runs", [nameless])])
+  assert runs_of_job(
+      bq,
+      quality_dataset=_QDS,
+      job_id="job-1",
+      job_name="synthetic-sdfb-v0-6-1-m",
+      window=WINDOW)
+  assert not runs_of_job(
+      bq,
+      quality_dataset=_QDS,
+      job_id="job-1",
+      job_name="another-name",
+      window=WINDOW)
+
+
+def test_runs_of_job_on_a_table_without_the_record_finds_nothing(fake_bq):
+  bq = fake_bq(responses=[("validation_runs", [_RUN])])
+  assert runs_of_job(
+      bq, quality_dataset=_QDS, job_id="job-1", job_name="n",
+      window=WINDOW) == []
+
+
+def test_runs_of_job_needs_both_window_bounds(fake_bq):
+  bq = fake_bq()
+  assert runs_of_job(
+      bq,
+      quality_dataset=_QDS,
+      job_id="job-1",
+      job_name="n",
+      window=(WINDOW[0], None)) == []
+  assert bq.queries == []
+
+
+@pytest.mark.parametrize(
+    "row_id,row_name,job_id,job_name,expected",
+    [
+        ("j1", "n1", "j1", "n1", True),
+        ("j1", "n1", "j2", "n1", False),  # an id that differs decides
+        (None, "n1", "j1", "n1", True),  # no id: the name
+        (None, "n1", "j1", "n2", False),
+        (None, None, "j1", "n1", False),
+        ("j1", None, None, None, False),
+    ])
+def test_of_job(row_id, row_name, job_id, job_name, expected):
+  assert of_job(row_id, row_name, job_id, job_name) is expected
+
+
+def test_rows_of_jobs_keeps_the_listed_jobs_rows():
+  rows = [{
+      "run_id": "B-b00-00-T_A",
+      "job_id": "job-0"
+  }, {
+      "run_id": "B-b01-00-T_B",
+      "job_id": "job-1"
+  }, {
+      "run_id": "B-b02-00-T_C",
+      "job_id": "job-2"
+  }]
+  notes: list[str] = []
+  kept = rows_of_jobs(rows, ["job-0", "job-1"], notes)
+  assert [r["run_id"] for r in kept] == ["B-b00-00-T_A", "B-b01-00-T_B"]
+  assert notes == [
+      "validation_runs rows of jobs not in generation_job_ids were not "
+      "evaluated: ['B-b02-00-T_C']"
+  ]
+
+
+def test_rows_without_a_job_id_are_kept_with_a_note():
+  rows = [{"run_id": "B-b00-00-T_A", "job_id": None}]
+  notes: list[str] = []
+  assert rows_of_jobs(rows, ["job-0"], notes) == rows
+  assert notes == [
+      "validation_runs rows that carry no job id were evaluated (nothing "
+      "says which job wrote them; they may include batches not listed in "
+      "--generation_job_ids): ['B-b00-00-T_A']"
+  ]

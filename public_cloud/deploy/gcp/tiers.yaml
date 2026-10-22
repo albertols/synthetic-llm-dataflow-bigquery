@@ -37,6 +37,7 @@ defaults:
     vllm_dtype: float16        # T4 requirement for the bf16 qwen3 checkpoint
     vllm_max_model_len: "8192" # KV-cache cap — REQUIRED on T4 (RUN_PLAYBOOK)
     seed: ""
+    # config_uri: "gs://{MODELS_BUCKET}/synthetic/config/personal.yaml"  # generator config file (ADR 0043); omitted = none
     model_uri: "gs://{MODELS_BUCKET}/synthetic/models/qwen3/4b-instruct-2507/v1/"
     embedder_uri: "gs://{MODELS_BUCKET}/synthetic/models/embedders/bge-small-en-v1.5/v1/"
     dlq_table: "{PROJECT_ID}.synthetic_data_quality.dlq"

@@ -100,6 +100,12 @@ variable "num_rows" {
   default     = 1000
 }
 
+variable "config_uri" {
+  description = "gs:// path to a generator config YAML (ADR 0043); empty = none."
+  type        = string
+  default     = ""
+}
+
 variable "launch_job" {
   description = "Launch the generation job from Terraform (google_dataflow_flex_template_job) instead of scripts/04_run_dataflow.sh. Needs the image, the weights and the template spec first (scripts 01-03). A finished batch job is launched again on the next apply while this stays true."
   type        = bool

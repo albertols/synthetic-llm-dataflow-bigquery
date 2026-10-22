@@ -19,10 +19,21 @@ import { KnobControl } from "./KnobControl";
 
 const ALL = "all";
 
-/** Phones start on one channel (every knob is a long scroll at 390 px); wider screens see the whole console. */
+/** How a job runs, not what it generates: a phone does not open on them. */
+const LAUNCH_JACKS = new Set(["io", "launch"]);
+
+/**
+ * Phones start on one channel (every knob is a long scroll at 390 px): the first generation channel
+ * with a knob to turn, past the IO and launch jacks that lead the list (launch has dials since
+ * ADR 0045, K and the thread counts). Wider screens see the whole console.
+ */
 function defaultChannel(): string {
   const narrow = typeof window !== "undefined" && window.matchMedia?.("(max-width: 639px)").matches;
-  return narrow ? (CHANNELS[0]?.id ?? ALL) : ALL;
+  if (!narrow) return ALL;
+  const turnable = CHANNELS.find(
+    (c) => !LAUNCH_JACKS.has(c.id) && channelKnobs(c.id).some((k) => ["dial", "selector"].includes(kindOf(k))),
+  );
+  return (turnable ?? CHANNELS[0])?.id ?? ALL;
 }
 
 export function AmpPanel({
@@ -33,7 +44,7 @@ export function AmpPanel({
   onOpenKnob: (id: string) => void;
   /**
    * A channel id to show first (a deep link: `/config?section=amp&channel=free_text`);
-   * an unknown id falls back to "all" on wide screens, the first channel on phones.
+   * an unknown id falls back to "all" on wide screens, the first turnable channel on phones.
    */
   initialChannel?: string;
   /** The channel the reader picks (the page keeps it in the URL, and the panel follows the URL back). */
@@ -123,7 +134,8 @@ export function AmpPanel({
         </div>
         <p className="text-xs text-text-3">
           Turn a dial: focus it, then arrows, Page Up/Down, Home/End — or drag it with a mouse. Enter or a click opens
-          its sheet. Screws are code constants and do not turn.
+          its sheet. Screws do not turn: they are set in a config file (--config_uri) or, for the few fixed ones, in
+          code.
         </p>
       </div>
 

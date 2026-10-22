@@ -75,9 +75,9 @@ LAST_POOL_MIN = 64.2
 # 42 INT64 + 3 TIMESTAMP + 1 DATE + 21 STRING, ~10k observed values each.
 #   _numeric_numpy     rebuilds a listcomp+predicate per call  (~150 ns/item)
 #   _temporal_numpy    memoizes the LIST but re-runs np.asarray (~20 ns/item)
-#   _categorical_numpy rebuilds probs, but `categories` is CAPPED at 50 in
-#                      profile.py (_FREE_TEXT_MAX_CATEGORIES), so it is bounded
-#                      and deliberately left alone.
+#   _categorical_numpy rebuilds probs, but `categories` is CAPPED at 50 by
+#                      the config key free_text.free_text_max_categories, so
+#                      it is bounded and deliberately left alone.
 N_ROWS = 1_000_000
 N_OBSERVED = 10_000
 N_NUMERIC_COLS, NS_PER_ITEM = 42, 150e-9

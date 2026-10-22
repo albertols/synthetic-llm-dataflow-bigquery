@@ -146,6 +146,7 @@ function KnobSheetBody({ knob: k }: { knob: Knob }) {
           {k.cli_flag ? <Flag label="Launcher flag" value={k.cli_flag} /> : null}
           {k.composer_param ? <Flag label="Composer param" value={k.composer_param} /> : null}
           {k.flex_param ? <Flag label="Flex Template param" value={k.flex_param} /> : null}
+          {k.config_key ? <Flag label="Config file" value={k.config_key} /> : null}
         </ul>
       </Section>
 

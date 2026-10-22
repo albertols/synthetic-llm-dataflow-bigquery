@@ -26,8 +26,8 @@ a shared-file merge conflict with B.1; consolidate to a shared
 Pure Python + NumPy only — no Beam, no GCP, no torch, no sdgx. Importing
 this module must succeed with only ``sdfb-core``'s base deps present.
 
-Design: docs/DESIGN.md §2 Engines; §5 Fidelity
-(ADR 0013, 0022, 0024, 0025).
+Design: docs/DESIGN.md §2 Engines; §5 Fidelity; §8 Configuration
+(ADR 0013, 0022, 0024, 0025, 0043).
 """
 
 from __future__ import annotations
@@ -41,6 +41,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from typing import Any, cast
 
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts.prompt_constraint import (
     parse_prompt_constraint,
     render_prompt_clause,
@@ -74,8 +75,9 @@ _FREE_TEXT_MIN_LEN = 40  # mean string length above this ⇒ likely prose
 # observed range, genuinely high-cardinality strings go to the LLM hook.
 #
 # The temporal cap mirrors b1_rag/profile.py's `_TEMPORAL_MAX_CATEGORIES`
-# (20). The STRING cap mirrors b1's `_FREE_TEXT_MAX_CATEGORIES` (50), NOT
-# the numeric/temporal 20: WS1 originally set 20 here, which routed
+# (20). The STRING cap mirrors the default of b1's config key
+# `free_text.free_text_max_categories` (50), NOT the numeric/temporal 20:
+# WS1 originally set 20 here, which routed
 # mid-cardinality enums (COL_901, 41 distinct) to the LLM — a
 # saturated domain the model cannot generate novel values for, so under
 # strict_freetext every batch died on FreeTextEmptyYieldError and the
@@ -94,15 +96,13 @@ _TEMPORAL_BQ_TYPES = frozenset({"DATE", "DATETIME", "TIME", "TIMESTAMP"})
 _TEMPORAL_SENTINEL_YEARS = frozenset({1, 9999})
 
 # Interim temporal-age policy (2026-07-23): generated dates/datetimes/
-# timestamps must not be older than this. The jitter floor becomes
-# max(observed_min, now - 10y); columns whose ENTIRE observed range is older
-# keep it unchanged (fabricated recent dates would be worse than old truth).
-# EXPLICITLY interim: per-column behavior will later come from the DDL-JSON
-# description (audit fields that must keep fixed/consistent values, FK
-# referential integrity across linked tables, M2+) and must override this
-# blanket constant — keep the policy a single constant + clamp, not a
-# config surface, until that metadata exists.
-_MAX_TEMPORAL_AGE_YEARS = 10
+# timestamps must not be older than `generation.temporal_max_age_years_b2`
+# (ADR 0043). The jitter floor becomes max(observed_min, now - that many
+# years); columns whose ENTIRE observed range is older keep it unchanged
+# (fabricated recent dates would be worse than old truth). EXPLICITLY
+# interim: per-column behavior will later come from the DDL-JSON description
+# (audit fields that must keep fixed/consistent values, FK referential
+# integrity across linked tables, M2+) and must override this blanket value.
 
 # Control-character guard (WS1 §3c): values containing C0/C1 control bytes
 # in a STRING column usually mean binary data mis-declared upstream
@@ -300,6 +300,7 @@ def _temporal_profile(
     non_null: list[object],
     nullable: bool,
     null_fraction: float,
+    max_age_years: int = DEFAULT_CONFIG.generation.temporal_max_age_years_b2,
 ) -> ColumnProfile | None:
   """The TEMPORAL profile for a column, or None when the observed values
     are mixed/unparseable (caller demotes to CATEGORICAL).
@@ -307,7 +308,7 @@ def _temporal_profile(
     Sentinel-year values are split out of the jitter range (re-injected at
     sampling time at their observed fraction); a column that is ALL
     sentinel years has nothing to trim toward and keeps the observed range.
-    The floor is then clamped to now - `_MAX_TEMPORAL_AGE_YEARS` — unless
+    The floor is then clamped to now - ``max_age_years`` — unless
     the whole range is older (fully-historical columns keep old truth;
     per-column DDL-JSON descriptions govern later).
     """
@@ -332,13 +333,13 @@ def _temporal_profile(
       (v, count / total_non_null) for v, count in sentinel_counts.items())
   ordered = sorted(epochs)
   lo, hi = ordered[0], ordered[-1]
-  floor = age_floor_epoch(value_type, fmt, _MAX_TEMPORAL_AGE_YEARS)
+  floor = age_floor_epoch(value_type, fmt, max_age_years)
   if floor is not None and lo < floor <= hi:
     lo = floor
     log_milestone(
         "temporal_range_clamped",
         column=field.name,
-        max_age_years=_MAX_TEMPORAL_AGE_YEARS,
+        max_age_years=max_age_years,
     )
   # Quantile points below the clamp floor collapse onto it — same
   # semantics as the [minimum, maximum] clamp, applied to the CDF vector.
@@ -358,8 +359,11 @@ def _temporal_profile(
   )
 
 
-def profile_column(field: FieldSchema,
-                   reference_rows: list[dict]) -> ColumnProfile:
+def profile_column(
+    field: FieldSchema,
+    reference_rows: list[dict],
+    max_age_years: int = DEFAULT_CONFIG.generation.temporal_max_age_years_b2,
+) -> ColumnProfile:
   """Profile a single column over the reference rows (the O(1) fit step)."""
   raw = _column_values(reference_rows, field.name)
   non_null = _non_null(raw)
@@ -442,7 +446,8 @@ def profile_column(field: FieldSchema,
     )
 
   if kind is ColumnKind.TEMPORAL:
-    profile = _temporal_profile(field, substantive, nullable, null_fraction)
+    profile = _temporal_profile(field, substantive, nullable, null_fraction,
+                                max_age_years)
     if profile is not None:
       return profile
     # BQ-typed temporal whose observed values are mixed/unparseable:
@@ -502,13 +507,18 @@ def _dedupe_stable(items: list) -> list:
   return out
 
 
-def profile_table(ctx_schema: TableSchema,
-                  reference_rows: list[dict]) -> dict[str, ColumnProfile]:
+def profile_table(
+    ctx_schema: TableSchema,
+    reference_rows: list[dict],
+    *,
+    max_age_years: int = DEFAULT_CONFIG.generation.temporal_max_age_years_b2,
+) -> dict[str, ColumnProfile]:
   """Profile every top-level column. STRUCT/REPEATED columns are profiled
     as a single free-text/categorical unit over their serialized form;
     nested decomposition is out of M1 scope (single-table, §4)."""
   return {
-      col.name: profile_column(col, reference_rows) for col in ctx_schema.columns
+      col.name: profile_column(col, reference_rows, max_age_years)
+      for col in ctx_schema.columns
   }
 
 

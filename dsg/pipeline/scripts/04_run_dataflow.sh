@@ -68,6 +68,10 @@ PARAMS=(
   "env=dev"
 )
 # `^~^` switches gcloud's list delimiter from ',' to '~' (gcloud topic escaping).
+# Optional generator config file (ADR 0043): passed only when CONFIG_URI is set.
+if [[ -n "${CONFIG_URI:-}" ]]; then
+  PARAMS+=("config_uri=${CONFIG_URI}")
+fi
 JOINED="$(IFS='~'; echo "${PARAMS[*]}")"
 
 gcloud dataflow flex-template run "sdfb-${RUN_ID}" \

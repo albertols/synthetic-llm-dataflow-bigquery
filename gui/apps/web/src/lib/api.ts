@@ -16,7 +16,7 @@
  *   const { data, isPending, error } = useEvaluations({ engine: ["b1_rag"], limit: 50 });
  *   data?.data.items; data?.bytesEstimate;
  */
-import { keepPreviousData, queryOptions, useQuery } from "@tanstack/react-query";
+import { keepPreviousData, queryOptions, useQueries, useQuery } from "@tanstack/react-query";
 
 import type {
   ChunkMeta,
@@ -44,6 +44,7 @@ import type {
 } from "@contracts/api";
 import type { CatalogueMetric } from "@contracts/generated/catalogue";
 import type { KnobsFile } from "@contracts/knobs";
+import type { GenerationRecord } from "@contracts/record";
 import { decodeVectorEnvelope, type VectorEnvelope } from "@contracts/vectors";
 
 export interface ApiResult<T> {
@@ -145,6 +146,9 @@ export const api = {
   /** ADR 0038: each generated table joined to its `validation_runs` row, with the generator's verdict on its key. */
   adjustments: (id: string, signal?: AbortSignal) =>
     getJson<EvaluationAdjustments>(`/evaluations/${encodeURIComponent(id)}/adjustments`, undefined, signal),
+  /** ADR 0044: the generation record of the evaluation's launch, read from `validation_runs`. */
+  record: (id: string, signal?: AbortSignal) =>
+    getJson<GenerationRecord>(`/evaluations/${encodeURIComponent(id)}/record`, undefined, signal),
   compare: (ids: readonly string[], signal?: AbortSignal) => getJson<Comparison>("/compare", { ids }, signal),
   trend: (query: TrendQuery, signal?: AbortSignal) => getJson<TrendPoint[]>("/trend", query, signal),
   runs: (filter: RunFilter = {}, signal?: AbortSignal) => getJson<ValidationRun[]>("/runs", filter, signal),
@@ -177,6 +181,7 @@ export const queryKeys = {
   evaluation: (id: string, profiles: "all" | "none") => ["api", "evaluation", id, profiles] as const,
   profiles: (id: string, query: ProfileQuery) => ["api", "profiles", id, query] as const,
   adjustments: (id: string) => ["api", "adjustments", id] as const,
+  record: (id: string) => ["api", "record", id] as const,
   compare: (ids: readonly string[]) => ["api", "compare", [...ids]] as const,
   trend: (query: TrendQuery) => ["api", "trend", query] as const,
   runs: (filter: RunFilter) => ["api", "runs", filter] as const,
@@ -243,6 +248,27 @@ export function useEvaluationAdjustments(id: string | undefined) {
     queryFn: ({ signal }) => api.adjustments(id!, signal),
     enabled: !!id,
     retry: false,
+  });
+}
+
+/** The generation record (ADR 0044). Its own request, not retried: a failure leaves the panel saying so. */
+export function useEvaluationRecord(id: string | undefined) {
+  return useQuery({
+    queryKey: queryKeys.record(id ?? ""),
+    queryFn: ({ signal }) => api.record(id!, signal),
+    enabled: !!id,
+    retry: false,
+  });
+}
+
+/** One record per compared evaluation, in the order given. */
+export function useEvaluationRecords(ids: readonly string[]) {
+  return useQueries({
+    queries: ids.map((id) => ({
+      queryKey: queryKeys.record(id),
+      queryFn: ({ signal }: { signal: AbortSignal }) => api.record(id, signal),
+      retry: false,
+    })),
   });
 }
 

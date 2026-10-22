@@ -219,6 +219,24 @@ export const ADRS: readonly AdrRef[] = [
     title: "A self-hosted GUI; managed dashboards stay out",
     file: "0042-self-hosted-platform-gui.md",
   },
+  {
+    number: "0043",
+    section: 8,
+    title: "Generator config: a typed model, a catalogue, file wins",
+    file: "0043-generator-config.md",
+  },
+  {
+    number: "0044",
+    section: 7,
+    title: "The generation record",
+    file: "0044-generation-record.md",
+  },
+  {
+    number: "0045",
+    section: 4,
+    title: "Whole-model launches",
+    file: "0045-whole-model-launches.md",
+  },
 ];
 
 const BY_NUMBER = new Map(ADRS.map((adr) => [adr.number, adr]));

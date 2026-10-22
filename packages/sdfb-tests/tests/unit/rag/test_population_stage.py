@@ -202,7 +202,7 @@ def test_embed_dofn_localizes_a_gcs_embedder_before_building_it(monkeypatch):
 
   class _SpyEmbedder:
 
-    def __init__(self, uri, device="auto"):
+    def __init__(self, uri, device="auto", **_config):
       pulled["built_from"] = uri
 
   monkeypatch.setattr(gcs_mod, "localize_gcs_prefix", _fake_pull)

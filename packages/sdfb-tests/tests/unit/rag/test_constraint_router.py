@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import re
 
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationContext
 from sdfb_core.engines.b1_rag import B1RagEngine, HashingEmbedder
@@ -124,8 +125,8 @@ class TestTierPattern:
     rx = re.compile(C2E_PATTERN)
     values = [r.model_dump()["KEY"] for r in out]
     assert all(rx.fullmatch(v) for v in values)
-    # Unbounded: distinct far beyond _FREE_TEXT_POOL_MAX (512).
-    assert len(set(values)) > 512
+    # Unbounded: distinct far beyond free_text.free_text_pool_max.
+    assert len(set(values)) > DEFAULT_CONFIG.free_text.free_text_pool_max
 
   def test_draws_reject_observed_source_values(self, caplog) -> None:
     rows = self._rows()

@@ -6,7 +6,7 @@
  *   dial      settable number → a rotary knob (the GUI's what-if range)
  *   selector  settable with choices → a stepped rotary switch
  *   port      settable free-form value (a URI, a flag string) → a jack, not turnable here
- *   screw     constant → a fixed screw (a code edit changes it)
+ *   screw     constant, or a setting only a config file sets → a fixed screw (no flag turns it)
  *   readout   derived → an LED readout
  */
 import type { Knob, KnobChannel, KnobValue } from "@contracts/knobs";
@@ -57,6 +57,7 @@ export function measured(id: string) {
   return found;
 }
 
+/** Settable by a launch flag or param (a config file key alone does not count: nothing on the amp turns it). */
 export function isSettable(k: Knob): boolean {
   return k.settable_via.some((via) => via === "cli" || via === "composer" || via === "flex");
 }
@@ -91,6 +92,7 @@ export function choicesOf(k: Knob): string[] | null {
 export function kindOf(k: Knob): KnobKind {
   if (k.settable_via.includes("constant")) return "screw";
   if (k.settable_via.includes("derived")) return "readout";
+  // Set only in a config file (settable_via ["config"]): a screw too, whose sheet names the key.
   if (!isSettable(k)) return "screw";
   if (DIAL_STEPS[k.id]) return "dial";
   if (choicesOf(k)) return "selector";
@@ -168,6 +170,7 @@ export const SETTABLE_LABEL: Readonly<Record<string, string>> = {
   cli: "CLI",
   composer: "Composer",
   flex: "Flex",
+  config: "Config",
   constant: "Constant",
   derived: "Derived",
 };

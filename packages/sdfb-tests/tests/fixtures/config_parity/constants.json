@@ -1,0 +1,33 @@
+{
+  "embedder_min_free_vram": 536870912,
+  "fk_key_sample_ceiling": 1000000,
+  "fk_key_sample_floor": 100000,
+  "fk_key_sample_margin": 10,
+  "free_text_max_categories": 50,
+  "free_text_min_mean_len": 20,
+  "free_text_pool_max": 512,
+  "free_text_unique_ratio": 0.9,
+  "length_percentiles": [
+    0.05,
+    0.5,
+    0.95
+  ],
+  "max_conditional_values_per_request": 100000,
+  "max_free_text_values_per_column": 1024,
+  "null_pattern_max_cols": 64,
+  "null_pattern_top_k": 8,
+  "pool_build_max_workers": 4,
+  "pool_format_collapse_rounds": 2,
+  "pool_parallel_choices": 4,
+  "pool_stagnation_min_novel": 4,
+  "pool_stagnation_window": 3,
+  "pool_values_per_call": 32,
+  "rag_top_k": 8,
+  "repeat_share_tolerance": 0.05,
+  "shape_mix_top_k": 8,
+  "source_domain_cap": 1000000,
+  "temporal_max_age_years_b1": 10,
+  "temporal_max_age_years_b2": 10,
+  "top_values_max_distinct": 50,
+  "top_values_top_k": 8
+}

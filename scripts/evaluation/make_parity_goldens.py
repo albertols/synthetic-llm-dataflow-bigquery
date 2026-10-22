@@ -64,6 +64,7 @@ _MODEL_FILES = (
     "example_retail",
     "example_star_diamond",
     "gcp_public_fk_example",
+    "example_isolated_forest",
 )
 _OUTPUT = (
     _ROOT / "packages" / "sdfb-evaluation" / "tests" / "fixtures" / "parity" /
@@ -98,7 +99,7 @@ _INVENTED_WIDENING_YAML = ("model: invented_widening\n"
                            "        ref: G\n"
                            "        ref_cols: [G2]\n")
 
-# 25 invented YAML texts (or source SETS, for the cross-file checks)
+# 40 invented YAML texts (or source SETS, for the cross-file checks)
 # pinning `parse_model`/`load_models` strictness against the originals'
 # pydantic models and `RelationshipRegistry.from_sources` (R47).
 _PARSE_CASES: tuple[tuple[str, list[tuple[str, str]]], ...] = (
@@ -156,6 +157,46 @@ _PARSE_CASES: tuple[tuple[str, list[tuple[str, str]]], ...] = (
        "        ref: B\n        ref_cols: [X]\n"
        "  B:\n    fk:\n      - cols: [X]\n"
        "        ref: A\n        ref_cols: [X]\n")]),
+    # ADR 0045 -- the two per-table launch keys, strict on both sides.
+    ("source_table_two_parts",
+     [("a.yaml", "model: m\ntables:\n  A:\n    source_table: ds.A_V2\n")]),
+    ("source_table_three_parts",
+     [("a.yaml", "model: m\ntables:\n  A:\n    source_table: p-1.ds.A_V2\n")]),
+    ("source_table_one_part_invalid",
+     [("a.yaml", "model: m\ntables:\n  A:\n    source_table: A_V2\n")]),
+    ("source_table_four_parts_invalid",
+     [("a.yaml", "model: m\ntables:\n  A:\n    source_table: a.b.c.d\n")]),
+    ("source_table_int_invalid",
+     [("a.yaml", "model: m\ntables:\n  A:\n    source_table: 7\n")]),
+    ("source_table_null",
+     [("a.yaml", "model: m\ntables:\n  A:\n    source_table: null\n")]),
+    ("num_rows_int", [("a.yaml",
+                       "model: m\ntables:\n  A:\n    num_rows: 5000\n")]),
+    ("num_rows_zero_invalid", [("a.yaml",
+                                "model: m\ntables:\n  A:\n    num_rows: 0\n")]),
+    ("num_rows_bool_invalid",
+     [("a.yaml", "model: m\ntables:\n  A:\n    num_rows: true\n")]),
+    ("num_rows_string_invalid",
+     [("a.yaml", "model: m\ntables:\n  A:\n    num_rows: '5000'\n")]),
+    ("num_rows_float_invalid",
+     [("a.yaml", "model: m\ntables:\n  A:\n    num_rows: 5000.0\n")]),
+    ("num_rows_on_driven_child_invalid",
+     [("a.yaml",
+       "model: m\ntables:\n  P:\n    pk: [P1]\n  C:\n    num_rows: 9\n"
+       "    fk:\n      - cols: [P1]\n        ref: P\n        ref_cols: [P1]\n")
+     ]),
+    ("num_rows_on_documented_child",
+     [("a.yaml",
+       "model: m\ntables:\n  P:\n    pk: [P1]\n  C:\n    num_rows: 9\n"
+       "    fk:\n      - cols: [P1]\n        ref: P\n        ref_cols: [P1]\n"
+       "        enforced: false\n")]),
+    ("num_rows_on_child_of_disabled_parent",
+     [("a.yaml", "model: m\ntables:\n  P:\n    pk: [P1]\n    enabled: false\n"
+       "  C:\n    num_rows: 9\n    fk:\n      - cols: [P1]\n        ref: P\n"
+       "        ref_cols: [P1]\n")]),
+    ("num_rows_on_external_child",
+     [("a.yaml", "model: m\ntables:\n  C:\n    num_rows: 9\n    fk:\n"
+       "      - cols: [P1]\n        ref: ds.P\n        ref_cols: [P1]\n")]),
 )
 
 # One path per `is_sample_model` rule: `example_*`, `*.example.*`,
