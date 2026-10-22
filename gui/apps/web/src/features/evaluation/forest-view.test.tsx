@@ -149,3 +149,88 @@ describe("a forest of isolated tables (ADR 0036)", () => {
     expect(screen.getByText(/160 not applicable \(no key declared\)/)).toBeInTheDocument();
   });
 });
+
+const stat = (card: HTMLElement, label: string) => card.querySelector<HTMLElement>(`[data-stat="${label}"]`)!;
+/** A numeric stat is asserted on its own `dd`, exactly: "0" would also match "10" by substring. */
+const statValue = (card: HTMLElement, label: string) => stat(card, label).querySelector("dd")!;
+
+function servedForest(enabledOf = 120) {
+  return {
+    model: "isolated_forest_demo",
+    description: "",
+    source: "",
+    sha12: "f0f0f0f0f0f0",
+    generation_order: [],
+    origin: "mock",
+    tables: Array.from({ length: 125 }, (_, k) => ({
+      name: `T_${String(k + 1).padStart(3, "0")}`,
+      pk: [],
+      identity: [],
+      enabled: k < enabledOf,
+      note: "",
+      fk: [],
+    })),
+  };
+}
+
+describe("the model summary card (ADR 0044, ADR 0045)", () => {
+  it("counts what the launch declared, links each batch job, and says where the counts come from", async () => {
+    stubForest();
+    renderAt(`/evaluation/${ID}`);
+    const card = await screen.findByRole("region", { name: "Model summary" });
+    expect(card).toHaveTextContent("isolated_forest_demo");
+    expect(card).toHaveTextContent("sha12 f0f0f0f0f0f0");
+    expect(card).toHaveTextContent("from the generation record (ADR 0044)");
+    expect(statValue(card, "Tables")).toHaveTextContent(/^120$/);
+    expect(stat(card, "Tables")).toHaveTextContent("disabled: not recorded");
+    expect(statValue(card, "Primary key")).toHaveTextContent(/^80 declared$/);
+    expect(stat(card, "Primary key")).toHaveTextContent("40 none");
+    expect(statValue(card, "Edges")).toHaveTextContent(/^0$/);
+    expect(statValue(card, "Isolated")).toHaveTextContent(/^120$/);
+    expect(statValue(card, "Source overrides")).toHaveTextContent(/^6$/);
+    expect(statValue(card, "Batch jobs")).toHaveTextContent(/^12$/);
+    const links = within(within(card).getByRole("list", { name: "Batch jobs" })).getAllByRole("link");
+    expect(links).toHaveLength(12);
+    expect(links[3]).toHaveAccessibleName(/^b03/);
+    expect(links[3]).toHaveAttribute("href", expect.stringContaining("/dataflow/jobs/europe-west3/"));
+    expect(links[3]).toHaveAttribute("href", expect.stringContaining("project=demo-project"));
+  });
+
+  it("counts disabled tables when the whole model is served", async () => {
+    stubForest(forestDetail(), forestRecord(), [servedForest()]);
+    renderAt(`/evaluation/${ID}`);
+    const card = await screen.findByRole("region", { name: "Model summary" });
+    await waitFor(() => expect(stat(card, "Tables")).toHaveTextContent("of 125 declared · 5 disabled"));
+  });
+
+  it("without a record it says it reads the registry, and shows no source overrides", async () => {
+    stubForest(forestDetail(), null);
+    renderAt(`/evaluation/${ID}`);
+    const card = await screen.findByRole("region", { name: "Model summary" });
+    expect(card).toHaveTextContent("from the registry and the metric rows");
+    expect(statValue(card, "Source overrides")).toHaveTextContent(/^—$/);
+  });
+
+  it("the Relational tab says why it has nothing to draw", async () => {
+    stubForest();
+    renderAt(`/evaluation/${ID}?tab=relational`);
+    expect(
+      await screen.findByRole("heading", { name: "Isolated tables — no relationships declared" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("Integrity is scored per table: columns, row count, keys where declared."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("No relationship metrics")).toBeNull();
+  });
+});
+
+describe("the Generator panel's relationships card (ADR 0044)", () => {
+  it("lists every table the launch declared, not only batch 0's snapshot", async () => {
+    stubForest();
+    renderAt(`/evaluation/${ID}?tab=params`);
+    const card = (await screen.findByText("120 tables · 12 batch jobs")).closest('[data-slot="card"]') as HTMLElement;
+    expect(card).not.toBeNull();
+    expect(within(card).getAllByRole("listitem")).toHaveLength(120);
+    expect(within(card).getByText("T_120")).toBeInTheDocument();
+  });
+});

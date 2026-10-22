@@ -103,7 +103,14 @@ export function GeneratorPanel({
   const worker = record.worker_versions.join(", ");
   const launched = record.runs.find((r) => r.launched_at)?.launched_at ?? null;
   const model = isObject(snapshot.relationships) ? snapshot.relationships : null;
-  const tables = isObject(model?.tables) ? Object.entries(model.tables) : [];
+  // A batched launch's snapshot is batch 0's: the record's declared tables (ADR 0045) are the whole launch.
+  const tables: [string, { pk: string; fks: number }][] = record.declared_tables.length
+    ? record.declared_tables.map((t) => [t.name, { pk: t.pk.length ? t.pk.join(", ") : MISSING, fks: t.fk.length }])
+    : (isObject(model?.tables) ? Object.entries(model.tables) : []).map(([name, declaration]) => [
+        name,
+        tableSummary(declaration),
+      ]);
+  const batchJobs = record.batches.length;
 
   return (
     <section aria-label="Generator" className="grid gap-3">
@@ -194,9 +201,14 @@ export function GeneratorPanel({
                 {text(model.model) ?? MISSING} <span className="text-text-3">({text(model.sha12) ?? "no sha"})</span>
               </p>
               <p className="break-all text-text-2">{text(model.uri) ?? MISSING}</p>
+              {batchJobs ? (
+                <p className="text-text-1">
+                  {tables.length} table{tables.length === 1 ? "" : "s"} · {batchJobs} batch job
+                  {batchJobs === 1 ? "" : "s"}
+                </p>
+              ) : null}
               <ul className="grid">
-                {tables.map(([name, declaration]) => {
-                  const { pk, fks } = tableSummary(declaration);
+                {tables.map(([name, { pk, fks }]) => {
                   return (
                     <li key={name} className="flex flex-wrap gap-2 border-b border-border py-1 last:border-0">
                       <span className="text-text-1">{name}</span>

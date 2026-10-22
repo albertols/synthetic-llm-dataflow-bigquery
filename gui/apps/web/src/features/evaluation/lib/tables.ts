@@ -5,8 +5,9 @@
  * registry's run ids stand in. Pure functions (memoise them in components).
  */
 import { inapplicableKey } from "@contracts/applicability";
-import type { EvaluationDetail, MetricRow } from "@contracts/api";
-import type { DeclaredTable, GenerationRecord } from "@contracts/record";
+import type { EvaluationDetail, EvaluationRecord, MetricRow } from "@contracts/api";
+import type { DeclaredTable, GenerationRecord, RecordBatch } from "@contracts/record";
+import type { RelationshipModel } from "@contracts/relational";
 
 import { ZERO_TOLERANCE_IDS } from "./catalogue";
 import type { Graph } from "./graph";
@@ -110,4 +111,82 @@ export function tableFacts(input: {
     });
   }
   return out;
+}
+
+/** The card shows from this many tables (a one-table run has nothing to summarise). */
+export const SUMMARY_MIN_TABLES = 2;
+
+export interface ModelSummary {
+  model: string | null;
+  sha12: string | null;
+  /** "record": the launch's generation record (ADR 0044); "registry": the registry and the metric rows. */
+  source: "record" | "registry";
+  /** The tables the run generated (its facts). */
+  tables: number;
+  /** Tables and disabled tables of the whole model: only when the GUI can read it. */
+  declaredTotal: number | null;
+  disabled: number | null;
+  withPk: number;
+  withoutPk: number;
+  pkUnknown: number;
+  /** Foreign keys the graph draws. */
+  edges: number;
+  /** Tables with no foreign key. */
+  isolated: number;
+  /** Tables read from another source table (ADR 0045); null without a record. */
+  sourceOverrides: number | null;
+  /** Batch jobs the launch planned (`batch.count`); null for a launch in one job. */
+  batchCount: number | null;
+  /** The batch jobs whose rows were recorded. */
+  batches: readonly RecordBatch[];
+}
+
+export function modelSummary(input: {
+  evaluation: Pick<EvaluationRecord, "relationship_model" | "relationship_model_sha">;
+  record?: Pick<GenerationRecord, "snapshot" | "declared_tables" | "batches"> | null;
+  facts: readonly TableFacts[];
+  graph: Pick<Graph, "edges">;
+  model?: Pick<RelationshipModel, "sha12" | "tables"> | null;
+}): ModelSummary {
+  const { evaluation, record, facts, graph, model } = input;
+  const relationships = record?.snapshot?.relationships;
+  const recordedModel = typeof relationships?.model === "string" ? relationships.model : null;
+  const recordedSha = typeof relationships?.sha12 === "string" ? relationships.sha12 : null;
+  const sha12 = recordedSha ?? evaluation.relationship_model_sha;
+  const fromRecord = (record?.declared_tables.length ?? 0) > 0;
+  // A launch records only the tables it generated: disabled ones are known only from the whole model.
+  const whole = model && (sha12 === null || model.sha12 === sha12) ? model : null;
+  const batches = record?.batches ?? [];
+  return {
+    model: recordedModel ?? evaluation.relationship_model,
+    sha12,
+    source: fromRecord ? "record" : "registry",
+    tables: facts.length,
+    declaredTotal: whole ? whole.tables.length : null,
+    disabled: whole ? whole.tables.filter((t) => !t.enabled).length : null,
+    withPk: facts.filter((f) => f.pk === "declared").length,
+    withoutPk: facts.filter((f) => f.pk === "none").length,
+    pkUnknown: facts.filter((f) => f.pk === "unknown").length,
+    edges: graph.edges.length,
+    isolated: facts.filter((f) => f.degree === 0).length,
+    sourceOverrides: fromRecord ? facts.filter((f) => f.sourceOverride !== null).length : null,
+    batchCount: batches.length ? Math.max(...batches.map((b) => b.count)) : null,
+    batches,
+  };
+}
+
+/**
+ * The launch declared no foreign key between its tables (the zero-edge message): two or more tables,
+ * no edge drawn, and a model or the record drew the graph; or, without either, every registry role is
+ * `isolated` (the evaluator's tag for a table with no edge).
+ */
+export function declaresNoEdges(input: {
+  facts: readonly TableFacts[];
+  graph: Pick<Graph, "edges" | "resolvedFrom">;
+  evaluation: Pick<EvaluationRecord, "tables">;
+}): boolean {
+  if (input.facts.length < 2 || input.graph.edges.length > 0) return false;
+  if (input.graph.resolvedFrom !== "edges") return true;
+  const roles = input.evaluation.tables.filter((t) => t.role !== "external").map((t) => t.role);
+  return roles.length >= 2 && roles.every((r) => r === "isolated");
 }

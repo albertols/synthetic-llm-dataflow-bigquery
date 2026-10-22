@@ -257,8 +257,14 @@ export function RelationalPanel({
   adjustments = NO_ADJUSTMENTS,
   adjustmentsError,
   tolerance = REPEAT_SHARE_TOLERANCE,
+  isolated,
 }: {
   graph: Graph;
+  /**
+   * The launch declared no foreign key between its tables (lib/tables.ts `declaresNoEdges`): the panel
+   * says so instead of "No relationship metrics".
+   */
+  isolated?: boolean;
   table?: string;
   /**
    * The evaluation has no metric row at all: say that, not a guess at the model. "yet" while it is
@@ -282,20 +288,29 @@ export function RelationalPanel({
       adjusted by the launch (ADR 0038) is not known here.
     </Callout>
   ) : null;
+  const isolatedNote =
+    isolated && !noMetrics ? (
+      <EmptyState
+        title="Isolated tables — no relationships declared"
+        description="Integrity is scored per table: columns, row count, keys where declared."
+      />
+    ) : null;
   if (!edges.length && !adjusted.length)
     return (
       <div className="grid gap-4">
         {failed}
-        <EmptyState
-          title="No relationship metrics"
-          description={
-            noMetrics === "yet"
-              ? "This evaluation has written no metric rows yet, so no relationship has been measured so far."
-              : noMetrics === "at-all"
-                ? "This evaluation wrote no metric rows at all, so no relationship was measured."
-                : "The launch generated one table, or its relationship model declares no foreign keys between generated tables."
-          }
-        />
+        {isolatedNote ?? (
+          <EmptyState
+            title="No relationship metrics"
+            description={
+              noMetrics === "yet"
+                ? "This evaluation has written no metric rows yet, so no relationship has been measured so far."
+                : noMetrics === "at-all"
+                  ? "This evaluation wrote no metric rows at all, so no relationship was measured."
+                  : "The launch generated one table, or its relationship model declares no foreign keys between generated tables."
+            }
+          />
+        )}
       </div>
     );
   const orphanRow = (row: MetricRow | null) => (row ? row.value : null);
@@ -389,7 +404,9 @@ export function RelationalPanel({
             ))}
           </section>
         </>
-      ) : null}
+      ) : (
+        isolatedNote
+      )}
     </div>
   );
 }

@@ -383,6 +383,19 @@ export const concepts = defineConcepts([
     ],
   },
   {
+    id: "eval:model-summary",
+    title: "Model summary",
+    purpose:
+      "What the launch declared, in counts: its tables, how many declare a primary key, the foreign keys between them, the isolated ones, the tables read from another source table and the batch jobs a whole-model launch was split into. The counts come from the launch's generation record when it has one, else from the registry and the metric rows.",
+    interpretation: {
+      tip: "Disabled tables are counted only when the GUI can read the whole model: a launch records only the tables it generated.",
+    },
+    links: [
+      { label: "Relationship models — README", url: RELATIONSHIPS, kind: "docs" },
+      { label: "GUI data contracts", url: CONTRACTS, kind: "docs" },
+    ],
+  },
+  {
     id: "eval:documented-edge",
     title: "Documented edge",
     purpose:

@@ -43,14 +43,15 @@ import { fmtScore, shortModel } from "./lib/format";
 import { buildGraph, WIDE_GRAPH_MIN_TILES } from "./lib/graph";
 import { findings, headline } from "./lib/interpret";
 import { columnSummaries, countStatuses, familyCards, heatmapModel, tableNames } from "./lib/model";
-import { toleranceOf } from "./lib/record";
-import { tableFacts } from "./lib/tables";
+import { projectOf, toleranceOf } from "./lib/record";
+import { declaresNoEdges, modelSummary, SUMMARY_MIN_TABLES, tableFacts } from "./lib/tables";
 import { ColumnDrawer } from "./panels/ColumnDrawer";
 import { ColumnHeatmap, HEATMAP_PAGE } from "./panels/ColumnHeatmap";
 import { DetectionPanel } from "./panels/DetectionPanel";
 import { InterpretationPanel } from "./panels/InterpretationPanel";
 import { GeneratorPanel } from "./panels/GeneratorPanel";
 import { ModelGraph } from "./panels/ModelGraph";
+import { ModelSummaryCard } from "./panels/ModelSummary";
 import { PairsPanel } from "./panels/PairsPanel";
 import { ParamsPanel } from "./panels/ParamsPanel";
 import { PrivacyPanel } from "./panels/PrivacyPanel";
@@ -167,6 +168,8 @@ function RunPageContent() {
       graph,
       facts,
       factsByName: new Map(facts.map((f) => [f.name, f])),
+      summary: modelSummary({ evaluation: detail.evaluation, record, facts, graph, model }),
+      isolated: declaresNoEdges({ facts, graph, evaluation: detail.evaluation }),
       tables: tableNames(detail.evaluation, detail.metrics),
       counts: countStatuses(detail.metrics.filter((m) => !isRollup(m.metric_id))),
     };
@@ -240,6 +243,14 @@ function RunPageContent() {
   const running = evaluation.status === "RUNNING" && !stale;
   // No metric row in the whole evaluation (not the table scope): "yet" only while its last event is a live RUNNING.
   const noMetrics = hasMetrics ? undefined : evaluation.event === "RUNNING" && !stale ? "yet" : "at-all";
+  const summaryCard =
+    derived.facts.length >= SUMMARY_MIN_TABLES ? (
+      <ModelSummaryCard
+        summary={derived.summary}
+        region={evaluation.generation_region}
+        project={projectOf(record?.runs[0]?.landing_table ?? evaluation.tables[0]?.landing_table)}
+      />
+    ) : null;
   const notApplicable = detail.metrics.filter((m) => inapplicableKey(m) !== null).length;
   const rowsSynthetic = evaluation.tables.reduce((acc, t) => acc + (t.rows_synthetic ?? 0), 0);
   // The registry row names an evaluator job as its generation job: by that job's name, or because
@@ -413,6 +424,7 @@ function RunPageContent() {
                   footnote={`${derived.tables.length} table${derived.tables.length === 1 ? "" : "s"} · ${formatCount(detail.flags.length)} flagged rows`}
                 />
               </div>
+              {summaryCard}
               <Scorecards
                 cards={derived.cards}
                 selectedTable={table}
@@ -439,6 +451,7 @@ function RunPageContent() {
             </>
           ) : (
             <>
+              {summaryCard}
               <EmptyState
                 title={
                   stale
@@ -521,6 +534,7 @@ function RunPageContent() {
               adjustments={derived.adjusted}
               adjustmentsError={adjustmentsError}
               tolerance={tolerance}
+              isolated={derived.isolated}
             />
           ) : null}
         </TabsContent>
