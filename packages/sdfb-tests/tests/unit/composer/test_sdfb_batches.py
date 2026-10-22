@@ -32,7 +32,8 @@ from pathlib import Path
 
 import pytest
 from sdfb_beam.cli import run_pipeline as rp
-from sdfb_core.contracts.relationships import RelationshipRegistry
+from sdfb_core.contracts.relationships import (RelationshipError,
+                                               RelationshipRegistry)
 from sdfb_core.launch.batches import plan_model_launch
 from sdfb_tests.launch_surface import generator_flags
 from sdfb_tests.model_fixtures import forest_model_text
@@ -214,6 +215,39 @@ def test_what_the_core_refuses_the_mirror_refuses():
       M.plan_batches("model: m\ntables:\n  T_A: {}\n", k)
 
 
+_REFUSED_AT_LOAD = {
+    # A bare ref the model does not declare (a typo): no launcher would load
+    # the model, so no batch may be launched to find that out.
+    "unknown_ref": ("model: m\ntables:\n  T_A: {pk: [A_ID]}\n  T_B:\n"
+                    "    fk:\n      - {cols: [A_ID], ref: GHOST, "
+                    "ref_cols: [A_ID]}\n"),
+    # The same on a disabled table: the core reads every table's refs.
+    "unknown_ref_on_a_disabled_table":
+        ("model: m\ntables:\n  T_A: {pk: [A_ID]}\n  T_B:\n    enabled: false\n"
+         "    fk:\n      - {cols: [A_ID], ref: T_GHOST, ref_cols: [A_ID]}\n"),
+    "self_ref":
+        ("model: m\ntables:\n  T_A: {pk: [A_ID]}\n  T_B:\n"
+         "    fk:\n      - {cols: [P_ID], ref: T_B, ref_cols: [B_ID]}\n"),
+    # A dotted ref whose table part is the table itself is one too.
+    "dotted_self_ref": ("model: m\ntables:\n  T_A:\n    fk:\n"
+                        "      - {cols: [P_ID], ref: other_ds.T_A, "
+                        "ref_cols: [A_ID]}\n"),
+}
+
+
+@pytest.mark.parametrize(
+    "text", list(_REFUSED_AT_LOAD.values()), ids=list(_REFUSED_AT_LOAD))
+def test_a_ref_the_core_refuses_at_load_the_mirror_refuses_in_its_words(text):
+  """Review M1: the launcher's registry load refuses these refs, so every
+    batch would pay a Flex launch only to stop there. The planner refuses
+    them first, with the core's message (less its file-name prefix)."""
+  with pytest.raises(RelationshipError) as core:
+    RelationshipRegistry.from_sources([("m.yaml", text)])
+  with pytest.raises(M.PlanError) as mirror:
+    M.plan_batches(text, 10)
+  assert str(core.value) == f"m.yaml: {mirror.value}"
+
+
 # -- planning inputs -------------------------------------------------------
 def test_params_name_the_model_and_k():
   assert M.planning_inputs(_PARAMS, None) == ("gs://b/rel/model.yaml", 10)
@@ -374,6 +408,21 @@ def test_batch_job_names_are_distinct_dataflow_names():
     assert re.fullmatch(r"[a-z]([-a-z0-9]{0,61}[a-z0-9])?", name), name
   assert M.batch_job_name("synthetic-sdfb-model-v0-7-0-m",
                           3) == ("synthetic-sdfb-model-v0-7-0-m-b03")
+
+
+@pytest.mark.parametrize(
+    "base", [
+        "r1", "example-acceptance-whole-model-launch-2026-10-22-forest-r01",
+        "x" * 58, "scheduled__2026-10-22T00:00:00+00:00-" + "y" * 40
+    ],
+    ids=["short", "59_chars", "58_chars", "long"])
+@pytest.mark.parametrize("index", [0, 1, 11, 100])
+def test_a_cli_batch_job_is_named_by_the_model_dags_rule(base, index):
+  """Review M2: the launcher names a CLI batch job as the model DAG names
+    its batch jobs — the name before `-bNN` shortened, the suffix whole."""
+  name = rp.batch_job_name(base, index)
+  assert name == M.batch_job_name(rp.sanitize_job_name("sdfb", base), index)
+  assert len(name) <= 63 and name.endswith(f"-b{index:02d}")
 
 
 @pytest.mark.parametrize("uri", [

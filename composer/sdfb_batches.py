@@ -30,8 +30,11 @@ stops when its count differs from `batch_count`. A parity test pins
 forests of up to 120 tables
 (packages/sdfb-tests/tests/unit/composer/test_sdfb_batches.py).
 
-The planner reads each table's `enabled` flag and its FK refs, nothing else:
-the launcher validates the rest of the model when a batch job starts.
+The planner reads each table's `enabled` flag and its FK refs, nothing else.
+It refuses the refs sdfb-core refuses at load (an edge to the table itself,
+a bare ref the model does not declare), so a typo stops `plan` rather than
+every batch's Flex launch; the launcher validates the rest of the model when
+a batch job starts.
 
 The DAGs folder imports this file beside the DAG. It never names the
 scheduler: a file in that folder that names it and says "dag" is parsed as
@@ -121,28 +124,53 @@ def _positive_int(value: Any, key: str) -> int:
   return number
 
 
+def _check_refs(model: Any, refs: Mapping[str, Sequence[str]]) -> None:
+  """The refs sdfb-core refuses when it loads the model
+  (`contracts/relationships.py::_validate_refs`), refused in its words, less
+  its file-name prefix: an edge to the table itself, and a bare ref that
+  names no table of the model. The other load checks read what the planner
+  does not (columns, `enforced`), so the launcher still makes them."""
+  known = sorted(refs)
+  for table, names in refs.items():
+    for ref in names:
+      if ref == table or ref.rsplit(".", 1)[-1] == table:
+        raise PlanError(f"{table} references itself ({ref}) — an FK edge "
+                        f"needs two tables")
+      if "." not in ref and ref not in refs:
+        raise PlanError(f"{table}'s fk.ref {ref!r} does not name a table in "
+                        f"model {model!r} ({known}). Qualify it as "
+                        f"dataset.table if the parent lives outside this "
+                        f"model.")
+
+
 def _tables(model_text: str) -> dict[str, tuple[bool, tuple[str, ...]]]:
   """table → (enabled, the in-model tables its FK edges name), in file
-  order. An edge whose ref is dotted names another dataset and is left out."""
+  order. An edge whose ref is dotted names another dataset and is left out;
+  a ref the core refuses at load is refused (`_check_refs`)."""
   raw = yaml.safe_load(model_text) or {}
   if not isinstance(raw, Mapping):
     raise PlanError("the model file's top level must be a mapping")
   tables = raw.get("tables") or {}
   if not isinstance(tables, Mapping):
     raise PlanError("the model file's `tables:` must be a mapping")
-  out: dict[str, tuple[bool, tuple[str, ...]]] = {}
+  enabled: dict[str, bool] = {}
+  refs: dict[str, list[str]] = {}
   for name, spec in tables.items():
     if not isinstance(spec, Mapping):
       raise PlanError(f"tables.{name}: expected a mapping, got "
                       f"{type(spec).__name__}")
-    refs = []
+    refs[str(name)] = []
     for edge in spec.get("fk") or ():
       ref = edge.get("ref") if isinstance(edge, Mapping) else None
-      if isinstance(ref, str) and "." not in ref:  # in-model, not external
-        refs.append(ref)
-    out[str(name)] = (_enabled(spec.get("enabled", True),
-                               f"tables.{name}"), tuple(refs))
-  return out
+      if isinstance(ref, str):
+        refs[str(name)].append(ref)
+    enabled[str(name)] = _enabled(spec.get("enabled", True), f"tables.{name}")
+  # After every table's shape, as the core validates the refs after it.
+  _check_refs(raw.get("model"), refs)
+  return {
+      name: (enabled[name], tuple(r for r in refs[name] if "." not in r))
+      for name in enabled
+  }
 
 
 def _components(
@@ -253,7 +281,9 @@ def model_slug(uri: str, max_len: int = 24) -> str:
 
 def batch_job_name(job_name: str, index: int) -> str:
   """A batch job's Dataflow name, `<job_name>-bNN`, inside Dataflow's 63
-  characters: parallel jobs need distinct names."""
+  characters: parallel jobs need distinct names. The launcher names a CLI
+  batch job by the same rule (`run_pipeline.batch_job_name`, pinned equal by
+  test)."""
   suffix = f"-b{index:02d}"
   return job_name[:_JOB_NAME_MAX - len(suffix)].rstrip("-") + suffix
 

@@ -24,7 +24,8 @@ import json
 from pathlib import Path
 
 import pytest
-from apache_beam.options.pipeline_options import SetupOptions
+from apache_beam.options.pipeline_options import (GoogleCloudOptions,
+                                                  SetupOptions)
 from sdfb_beam import pipeline as pipeline_mod
 from sdfb_beam.cli import run_pipeline as rp
 from sdfb_beam.io.local_sinks import WriteToJsonLines
@@ -287,6 +288,76 @@ def test_an_oversized_batch_is_announced_and_runs_whole(tmp_path, jobs, capsys):
   text = capsys.readouterr().err
   assert "name=model_batch_oversized" in text
   assert "name=model_launch_plan" in text
+
+
+class _JobNamedError(Exception):
+  """Stops a job once its Dataflow options are set; carries its name."""
+
+
+@pytest.fixture(name="job_name_of")
+def fixture_job_name_of(monkeypatch):
+  """`main`'s Dataflow job name for these flags: the job stops as soon as
+    `configure_pipeline_options` has named it."""
+  configure = rp.configure_pipeline_options
+
+  def named(options, *a, **k):
+    configure(options, *a, **k)
+    raise _JobNamedError(options.view_as(GoogleCloudOptions).job_name)
+
+  monkeypatch.setattr(rp, "configure_pipeline_options", named)
+  monkeypatch.delenv(_FLEX, raising=False)
+
+  def job_name_of(argv: list[str]) -> str:
+    with restoring_root_handlers(), pytest.raises(_JobNamedError) as stop:
+      rp.main([*argv, "--runner=DataflowRunner"])
+    return str(stop.value)
+
+  return job_name_of
+
+
+_LONG_BASE = "example-acceptance-whole-model-launch-2026-10-22-forest-r01"
+
+
+def test_parallel_batches_of_a_long_base_get_distinct_job_names(
+    model_uri, job_name_of):
+  """Review M2: `run_model.py` launches b00 (two tables, one job) and b01
+    (one table) side by side; cut at 63 characters, both were named
+    `sdfb-<the first 58 characters of the base>` and the second create
+    failed. The `-bNN` suffix stays whole."""
+  assert len(_LONG_BASE) == 59
+  names = [
+      job_name_of([
+          *_ARGV, f"--relationships_uri={model_uri}", "--max_tables_per_job=2",
+          f"--run_id={_LONG_BASE}", f"--batch_index={index}", "--batch_count=2"
+      ]) for index in (0, 1)
+  ]
+  assert names == [f"sdfb-{_LONG_BASE[:54]}-b00", f"sdfb-{_LONG_BASE[:54]}-b01"]
+  assert all(len(name) <= 63 for name in names)
+
+
+def test_a_short_base_batch_job_is_named_by_its_batch(model_uri, job_name_of):
+  """b00 (two tables, one job) keeps the name it had; b01's one table runs
+    as `r1-b01-00-T_RATES` and its job takes the batch's name,
+    `sdfb-<base>-bNN` (ADR 0045 D4), as the model DAG names it."""
+  names = [
+      job_name_of([
+          *_ARGV, f"--relationships_uri={model_uri}", "--max_tables_per_job=2",
+          f"--batch_index={index}", "--batch_count=2"
+      ]) for index in (0, 1)
+  ]
+  assert names == ["sdfb-r1-b00", "sdfb-r1-b01"]
+
+
+@pytest.mark.parametrize(
+    "run_id, name", [("r1", "sdfb-r1"), ("a" * 58, "sdfb-" + "a" * 58),
+                     (_LONG_BASE + "-b01", "sdfb-" + _LONG_BASE[:58])],
+    ids=["short", "exactly_63", "long"])
+def test_a_launch_that_is_no_batch_keeps_its_job_name(job_name_of, run_id,
+                                                      name):
+  """Behaviour parity: a job of no whole-model batch is named as before,
+    `sdfb-<run id>` cut at 63 characters — a run id that ends like a batch
+    suffix included."""
+  assert job_name_of([*cp.ARGV_BASE, f"--run_id={run_id}"]) == name
 
 
 # -- the record each batch writes (DirectRunner) ---------------------------

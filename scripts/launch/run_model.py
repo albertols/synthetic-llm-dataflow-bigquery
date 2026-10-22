@@ -19,8 +19,8 @@ It plans the batches exactly as each launcher will (it resolves the same
 flags and config file through `run_pipeline.parse_args`), runs one launcher
 per batch — `--tables=all --batch_index=i --batch_count=N` — at most
 `launch.max_parallel_jobs` at a time, waits for each, and prints every
-batch's Dataflow job id and the evaluation command that covers the batches
-that landed.
+Dataflow job id each batch logged and the evaluation command that covers the
+batches that landed.
 
     uv run --no-sync python3 scripts/launch/run_model.py --dry_run <launcher flags>
     uv run --no-sync python3 scripts/launch/run_model.py <launcher flags> \\
@@ -67,7 +67,8 @@ from sdfb_core.launch.batches import (ModelLaunch, ModelLaunchError,
                                       plan_model_launch)
 
 _REPO = Path(__file__).resolve().parents[2]
-# Beam's DataflowRunner logs this once it has created the job.
+# Beam's DataflowRunner logs this once it has created a job: once per job,
+# so once per table under --multi_table_mode=sequential_jobs.
 _JOB_CREATED = re.compile(r"Created job with id: \[([^\]]+)\]")
 # Set per batch by the launcher: giving them would make parallel batches
 # collide (one Dataflow job name) or disagree with the plan.
@@ -94,7 +95,7 @@ class BatchResult:
   """One batch launcher's outcome."""
   index: int
   returncode: int
-  job_id: str | None
+  job_ids: tuple[str, ...]  # in the log's order, each once
   log: Path
 
 
@@ -188,13 +189,15 @@ def batch_command(rest: list[str], index: int, count: int) -> list[str]:
   ]
 
 
-def job_id_in(log: Path) -> str | None:
-  """The Dataflow job id the batch's launcher logged, if it got that far."""
+def job_ids_in(log: Path) -> tuple[str, ...]:
+  """Every Dataflow job id the batch's launcher logged creating, in order
+  and each once (several under `--multi_table_mode=sequential_jobs`); none
+  if it did not get that far."""
   try:
-    found = _JOB_CREATED.search(log.read_text(encoding="utf-8"))
+    found = _JOB_CREATED.findall(log.read_text(encoding="utf-8"))
   except OSError:
-    return None
-  return found.group(1) if found else None
+    return ()
+  return tuple(dict.fromkeys(found))
 
 
 def run_batch(rest: list[str],
@@ -212,11 +215,11 @@ def run_batch(rest: list[str],
       proc = fleet.start(batch_command(rest, index, count), out)
     except OSError as exc:
       out.write(f"could not start the launcher: {exc}\n")
-      return BatchResult(index, _COULD_NOT_START, None, log)
+      return BatchResult(index, _COULD_NOT_START, (), log)
     if proc is None:
-      return BatchResult(index, _NOT_STARTED, None, log)
+      return BatchResult(index, _NOT_STARTED, (), log)
     returncode = proc.wait()
-  return BatchResult(index, returncode, job_id_in(log), log)
+  return BatchResult(index, returncode, job_ids_in(log), log)
 
 
 def _without_job_id(args: argparse.Namespace,
@@ -225,30 +228,37 @@ def _without_job_id(args: argparse.Namespace,
   return [
       batch_run_id(args.run_id, r.index)
       for r in results
-      if r.returncode == 0 and not r.job_id
+      if r.returncode == 0 and not r.job_ids
   ]
 
 
 def evaluation_command(args: argparse.Namespace, beam_argv: list[str],
                        results: list[BatchResult]) -> str | None:
   """The `sdfb-eval run` that covers the batches that landed (ADR 0045):
-  the launch's base run id and their job ids. `--scope=manual`, as the model
-  DAG passes: a `--run_id` run has no labelled writes, so `auto` would
-  resolve every table to `unknown`."""
-  landed = [r.job_id for r in results if r.returncode == 0 and r.job_id]
+  the launch's base run id and their job ids, in the batches' region.
+  `--scope=manual`, as the model DAG passes: a `--run_id` run has no
+  labelled writes, so `auto` would resolve every table to `unknown`. With
+  FK generation on, the model file too, as the model DAG passes it: the
+  fallback when the launch's records name none."""
+  landed = list(
+      dict.fromkeys(job_id for r in results if r.returncode == 0
+                    for job_id in r.job_ids))
   if not landed:
     return None
   joined = ",".join(landed)
-  project = (
-      PipelineOptions(beam_argv).view_as(GoogleCloudOptions).project or
-      "<PROJECT>")
+  google = PipelineOptions(beam_argv).view_as(GoogleCloudOptions)
+  project = google.project or "<PROJECT>"
+  region = google.region or "<REGION>"
   parts = (args.validation_runs_table or "").split(".")
   dataset = parts[1] if len(parts) == _FQN_PARTS else "<QUALITY_DATASET>"
+  model = (f"--relationships_uri={args.relationships_uri} " if
+           run_pipeline.parse_bool_flag(args.generate_fk_relationships) else "")
   return (f"uv run --project packages/sdfb-evaluation sdfb-eval run "
           f"--project={project} --run_id={args.run_id} "
           f"--generation_job_ids={joined} "
-          f"--output_dataset={dataset} --scope=manual --runner=DataflowRunner "
-          f"--region=<REGION> --temp_location=gs://<BUCKET>/temp")
+          f"--output_dataset={dataset} --scope=manual {model}"
+          f"--runner=DataflowRunner --region={region} "
+          f"--temp_location=gs://<BUCKET>/temp")
 
 
 def _report_started_jobs(beam_argv: list[str], log_dir: Path,
@@ -263,10 +273,10 @@ def _report_started_jobs(beam_argv: list[str], log_dir: Path,
   found = False
   for index in range(count):
     log = log_dir / f"{batch_label(index)}.log"
-    job_id = job_id_in(log)
-    if job_id:
+    job_ids = ",".join(job_ids_in(log))
+    if job_ids:
       found = True
-      print(f"  {batch_label(index)}  job {job_id}  {log}")
+      print(f"  {batch_label(index)}  job {job_ids}  {log}")
   if found:
     print("  These jobs may still be running on Dataflow; cancel each with "
           f"`gcloud dataflow jobs cancel <id> --region={region}`.")
@@ -321,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
   for result in results:
     state = ("OK"
              if result.returncode == 0 else f"FAILED rc={result.returncode}")
-    job = result.job_id or "(not in the log)"
+    job = ",".join(result.job_ids) or "(not in the log)"
     print(f"{batch_run_id(args.run_id, result.index)}  {state}  job {job}  "
           f"{result.log}")
   unidentified = ", ".join(_without_job_id(args, results))

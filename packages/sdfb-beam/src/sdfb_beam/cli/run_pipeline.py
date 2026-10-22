@@ -116,6 +116,7 @@ from sdfb_core.engines.fanout import conditional_edge_id
 from sdfb_core.launch.batches import (
     ModelLaunch,
     ModelLaunchError,
+    batch_label,
     batch_run_id,
     launch_banner,
     plan_model_launch,
@@ -213,6 +214,8 @@ _DEFAULT_WORKER_DISK_GB = 200
 # them per bundle ("Retrieving state 62 times costed 60 seconds",
 # 2026-09-07 R7). 512 MB on an n1-highmem-8 is a rounding error.
 _DEFAULT_STATE_CACHE_MB = 512
+# Dataflow's job-name limit (`sanitize_job_name`, `batch_job_name`).
+_JOB_NAME_MAX = 63
 
 # batch_size is rows-per-element. At the historic fixed default of 16, a 1M-row
 # run produced 62,500 elements and paid per-element Python overhead 62,500
@@ -2423,6 +2426,8 @@ def _run_batch(args: argparse.Namespace, beam_argv: list[str],
   # ADR 0044 — one record per batch job, its launch_run_id the base.
   batch_args._record_base = prepare_record_base(batch_args, registry, plan)  # pylint: disable=protected-access
   batch_args.run_id = batch_run_id(base, index)
+  # The Dataflow name of every job of this batch, unless --job_name is given.
+  batch_args._batch_job_name = batch_job_name(base, index)  # pylint: disable=protected-access
   log_milestone(
       "model_batch",
       batch=batch.label,
@@ -2465,7 +2470,20 @@ def sanitize_job_name(prefix: str, run_id: str) -> str:
     (e.g. ``scheduled__2026-05-20T00:00:00+00:00``) that are all illegal."""
   slug = re.sub(r"[^a-z0-9]+", "-", run_id.lower()).strip("-")
   name = f"{prefix}-{slug}" if slug else prefix
-  return name[:63].rstrip("-")
+  return name[:_JOB_NAME_MAX].rstrip("-")
+
+
+def batch_job_name(base_run_id: str, index: int) -> str:
+  """A whole-model batch job's Dataflow name, ``sdfb-<base>-bNN``
+    (ADR 0045 D4): the base's name is shortened so the ``-bNN`` suffix stays
+    whole inside 63 characters — the model DAG's rule
+    (``composer/sdfb_batches.py::batch_job_name``) — so two batches of one
+    launch running side by side never share a name, however long the base.
+    Every job of the batch takes it (a one-table batch, each
+    ``sequential_jobs`` job in turn)."""
+  suffix = f"-{batch_label(index)}"
+  name = sanitize_job_name("sdfb", base_run_id)
+  return name[:_JOB_NAME_MAX - len(suffix)].rstrip("-") + suffix
 
 
 def _pin_autoscaling(worker_options, autoscaling: str,
@@ -2493,6 +2511,7 @@ def configure_pipeline_options(
     run_id: str,
     num_workers: int | None = None,
     autoscaling: str = "auto",
+    default_job_name: str | None = None,
 ) -> None:
   """Set runner-dependent options.
 
@@ -2501,8 +2520,9 @@ def configure_pipeline_options(
     deps + source, so it just adds startup cost.
 
     The flex launcher already passes a valid ``--job_name`` (from the DAG's
-    ``jobName``), so we only synthesize one — sanitized from ``run_id`` — when
-    it's absent (e.g. a direct DataflowRunner launch).
+    ``jobName``), so we only synthesize one — ``default_job_name`` (a
+    whole-model batch's ``batch_job_name``), else sanitized from ``run_id`` —
+    when it's absent (e.g. a direct DataflowRunner launch).
 
     ``sdk_container_image`` pins Runner v2 *workers* to THIS image. The Flex
     Template's ``--image`` only sets the *launcher*; the worker harness image
@@ -2522,7 +2542,7 @@ def configure_pipeline_options(
   if runner == "DataflowRunner":
     gco = options.view_as(GoogleCloudOptions)
     if not gco.job_name:
-      gco.job_name = sanitize_job_name("sdfb", run_id)
+      gco.job_name = default_job_name or sanitize_job_name("sdfb", run_id)
     worker_options = options.view_as(WorkerOptions)
     if not worker_options.max_cache_memory_usage_mb:
       worker_options.max_cache_memory_usage_mb = _DEFAULT_STATE_CACHE_MB
@@ -3917,6 +3937,7 @@ def _run_one_table(
       args.run_id,
       num_workers=resolve_num_workers(getattr(args, "initial_workers", "")),
       autoscaling=getattr(args, "autoscaling", "auto"),
+      default_job_name=getattr(args, "_batch_job_name", None),
   )
   cross_process = resolve_cross_process(
       runner,
@@ -4040,6 +4061,7 @@ def _run_relational_job(
       args.run_id,
       num_workers=resolve_num_workers(getattr(args, "initial_workers", "")),
       autoscaling=getattr(args, "autoscaling", "auto"),
+      default_job_name=getattr(args, "_batch_job_name", None),
   )
   cross_process = resolve_cross_process(
       runner,

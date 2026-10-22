@@ -103,6 +103,8 @@ class _Proc:
     time.sleep(self.owner.pause)
     if self.index not in self.owner.no_id:
       self.stdout.write(f"INFO Created job with id: [job-{self.index}]\n")
+    for job_id in self.owner.more_ids.get(self.index, ()):
+      self.stdout.write(f"INFO Created job with id: [{job_id}]\n")
     with self.owner.lock:
       self.owner.running -= 1
     self.returncode = self.owner.codes.get(self.index, 0)
@@ -119,9 +121,12 @@ class _Launchers:
                hang=(),
                refuse=(),
                no_id=(),
-               signal_after=None):
+               signal_after=None,
+               more_ids=None):
     self.codes = codes or {}
     self.no_id = set(no_id)
+    # index -> the ids of the further jobs that batch logs creating
+    self.more_ids = more_ids or {}
     # (signal, n): sent to this process once n hung launchers are waiting
     self.signal_after = signal_after
     self.arrived = 0
@@ -147,8 +152,10 @@ class _Launchers:
       proc = _Proc(self, cmd, stdout, index)
       self.procs.append(proc)
     if index in self.hang and index not in self.no_id:
-      # a hung launcher has already created its Dataflow job
+      # a hung launcher has already created its Dataflow job(s)
       stdout.write(f"INFO Created job with id: [job-{index}]\n")
+      for job_id in self.more_ids.get(index, ()):
+        stdout.write(f"INFO Created job with id: [{job_id}]\n")
     return proc
 
   def arrive(self):
@@ -394,3 +401,70 @@ def test_a_malformed_launch_is_a_usage_error(argv):
   with pytest.raises(SystemExit) as exc:
     RM.main([a for a in argv if not a.startswith("--source_dataset")])
   assert exc.value.code == 2
+
+
+def _evaluation_line(out: str) -> str:
+  lines = [line for line in out.splitlines() if "sdfb-eval run" in line]
+  assert len(lines) == 1
+  return lines[0]
+
+
+def test_every_job_a_batch_created_is_evaluated(argv, monkeypatch, capsys):
+  """Review M3: under `--multi_table_mode=sequential_jobs` a batch runs one
+    Dataflow job per table. Every job id its log names reaches
+    `--generation_job_ids`, in the log's order, each once."""
+  monkeypatch.setattr(RM.subprocess, "Popen",
+                      _Launchers(more_ids={0: ["job-0b", "job-0", "job-0c"]}))
+  assert RM.main(
+      [*argv, "--max_tables_per_job=2",
+       "--multi_table_mode=sequential_jobs"]) == 0
+  out = capsys.readouterr().out
+  assert "r1-b00  OK  job job-0,job-0b,job-0c  " in out
+  assert "r1-b01  OK  job job-1  " in out
+  assert (" --generation_job_ids=job-0,job-0b,job-0c,job-1 "
+          in _evaluation_line(out))
+
+
+def test_a_stop_reports_every_job_a_batch_created(argv, monkeypatch, capsys):
+  launchers = _Launchers(
+      hang={0}, signal_after=(signal.SIGINT, 1), more_ids={0: ["job-0b"]})
+  monkeypatch.setattr(RM.subprocess, "Popen", launchers)
+  with pytest.raises(KeyboardInterrupt):
+    RM.main([*argv, "--max_tables_per_job=1"])
+  assert "  b00  job job-0,job-0b  " in capsys.readouterr().out
+
+
+def test_the_evaluation_runs_in_the_launch_region(argv, monkeypatch, capsys):
+  """Review M8: the region the batches ran in is the evaluation's."""
+  monkeypatch.setattr(RM.subprocess, "Popen", _Launchers())
+  assert RM.main([*argv, "--max_tables_per_job=2",
+                  "--region=europe-west3"]) == 0
+  line = _evaluation_line(capsys.readouterr().out)
+  assert " --region=europe-west3 " in line and "<REGION>" not in line
+
+
+def test_the_region_stays_a_placeholder_when_the_launch_named_none(
+    argv, monkeypatch, capsys):
+  monkeypatch.setattr(RM.subprocess, "Popen", _Launchers())
+  assert RM.main([*argv, "--max_tables_per_job=2"]) == 0
+  assert " --region=<REGION> " in _evaluation_line(capsys.readouterr().out)
+
+
+def test_the_evaluation_has_the_model_when_no_record_names_it(
+    argv, monkeypatch, capsys, tmp_path):
+  """Review M9: the model DAG passes the planned model to its evaluation as
+    the fallback for records that name none — when FK generation is on."""
+  monkeypatch.setattr(RM.subprocess, "Popen", _Launchers())
+  assert RM.main([*argv, "--max_tables_per_job=2"]) == 0
+  line = _evaluation_line(capsys.readouterr().out)
+  model = tmp_path / "forest.yaml"  # the argv fixture's model file
+  assert f" --relationships_uri={model} " in line
+
+
+def test_without_fk_generation_the_evaluation_gets_no_model(
+    argv, monkeypatch, capsys):
+  monkeypatch.setattr(RM.subprocess, "Popen", _Launchers())
+  assert RM.main(
+      [*argv, "--max_tables_per_job=2",
+       "--generate_fk_relationships=false"]) == 0
+  assert "--relationships_uri" not in _evaluation_line(capsys.readouterr().out)
