@@ -125,6 +125,7 @@ exclude:
   - packages/sdfb-tests/tests/unit/validation/test_freetext_rules.py
   # Reads composer/ (not shipped); the golden source's CI keeps covering it.
   - packages/sdfb-tests/tests/unit/docker/test_launch_surfaces.py
+  - packages/sdfb-tests/tests/unit/composer/**
 
 # Explicit test -> script pairs the automatic `"scripts" / ...` detection
 # cannot see.
