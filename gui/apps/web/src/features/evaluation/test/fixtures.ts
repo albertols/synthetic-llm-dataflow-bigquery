@@ -13,6 +13,7 @@ import type {
   ProfileRow,
   RowFlag,
 } from "@contracts/api";
+import { NO_IDENTITY_REASON, NO_PK_REASON } from "@contracts/applicability";
 import type { GenerationRecord } from "@contracts/record";
 
 import { metricMeta } from "../lib/catalogue";
@@ -674,6 +675,154 @@ export function generationRecord(
     worker_versions: [worker],
     version_mismatch: !!options.mismatch,
     config_digests: ["0123456789ab"],
+    declared_tables: [],
+    batches: [],
+  };
+}
+
+// ----------------------------------------------------------- the forest --
+
+/** `T_001` …: the generic names of the forest fixtures. */
+export const forestName = (i: number) => `T_${String(i).padStart(3, "0")}`;
+const pad2 = (n: number) => String(n).padStart(2, "0");
+/** The run id of forest table i: ten tables per batch job, `F-bNN-MM-<table>`. */
+export const forestRunId = (i: number) => `F-b${pad2(Math.floor((i - 1) / 10))}-${pad2((i - 1) % 10)}-${forestName(i)}`;
+/** Overall score of forest table i, in percent: 60 … 99. */
+export const forestPct = (i: number) => 60 + ((i * 37) % 40);
+/** The Dataflow job id of forest batch b (the registry's `generation_job_ids` and the record's batches agree). */
+export const forestJobId = (b: number) => `2026-10-21_01_${pad2(b)}_00-10000000000000000${pad2(b)}`;
+
+/**
+ * A whole-model launch of `n` unrelated tables (ADR 0036), as the registry and the metric rows tell it:
+ * every third table declares no primary key (its PK row is the evaluator's "no primary key declared"),
+ * no table declares identity columns, T_004 landed duplicate keys, scores vary with the index.
+ */
+export function forestDetail(n = 120): EvaluationDetail {
+  const metrics: MetricRow[] = [];
+  const tables: TableEntry[] = [];
+  for (let i = 1; i <= n; i += 1) {
+    const name = forestName(i);
+    const pct = forestPct(i);
+    const score = pct / 100;
+    const integrity = i === 4 ? 0.5 : 1;
+    tables.push(tableEntry(name, { role: "isolated", run_id: forestRunId(i), table_score: score }));
+    metrics.push(
+      metric("table.overall_score", {
+        table_name: name,
+        value: score,
+        score,
+        status: pct <= 70 ? "fail" : pct <= 85 ? "warn" : "pass",
+      }),
+      metric("table.integrity_score", {
+        table_name: name,
+        value: integrity,
+        score: integrity,
+        status: integrity <= 0.7 ? "fail" : "pass",
+      }),
+      metric("table.row_count_ratio", { table_name: name, value: 1, score: 1 }),
+      i % 3 === 0
+        ? metric("table.pk_duplicate_rate", {
+            table_name: name,
+            value: null,
+            score: null,
+            status: "not_evaluated",
+            detail: { reason: NO_PK_REASON },
+          })
+        : metric("table.pk_duplicate_rate", {
+            table_name: name,
+            value: i === 4 ? 0.000006 : 0,
+            score: i === 4 ? 0 : 1,
+            status: i === 4 ? "fail" : "pass",
+          }),
+      metric("table.identity_duplicate_rate", {
+        table_name: name,
+        value: null,
+        score: null,
+        status: "not_evaluated",
+        detail: { reason: NO_IDENTITY_REASON },
+      }),
+    );
+  }
+  for (const family of ["fidelity", "privacy", "integrity", "diversity", "overall"])
+    metrics.push(metric(`model.${family}_score`, { table_name: "isolated_forest_demo", value: 0.9, score: 0.9 }));
+  return {
+    evaluation: evaluation({
+      relationship_model: "isolated_forest_demo",
+      relationship_model_sha: "f0f0f0f0f0f0",
+      base_run_id: "F",
+      run_ids: tables.map((t) => t.run_id!),
+      tables,
+      metrics_total: metrics.length,
+      // `--run_id F --generation_job_ids …` (ADR 0045): every batch job landed, the first is generation_job_id.
+      generation_job_id: forestJobId(0),
+      generation_job_ids: Array.from({ length: Math.ceil(n / 10) }, (_, b) => forestJobId(b)),
+    }),
+    events: [],
+    metrics,
+    profiles: [],
+    flags: [],
+  };
+}
+
+/** The generation record (ADR 0044) of `forestDetail`'s launch: its declared tables and its batch jobs. */
+export function forestRecord(n = 120): GenerationRecord {
+  const names = Array.from({ length: n }, (_, k) => forestName(k + 1));
+  const count = Math.ceil(n / 10);
+  const batches = Array.from({ length: count }, (_, b) => {
+    const tables = names.slice(b * 10, (b + 1) * 10);
+    return {
+      index: b,
+      count,
+      tables,
+      job_ids: [forestJobId(b)],
+      run_ids: tables.map((_, j) => forestRunId(b * 10 + j + 1)),
+    };
+  });
+  const base = generationRecord();
+  return {
+    ...base,
+    runs: [],
+    snapshot: {
+      ...base.snapshot!,
+      // B's `values.launch`: exactly its four settable keys.
+      values: {
+        ...base.snapshot!.values,
+        launch: { tables: "all", max_tables_per_job: 10, max_parallel_jobs: 1, prep_workers: 8 },
+      },
+      relationships: {
+        uri: "gs://b/synthetic/relationships/isolated_forest_demo.yaml",
+        model: "isolated_forest_demo",
+        sha12: "f0f0f0f0f0f0",
+        tables: {},
+      },
+      batch: { index: 0, count, tables: batches[0]!.tables },
+    },
+    snapshot_run_id: forestRunId(1),
+    declared_tables: names.map((name, k) => ({
+      name,
+      pk: (k + 1) % 3 === 0 ? [] : ["COL_001"],
+      identity: [],
+      fk: [],
+      enabled: true,
+      source_table: (k + 1) % 20 === 7 ? `example_archive.${name}_V2` : null,
+      num_rows: null,
+    })),
+    batches,
+  };
+}
+
+/** The record route's answer for a run written before the generation record (ADR 0044). */
+export function noRecord(id: string): GenerationRecord {
+  return {
+    ...generationRecord(),
+    evaluation_id: id,
+    runs: [],
+    snapshot: null,
+    snapshot_run_id: null,
+    launcher_version: null,
+    worker_versions: [],
+    version_mismatch: false,
+    config_digests: [],
     declared_tables: [],
     batches: [],
   };

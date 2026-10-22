@@ -30,6 +30,7 @@ import {
   useEvaluations,
   useRelationships,
 } from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { formatCompact, formatCount, formatDateTime } from "@/lib/format";
 import { CLOSE_BY_HAND, isStale, STALE_AFTER_HOURS } from "@/lib/runState";
 
@@ -38,7 +39,7 @@ import { StatusCounts } from "./components/StatusCounts";
 import { adjustedSummary, adjustedTableCount, adjustmentRows, PK_METRIC } from "./lib/adjustment";
 import { isRollup } from "./lib/catalogue";
 import { fmtScore, shortModel } from "./lib/format";
-import { buildGraph } from "./lib/graph";
+import { buildGraph, WIDE_GRAPH_MIN_TILES } from "./lib/graph";
 import { findings, headline } from "./lib/interpret";
 import { columnSummaries, countStatuses, familyCards, heatmapModel, tableNames } from "./lib/model";
 import { toleranceOf } from "./lib/record";
@@ -159,11 +160,11 @@ function RunPageContent() {
       cards: familyCards(detail),
       findings: findings(detail, adjustments?.model_adjustments, tolerance),
       headline: headline(detail),
-      graph: buildGraph(detail, model, adjusted),
+      graph: buildGraph(detail, model, adjusted, record?.declared_tables),
       tables: tableNames(detail.evaluation, detail.metrics),
       counts: countStatuses(detail.metrics.filter((m) => !isRollup(m.metric_id))),
     };
-  }, [detail, adjustments, tolerance, relationships.data]);
+  }, [detail, adjustments, tolerance, relationships.data, record]);
 
   const table = search.table && derived?.tables.includes(search.table) ? search.table : undefined;
   const scopedMetrics = useMemo(
@@ -228,6 +229,8 @@ function RunPageContent() {
   const hasMetrics = detail.metrics.length > 0;
   // An old RUNNING event: the launch or the job most likely ended without a FINAL row (lib/runState.ts).
   const stale = isStale(evaluation);
+  // Beside a forest of isolated tables the graph takes the full row: the tile grid needs the width.
+  const wideGraph = derived.graph.tiles.length >= WIDE_GRAPH_MIN_TILES;
   const running = evaluation.status === "RUNNING" && !stale;
   // No metric row in the whole evaluation (not the table scope): "yet" only while its last event is a live RUNNING.
   const noMetrics = hasMetrics ? undefined : evaluation.event === "RUNNING" && !stale ? "yet" : "at-all";
@@ -406,7 +409,7 @@ function RunPageContent() {
                 tolerance={tolerance}
                 onOpen={onOpen}
               />
-              <div className="grid gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
+              <div className={cn("grid gap-6", !wideGraph && "xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]")}>
                 <InterpretationPanel
                   headline={derived.headline}
                   findings={derived.findings}
@@ -416,7 +419,7 @@ function RunPageContent() {
                 <ModelGraph
                   graph={derived.graph}
                   modelName={evaluation.relationship_model}
-                  resolvedFrom={derived.model ? "model" : "edges"}
+                  resolvedFrom={derived.graph.resolvedFrom}
                   selected={table}
                   onSelect={(t) => setSearch({ table: t })}
                 />
@@ -444,7 +447,7 @@ function RunPageContent() {
               <ModelGraph
                 graph={derived.graph}
                 modelName={evaluation.relationship_model}
-                resolvedFrom={derived.model ? "model" : "edges"}
+                resolvedFrom={derived.graph.resolvedFrom}
                 selected={table}
                 onSelect={(t) => setSearch({ table: t })}
               />

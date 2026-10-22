@@ -358,6 +358,19 @@ export const concepts = defineConcepts([
     links: [{ label: "Relationship models — README", url: RELATIONSHIPS, kind: "docs" }],
   },
   {
+    id: "eval:isolated-tables",
+    title: "Isolated tables",
+    purpose:
+      "Tables with no foreign key to or from any other table of the launch: there is no relationship to draw, so the model graph packs them into a grid of tiles instead of one tall column. Each tile shows the table's overall score and, when the launch adjusted its declared primary key, the PK adj. chip.",
+    interpretation: {
+      tip: "Click a tile to scope every section to that table.",
+    },
+    links: [
+      { label: "Relationship models — README", url: RELATIONSHIPS, kind: "docs" },
+      { label: "GUI UX rules", url: `${REPO}/gui/docs/UX.md`, kind: "docs" },
+    ],
+  },
+  {
     id: "eval:documented-edge",
     title: "Documented edge",
     purpose:
