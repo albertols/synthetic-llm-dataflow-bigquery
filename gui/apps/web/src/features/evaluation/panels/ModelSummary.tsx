@@ -91,7 +91,7 @@ export function ModelSummaryCard({
                     href={dataflowJobUrl(jobId, region, project)}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="font-mono text-link underline underline-offset-2"
+                    className="inline-flex min-h-6 min-w-6 items-center font-mono text-link underline underline-offset-2"
                   >
                     {batchLabel(b.index)}
                     {k > 0 ? ` (${k + 1})` : ""} ↗

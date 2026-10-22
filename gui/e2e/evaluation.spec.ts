@@ -4,6 +4,7 @@
  * 200-column evaluation; a RUNNING event on both sides of the 24-hour stale
  * rule, with the browser's clock fixed; the degenerate registry states
  * (SKIPPED, FAILED, reference unverified, unknown id, a single id to compare).
+ * the isolated-forest launch at scale (eval-0043: tile grid, N/A keys, model card, filters, windowed lists).
  * Screenshots of the key views when GUI_SHOTS_DIR is set.
  */
 import { AxeBuilder } from "@axe-core/playwright";
@@ -388,4 +389,117 @@ test("screenshots of the evaluation tab (set GUI_SHOTS_DIR to capture)", async (
   await page.waitForTimeout(1500);
   await strip.screenshot({ path: `${dir}/evaluation-adjusted-keys-${width}.png` });
   await page.setViewportSize({ width, height: isMobile(testInfo.project.name) ? 844 : 900 });
+});
+
+// eval-0043 evaluates one whole-model launch of 120 unrelated tables, 112 of them generated in 12
+// batch jobs (packages/mock/src/forest.ts): the isolated-tables views at that scale (ADR 0036, 0042, 0045).
+test("a forest of 112 isolated tables reads as a bounded grid, with N/A keys, a model card and filters", async ({
+  page,
+}) => {
+  test.setTimeout(300_000);
+  const errors = watchErrors(page);
+  await page.goto("/evaluation/eval-0043");
+
+  // The card: what the launch declared. Numbers are asserted on their own <dd>, never by substring.
+  const card = page.getByRole("region", { name: "Model summary" });
+  await expect(card).toBeVisible({ timeout: 45_000 });
+  await expect(card).toContainText("isolated_forest_demo");
+  const stat = (name: string) => card.locator(`[data-stat="${name}"] dd`).first();
+  await expect(stat("Tables")).toHaveText("112");
+  await expect(card.locator('[data-stat="Tables"]')).toContainText("of 120 declared · 8 disabled");
+  await expect(card.locator('[data-stat="Primary key"]')).toContainText("80 declared");
+  await expect(card.locator('[data-stat="Primary key"]')).toContainText("32 none");
+  await expect(stat("Edges")).toHaveText("0");
+  await expect(stat("Isolated")).toHaveText("112");
+  await expect(stat("Source overrides")).toHaveText("6");
+  await expect(stat("Batch jobs")).toHaveText("12");
+  await expect(card.getByRole("list", { name: "Batch jobs" }).getByRole("link")).toHaveCount(12);
+
+  // The grid: every generated table is a tile, the frame is bounded, nothing scrolls sideways.
+  const grid = page.getByRole("region", { name: "Isolated tables: 112" });
+  const tilesIn = grid.locator('[data-slot="table-tile"]');
+  await expect(tilesIn).toHaveCount(112);
+  const box = (await grid.boundingBox())!;
+  expect(box.height).toBeLessThanOrEqual(738 + 4); // TILE_GRID_MAX_REM = 46.125 rem at 16 px (lib/graph.ts)
+  await expect(page.getByRole("figure", { name: /^Model graph/ }).locator("svg[role='group']")).toHaveCount(0);
+  await expect(grid.locator('[data-table="T_003"]')).toHaveAttribute("data-pk", "none");
+  await expect(grid.locator('[data-table="T_007"]')).toContainText("⇄");
+  await noHorizontalScroll(page);
+  await expectNoSeriousViolations(page, "forest overview");
+
+  // Filters narrow the tiles and the per-table scorecards together, and live in the URL.
+  const search = page.getByRole("searchbox", { name: "Find a table" });
+  await search.fill("T_01");
+  await expect.poll(async () => (await routeSearch(page)).tq).toBe("T_01");
+  await expect(tilesIn).toHaveCount(9);
+  const filters = page.getByRole("group", { name: "Table filters" });
+  await expect(filters.getByText("9 of 112 tables", { exact: true })).toBeVisible();
+  await noHorizontalScroll(page);
+  await expectNoSeriousViolations(page, "filter bar", '[aria-label="Table filters"]');
+  await search.fill("");
+  const pk = page.getByRole("radiogroup", { name: "Primary key" });
+  await pk.getByRole("radio", { name: "No PK" }).click();
+  await expect(tilesIn).toHaveCount(32);
+  await expect(grid.locator('[data-slot="table-tile"]:not([data-pk="none"])')).toHaveCount(0);
+  await pk.getByRole("radio", { name: "Any key" }).click();
+  const status = page.getByRole("radiogroup", { name: "Table status" });
+  const fail = status.getByRole("radio", { name: "Fail" });
+  await fail.scrollIntoViewIfNeeded();
+  await fail.click();
+  await expect(grid.locator('[data-table="T_004"]')).toBeVisible();
+  await expect(grid.locator('[data-table="T_008"]')).toBeVisible();
+  await expect(grid.locator('[data-slot="table-tile"]:not([data-status="fail"])')).toHaveCount(0);
+  await status.getByRole("radio", { name: "All" }).click();
+  await page.getByRole("combobox", { name: "Batch job" }).click();
+  await page.getByRole("option", { name: "b03" }).click();
+  await expect(tilesIn).toHaveCount(10);
+  expect((await tilesIn.evaluateAll((els) => els.map((e) => e.getAttribute("data-table")))).sort()).toEqual([
+    "T_033",
+    "T_034",
+    "T_035",
+    "T_036",
+    "T_037",
+    "T_038",
+    "T_039",
+    "T_040",
+    "T_041",
+    "T_042",
+  ]);
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await expect(tilesIn).toHaveCount(112);
+
+  // The per-table scorecards are windowed: a few rows in the DOM, every row reachable.
+  const frame = page.getByRole("region", { name: "Per-table scores, Integrity: 112 tables" });
+  const rendered = await frame.getByRole("listitem").count();
+  expect(rendered).toBeGreaterThanOrEqual(12);
+  expect(rendered).toBeLessThan(40);
+  await frame.evaluate((el) => {
+    el.scrollTop = el.scrollHeight;
+  });
+  await expect(frame.locator('li[aria-posinset="112"]')).toBeVisible();
+
+  // A PK-less table: its key checks are not applicable, never a FAIL.
+  await search.fill("T_003");
+  const trigger = page.getByRole("button", { name: /^Integrity units of T_003/ });
+  await trigger.click();
+  const units = page.getByRole("dialog", { name: "Integrity units of T_003" });
+  await expect(units).toContainText("Not applicable — no primary key declared");
+  await expect(units).toContainText("Not applicable — no identity columns declared");
+  await expect(units).not.toContainText("Fail");
+  await expectNoSeriousViolations(page, "integrity units", '[role="dialog"]');
+  await page.keyboard.press("Escape");
+  // WCAG 2.2 target-size of the popover trigger (the spec's wcag22aa tag), on both projects.
+  await expectNoSeriousViolations(page, "integrity trigger", '[aria-label^="Integrity units of T_003"]');
+  const target = (await trigger.boundingBox())!;
+  expect(Math.min(target.width, target.height)).toBeGreaterThanOrEqual(24);
+
+  // The Relational tab says why it has nothing to draw.
+  await page.goto("/evaluation/eval-0043?tab=relational");
+  await expect(page.getByRole("heading", { name: "Isolated tables — no relationships declared" })).toBeVisible({
+    timeout: 45_000,
+  });
+  await expect(page.getByText("Integrity is scored per table: columns, row count, keys where declared.")).toBeVisible();
+  await expectNoSeriousViolations(page, "forest relational");
+  await noHorizontalScroll(page);
+  expect(errors).toEqual([]);
 });
