@@ -15,8 +15,11 @@
 
 The file ships inside the sdfb-core package (`config/generator.yaml` at the
 repository root is a symlink to it), so the image, the wheel and the DSG copy
-all carry the one file. `model.py` imports this module, so it imports nothing
-from sdfb_core: only the standard library and PyYAML.
+all carry the one file. `model.py` imports this module, so it imports
+nothing from sdfb_core: only the standard library and PyYAML (ADR 0043).
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0043).
 """
 from __future__ import annotations
 

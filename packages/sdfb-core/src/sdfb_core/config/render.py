@@ -15,7 +15,10 @@
 
 The file's value lines are the generator's defaults (`defaults.py`); this
 module writes every key's explanation around the values it is given and never
-chooses a value itself.
+chooses a value itself (ADR 0043).
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0043).
 """
 from __future__ import annotations
 
@@ -34,9 +37,9 @@ _HEADER = """\
 # generator loads. Precedence: this file < composer/sdfb_env.yaml < DAG
 # trigger values < your --config_uri file (keys it omits fall back).
 # Copy only the keys you want to pin; a file of your own starts with
-# `config_version: 1`. Comments are abridged from sdfb_core/config/
+# `config_version: 1`. Comments are rendered from sdfb_core/config/
 # catalogue.yaml by scripts/doc/render_generator_config.py --fix (never
-# touches a value); the catalogue holds the full text.
+# touches a value).
 #
 #   [--x · ADR n · required]  the CLI / Flex / Composer flag, its ADR, and
 #                             whether a launch needs a value
@@ -62,66 +65,9 @@ _SECTION_TITLES = {
 
 def _comment(text: str, indent: str) -> list[str]:
   return [
-      f"{indent}# {line}"
+      f"{indent}# {line}".replace("\u00a0", " ")
       for line in textwrap.wrap(text, 75 - len(indent), break_on_hyphens=False)
   ]
-
-
-_WIDTH = 73  # text columns after the "  # " of a comment line
-_HEAD_LINES = 2  # an entry is at most 3 comment lines: 2 here, 1 for ↑ ↓
-_SENTENCE = re.compile(r".*?[.!?](?=\s|$)")
-_CLAUSE = re.compile(r".{25,}?(?=[:;] )")
-
-
-def _clip(text: str, limit: int) -> str:
-  """`text` cut to `limit` characters: at a clause, else at a word, + `…`;
-  never inside an open parenthesis."""
-  text = text.strip()
-  if len(text) <= limit:
-    return text
-  room = text[:max(limit - 1, 1)]
-  if room.count("(") > room.count(")") and room.rfind("(") >= limit // 2:
-    room = room[:room.rfind("(")].rstrip()
-  for mark in (", ", " — ", "; ", ": "):
-    at = room.rfind(mark)
-    if at >= limit // 2:
-      return room[:at] + "…"
-  return room.rsplit(" ", 1)[0].rstrip(",;:") + "…"
-
-
-def _first(text: str) -> str:
-  """The first sentence of `text`, without its final full stop."""
-  match = _SENTENCE.match(text)
-  return (match.group(0) if match else text).rstrip(".")
-
-
-def _head(label: str, purpose: str, where: list[str]) -> list[str]:
-  """`# <Label> — <purpose> [--flag · ADR n · required]`, wrapped at two
-  lines at most; the purpose is its first clause, clipped to make it fit."""
-  clause = _CLAUSE.match(_first(purpose))
-  purpose = clause.group(0) if clause else _first(purpose)
-  meta = " [" + " · ".join(where) + "]" if where else ""
-  lead = f"{label} — "
-  for limit in range(len(purpose), 0, -1):
-    lines = _comment(f"{lead}{_clip(purpose, limit)}{meta}", "  ")
-    if len(lines) <= _HEAD_LINES:
-      return [line.replace("\u00a0", " ") for line in lines]
-  return _comment(f"{lead}{meta}".replace("\u00a0", " "), "  ")
-
-
-def _raise_lower(up: str, down: str) -> str:
-  """`# ↑ <raise> · ↓ <lower>` on one line: each side gets half of it, and
-  a short side leaves the rest to the other."""
-  up, down = _first(up), _first(down)
-  room = _WIDTH - len("↑  · ↓ ")
-  half = room // 2
-  if len(up) < half:
-    down = _clip(down, room - len(up))
-  elif len(down) < half:
-    up = _clip(up, room - len(down))
-  else:
-    up, down = _clip(up, half), _clip(down, room - half)
-  return f"  # ↑ {up} · ↓ {down}"
 
 
 def _value(value: object) -> str:
@@ -150,8 +96,12 @@ def render_reference(values: Mapping[str, Mapping[str, object]]) -> str:
         where.append("ADR\u00a0" + ", ".join(entry.adrs))
       if key in REQUIRED_FLAGS:
         where.append("required")
-      out += _head(entry.label, render_text(entry.purpose), where)
-      out.append(_raise_lower(render_text(entry.up), render_text(entry.down)))
+      meta = " [" + " · ".join(where) + "]" if where else ""
+      # A non-breaking space keeps "ADR n" on one line while wrapping.
+      head = f"{entry.label} — {render_text(entry.purpose)}{meta}"
+      out += _comment(head, "  ")
+      out += _comment(
+          f"↑ {render_text(entry.up)} · ↓ {render_text(entry.down)}", "  ")
       if entry.null_means:
         out += _comment(f"null = {entry.null_means}", "  ")
       if key in IDENTITY_KEYS:
