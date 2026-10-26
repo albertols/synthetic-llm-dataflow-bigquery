@@ -164,8 +164,8 @@ def test_the_image_resolves_the_root_link():
   assert "\nCOPY config config\n" in final
 
 
-# 75 % of the 749 lines the file had before it was made compact.
-_LINE_BUDGET = 561
+# 87.5 % of the 749-line baseline: full catalogue text, separators kept.
+_LINE_BUDGET = 656
 
 
 def test_reference_is_compact():
