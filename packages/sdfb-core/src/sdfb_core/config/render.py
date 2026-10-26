@@ -11,25 +11,33 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Render config/generator.yaml: every key, its default and its explanation.
+"""Render the comments of generator.yaml around the values it holds.
+
+The file's value lines are the generator's defaults (`defaults.py`); this
+module writes every key's explanation around the values it is given and never
+chooses a value itself.
 
 Design: docs/DESIGN.md §8 Configuration
 (ADR 0043).
 """
 from __future__ import annotations
 
+import re
 import textwrap
+from collections.abc import Mapping
 
 import yaml
 
 from sdfb_core.config.catalogue import load_catalogue, render_text
-from sdfb_core.config.model import (CONFIG_VERSION, DEFAULT_CONFIG, FLAG_KEYS,
-                                    IDENTITY_KEYS, REQUIRED_FLAGS,
-                                    SECTION_TYPES)
+from sdfb_core.config.model import (CONFIG_VERSION, FLAG_KEYS, IDENTITY_KEYS,
+                                    REQUIRED_FLAGS, SECTION_TYPES)
 
 _HEADER = """\
-# Generator configuration — REFERENCE. Rendered from sdfb_core/config by
-# scripts/doc/render_generator_config.py; do not edit by hand.
+# Generator configuration — the DEFAULTS. Every value line below is the
+# default the generator loads (sdfb_core/config/generator.yaml; the
+# repository's config/generator.yaml links to it). Edit a value here; the
+# comments are rendered from sdfb_core/config/catalogue.yaml by
+# scripts/doc/render_generator_config.py --fix, which never changes a value.
 #
 # Copy ONLY the keys you want to pin into your own file and pass it with
 # --config_uri (local path or gs://). Keys in that file override the same
@@ -81,8 +89,10 @@ def _value(value: object) -> str:
   return str(text.strip().removesuffix("...").strip())
 
 
-def render_reference() -> str:
-  """The full text of the reference file (without the licence header)."""
+def render_reference(values: Mapping[str, Mapping[str, object]]) -> str:
+  """The full text of generator.yaml (without the licence header): the
+  catalogue's comments around the given `{section: {key: value}}` values.
+  Launch identity has no value line; it is shown commented out as null."""
   cat = load_catalogue()
   out = [_HEADER, f"config_version: {CONFIG_VERSION}", ""]
   for section, cls in SECTION_TYPES.items():
@@ -104,7 +114,46 @@ def render_reference() -> str:
         out += _comment(" · ".join(where), "  ")
       if entry.null_means:
         out += _comment(f"null = {entry.null_means}", "  ")
-      line = f"{key}: {_value(getattr(getattr(DEFAULT_CONFIG, section), key))}"
-      out.append(f"  # {line}" if key in IDENTITY_KEYS else f"  {line}")
+      if key in IDENTITY_KEYS:
+        out.append(f"  # {key}: null")
+      else:
+        out.append(f"  {key}: {_value(values[section][key])}")
       out.append("")
   return "\n".join(out).rstrip() + "\n"
+
+
+_VALUE_LINE = re.compile(r"^  (\w+):")
+_IDENTITY_LINE = re.compile(r"^  # (\w+): null$")
+_SECTION_LINE = re.compile(r"^(\w+):")
+
+
+def _key_of(line: str) -> str | None:
+  """The key a rendered value line (or commented identity line) carries."""
+  if match := _VALUE_LINE.match(line):
+    return match.group(1)
+  if (match := _IDENTITY_LINE.match(line)) and match.group(1) in IDENTITY_KEYS:
+    return match.group(1)
+  return None
+
+
+def first_stale_key(actual: str, expected: str) -> str | None:
+  """The dotted key whose rendered entry is the first to differ, `header`
+  when the difference comes before the first section, `end of file` after
+  the last key, None when the texts are equal."""
+  if actual == expected:
+    return None
+  got, want = actual.splitlines(), expected.splitlines()
+  first = next(
+      (i for i, (a, b) in enumerate(zip(got, want, strict=False)) if a != b),
+      min(len(got), len(want)))
+  section = None
+  for index, line in enumerate(want):
+    if match := _SECTION_LINE.match(line):
+      section = match.group(1) if match.group(1) in SECTION_TYPES else None
+    if index < first:
+      continue
+    if section is None:
+      return "header"
+    if key := _key_of(line):
+      return f"{section}.{key}"
+  return "end of file"

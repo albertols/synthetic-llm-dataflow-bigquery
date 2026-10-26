@@ -31,8 +31,8 @@ import yaml
 from pydantic import ValidationError
 
 from sdfb_core.config.catalogue import load_catalogue
-from sdfb_core.config.model import (ALL_KEYS, CONFIG_VERSION, FLAG_KEYS,
-                                    IDENTITY_KEYS, REQUIRED_FLAGS,
+from sdfb_core.config.model import (ALL_KEYS, CONFIG_VERSION, DEFAULT_VALUES,
+                                    FLAG_KEYS, IDENTITY_KEYS, REQUIRED_FLAGS,
                                     SECTION_TYPES, SECTIONS, GeneratorConfig,
                                     value_of)
 
@@ -143,17 +143,19 @@ def resolve(typed: Mapping[str, object],
             config_uri: str = "") -> ConfigResolution:
   """Merge: file > typed flag > model default.
 
-  A file's `null` on a key whose default is null (the required keys, a
-  derived default) means "not pinned": the reference file shows those keys
-  as null, so a block copied from it leaves them to the flags.
+  A file's `null` on a key whose generator.yaml default is null (the
+  required keys, a derived default) means "not pinned": the reference file
+  shows those keys as null, so a block copied from it leaves them to the
+  flags.
   """
   file_values = file_values or {}
   merged: dict[str, dict[str, Any]] = {s: {} for s in SECTIONS}
   provenance: dict[str, str] = {}
   for section, values in file_values.items():
     fields = SECTION_TYPES[section].model_fields
+    defaults = DEFAULT_VALUES[section]
     for key, value in values.items():
-      if value is None and key in fields and fields[key].default is None:
+      if value is None and key in fields and defaults.get(key) is None:
         continue
       merged[section][key] = value
       provenance[f"{section}.{key}"] = PROVENANCE_FILE

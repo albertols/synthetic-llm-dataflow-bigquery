@@ -14,16 +14,19 @@
 """The generator's configuration: one typed, frozen model.
 
 Every setting the generator reads at launch lives here exactly once, with its
-type and its default. Flags keep their CLI names inside their section; the
-other fields are the constants the GUI already shows as knobs. The prose that
-explains each key lives in `catalogue.yaml`, matched 1:1 by a test (ADR 0043).
+type. Its default is the value line of `generator.yaml` (`defaults.py` loads
+it): a section fills every key its input leaves out from that file, so this
+module holds no default literal. Flags keep their CLI names inside their
+section; the other fields are the constants the GUI already shows as knobs.
+The prose that explains each key lives in `catalogue.yaml`, matched 1:1 by a
+test (ADR 0043).
 
 Flag fields mirror argparse exactly — same type, choices and default,
 including the string encodings argparse holds (`"true"`, `""`, `"8192"`) —
 because the launcher rebuilds today's namespace from this model and nothing
 downstream may notice. YAML-native values (`true`, `4096`, `[a, b]`) are
 coerced to those encodings on the way in. This module imports nothing from
-sdfb_core: everything else may import it.
+sdfb_core but `config.defaults`: everything else may import it.
 
 Design: docs/DESIGN.md §3 Serving; §4 Relational generation; §5 Fidelity;
 §8 Configuration
@@ -31,29 +34,32 @@ Design: docs/DESIGN.md §3 Serving; §4 Relational generation; §5 Fidelity;
 """
 from __future__ import annotations
 
-from typing import Annotated, Any, Literal
+from typing import Annotated, Any, ClassVar, Literal
 
 from pydantic import (BaseModel, BeforeValidator, ConfigDict, Field,
                       model_validator)
 
-CONFIG_VERSION = 1
+from sdfb_core.config.defaults import CONFIG_VERSION, load_defaults
+
+# The value lines of generator.yaml: section -> key -> default.
+DEFAULT_VALUES: dict[str, dict[str, object]] = load_defaults()
 
 KIND_FLAG = "flag"
 KIND_CONSTANT = "constant"
 KIND_IDENTITY = "identity"
 
 
-def _flag(default: Any, **constraints: Any) -> Any:
-  return Field(
-      default=default, json_schema_extra={"kind": KIND_FLAG}, **constraints)
+def _flag(**constraints: Any) -> Any:
+  return Field(json_schema_extra={"kind": KIND_FLAG}, **constraints)
 
 
-def _const(default: Any, **constraints: Any) -> Any:
-  return Field(
-      default=default, json_schema_extra={"kind": KIND_CONSTANT}, **constraints)
+def _const(**constraints: Any) -> Any:
+  return Field(json_schema_extra={"kind": KIND_CONSTANT}, **constraints)
 
 
 def _identity() -> Any:
+  # Launch identity is set by flags only: generator.yaml shows it commented
+  # out, so unset is None here rather than a value line.
   return Field(default=None, json_schema_extra={"kind": KIND_IDENTITY})
 
 
@@ -100,13 +106,10 @@ def _yaml_switch(*, on: bool) -> BeforeValidator:
   return BeforeValidator(coerce)
 
 
-_ROW_DOCS_DEFAULT = 1024
-
-
 def _row_docs(value: Any) -> Any:
   """`--rag_row_docs_limit`: empty means the default, as on the CLI."""
   if isinstance(value, str) and not value.strip():
-    return _ROW_DOCS_DEFAULT
+    return DEFAULT_VALUES["rag"]["rag_row_docs_limit"]
   return value
 
 
@@ -121,51 +124,63 @@ _ON_OFF = _yaml_switch(on=True)
 
 class _Section(BaseModel):
   model_config = ConfigDict(frozen=True, extra="forbid")
+  # The section's name in generator.yaml (and in GeneratorConfig).
+  SECTION: ClassVar[str]
+
+  @model_validator(mode="before")
+  @classmethod
+  def _yaml_defaults(cls, data: Any) -> Any:
+    """Every key the input leaves out takes its generator.yaml value."""
+    if isinstance(data, dict):
+      return {**DEFAULT_VALUES[cls.SECTION], **data}
+    return data
 
 
 class IoSettings(_Section):
   """Where the launch reads from and writes to."""
-  ddl_uri: str = _flag("")
-  reference_table: str | None = _flag(None)
+  SECTION = "io"
+  ddl_uri: str = _flag()
+  reference_table: str | None = _flag()
   # A comma-separated list on the CLI; a YAML list in a file.
-  landing_table: Annotated[str | None, BeforeValidator(_csv_text)] = _flag(None)
-  dlq_table: str | None = _flag(None)
-  create_if_not_exists: CliBoolFalse = _flag("false")
-  validation_runs_table: str = _flag("")
-  rag_chunks_table: str = _flag("")
-  freetext_pools_table: str = _flag("")
-  fk_fanout_stats_table: str = _flag("")
-  source_stats_table: str = _flag("")
-  source_stats_json: str = _flag("")
+  landing_table: Annotated[str | None, BeforeValidator(_csv_text)] = _flag()
+  dlq_table: str | None = _flag()
+  create_if_not_exists: CliBoolFalse = _flag()
+  validation_runs_table: str = _flag()
+  rag_chunks_table: str = _flag()
+  freetext_pools_table: str = _flag()
+  fk_fanout_stats_table: str = _flag()
+  source_stats_table: str = _flag()
+  source_stats_json: str = _flag()
   # ADR 0045 — a whole-model launch (`launch.tables: all`) reads every
   # table's source from `source_dataset` under the table's own name (unless
   # the model gives it a source_table) and lands it in `landing_dataset`.
   # Both project.dataset; an explicit launch reads neither.
-  source_dataset: str = _flag("")
-  landing_dataset: str = _flag("")
+  source_dataset: str = _flag()
+  landing_dataset: str = _flag()
 
 
 class LaunchSettings(_Section):
   """Which tables a launch generates and how they split into Dataflow jobs,
   plus the launch's identity, which only flags set (never a file)."""
+  SECTION = "launch"
   run_id: str | None = _identity()
   # ADR 0045 — explicit: io.landing_table and the tables its components pull
   # in (every launch before). all: every enabled table of the one model file
   # relational.relationships_uri names.
-  tables: Literal["explicit", "all"] = _flag("explicit")
+  tables: Literal["explicit", "all"] = _flag()
   # Under `all`, at most this many tables per Dataflow job; a connected
   # component is never split. An estimate (ADR 0045): each batch launch's
   # margin inside the Flex Template's 12-minute window measures it.
-  max_tables_per_job: int = _flag(10, ge=1)
+  max_tables_per_job: int = _flag(ge=1)
   # Batch jobs scripts/launch/run_model.py runs at once: each holds its
   # workers' GPUs. The Composer model DAG reads the Airflow Variable
   # SDFB_MAX_PARALLEL_JOBS instead (Airflow fixes a mapped task's
   # concurrency when it parses the DAG file); a launcher runs one job.
-  max_parallel_jobs: int = _flag(1, ge=1)
+  max_parallel_jobs: int = _flag(ge=1)
   # Threads a multi-table launcher reads schemas, reference samples and
   # source stats on before the cross-table steps run in plan order.
   # 1 = one table after another, exactly as before ADR 0045.
-  prep_workers: int = _flag(8, ge=1)
+  prep_workers: int = _flag(ge=1)
   # The batch this job generates and the count its orchestrator planned.
   batch_index: int | None = _identity()
   batch_count: int | None = _identity()
@@ -173,24 +188,24 @@ class LaunchSettings(_Section):
 
 class SamplingSettings(_Section):
   """The reference sample and the source-stats profiler."""
-  reference_rows_limit: int = _flag(10_000)
-  source_stats: Annotated[Literal["off", "sample", "exact"],
-                          _OFF] = _flag("sample")
+  SECTION = "sampling"
+  reference_rows_limit: int = _flag()
+  source_stats: Annotated[Literal["off", "sample", "exact"], _OFF] = _flag()
   # Literal source values land in stats ONLY for enum-routed columns (the T4
   # exemplar-leak lesson): above this distinct count, a column gets shapes /
   # entropy / lengths — never values. It may not exceed
   # free_text.free_text_max_categories (GeneratorConfig refuses it), so a
   # column whose values reach the stats is always one the engines route as
   # an enum, never a free-text one.
-  top_values_max_distinct: int = _const(50, ge=1)
-  top_values_top_k: int = _const(8, ge=1)
-  shape_mix_top_k: int = _const(8, ge=1)
-  length_percentiles: tuple[float, float, float] = _const((0.05, 0.50, 0.95))
+  top_values_max_distinct: int = _const(ge=1)
+  top_values_top_k: int = _const(ge=1)
+  shape_mix_top_k: int = _const(ge=1)
+  length_percentiles: tuple[float, float, float] = _const()
   # Row-level null co-occurrence: per-row is-null bitstrings, top-K patterns.
   # Skipped above the column cap — the bitstring alphabet grows with width and
   # the pass is O(rows x cols).
-  null_pattern_max_cols: int = _const(64, ge=1)
-  null_pattern_top_k: int = _const(8, ge=1)
+  null_pattern_max_cols: int = _const(ge=1)
+  null_pattern_top_k: int = _const(ge=1)
 
   @model_validator(mode="after")
   def _percentiles_ascending(self) -> SamplingSettings:
@@ -203,17 +218,18 @@ class SamplingSettings(_Section):
 
 class GenerationSettings(_Section):
   """What is generated and how close it stays to the reference."""
-  engine: str = _flag("b1_rag")
-  num_rows: int | None = _flag(None)
-  similarity: float = _flag(0.5)
-  seed: NumericText = _flag("")
-  batch_size: int = _flag(16)
+  SECTION = "generation"
+  engine: str = _flag()
+  num_rows: int | None = _flag()
+  similarity: float = _flag()
+  seed: NumericText = _flag()
+  batch_size: int = _flag()
   # Interim temporal-age policy (2026-07-23): the jitter floor is clamped to
   # now - 10y; fully-historical columns keep their observed range. Subject to
   # per-column DDL-JSON functional descriptions later (audit fields, FK
   # referential integrity, M2+) — see b2_library/fidelity.py for the full
   # rationale.
-  temporal_max_age_years_b1: int = _const(10, ge=1)
+  temporal_max_age_years_b1: int = _const(ge=1)
   # Interim temporal-age policy (2026-07-23): generated dates/datetimes/
   # timestamps must not be older than this. The jitter floor becomes
   # max(observed_min, now - 10y); columns whose ENTIRE observed range is older
@@ -223,34 +239,33 @@ class GenerationSettings(_Section):
   # referential integrity across linked tables, M2+) and must override this
   # blanket constant — keep the policy a single constant + clamp, not a
   # config surface, until that metadata exists.
-  temporal_max_age_years_b2: int = _const(10, ge=1)
+  temporal_max_age_years_b2: int = _const(ge=1)
 
 
 class FreeTextSettings(_Section):
   """Free-text pools: how they are built, routed and expanded."""
+  SECTION = "free_text"
   freetext_expansion: Annotated[Literal["off", "identifiers", "all"],
-                                _OFF] = _flag("identifiers")
-  pool_seed_strategy: Literal["centroid", "kcenter",
-                              "kcenter_rotate"] = _flag("centroid")
-  prompt_constraints: Annotated[Literal["on", "off"], _ON_OFF] = _flag("on")
-  prompt_debug: Annotated[Literal["off", "redacted", "full"],
-                          _OFF] = _flag("off")
-  pool_pattern_guidance: CliBoolEmpty = _flag("")
-  build_pool_layer: CliBoolEmpty = _flag("")
+                                _OFF] = _flag()
+  pool_seed_strategy: Literal["centroid", "kcenter", "kcenter_rotate"] = _flag()
+  prompt_constraints: Annotated[Literal["on", "off"], _ON_OFF] = _flag()
+  prompt_debug: Annotated[Literal["off", "redacted", "full"], _OFF] = _flag()
+  pool_pattern_guidance: CliBoolEmpty = _flag()
+  build_pool_layer: CliBoolEmpty = _flag()
   # The bounded-pool ceiling shared by the engines' free-text ladders and
   # the launcher's PK-capacity preflight (ADR 0028 P4): a constrained
   # column with no samplable pattern can never exceed this many distinct
   # values, so a PK routed there caps at it — the 2026-08-21 run DLQ'd
   # 999 488 of 1M rows exactly this way.
-  free_text_pool_max: int = _const(512, ge=1)
-  pool_values_per_call: int = _const(32, ge=1)
+  free_text_pool_max: int = _const(ge=1)
+  pool_values_per_call: int = _const(ge=1)
   # Server-side parallel sampling (2026-07-25 perf fix): each pool HTTP round
   # trip requests this many INDEPENDENT array-completions (`n=`) and de-dupes
   # across them, multiplying per-call novel yield ~4x. Safe because pool
   # requests are UNSEEDED — the 2026-07-16 collapse was n=32 single-value
   # choices under a pinned seed, a different shape entirely. The prompt stays
   # byte-identical across attempts (stable prefix ⇒ vLLM APC / LMCache-ready).
-  pool_parallel_choices: int = _const(4, ge=1)
+  pool_parallel_choices: int = _const(ge=1)
   # Stagnation exit (2026-07-23 E2E): 2 of 3 pool columns rode the full
   # 2*ceil(target/32)=32-call budget (~30 min of T4 setup) while marginal
   # novel yield had collapsed to cross-call duplicates and prompt echoes.
@@ -258,38 +273,38 @@ class FreeTextSettings(_Section):
   # attempts each adding fewer than pool_stagnation_min_novel novel values
   # end the ladder — more retries at the ceiling level cannot outrun the
   # yield decay.
-  pool_stagnation_window: int = _const(3, ge=1)
+  pool_stagnation_window: int = _const(ge=1)
   # None = max(1, pool_values_per_call // 8), the master derivation.
-  pool_stagnation_min_novel: int | None = _const(None, ge=1)
+  pool_stagnation_min_novel: int | None = _const(ge=1)
   # Format-collapse exit (ADR 0033, 2026-08-25/26 R6 A_COL_037): 385/393
   # and 386/393 parsed values were format-rejected — 28-char values into a
   # fixed 31-char bucket, the model echoing its clause's own off-format
   # example — over three ~150 s T4 rounds before the stagnation window
   # closed. A full-yield round with ZERO in-format values is a structural
   # mismatch temperature cannot fix; two in a row end the ladder.
-  pool_format_collapse_rounds: int = _const(2, ge=1)
+  pool_format_collapse_rounds: int = _const(ge=1)
   # Ladders for different columns are independent — run them on a bounded
   # thread pool. vLLM continuous-batches concurrent requests on the server
   # side; the client (openai/httpx) is thread-safe; embedder work is NOT
   # (HF "Already borrowed") and therefore finishes before any thread spawns.
-  pool_build_max_workers: int = _const(4, ge=1)
+  pool_build_max_workers: int = _const(ge=1)
   # Above this many distinct values the filter set stops being a cheap
   # worker-side frozenset; the store reports "unavailable" and the engine
   # degrades loudly to sample-only rejection. 1M strings ~= tens of MB on an
   # n1-highmem-8 — far below worker RAM, far above every observed E2E column
   # (max seen: 146k distinct, B_TABLE COL_038).
-  source_domain_cap: int = _const(1_000_000, ge=1)
+  source_domain_cap: int = _const(ge=1)
   # A string column with more unique non-null values than this *fraction* of
   # its non-null count, AND a mean rendered length above the threshold, is
   # treated as FREE_TEXT rather than CATEGORICAL. Tuned so low-cardinality
   # enums (country, tier) stay categorical while names / descriptions /
   # free-form notes go to the LLM pool.
-  free_text_unique_ratio: float = _const(0.9, gt=0.0, le=1.0)
-  free_text_min_mean_len: int = _const(20, ge=0)
+  free_text_unique_ratio: float = _const(gt=0.0, le=1.0)
+  free_text_min_mean_len: int = _const(ge=0)
   # Above this absolute distinct count a string column is high-cardinality and
   # treated as free text even if short (e.g. emails, ids-as-strings). It
   # caps sampling.top_values_max_distinct (see GeneratorConfig).
-  free_text_max_categories: int = _const(50, ge=1)
+  free_text_max_categories: int = _const(ge=1)
 
   @property
   def stagnation_min_novel(self) -> int:
@@ -301,34 +316,35 @@ class FreeTextSettings(_Section):
 
 class RagSettings(_Section):
   """B.1 retrieval: the embedder, the chunk store and the exemplar pick."""
-  embedder_uri: str = _flag("")
-  build_rag_layer: CliBoolEmpty = _flag("")
-  rag_row_docs_limit: Annotated[int, BeforeValidator(_row_docs)] = _flag(
-      _ROW_DOCS_DEFAULT, ge=1)
+  SECTION = "rag"
+  embedder_uri: str = _flag()
+  build_rag_layer: CliBoolEmpty = _flag()
+  rag_row_docs_limit: Annotated[int, BeforeValidator(_row_docs)] = _flag(ge=1)
   # free_text_col chunks dedupe to distinct (column, value); a pathological
   # near-unique column stays bounded here (consumers pick top-k=8 exemplars).
-  max_free_text_values_per_column: int = _const(1024, ge=1)
+  max_free_text_values_per_column: int = _const(ge=1)
   # Top-k exemplars retrieved to condition the LLM's free-text inference.
-  rag_top_k: int = _const(8, ge=1)
+  rag_top_k: int = _const(ge=1)
   # bge-small-en-v1.5 has 512 position embeddings: a longer window passes
   # here and crashes the embedder on a worker after launch, so it is capped.
-  bge_max_length: int = _const(512, ge=1, le=512)
+  bge_max_length: int = _const(ge=1, le=512)
   # bge-small-en-v1.5 is ~130 MB of fp32 weights; activations and CUDA context
   # push the real footprint higher. Require this much FREE VRAM before "auto"
   # picks CUDA. The 2026-07-26 E2E asked for 2 MiB with 2.81 MiB free and
   # OOMed: cuda.is_available() answers "does a GPU exist", never "is there
   # room", and on a DoFn.setup() RETRY the module-level vLLM server reuse
   # (ADR 0014) means the card is already spoken for.
-  embedder_min_free_vram: int = _const(512 * 1024 * 1024, ge=0)
+  embedder_min_free_vram: int = _const(ge=0)
 
 
 class GuardrailSettings(_Section):
   """The gate: environment tier, uniqueness and the landing write mode."""
-  env: str = _flag("dev")
-  uniqueness_mode: UniquenessMode = _flag("exact")
-  driven_uniqueness_mode: UniquenessMode = _flag("streaming")
-  write_disposition: Literal["append", "overwrite"] = _flag("append")
-  thresholds_uri: str = _flag("config/thresholds.yml")
+  SECTION = "guardrails"
+  env: str = _flag()
+  uniqueness_mode: UniquenessMode = _flag()
+  driven_uniqueness_mode: UniquenessMode = _flag()
+  write_disposition: Literal["append", "overwrite"] = _flag()
+  thresholds_uri: str = _flag()
   # Absolute tolerance between the SOURCE key-repeat share and the one the
   # landing table lands with (ADR 0038 §5).
   #
@@ -341,33 +357,33 @@ class GuardrailSettings(_Section):
   # whole source's. Five points is loose enough to survive all three and
   # tight enough that a structural break is unmissable: a fan-out capped
   # to one child lands ~0.00 and a doubled one ~0.75, both far outside.
-  repeat_share_tolerance: float = _const(0.05, ge=0.0, le=1.0)
+  repeat_share_tolerance: float = _const(ge=0.0, le=1.0)
 
 
 class RelationalSettings(_Section):
   """Keys, edges and the FK key samples."""
-  generate_fk_relationships: CliBoolFalse = _flag("true")
-  relationships_uri: str = _flag("config/relationships")
-  multi_table_mode: Literal["single_job",
-                            "sequential_jobs"] = _flag("single_job")
-  on_model_conflict: Literal["adjust", "stop"] = _flag("adjust")
-  fk_candidate_cap: int = _flag(64, ge=1)
-  identity_cols: CsvText = _flag("")
-  pk_cols: CsvText = _flag("")
-  fk_parent_landing: str = _flag("")
+  SECTION = "relational"
+  generate_fk_relationships: CliBoolFalse = _flag()
+  relationships_uri: str = _flag()
+  multi_table_mode: Literal["single_job", "sequential_jobs"] = _flag()
+  on_model_conflict: Literal["adjust", "stop"] = _flag()
+  fk_candidate_cap: int = _flag(ge=1)
+  identity_cols: CsvText = _flag()
+  pk_cols: CsvText = _flag()
+  fk_parent_landing: str = _flag()
   # The ADR 0030 side-input cap: a child samples at most this many parent
   # key tuples unless its PK needs more; `io/fk_pools` defaults to it too.
-  fk_key_sample_floor: int = _const(100_000, ge=1)
+  fk_key_sample_floor: int = _const(ge=1)
   # Largest side input this sizing will ask for. 1M single-column string
   # keys is ~40 MB pickled / ~130 MB live per SDK process; beyond it the
   # scaling answer is the co-partitioned join (ADR 0031 escape hatch).
-  fk_key_sample_ceiling: int = _const(1_000_000, ge=1)
+  fk_key_sample_ceiling: int = _const(ge=1)
   # Capacity / num_rows target: at 10x, expected duplicates are ~4.8%.
-  fk_key_sample_margin: int = _const(10, ge=1)
+  fk_key_sample_margin: int = _const(ge=1)
   # ADR 0037 §7 — a fan-out request carries `keys_per_batch * M` candidate
   # tuples per conditional edge; `keys_per_batch` is lowered so the whole
   # request stays under this many values, whatever the cap is set to.
-  max_conditional_values_per_request: int = _const(100_000, ge=1)
+  max_conditional_values_per_request: int = _const(ge=1)
 
   @model_validator(mode="after")
   def _floor_below_ceiling(self) -> RelationalSettings:
@@ -379,12 +395,13 @@ class RelationalSettings(_Section):
 
 class ServingSettings(_Section):
   """The model, the vLLM server and the worker fleet."""
-  client_type: Literal["vllm", "mlx", "fake"] = _flag("vllm")
-  model_uri: str | None = _flag(None)
-  vllm_dtype: Literal["auto", "float16", "bfloat16"] = _flag("auto")
-  vllm_max_model_len: NumericText = _flag("8192")
-  autoscaling: Literal["auto", "throughput", "fixed"] = _flag("auto")
-  initial_workers: NumericText = _flag("")
+  SECTION = "serving"
+  client_type: Literal["vllm", "mlx", "fake"] = _flag()
+  model_uri: str | None = _flag()
+  vllm_dtype: Literal["auto", "float16", "bfloat16"] = _flag()
+  vllm_max_model_len: NumericText = _flag()
+  autoscaling: Literal["auto", "throughput", "fixed"] = _flag()
+  initial_workers: NumericText = _flag()
 
 
 SECTION_TYPES: dict[str, type[_Section]] = {

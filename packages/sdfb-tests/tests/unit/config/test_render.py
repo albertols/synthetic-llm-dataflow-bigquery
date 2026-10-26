@@ -17,12 +17,17 @@ import importlib.util
 from pathlib import Path
 
 from sdfb_core.config.catalogue import load_catalogue
+from sdfb_core.config.defaults import load_defaults
 from sdfb_core.config.model import (ALL_KEYS, DEFAULT_CONFIG, IDENTITY_KEYS,
                                     REQUIRED_FLAGS, SECTION_TYPES)
-from sdfb_core.config.render import render_reference
+from sdfb_core.config.render import render_reference as _render
 from sdfb_core.config.resolve import parse_config_text, resolve
 
 _REPO = Path(__file__).resolve().parents[5]
+
+
+def render_reference() -> str:
+  return _render(load_defaults())
 
 
 def test_committed_file_is_current():
@@ -52,9 +57,10 @@ def test_personal_example_resolves():
 
 def test_every_null_default_is_required_or_derived():
   entries = load_catalogue().entries
+  defaults = load_defaults()
   for section, cls in SECTION_TYPES.items():
-    for key, info in cls.model_fields.items():
-      if info.default is None:
+    for key in cls.model_fields:
+      if defaults[section].get(key) is None:
         assert (key in REQUIRED_FLAGS or key in IDENTITY_KEYS or
                 entries[f"{section}.{key}"].null_means), f"{section}.{key}"
 
@@ -80,6 +86,8 @@ def test_check_exits_1_on_a_drifted_file(tmp_path, monkeypatch):
   monkeypatch.setattr(module, "_TARGET", target)
   monkeypatch.setattr("sys.argv", ["x", "--check"])
   assert module.main() == 1  # missing file
+  target.write_text("config_version: 1\n", encoding="utf-8")
+  assert module.main() == 1  # no value lines
   target.write_text(module._LICENCE + render_reference(), encoding="utf-8")  # pylint: disable=protected-access
   assert module.main() == 0
   target.write_text(

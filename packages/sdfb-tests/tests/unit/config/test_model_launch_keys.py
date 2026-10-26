@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import pytest
 from sdfb_beam.cli import run_pipeline as rp
+from sdfb_core.config.defaults import load_defaults
 from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
 from sdfb_core.config.render import render_reference
 from sdfb_core.config.resolve import ConfigError, parse_config_text, resolve
@@ -111,7 +112,7 @@ def test_master_prefixes_still_resolve_or_stop_loudly(capsys):
 
 
 def test_the_reference_file_renders_the_launch_section():
-  text = render_reference()
+  text = render_reference(load_defaults())
   assert "launch:\n  {}" not in text
   assert "\n  tables: explicit\n" in text
   assert "\n  max_tables_per_job: 10\n" in text
