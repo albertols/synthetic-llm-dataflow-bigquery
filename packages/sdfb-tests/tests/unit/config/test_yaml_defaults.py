@@ -12,9 +12,6 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 """`generator.yaml` holds the defaults; the model keeps the types only.
-
-Design: docs/DESIGN.md §8 Configuration
-(ADR 0043).
 """
 from __future__ import annotations
 
@@ -26,6 +23,7 @@ from pathlib import Path
 import pytest
 from sdfb_core.config.defaults import (GENERATOR_YAML, defaults_digest,
                                        load_defaults)
+from sdfb_core.config.catalogue import load_catalogue
 from sdfb_core.config.model import (DEFAULT_CONFIG, IDENTITY_KEYS,
                                     SECTION_TYPES, GeneratorConfig)
 
@@ -160,3 +158,53 @@ def test_the_image_resolves_the_root_link():
   assert "\nWORKDIR /workspace\n" in final
   assert "\nCOPY packages/sdfb-core/src packages/sdfb-core/src\n" in final
   assert "\nCOPY config config\n" in final
+
+
+# 75 % of the 749 lines the file had before it was made compact.
+_LINE_BUDGET = 561
+
+
+def test_reference_is_compact():
+  lines = GENERATOR_YAML.read_text(encoding="utf-8").splitlines()
+  assert len(lines) <= _LINE_BUDGET, len(lines)
+
+
+def _comment_runs() -> dict[str, list[str]]:
+  """Per `section.key`, the comment lines directly above its value line."""
+  runs: dict[str, list[str]] = {}
+  section = ""
+  above: list[str] = []
+  for line in GENERATOR_YAML.read_text(encoding="utf-8").splitlines():
+    if line in {f"{name}:" for name in SECTION_TYPES}:
+      section, above = line[:-1], []
+    elif line.startswith("  #") and section:
+      key = line[4:].split(":", 1)[0]
+      if line.endswith(": null") and key in IDENTITY_KEYS:
+        runs[f"{section}.{key}"], above = above, []
+      else:
+        above.append(line)
+    elif line.startswith("  ") and section:
+      name = line.split(":", 1)[0].strip()
+      runs[f"{section}.{name}"] = above
+      above = []
+    else:
+      above = []
+  return runs
+
+
+def test_every_entry_has_at_most_three_comment_lines_plus_null():
+  entries = load_catalogue().entries
+  runs = _comment_runs()
+  assert len(runs) == sum(
+      len(cls.model_fields) for cls in SECTION_TYPES.values())
+  for dotted, comments in runs.items():
+    limit = 4 if entries[dotted].null_means else 3
+    assert 1 <= len(comments) <= limit, (dotted, comments)
+
+
+def test_compact_entry_layout():
+  comments = _comment_runs()["generation.similarity"]
+  assert comments[0].startswith("  # Similarity — ")
+  assert "--similarity" in comments[0]
+  arrows = [c for c in comments if c.startswith("  # ↑ ")]
+  assert len(arrows) == 1 and " · ↓ " in arrows[0]

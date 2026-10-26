@@ -16,9 +16,6 @@
 The file's value lines are the generator's defaults (`defaults.py`); this
 module writes every key's explanation around the values it is given and never
 chooses a value itself.
-
-Design: docs/DESIGN.md §8 Configuration
-(ADR 0043).
 """
 from __future__ import annotations
 
@@ -33,30 +30,19 @@ from sdfb_core.config.model import (CONFIG_VERSION, FLAG_KEYS, IDENTITY_KEYS,
                                     REQUIRED_FLAGS, SECTION_TYPES)
 
 _HEADER = """\
-# Generator configuration — the DEFAULTS. Every value line below is the
-# default the generator loads (sdfb_core/config/generator.yaml; the
-# repository's config/generator.yaml links to it). Edit a value here; the
-# comments are rendered from sdfb_core/config/catalogue.yaml by
-# scripts/doc/render_generator_config.py --fix, which never changes a value.
+# Generator configuration: the DEFAULTS. Every value line is the default the
+# generator loads. Precedence: this file < composer/sdfb_env.yaml < DAG
+# trigger values < your --config_uri file (keys it omits fall back).
+# Copy only the keys you want to pin; a file of your own starts with
+# `config_version: 1`. Comments are abridged from sdfb_core/config/
+# catalogue.yaml by scripts/doc/render_generator_config.py --fix (never
+# touches a value); the catalogue holds the full text.
 #
-# Copy ONLY the keys you want to pin into your own file and pass it with
-# --config_uri (local path or gs://). Keys in that file override the same
-# flags and DAG params; flags fill the keys it leaves out (ADR 0043).
-# Passing this whole file pins every key and makes every flag a no-op.
-# A file of your own starts with `config_version: 1`.
-#
-# How to read an entry:
-#   flag --x   the key is also a CLI / Flex / Composer flag; keys without
-#              it can be set only in a file.
-#   raise/lower  what a higher / lower value does.
-#   null       either `required` (the entry says so: a launch needs a
-#              value from a flag or a file; a null left in your file pins
-#              nothing, so a flag still fills it) or `derived` (the entry
-#              says `null = ...`: leave it null and the value is computed).
-#              On a key with a value, `null = ...` says what a null in
-#              your file means instead (vllm_max_model_len: no cap).
-#   Quoted values ('on', 'false', '8192', '') are string-encoded CLI
-#   values: keep them quoted.
+#   [--x · ADR n · required]  the CLI / Flex / Composer flag, its ADR, and
+#                             whether a launch needs a value
+#   ↑ / ↓                     what raising / lowering the value does
+#   null = ...                what a null means (otherwise `required`)
+#   'on', 'false', '8192'     quoted: string-encoded CLI values, keep them
 """
 
 _RULE = "# " + "=" * 73
@@ -81,6 +67,63 @@ def _comment(text: str, indent: str) -> list[str]:
   ]
 
 
+_WIDTH = 73  # text columns after the "  # " of a comment line
+_HEAD_LINES = 2  # an entry is at most 3 comment lines: 2 here, 1 for ↑ ↓
+_SENTENCE = re.compile(r".*?[.!?](?=\s|$)")
+_CLAUSE = re.compile(r".{25,}?(?=[:;] )")
+
+
+def _clip(text: str, limit: int) -> str:
+  """`text` cut to `limit` characters: at a clause, else at a word, + `…`;
+  never inside an open parenthesis."""
+  text = text.strip()
+  if len(text) <= limit:
+    return text
+  room = text[:max(limit - 1, 1)]
+  if room.count("(") > room.count(")") and room.rfind("(") >= limit // 2:
+    room = room[:room.rfind("(")].rstrip()
+  for mark in (", ", " — ", "; ", ": "):
+    at = room.rfind(mark)
+    if at >= limit // 2:
+      return room[:at] + "…"
+  return room.rsplit(" ", 1)[0].rstrip(",;:") + "…"
+
+
+def _first(text: str) -> str:
+  """The first sentence of `text`, without its final full stop."""
+  match = _SENTENCE.match(text)
+  return (match.group(0) if match else text).rstrip(".")
+
+
+def _head(label: str, purpose: str, where: list[str]) -> list[str]:
+  """`# <Label> — <purpose> [--flag · ADR n · required]`, wrapped at two
+  lines at most; the purpose is its first clause, clipped to make it fit."""
+  clause = _CLAUSE.match(_first(purpose))
+  purpose = clause.group(0) if clause else _first(purpose)
+  meta = " [" + " · ".join(where) + "]" if where else ""
+  lead = f"{label} — "
+  for limit in range(len(purpose), 0, -1):
+    lines = _comment(f"{lead}{_clip(purpose, limit)}{meta}", "  ")
+    if len(lines) <= _HEAD_LINES:
+      return [line.replace("\u00a0", " ") for line in lines]
+  return _comment(f"{lead}{meta}".replace("\u00a0", " "), "  ")
+
+
+def _raise_lower(up: str, down: str) -> str:
+  """`# ↑ <raise> · ↓ <lower>` on one line: each side gets half of it, and
+  a short side leaves the rest to the other."""
+  up, down = _first(up), _first(down)
+  room = _WIDTH - len("↑  · ↓ ")
+  half = room // 2
+  if len(up) < half:
+    down = _clip(down, room - len(up))
+  elif len(down) < half:
+    up = _clip(up, room - len(down))
+  else:
+    up, down = _clip(up, half), _clip(down, room - half)
+  return f"  # ↑ {up} · ↓ {down}"
+
+
 def _value(value: object) -> str:
   """One YAML flow value; strings are quoted so YAML 1.1 never reinterprets."""
   if isinstance(value, tuple):
@@ -100,18 +143,15 @@ def render_reference(values: Mapping[str, Mapping[str, object]]) -> str:
     for key in cls.model_fields:
       dotted = f"{section}.{key}"
       entry = cat.entries[dotted]
-      out += _comment(f"{entry.label} — {render_text(entry.purpose)}", "  ")
-      out += _comment(f"raise: {render_text(entry.up)}", "  ")
-      out += _comment(f"lower: {render_text(entry.down)}", "  ")
       where = []
       if key in FLAG_KEYS or key in IDENTITY_KEYS:
-        where.append(f"flag --{key}")
+        where.append(f"--{key}")
       if entry.adrs:
-        where.append("ADR " + ", ".join(entry.adrs))
+        where.append("ADR\u00a0" + ", ".join(entry.adrs))
       if key in REQUIRED_FLAGS:
         where.append("required")
-      if where:
-        out += _comment(" · ".join(where), "  ")
+      out += _head(entry.label, render_text(entry.purpose), where)
+      out.append(_raise_lower(render_text(entry.up), render_text(entry.down)))
       if entry.null_means:
         out += _comment(f"null = {entry.null_means}", "  ")
       if key in IDENTITY_KEYS:
