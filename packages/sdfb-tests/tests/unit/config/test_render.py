@@ -55,6 +55,17 @@ def test_personal_example_resolves():
   assert resolve({"run_id": "r"}, values).config.guardrails.env == "dev"
 
 
+def test_personal_example_serves_the_t4_in_float16():
+  # The example is the T4 qwen profile: gpu: t4 is what makes the launch
+  # record the T4 and serve the bf16 checkpoint in float16 (ADR 0043).
+  text = (_REPO / "config/generator.personal.example.yaml").read_text()
+  serving = resolve({
+      "run_id": "r"
+  }, parse_config_text(text, source="example")).config.serving
+  assert serving.gpu == "t4"
+  assert serving.effective_vllm_dtype == "float16"
+
+
 def test_every_null_default_is_required_or_derived():
   entries = load_catalogue().entries
   defaults = load_defaults()

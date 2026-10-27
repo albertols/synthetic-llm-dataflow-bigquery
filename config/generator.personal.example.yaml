@@ -24,6 +24,9 @@ io:
 serving:
   # The T4-safe entry of config/models.yml: Gemma cannot run on a T4.
   model_uri: gs://my-bucket/synthetic/models/qwen3/4b-instruct-2507/v1/
-  vllm_dtype: float16
+  # The workers' GPU. The launcher records it, and derives vllm_dtype from it
+  # (t4: float16, which this bf16 checkpoint needs on a T4); left at the l4
+  # default, a T4 launch is refused before the vLLM server starts.
+  gpu: t4
 guardrails:
   env: dev
