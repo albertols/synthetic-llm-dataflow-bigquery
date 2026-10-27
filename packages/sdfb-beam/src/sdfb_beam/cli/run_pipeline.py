@@ -324,11 +324,11 @@ def resolve_batch_size(requested: int, num_rows: int) -> int:
 
 
 # argparse takes any unambiguous prefix of a long option. Flags added since
-# v0.6.1 (`--landing_*`, `--batch_*`, `--generator_defaults_digest`) made these master spellings ambiguous;
-# an exact entry wins over prefix matching, so they keep reaching the same
-# flag (ADR 0043). They are registered by string only: they never appear in
-# `option_strings`, `--help` or the launch surface. Pinned by
-# test_flag_abbreviations.
+# v0.6.1 (`--landing_*`, `--batch_*`, `--generator_defaults_digest`) made
+# these master spellings ambiguous; an exact entry wins over prefix matching,
+# so they keep reaching the same flag (ADR 0043). They are registered by
+# string only: they never appear in `option_strings`, `--help` or the launch
+# surface. Pinned by test_flag_abbreviations.
 _FLAG_ALIASES = {
     "--landing_table":
         ("--lan", "--land", "--landi", "--landin", "--landing", "--landing_"),
@@ -857,7 +857,8 @@ def log_config_resolution(resolution: ConfigResolution) -> None:
 def log_defaults_mismatch(resolution: ConfigResolution) -> None:
   """WARN when the DAG's generator.yaml is not the image's; nothing on a
     match or when no digest was given."""
-  dag = resolution.config.launch.generator_defaults_digest
+  dag = (resolution.config.launch.generator_defaults_digest or "").strip()
+  dag = dag.lower()
   image = defaults_digest()
   if dag and dag != image:
     log_milestone(

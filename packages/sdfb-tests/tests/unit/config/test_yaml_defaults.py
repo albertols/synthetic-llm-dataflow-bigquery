@@ -174,7 +174,9 @@ _BASE_BUDGET = 656
 _SERVING_LAUNCH_KEYS_LINES = 3 * 4
 _VLLM_DTYPE_NULL_LINE = 1
 # Task 5's identity key launch.generator_defaults_digest: blank + 6 comment
-# lines + the commented null (Ruling R1).
+# lines + the commented null. Ruling R10: R1's 4-lines-per-key limit was
+# sized for short serving entries and R4 forbids clipping catalogue text, so
+# this identity key's full text costs 8.
 _DEFAULTS_DIGEST_KEY_LINES = 8
 _LINE_BUDGET = (
     _BASE_BUDGET + _SERVING_LAUNCH_KEYS_LINES + _VLLM_DTYPE_NULL_LINE +

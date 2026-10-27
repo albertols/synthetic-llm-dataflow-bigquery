@@ -23,6 +23,7 @@ import logging
 import pytest
 from sdfb_beam.cli import run_pipeline as rp
 from sdfb_core.config.defaults import defaults_digest
+from sdfb_core.config.resolve import ConfigError, parse_config_text
 from sdfb_core.record import build_snapshot
 from sdfb_tests.config_parity import ARGV_BASE
 
@@ -49,6 +50,19 @@ def test_mismatched_digest_warns_with_both(caplog):
       f"{_MARK} dag=abcdef012345 image={defaults_digest()}")
 
 
+@pytest.mark.parametrize("value", ["", "  "])
+def test_a_blank_digest_counts_as_absent(caplog, value):
+  argv = [*ARGV_BASE, f"--generator_defaults_digest={value}"]
+  assert not _mismatch_lines(caplog, argv)
+
+
+def test_an_uppercase_digest_equal_to_the_image_logs_nothing(caplog):
+  argv = [
+      *ARGV_BASE, f"--generator_defaults_digest={defaults_digest().upper()}"
+  ]
+  assert not _mismatch_lines(caplog, argv)
+
+
 def test_absent_digest_logs_nothing(caplog):
   assert not _mismatch_lines(caplog, list(ARGV_BASE))
 
@@ -72,8 +86,7 @@ def test_a_file_cannot_set_the_digest(tmp_path):
     rp.parse_args([*ARGV_BASE, f"--config_uri={path}"])
 
 
-def test_the_resolver_names_the_key(tmp_path):
-  from sdfb_core.config.resolve import ConfigError, parse_config_text
+def test_the_resolver_names_the_key():
   with pytest.raises(
       ConfigError,
       match=r"launch\.generator_defaults_digest is launch identity"):
