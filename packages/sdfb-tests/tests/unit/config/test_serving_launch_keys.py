@@ -20,8 +20,8 @@ from the GPU (t4 -> float16, l4 -> bfloat16); an explicit value wins.
 `generation.num_rows` defaults to 1000 and is no longer required; both
 build layers default to true, a no-op without their table.
 
-Design: docs/DESIGN.md §3 Serving; §8 Configuration
-(ADR 0014, 0043).
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0043).
 """
 from __future__ import annotations
 
