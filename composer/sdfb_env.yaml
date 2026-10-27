@@ -1,0 +1,60 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+# The env overlay: every deploy marker of the generation DAG, in one file.
+# Workflow 3 runs its `sed` over this file and imports it beside the DAG,
+# composer/sdfb_batches.py and generator.yaml; composer/sdfb_batches.py
+# (`load_layers`) reads it. Precedence: generator.yaml < this file < the DAG
+# trigger's values < a config_uri file (ADR 0043).
+#
+# Every value is a quoted string, so a substituted prd, append, l4, an empty
+# value or a version stays that string and YAML never reads it as a boolean,
+# a number or null.
+
+# The DAG itself: its id is synthetic_sdfb_<dag_version>; the Flex Template
+# it launches is sdfb-<project_version>-template.json (ADR 0044).
+dag:
+  project_version: "{{PROJECT_VERSION}}"
+  dag_version: "{{DAG_VERSION}}"
+
+# The buckets (names, without gs://): Dataflow's temp and staging locations,
+# and the Flex Template specs.
+infra:
+  staging_bucket: "{{GCS_DATAFLOW_STAGING}}"
+  templates_bucket: "{{GCS_DATAFLOW_TEMPLATES}}"
+
+# section -> key over generator.yaml: this environment's defaults. A DAG
+# param of the same key (io.reference_table is the param table_fqn) starts
+# from the value here; the launch passes a key only where its value differs
+# from generator.yaml.
+config:
+  io:
+    reference_table: "{{SDFB_DEFAULT_TABLE_FQN}}"
+    landing_table: "{{SDFB_LANDING_TABLE}}"
+    dlq_table: "{{SDFB_DLQ_TABLE}}"
+    ddl_uri: "{{SDFB_DDL_URI}}"
+    validation_runs_table: "{{SDFB_VALIDATION_RUNS_TABLE}}"
+    rag_chunks_table: "{{SDFB_RAG_CHUNKS_TABLE}}"
+    freetext_pools_table: "{{SDFB_FREETEXT_POOLS_TABLE}}"
+    source_stats_table: "{{SDFB_SOURCE_STATS_TABLE}}"
+  generation:
+    engine: "{{ENGINE}}"
+  rag:
+    embedder_uri: "{{SDFB_EMBEDDER_URI}}"
+  guardrails:
+    env: "{{ENV}}"
+    write_disposition: "{{WRITE_DISPOSITION}}"
+  serving:
+    model_uri: "{{SDFB_MODEL_URI}}"
+    gpu: "{{GPU}}"

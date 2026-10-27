@@ -275,7 +275,7 @@ def test_a_bad_model_fails_the_run_at_once():
   assert ast.literal_eval(_kw(decorator, "retries")) == 0
 
 
-def test_the_plan_runs_on_what_the_dag_declares():
+def test_the_plan_runs_on_what_the_dag_declares(deployed):
   # `plan` hands the mirror the DAG params and `_CONSTANTS`: a key the
   # mirror reads and the DAG lacks would fail every launch on Composer.
   params = {name: _default(call) for name, call in _params(DAG).items()}
@@ -295,7 +295,8 @@ def test_the_plan_runs_on_what_the_dag_declares():
       max_tables_per_job=k,
       relationships_uri=uri,
       base_run_id="manual__x-abcd1234",
-      constants=constants)
+      constants=constants,
+      layers=BATCHES.load_layers(deployed()))
   assert (k, plan["batch_count"]) == (10, 2)
   # `plan` returns the bodies and pushes the rest: every key exists
   assert set(plan) == _PLAN_KEYS | {"bodies"}

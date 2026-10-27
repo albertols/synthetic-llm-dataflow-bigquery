@@ -11,30 +11,49 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Planning a whole-model launch for the Composer model DAG (ADR 0045).
+"""The generation DAG's launch bodies, for both branches (ADR 0043, 0045).
 
-`composer/synthetic_model_launch.py` cannot import sdfb-core (the Composer
-environment has neither it nor pydantic), so this module repeats, with the
-standard library and PyYAML only, what that DAG needs from it:
+The Composer DAGs cannot import sdfb-core (the Composer environment has
+neither it nor pydantic), so this module does, with the standard library and
+PyYAML only, what the DAG needs:
 
+    load_layers        the DAG folder's generator.yaml (the defaults) and
+                       sdfb_env.yaml (the env overlay workflow 3 fills), and
+                       the yaml's digest (sdfb_core.config.defaults' rule)
+    param_defaults     each DAG param's default: generator.yaml overlaid
+                       with the overlay's `config:` section
+    launch_overrides   the template parameters of a launch: only the keys
+                       whose value differs from generator.yaml, plus the
+                       launch identity and the yaml's digest
+    explicit_body      the explicit branch's Flex launch body (master's
+                       `start_sdfb`)
+    evaluation_body    the chained evaluation's launch body
+    resolve_tables_mode  which branch runs: a config file's launch.tables
+                       wins over the param
     plan_batches       the batches of sdfb_core.launch.batches
                        (first-fit-decreasing over whole components)
     planning_inputs    the model file and K the batch launchers will plan
                        with: a config file's keys win over the DAG params,
                        as they do in the launcher (ADR 0043)
+    launch_plan        the `all` branch's batch launch bodies
 
-and builds each batch's Flex Template launch body. The launcher stays
-authoritative: every batch job plans again from the same model and K and
-stops when its count differs from `batch_count`. A parity test pins
+Precedence: generator.yaml < sdfb_env.yaml < the trigger's values < a
+config_uri file. A key the launch does not pass takes the image's
+generator.yaml value, so the launch also passes the digest of the DAG's copy
+and the launcher warns (`generator_defaults_mismatch`) when the two differ.
+Parity tests pin `cli_text` to sdfb-core's text of every yaml value, the
+digest to `defaults_digest`, an explicit launch to master's recorded launch
+(packages/sdfb-tests/tests/unit/composer/test_launch_helpers.py), and
 `plan_batches` to sdfb-core's on every committed model and on generated
-forests of up to 120 tables
-(packages/sdfb-tests/tests/unit/composer/test_sdfb_batches.py).
+forests of up to 120 tables (test_sdfb_batches.py).
 
-The planner reads each table's `enabled` flag and its FK refs, nothing else.
-It refuses the refs sdfb-core refuses at load (an edge to the table itself,
-a bare ref the model does not declare), so a typo stops `plan` rather than
-every batch's Flex launch; the launcher validates the rest of the model when
-a batch job starts.
+The launcher stays authoritative: every batch job plans again from the same
+model and K and stops when its count differs from `batch_count`. The planner
+reads each table's `enabled` flag and its FK refs, nothing else. It refuses
+the refs sdfb-core refuses at load (an edge to the table itself, a bare ref
+the model does not declare), so a typo stops `plan` rather than every
+batch's Flex launch; the launcher validates the rest of the model when a
+batch job starts.
 
 The DAGs folder imports this file beside the DAG. It never names the
 scheduler: a file in that folder that names it and says "dag" is parsed as
@@ -43,19 +62,25 @@ a DAG file.
 Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
 (ADR 0043, 0045).
 """
-from __future__ import annotations
-
+# No `from __future__ import annotations`: string annotations make
+# @dataclass look this module up in sys.modules, where a loader from the
+# file (the tests, an exporter) has not put it.
+import hashlib
+import os
 import re
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 import yaml
 
 __all__ = [
-    "DEFAULT_MAX_TABLES_PER_JOB", "L4_ACCELERATOR", "T4_ACCELERATOR",
-    "PlanError", "batch_job_name", "batch_parameters", "common_parameters",
-    "landed_job_ids", "launch_environment", "launch_plan", "model_slug",
-    "plan_banner", "plan_batches", "planning_inputs"
+    "DEFAULT_MAX_TABLES_PER_JOB", "L4_ACCELERATOR", "T4_ACCELERATOR", "Layers",
+    "PlanError", "batch_job_name", "batch_parameters", "cli_text",
+    "common_parameters", "dag_constants", "evaluation_body", "explicit_body",
+    "landed_job_ids", "launch_environment", "launch_overrides", "launch_plan",
+    "load_layers", "model_slug", "param_defaults", "plan_banner",
+    "plan_batches", "planning_inputs", "resolve_tables_mode"
 ]
 
 DEFAULT_MAX_TABLES_PER_JOB = 10
@@ -70,26 +95,410 @@ L4_ACCELERATOR = (
     "worker_accelerator=type:nvidia-l4;count:1;install-nvidia-driver")
 T4_ACCELERATOR = ("worker_accelerator=type:nvidia-tesla-t4;count:1;"
                   "install-nvidia-driver:5xx")
-# What the single-table DAG passes as reference_rows_limit; a config file's
-# sampling.reference_rows_limit wins in the launcher.
-_REFERENCE_ROWS_LIMIT = "10000"
-# DAG params a batch forwards as typed: the single-table DAG's forwarded
-# params without the ones a whole-model launch takes from the model
-# (reference_table, landing_table, pk_cols, identity_cols) and the DDL pin,
-# plus the whole-model keys.
-_FORWARDED = ("source_stats", "freetext_expansion", "prompt_constraints",
-              "prompt_debug", "fk_parent_landing", "generate_fk_relationships",
-              "relationships_uri", "config_uri", "multi_table_mode",
-              "uniqueness_mode", "pool_seed_strategy", "rag_row_docs_limit",
-              "num_rows", "initial_workers", "autoscaling", "batch_size",
-              "similarity", "engine", "client_type", "vllm_dtype",
-              "vllm_max_model_len", "seed", "write_disposition",
-              "create_if_not_exists", "source_dataset", "landing_dataset",
-              "max_tables_per_job", "prep_workers")
+# The DAG folder's files (deploy workflow 3 copies generator.yaml beside the
+# DAG and fills the overlay's markers).
+GENERATOR_YAML = "generator.yaml"
+ENV_OVERLAY = "sdfb_env.yaml"
+_CONFIG_VERSION = 1
+_OVERLAY_SECTIONS = ("dag", "infra", "config")
+_DIGEST_HEX = 12
+# The DAG params that set the generator.yaml key of the same name; the
+# launcher takes each as the flag of that name.
+GENERATOR_PARAMS = ("num_rows", "engine", "batch_size", "similarity",
+                    "identity_cols", "pk_cols", "vllm_dtype",
+                    "vllm_max_model_len", "client_type", "gpu", "seed",
+                    "write_disposition", "create_if_not_exists",
+                    "build_rag_layer", "rag_row_docs_limit", "build_pool_layer",
+                    "sdk_containers", "initial_workers", "autoscaling",
+                    "launcher_machine_type", "uniqueness_mode",
+                    "freetext_expansion", "prompt_constraints", "prompt_debug",
+                    "source_stats", "fk_parent_landing", "multi_table_mode",
+                    "generate_fk_relationships", "pool_seed_strategy",
+                    "relationships_uri", "source_dataset", "landing_dataset",
+                    "tables", "max_tables_per_job", "prep_workers")
+# The DAG param named otherwise than its generator.yaml key.
+_TABLE_PARAM = "table_fqn"
+_PARAM_KEYS = {_TABLE_PARAM: "reference_table"}
+# The DAG's own params (no generator.yaml key) and their defaults, but
+# evaluation_output_dataset, which is the validation-runs table's dataset.
+_DAG_PARAM_DEFAULTS: dict[str, Any] = {
+    "config_uri": "",
+    "run_evaluation": True,
+    "evaluation_mode": "",
+    "evaluation_machine_type": "e2-standard-8",
+    "evaluation_launcher_machine_type": "e2-standard-8",
+    "evaluation_max_workers": 8,
+}
+_EVALUATION_OUTPUT_DATASET = "synthetic_data_quality"
+# Keys a launch mode does not read (the launcher's launch_option_unused):
+# never passed in that mode. Under all the model names every table and each
+# schema is extracted live; an explicit launch names its tables, and its
+# source_dataset param only tells the evaluation where the sources are.
+_UNREAD_UNDER_ALL = frozenset({"reference_table", "landing_table", "ddl_uri"})
+_UNREAD_UNDER_EXPLICIT = frozenset({"source_dataset", "landing_dataset"})
+_TABLES_ALL = "all"
+_TABLES_MODES = ("explicit", _TABLES_ALL)
+_QUALIFIED_TABLE_PARTS = 3  # project, dataset, table
+# Names the DAG gives its jobs and itself (master's generation DAG).
+_APP_DOMAIN, _APP_NAME = "synthetic", "sdfb"
+_EVALUATION_NAME_MAX = 38
+# The chained evaluation's constants (master's generation DAG): the workers'
+# boot disk for the generation's multi-GB image, and the trigger the failure
+# callback finds the evaluation's RUNNING row by.
+EVALUATION_WORKER_DISK_GB = "200"
+EVALUATION_TRIGGER = "chained"
 
 
 class PlanError(ValueError):
-  """The model DAG cannot plan this launch; the message says what to change."""
+  """The DAG cannot plan this launch; the message says what to change."""
+
+
+@dataclass(frozen=True)
+class Layers:
+  """The DAG folder's defaults: `defaults` is generator.yaml as
+  `{section: {key: value}}` (config_version checked and left out),
+  `overlay` the env overlay (`dag`, `infra`, `config`), `digest` the
+  generator.yaml digest (the first 12 hex of the sha256 of its bytes)."""
+  defaults: dict[str, dict[str, Any]]
+  overlay: dict[str, dict[str, Any]]
+  digest: str
+
+
+def _mapping(value: Any, where: str) -> dict[str, Any]:
+  if value is None:
+    return {}
+  if not isinstance(value, Mapping):
+    raise ValueError(f"{where} must be a mapping, got {type(value).__name__}")
+  return {str(k): v for k, v in value.items()}
+
+
+def load_layers(folder: str) -> Layers:
+  """generator.yaml and sdfb_env.yaml of the DAG folder `folder`.
+
+  The overlay's `config:` may only name keys generator.yaml has: a typo
+  would otherwise never reach a launch."""
+  with open(os.path.join(folder, GENERATOR_YAML), "rb") as handle:
+    raw = handle.read()
+  data = _mapping(yaml.safe_load(raw), GENERATOR_YAML)
+  version = data.pop("config_version", None)
+  if version != _CONFIG_VERSION or isinstance(version, bool):
+    raise ValueError(f"{GENERATOR_YAML}: config_version must be "
+                     f"{_CONFIG_VERSION}, got {version!r}")
+  defaults = {
+      section: _mapping(values, f"{GENERATOR_YAML}: section '{section}'")
+      for section, values in data.items()
+  }
+  with open(os.path.join(folder, ENV_OVERLAY), encoding="utf-8") as handle:
+    loaded = _mapping(yaml.safe_load(handle), ENV_OVERLAY)
+  unknown = sorted(set(loaded) - set(_OVERLAY_SECTIONS))
+  if unknown:
+    raise ValueError(f"{ENV_OVERLAY}: unknown sections {unknown}; expected "
+                     f"{list(_OVERLAY_SECTIONS)}")
+  overlay = {
+      name: _mapping(loaded.get(name), f"{ENV_OVERLAY}: {name}")
+      for name in _OVERLAY_SECTIONS
+  }
+  config: dict[str, Any] = {}
+  for section, values in overlay["config"].items():
+    keys = _mapping(values, f"{ENV_OVERLAY}: config.{section}")
+    missing = sorted(
+        f"{section}.{k}" for k in keys if k not in defaults.get(section, {}))
+    if missing:
+      names = ", ".join(missing)
+      raise ValueError(f"{ENV_OVERLAY}: {names} is no "
+                       f"{GENERATOR_YAML} key")
+    config[section] = keys
+  overlay["config"] = config
+  return Layers(
+      defaults=defaults,
+      overlay=overlay,
+      digest=hashlib.sha256(raw).hexdigest()[:_DIGEST_HEX])
+
+
+def cli_text(value: object) -> str:
+  """A yaml value as the launcher's flag text, as sdfb-core's config model
+  reads it: null is unset (empty), a boolean true/false, a list
+  comma-separated, anything else its str()."""
+  if value is None:
+    return ""
+  if isinstance(value, bool):
+    return "true" if value else "false"
+  if isinstance(value, (list, tuple)):
+    return ",".join(str(v) for v in value)
+  return str(value)
+
+
+def _overlaid(layers: Layers) -> dict[str, Any]:
+  """key -> value: generator.yaml with the overlay's `config:` over it."""
+  out: dict[str, Any] = {}
+  for section, values in layers.defaults.items():
+    out.update(values)
+    out.update(layers.overlay["config"].get(section, {}))
+  return out
+
+
+def _yaml_defaults(layers: Layers) -> dict[str, Any]:
+  return {
+      k: v for values in layers.defaults.values() for k, v in values.items()
+  }
+
+
+def _dataset(fqn: str, default: str = "") -> str:
+  """The dataset of `project.dataset.table`, else `default`."""
+  parts = fqn.split(".")
+  return parts[1] if len(parts) == _QUALIFIED_TABLE_PARTS else default
+
+
+def param_defaults(layers: Layers) -> dict[str, object]:
+  """Every DAG param's default. A generator param is generator.yaml
+  overlaid with the overlay's `config:`, as text (null is empty); the DAG's
+  own params keep theirs."""
+  values = _overlaid(layers)
+  out: dict[str, object] = {
+      _TABLE_PARAM: cli_text(values[_PARAM_KEYS[_TABLE_PARAM]])
+  }
+  for name in GENERATOR_PARAMS:
+    out[name] = cli_text(values[name])
+  out.update(_DAG_PARAM_DEFAULTS)
+  out["evaluation_output_dataset"] = _dataset(
+      cli_text(values["validation_runs_table"]), _EVALUATION_OUTPUT_DATASET)
+  return out
+
+
+def launch_overrides(params: Mapping[str, object],
+                     layers: Layers) -> dict[str, str]:
+  """A launch's template parameters: each key whose text differs from
+  generator.yaml's (`cli_text`), whether the overlay or the trigger set it,
+  plus `run_id`, `config_uri` when set and the yaml's digest.
+
+  The keys generator.yaml leaves unset (reference_table, landing_table,
+  dlq_table, model_uri) differ whenever they are set, so a launch passes
+  them; a key the trigger sets back to generator.yaml's value is not passed,
+  even where the overlay set another, since the launcher's default is that
+  value. The keys the launch's mode does not read are left out
+  (`_UNREAD_UNDER_ALL`, `_UNREAD_UNDER_EXPLICIT`)."""
+  values = _overlaid(layers)
+  for name, value in params.items():
+    key = _PARAM_KEYS.get(name, name)
+    if name in GENERATOR_PARAMS or name in _PARAM_KEYS:
+      values[key] = value
+  unread = (
+      _UNREAD_UNDER_ALL
+      if cli_text(values["tables"]) == _TABLES_ALL else _UNREAD_UNDER_EXPLICIT)
+  yaml_values = _yaml_defaults(layers)
+  out: dict[str, str] = {}
+  for key, value in values.items():
+    if key in unread:
+      continue
+    if cli_text(value) != cli_text(yaml_values[key]):
+      out[key] = cli_text(value)
+  run_id = cli_text(params.get("run_id")).strip()
+  if run_id:
+    out["run_id"] = run_id
+  config_uri = cli_text(params.get("config_uri")).strip()
+  if config_uri:
+    out["config_uri"] = config_uri
+  out["generator_defaults_digest"] = layers.digest
+  return out
+
+
+def resolve_tables_mode(params: Mapping[str, object],
+                        config_text: str | None) -> Literal["explicit", "all"]:
+  """The branch a launch takes: the config file's launch.tables when it sets
+  one (a file's keys win, ADR 0043), else the `tables` param."""
+  data = yaml.safe_load(config_text) if config_text else None
+  data = {} if data is None else data
+  if not isinstance(data, Mapping):
+    raise PlanError("config_uri: the top level must be a mapping of sections")
+  launch = data.get("launch") or {}
+  if not isinstance(launch, Mapping):
+    raise PlanError("config_uri: `launch` must be a mapping")
+  if "tables" in launch:
+    mode, where = launch["tables"], "config_uri's launch.tables"
+  else:
+    mode, where = params.get("tables", "explicit"), "the tables param"
+  if mode == "explicit":
+    return "explicit"
+  if mode == _TABLES_ALL:
+    return "all"
+  raise PlanError(f"{where} must be one of {list(_TABLES_MODES)}, got "
+                  f"{mode!r}")
+
+
+def _version_slug(version: str) -> str:
+  """A version as Dataflow job names allow it (lower case, digits, -)."""
+  return re.sub(r"[^a-z0-9]+", "-", version.lower()).strip("-")
+
+
+def dag_constants(layers: Layers, variables: Mapping[str,
+                                                     str]) -> dict[str, Any]:
+  """What the launch bodies take from the overlay and the Composer
+  Variables (PROJECT_ID, REGION, DATAFLOW_SUBNET, SA_DATAFLOW and the
+  optional DATAFLOW_NETWORK_TAGS): `launch_environment`'s and `launch_plan`'s
+  `constants`, the DAG's id and its jobs' names."""
+  dag, infra, values = layers.overlay["dag"], layers.overlay["infra"], (
+      _overlaid(layers))
+  templates = cli_text(infra["templates_bucket"])
+  version = cli_text(dag["project_version"])
+  dag_version = cli_text(dag["dag_version"])
+  dag_id = f"{_APP_DOMAIN}_{_APP_NAME}_{dag_version}"
+  base = f"{_APP_DOMAIN}-{_APP_NAME}-v{_version_slug(version)}"
+  slug = model_slug(cli_text(values["model_uri"]))
+  tags = str(variables.get("DATAFLOW_NETWORK_TAGS", "") or "").strip()
+  evaluation = f"{_APP_NAME}-evaluation-v{_version_slug(version)}"
+  return {
+      "project_id":
+          variables["PROJECT_ID"],
+      "region":
+          variables["REGION"],
+      "subnetwork":
+          variables["DATAFLOW_SUBNET"],
+      "service_account":
+          variables["SA_DATAFLOW"],
+      "network_tag_experiments": [
+          f"use_network_tags={tags}",
+          f"use_network_tags_for_flex_templates={tags}",
+      ] if tags else [],
+      "bucket_path":
+          cli_text(infra["staging_bucket"]),
+      "container_spec_gcs_path":
+          f"gs://{templates}/synthetic/"
+          f"sdfb-{version}-template.json",
+      "dag_id":
+          dag_id,
+      "labels": {
+          "app": _APP_NAME,
+          "env": cli_text(values["env"]),
+          "dag": dag_id
+      },
+      "job_name":
+          (f"{base}-{slug}"[:_JOB_NAME_MAX].rstrip("-") if slug else base),
+      "evaluation_job_name":
+          evaluation[:_EVALUATION_NAME_MAX].rstrip("-"),
+  }
+
+
+def explicit_body(params: Mapping[str, object], layers: Layers, *,
+                  job_name: str, variables: Mapping[str,
+                                                    str]) -> dict[str, Any]:
+  """The explicit branch's Flex launch body (master's `start_sdfb`): the
+  launch's environment, and the parameters `launch_overrides` passes under
+  launch.tables explicit (the branch `resolve_tables_mode` chose, whatever
+  the `tables` param says). `params` holds the trigger's resolved values
+  and the salted `run_id`; `variables` the Composer Variables
+  (`dag_constants`)."""
+  constants = dag_constants(layers, variables)
+  return {
+      "launchParameter": {
+          "containerSpecGcsPath":
+              constants["container_spec_gcs_path"],
+          "jobName":
+              job_name,
+          "environment":
+              launch_environment(params, constants=constants),
+          "parameters":
+              launch_overrides({
+                  **params, "tables": "explicit"
+              }, layers),
+      }
+  }
+
+
+def _evaluation_parameters(params: Mapping[str, object], layers: Layers,
+                           generation_job_ids: list[str] | None) -> dict:
+  """The evaluator's template parameters (docker/flex_template_metadata.json
+  names). Explicit: master's, the launched table its seed. All: the launch's
+  base run id and the batch jobs that landed."""
+  values = _overlaid(layers)
+  common = {
+      "scope": "manual",
+      "trigger": EVALUATION_TRIGGER,
+      "mode": cli_text(params["evaluation_mode"]),
+      "output_dataset": cli_text(params["evaluation_output_dataset"]),
+      "disk_size_gb": EVALUATION_WORKER_DISK_GB,
+  }
+  relationships_uri = (
+      cli_text(params["relationships_uri"])
+      if cli_text(params["generate_fk_relationships"]) == "true" else "")
+  if cli_text(params.get("tables", "explicit")) == _TABLES_ALL:
+    out = {
+        "sdfb_job": "evaluation",
+        "run_id": cli_text(params["run_id"]),
+    }
+    if generation_job_ids:
+      out["generation_job_ids"] = ",".join(generation_job_ids)
+    return {**out, "relationships_uri": relationships_uri, **common}
+  if not generation_job_ids or len(generation_job_ids) != 1:
+    raise ValueError(f"an explicit launch is one generation job; got "
+                     f"generation_job_ids={generation_job_ids!r}")
+  table = cli_text(params[_TABLE_PARAM])
+  source_dataset = cli_text(params["source_dataset"])
+  return {
+      "sdfb_job": "evaluation",
+      "generation_job_id": generation_job_ids[0],
+      "seed_table": table.rsplit(".", 1)[-1],
+      "relationships_uri": relationships_uri,
+      "landing_dataset": cli_text(values["landing_table"]).rsplit(".", 1)[0],
+      "reference_dataset": source_dataset or table.rsplit(".", 1)[0],
+      "reference_rows_limit": cli_text(values["reference_rows_limit"]),
+      "validation_runs_table": cli_text(values["validation_runs_table"]),
+      **common,
+  }
+
+
+def evaluation_body(params: Mapping[str, object], layers: Layers, *,
+                    generation_job_ids: list[str] | None,
+                    variables: Mapping[str,
+                                       str], ts_nodash: str) -> dict[str, Any]:
+  """The chained evaluation's Flex launch body: a CPU-only job from the
+  generation's template, master's for an explicit launch.
+
+  `params["tables"]` picks the shape, so it must hold the branch
+  `resolve_tables_mode` chose (a config file may have switched it).
+  Explicit: `generation_job_ids` is the one generation job. All: the
+  `run_id` param is the launch's base run id, the `relationships_uri` param
+  the planned model, and `generation_job_ids` the batch jobs that landed
+  (None: every row of the launch). The job is named after the DAG
+  run's `ts_nodash`; `variables` are the Composer Variables
+  (`dag_constants`)."""
+  constants = dag_constants(layers, variables)
+  bucket, name = constants["bucket_path"], constants["evaluation_job_name"]
+  return {
+      "launchParameter": {
+          "containerSpecGcsPath":
+              constants["container_spec_gcs_path"],
+          "jobName":
+              f"{name}-{ts_nodash.lower()}",
+          "environment": {
+              "tempLocation":
+                  f"gs://{bucket}/temp/",
+              "stagingLocation":
+                  f"gs://{bucket}/staging",
+              "subnetwork":
+                  constants["subnetwork"],
+              "ipConfiguration":
+                  "WORKER_IP_PRIVATE",
+              "serviceAccountEmail":
+                  constants["service_account"],
+              "additionalExperiments": [
+                  "use_runner_v2", "enable_secure_boot",
+                  *constants["network_tag_experiments"]
+              ],
+              "additionalUserLabels":
+                  dict(constants["labels"]),
+              "launcherMachineType":
+                  cli_text(params["evaluation_launcher_machine_type"]),
+              "machineType":
+                  cli_text(params["evaluation_machine_type"]),
+              "maxWorkers":
+                  cli_text(params["evaluation_max_workers"]),
+              "workerRegion":
+                  constants["region"],
+          },
+          "parameters":
+              _evaluation_parameters(params, layers, generation_job_ids),
+      }
+  }
 
 
 def _enabled(value: Any, where: str) -> bool:
@@ -290,20 +699,22 @@ def batch_job_name(job_name: str, index: int) -> str:
 
 def launch_environment(params: Mapping[str, Any], *,
                        constants: Mapping[str, Any]) -> dict[str, Any]:
-  """A batch job's Flex Template `environment`: the single-table DAG's
-  generation environment, its Jinja conditionals resolved here (the GPU,
-  the SDK containers, the machines)."""
+  """A generation job's Flex Template `environment`: master's generation
+  DAG's, its Jinja conditionals resolved here (the GPU, the SDK containers,
+  the machines). Each conditional experiment is `upload_graph` when it does
+  not apply, as master renders it (Dataflow drops the duplicate)."""
   vllm = params["client_type"] == "vllm"
   l4 = params["gpu"] == "l4"
-  experiments = ["use_runner_v2", "upload_graph", "enable_secure_boot"]
-  if vllm:
-    experiments += [
-        L4_ACCELERATOR if l4 else T4_ACCELERATOR,
-        "automatically_use_created_reservation"
-    ]
-    if params["sdk_containers"] == "single":
-      experiments.append("no_use_multiple_sdk_containers")
-  experiments += list(constants["network_tag_experiments"])
+  single = vllm and params["sdk_containers"] == "single"
+  experiments = [
+      "use_runner_v2",
+      "upload_graph",
+      "enable_secure_boot",
+      (L4_ACCELERATOR if l4 else T4_ACCELERATOR) if vllm else "upload_graph",
+      "automatically_use_created_reservation" if vllm else "upload_graph",
+      "no_use_multiple_sdk_containers" if single else "upload_graph",
+      *constants["network_tag_experiments"],
+  ]
   machine = (("g2-standard-8" if l4 else "n1-standard-8")
              if vllm else "e2-standard-8")
   bucket = constants["bucket_path"]
@@ -323,29 +734,13 @@ def launch_environment(params: Mapping[str, Any], *,
 
 
 def common_parameters(params: Mapping[str, Any], *,
-                      constants: Mapping[str, Any]) -> dict[str, str]:
-  """The template parameters every batch passes (all text, as the Flex
-  Template takes them); `batch_parameters` adds the batch's own."""
-  out: dict[str, str] = {}
-  if constants["rag_chunks_table"]:
-    out["rag_chunks_table"] = constants["rag_chunks_table"]
-    out["build_rag_layer"] = str(params["build_rag_layer"])
-  if constants["freetext_pools_table"]:
-    out["freetext_pools_table"] = constants["freetext_pools_table"]
-    out["build_pool_layer"] = str(params["build_pool_layer"])
-  if constants["source_stats_table"]:
-    out["source_stats_table"] = constants["source_stats_table"]
-  for name in _FORWARDED:
-    out[name] = str(params[name])
-  out.update({
-      "tables": "all",
-      "reference_rows_limit": _REFERENCE_ROWS_LIMIT,
-      "dlq_table": constants["dlq_table"],
-      "model_uri": constants["model_uri"],
-      "embedder_uri": constants["embedder_uri"],
-      "validation_runs_table": constants["validation_runs_table"],
-      "env": constants["env"],
-  })
+                      layers: Layers) -> dict[str, str]:
+  """The template parameters every batch passes: `launch_overrides` under
+  launch.tables all (only the keys that differ from generator.yaml, the
+  keys that mode does not read left out); `batch_parameters` adds the
+  batch's own and the run id."""
+  out = launch_overrides({**params, "tables": _TABLES_ALL}, layers)
+  out.pop("run_id", None)
   return out
 
 
@@ -378,13 +773,14 @@ def plan_banner(batches: Sequence[Mapping[str, Any]],
 
 def launch_plan(params: Mapping[str, Any], *, model_text: str,
                 max_tables_per_job: int, relationships_uri: str,
-                base_run_id: str, constants: Mapping[str,
-                                                     Any]) -> dict[str, Any]:
-  """Everything the model DAG's `plan` task returns: the batches, one Flex
-  Template launch body per batch, and the banner. Plain JSON (an XCom)."""
+                base_run_id: str, constants: Mapping[str, Any],
+                layers: Layers) -> dict[str, Any]:
+  """Everything the `all` branch plans: the batches, one Flex Template
+  launch body per batch, and the banner. Plain JSON (an XCom). `constants`
+  is `dag_constants`' (the environment, the template, the job name)."""
   batches = plan_batches(model_text, max_tables_per_job)
   environment = launch_environment(params, constants=constants)
-  common = common_parameters(params, constants=constants)
+  common = common_parameters(params, layers=layers)
   bodies = [{
       "launchParameter": {
           "containerSpecGcsPath":

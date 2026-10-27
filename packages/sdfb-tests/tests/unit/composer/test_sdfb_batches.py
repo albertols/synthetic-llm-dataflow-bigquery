@@ -295,9 +295,10 @@ def _template_names() -> set[str]:
   }
 
 
-def test_the_batch_parameters_are_template_parameters_and_generator_flags():
+def test_the_batch_parameters_are_template_parameters_and_generator_flags(
+    deployed):
   params = M.batch_parameters(
-      M.common_parameters(_PARAMS, constants=_CONSTANTS),
+      M.common_parameters(_PARAMS, layers=M.load_layers(deployed())),
       base_run_id="manual__2026-10-21-abcd1234",
       index=1,
       count=3)
@@ -334,25 +335,48 @@ def _single_dag_forwarded() -> set[str]:
   return names
 
 
-def test_a_batch_forwards_what_the_single_table_launch_forwards():
+def test_a_batch_forwards_what_the_single_table_launch_forwards(deployed):
+  """A batch passes only what differs from generator.yaml (ADR 0043): every
+  key the single-table launch forwards is passed, or the batch's value for
+  it is generator.yaml's, which the launcher holds without the flag."""
+  layers = M.load_layers(deployed())
   params = M.batch_parameters(
-      M.common_parameters(_PARAMS, constants=_CONSTANTS),
+      M.common_parameters(_PARAMS, layers=layers),
       base_run_id="b",
       index=0,
       count=1)
   missing = _single_dag_forwarded() - set(params) - {
       "reference_table", "landing_table", "ddl_uri", "pk_cols", "identity_cols"
   }
-  assert not missing, missing
-
-
-def test_the_stores_are_omitted_when_the_import_left_them_empty():
-  constants = {
-      **_CONSTANTS, "rag_chunks_table": "",
-      "freetext_pools_table": "",
-      "source_stats_table": ""
+  defaults = {
+      k: v for values in layers.defaults.values() for k, v in values.items()
   }
-  params = M.common_parameters(_PARAMS, constants=constants)
+  values = {
+      **defaults,
+      **{
+          k: v for values in layers.overlay["config"].values()
+          for k, v in values.items()
+      },
+      **_PARAMS
+  }
+  # config_uri is no generator.yaml key: it is passed when set.
+  assert _PARAMS["config_uri"] == "" and "config_uri" in missing
+  for name in missing - {"config_uri"}:
+    assert M.cli_text(values[name]) == M.cli_text(defaults[name]), name
+  assert len(missing) > 15  # most of them hold the default
+  assert M.common_parameters({
+      **_PARAMS, "config_uri": "gs://b/c.yaml"
+  },
+                             layers=layers)["config_uri"] == "gs://b/c.yaml"
+
+
+def test_the_stores_are_omitted_when_the_import_left_them_empty(deployed):
+  layers = M.load_layers(
+      deployed(
+          SDFB_RAG_CHUNKS_TABLE="",
+          SDFB_FREETEXT_POOLS_TABLE="",
+          SDFB_SOURCE_STATS_TABLE=""))
+  params = M.common_parameters(_PARAMS, layers=layers)
   for name in ("rag_chunks_table", "build_rag_layer", "freetext_pools_table",
                "build_pool_layer", "source_stats_table"):
     assert name not in params
@@ -444,7 +468,7 @@ def test_the_model_slug_is_the_generation_dags(uri):
   assert M.model_slug(uri) == scope["_model_slug"](uri)
 
 
-def test_the_plan_holds_one_body_per_batch():
+def test_the_plan_holds_one_body_per_batch(deployed):
   text = forest_model_text(enabled=25, disabled=0)
   plan = M.launch_plan(
       _PARAMS,
@@ -452,7 +476,8 @@ def test_the_plan_holds_one_body_per_batch():
       max_tables_per_job=10,
       relationships_uri="gs://b/rel/model.yaml",
       base_run_id="manual__x-abcd1234",
-      constants=_CONSTANTS)
+      constants=_CONSTANTS,
+      layers=M.load_layers(deployed()))
   assert plan["batch_count"] == 3 and len(plan["bodies"]) == 3
   names = [b["launchParameter"]["jobName"] for b in plan["bodies"]]
   assert names == [f"synthetic-sdfb-model-v0-7-0-m-b{i:02d}" for i in range(3)]
@@ -487,6 +512,8 @@ def test_the_module_needs_only_the_standard_library_and_yaml():
       for node in ast.walk(tree)
       if isinstance(node, ast.ImportFrom) and node.module
   }
-  assert imported <= {"__future__", "collections", "re", "typing", "yaml"}
+  assert imported <= {
+      "collections", "dataclasses", "hashlib", "os", "re", "typing", "yaml"
+  }
   # A DAGs-folder file naming the scheduler and "dag" is parsed as a DAG.
   assert "airflow" not in _MIRROR.read_text(encoding="utf-8").lower()

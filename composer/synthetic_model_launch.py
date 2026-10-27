@@ -131,6 +131,7 @@ instances; `all_done` and `one_failed` counting every mapped instance of
 
 from __future__ import annotations
 
+import os
 import re
 
 from airflow import models
@@ -708,7 +709,10 @@ def plan_batches(**context) -> list:
       max_tables_per_job=max_tables,
       relationships_uri=relationships_uri,
       base_run_id=f"{context['dag_run'].run_id}-{uuid.uuid4().hex[:8]}",
-      constants=_CONSTANTS)
+      constants=_CONSTANTS,
+      # generator.yaml and sdfb_env.yaml beside this file (deploy workflow 3)
+      layers=sdfb_batches.load_layers(
+          os.path.dirname(os.path.abspath(__file__))))
   logging.info("%s", plan["banner"])
   ti = context["ti"]
   for key in ("base_run_id", "batch_count", "relationships_uri", "batches",

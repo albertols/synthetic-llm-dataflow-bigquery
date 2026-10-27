@@ -37,6 +37,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Full history: test_launch_helpers.py reads master's DAG files
+          # with `git show <commit>:<path>` (the env overlay's markers).
+          fetch-depth: 0
 
       - name: Install uv
         # v6 runs on Node 24 (the v3 we used previously is being deprecated;
