@@ -142,7 +142,7 @@ flowchart LR
 | `3_import_dag.yaml` | "Substitute build-time placeholders" | run the existing `sed -i -e …` list on `sdfb_env.yaml` instead of the DAG. Every marker sits inside double quotes, so a value stays a string (`prd`, `append`, `l4`, a version, `''`) and must not itself contain `"` |
 | `3_import_dag.yaml` | "Substitute build-time placeholders" — the marker check | run the `grep -nE '\{\{[A-Z_]+\}\}'` check on `sdfb_env.yaml` (it must print nothing), then the load check below |
 | `3_import_dag.yaml` | "Substitute build-time placeholders" — the resolved-values check | unchanged: the same variables, now substituted into the overlay |
-| `3_import_dag.yaml` | "Import DAG into Composer" | four `gcloud composer environments storage dags import` calls, the same flags as the existing one, one per file of the table above |
+| `3_import_dag.yaml` | "Import DAG into Composer" | four `gcloud composer environments storage dags import` calls, the same flags as the existing one, one per file of the table above: `sdfb_batches.py`, `generator.yaml` and `sdfb_env.yaml` first, the DAG last |
 | `3_import_dag.yaml` | once, if a build of this branch from before 2026-10-26 imported it | `gcloud composer environments storage dags delete synthetic_model_launch.py` (same `--environment` and `--location`) |
 
 The standalone evaluation DAG `composer/evaluation_framework.py` still
@@ -163,11 +163,15 @@ cp -L config/generator.yaml "$OUT/generator.yaml"      # the file, not the symli
 sed -i <the -e list> "$OUT/sdfb_env.yaml"              # the ONE sed of the generation DAG
 if grep -nE '\{\{[A-Z_]+\}\}' "$OUT/sdfb_env.yaml"; then echo "unfilled marker"; exit 1; fi
 python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import sdfb_batches as b; d = b.param_defaults(b.load_layers(sys.argv[1])); print(d["table_fqn"], d["gpu"], d["engine"], d["write_disposition"])' "$OUT"
-for f in synthetic_beam_bigquery.py sdfb_batches.py generator.yaml sdfb_env.yaml; do
+for f in sdfb_batches.py generator.yaml sdfb_env.yaml synthetic_beam_bigquery.py; do  # the DAG last
   gcloud composer environments storage dags import \
     --environment="$COMPOSER_ENV" --location="$REGION" --source="$OUT/$f"
 done
 ```
+
+The DAG is imported last because the scheduler parses it as soon as it lands:
+imported before its helpers and YAML files, it would parse against the
+previous import's (or none, a broken DAG) until they arrive.
 
 The load check prints the default table, GPU, engine and write disposition
 the DAG will show, and fails on an overlay key `generator.yaml` does not have
