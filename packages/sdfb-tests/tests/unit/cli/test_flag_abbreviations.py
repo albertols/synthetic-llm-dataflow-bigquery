@@ -17,9 +17,6 @@ argparse takes any unambiguous prefix of a long option; each flag this branch
 added can make a prefix master accepted ambiguous. The golden is every
 prefix (three or more characters) unambiguous on master `edcfdcd`, mapped to
 its dest (`scripts/config/make_abbreviation_golden.py`).
-
-Design: docs/DESIGN.md §8 Configuration
-(ADR 0043).
 """
 from __future__ import annotations
 

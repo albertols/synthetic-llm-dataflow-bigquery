@@ -100,15 +100,14 @@ def test_tables_is_explicit_or_all():
     resolve({}, {"launch": {"tables": "some"}})
 
 
-def test_master_prefixes_still_resolve_or_stop_loudly(capsys):
-  """Ruling 25: a prefix only one flag matched still resolves; one that a
-    new flag now shares is argparse's ambiguous-option error."""
+def test_master_prefixes_still_resolve():
+  """Ruling 25, superseded by the abbreviation golden (Task 4): every prefix
+    master took still resolves, `--landing` and `--batch` included."""
   args, _ = rp.parse_args(
       [*cp.ARGV_BASE, "--landing_t=p.land.u", "--batch_s=40"])
   assert args.landing_table == "p.land.u" and args.batch_size == 40
-  with pytest.raises(SystemExit) as exc:
-    rp.parse_args([*cp.ARGV_BASE, "--landing=p.land.u"])
-  assert exc.value.code == 2 and "ambiguous option" in capsys.readouterr().err
+  args, _ = rp.parse_args([*cp.ARGV_BASE, "--landing=p.land.u", "--batch=40"])
+  assert args.landing_table == "p.land.u" and args.batch_size == 40
 
 
 def test_the_reference_file_renders_the_launch_section():

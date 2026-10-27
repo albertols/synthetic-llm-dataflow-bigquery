@@ -324,11 +324,22 @@ def resolve_batch_size(requested: int, num_rows: int) -> int:
 
 # argparse takes any unambiguous prefix of a long option. Flags added since
 # v0.6.1 (`--landing_*`, `--batch_*`) made these master spellings ambiguous;
-# an exact alias wins over prefix matching, so they keep reaching the same
-# flag (ADR 0043). Pinned by test_flag_abbreviations.
-_LANDING_TABLE_ALIASES = ("--lan", "--land", "--landi", "--landin", "--landing",
-                          "--landing_")
-_BATCH_SIZE_ALIASES = ("--bat", "--batc", "--batch", "--batch_")
+# an exact entry wins over prefix matching, so they keep reaching the same
+# flag (ADR 0043). They are registered by string only: they never appear in
+# `option_strings`, `--help` or the launch surface. Pinned by
+# test_flag_abbreviations.
+_FLAG_ALIASES = {
+    "--landing_table":
+        ("--lan", "--land", "--landi", "--landin", "--landing", "--landing_"),
+    "--batch_size": ("--bat", "--batc", "--batch", "--batch_"),
+}
+
+
+def _register_flag_aliases(parser: argparse.ArgumentParser) -> None:
+  actions = parser._option_string_actions  # pylint: disable=protected-access  # argparse has no public hook for a hidden alias
+  for flag, aliases in _FLAG_ALIASES.items():
+    for alias in aliases:
+      actions[alias] = actions[flag]
 
 
 def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides the CLI surface
@@ -365,7 +376,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "missing rows when --build_rag_layer is on (ADR 0019).")
   p.add_argument(
       "--landing_table",
-      *_LANDING_TABLE_ALIASES,
       help="BQ table for synthetic rows (project.dataset.table). "
       "Accepts a comma-separated list for multi-table "
       "launches (ADR 0029 scenarios): each table runs "
@@ -420,7 +430,6 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "--num_workers on the launch wins.")
   p.add_argument(
       "--batch_size",
-      *_BATCH_SIZE_ALIASES,
       type=int,
       help="Rows per element. Left at the default, this scales "
       "with --num_rows toward ~1,000 elements (never below "
@@ -726,6 +735,7 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       help="gs:// or local path to a generator config file (ADR 0043). "
       "Keys it sets win over the same flags; flags fill the keys it leaves "
       "out. Empty = no file. Reference: config/generator.yaml.")
+  _register_flag_aliases(p)
   typed, beam_args = p.parse_known_args(argv)
   typed_values = vars(typed)
   config_uri = str(typed_values.pop("config_uri", "") or "").strip()
