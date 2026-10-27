@@ -76,7 +76,7 @@ import yaml
 
 __all__ = [
     "DEFAULT_MAX_TABLES_PER_JOB", "L4_ACCELERATOR", "T4_ACCELERATOR", "Layers",
-    "PlanError", "batch_job_name", "batch_parameters", "cli_text",
+    "PlanError", "TablesMode", "batch_job_name", "batch_parameters", "cli_text",
     "common_parameters", "dag_constants", "evaluation_body", "explicit_body",
     "landed_job_ids", "launch_environment", "launch_overrides", "launch_plan",
     "load_layers", "model_slug", "param_defaults", "plan_banner",
@@ -138,6 +138,8 @@ _UNREAD_UNDER_ALL = frozenset({"reference_table", "landing_table", "ddl_uri"})
 _UNREAD_UNDER_EXPLICIT = frozenset({"source_dataset", "landing_dataset"})
 _TABLES_ALL = "all"
 _TABLES_MODES = ("explicit", _TABLES_ALL)
+# A launch's branch: what resolve_tables_mode returns.
+TablesMode = Literal["explicit", "all"]
 _QUALIFIED_TABLE_PARTS = 3  # project, dataset, table
 # Names the DAG gives its jobs and itself (master's generation DAG).
 _APP_DOMAIN, _APP_NAME = "synthetic", "sdfb"
@@ -303,16 +305,29 @@ def launch_overrides(params: Mapping[str, object],
 
 
 def resolve_tables_mode(params: Mapping[str, object],
-                        config_text: str | None) -> Literal["explicit", "all"]:
+                        config_text: str | None) -> TablesMode:
   """The branch a launch takes: the config file's launch.tables when it sets
-  one (a file's keys win, ADR 0043), else the `tables` param."""
-  data = yaml.safe_load(config_text) if config_text else None
+  one (a file's keys win, ADR 0043), else the `tables` param.
+
+  The file is read as the launcher reads it (sdfb_core.config.resolve): an
+  empty file or a `launch:` left empty sets nothing; a `launch:` that is no
+  mapping, and a launch.tables that is neither explicit nor all (null
+  included: its generator.yaml default is not null, so the launcher refuses
+  it rather than reading it as unset), are refused. Every refusal is a
+  PlanError: the same file fails the same way on every retry."""
+  try:
+    data = yaml.safe_load(config_text) if config_text else None
+  except yaml.YAMLError as e:
+    raise PlanError(f"config_uri: not valid YAML — {e}") from e
   data = {} if data is None else data
   if not isinstance(data, Mapping):
     raise PlanError("config_uri: the top level must be a mapping of sections")
-  launch = data.get("launch") or {}
+  launch = data.get("launch")
+  if launch is None:
+    launch = {}
   if not isinstance(launch, Mapping):
-    raise PlanError("config_uri: `launch` must be a mapping")
+    raise PlanError(f"config_uri: section 'launch' must be a mapping, got "
+                    f"{launch!r}")
   if "tables" in launch:
     mode, where = launch["tables"], "config_uri's launch.tables"
   else:
@@ -405,7 +420,8 @@ def explicit_body(params: Mapping[str, object], layers: Layers, *,
 
 
 def _evaluation_parameters(params: Mapping[str, object], layers: Layers,
-                           generation_job_ids: list[str] | None) -> dict:
+                           generation_job_ids: list[str] | None,
+                           mode: TablesMode) -> dict:
   """The evaluator's template parameters (docker/flex_template_metadata.json
   names). Explicit: master's, the launched table its seed. All: the launch's
   base run id and the batch jobs that landed."""
@@ -420,7 +436,10 @@ def _evaluation_parameters(params: Mapping[str, object], layers: Layers,
   relationships_uri = (
       cli_text(params["relationships_uri"])
       if cli_text(params["generate_fk_relationships"]) == "true" else "")
-  if cli_text(params.get("tables", "explicit")) == _TABLES_ALL:
+  if mode not in _TABLES_MODES:
+    raise ValueError(f"mode must be one of {list(_TABLES_MODES)}, got "
+                     f"{mode!r}")
+  if mode == _TABLES_ALL:
     out = {
         "sdfb_job": "evaluation",
         "run_id": cli_text(params["run_id"]),
@@ -447,18 +466,18 @@ def _evaluation_parameters(params: Mapping[str, object], layers: Layers,
 
 
 def evaluation_body(params: Mapping[str, object], layers: Layers, *,
-                    generation_job_ids: list[str] | None,
+                    mode: TablesMode, generation_job_ids: list[str] | None,
                     variables: Mapping[str,
                                        str], ts_nodash: str) -> dict[str, Any]:
   """The chained evaluation's Flex launch body: a CPU-only job from the
   generation's template, master's for an explicit launch.
 
-  `params["tables"]` picks the shape, so it must hold the branch
-  `resolve_tables_mode` chose (a config file may have switched it).
-  Explicit: `generation_job_ids` is the one generation job. All: the
-  `run_id` param is the launch's base run id, the `relationships_uri` param
-  the planned model, and `generation_job_ids` the batch jobs that landed
-  (None: every row of the launch). The job is named after the DAG
+  `mode` is the branch `resolve_tables_mode` chose (a config file may
+  have switched the `tables` param's), and picks the shape. Explicit:
+  `generation_job_ids` is the one generation job. All: the `run_id` param
+  is the launch's base run id, the `relationships_uri` param the planned
+  model, and `generation_job_ids` the batch jobs that landed (None: every
+  row of the launch). The job is named after the DAG
   run's `ts_nodash`; `variables` are the Composer Variables
   (`dag_constants`)."""
   constants = dag_constants(layers, variables)
@@ -496,7 +515,7 @@ def evaluation_body(params: Mapping[str, object], layers: Layers, *,
                   constants["region"],
           },
           "parameters":
-              _evaluation_parameters(params, layers, generation_job_ids),
+              _evaluation_parameters(params, layers, generation_job_ids, mode),
       }
   }
 

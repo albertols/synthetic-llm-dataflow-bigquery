@@ -33,12 +33,14 @@ import subprocess
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import TypeAdapter
 from sdfb_beam.cli import run_pipeline as rp
 from sdfb_core.config import model as config_model
 from sdfb_core.config.defaults import defaults_digest, load_defaults
 from sdfb_core.config.model import (ALL_KEYS, DEFAULT_CONFIG, FLAG_KEYS,
                                     SECTION_TYPES, value_of)
+from sdfb_core.config.resolve import ConfigError, parse_config_text, resolve
 from sdfb_tests.config_parity import DELIBERATE_CHANGES
 
 _REPO = Path(__file__).resolve().parents[5]
@@ -51,11 +53,24 @@ _GOLDEN = json.loads((_FIXTURES / "dag_bodies_master.json").read_text("utf-8"))
 _MASTER_DEFAULTS = json.loads(
     (_FIXTURES / "dag_param_defaults_master.json").read_text("utf-8"))
 _MARKER = re.compile(r"\{\{([A-Z_]+)\}\}")
-# The DAG files whose markers the overlay takes over (Ruling R2): master's
-# generation and evaluation DAGs, and the model DAG at the plan's start.
-_MARKED_FILES = (("edcfdcd", "composer/synthetic_beam_bigquery.py"),
-                 ("edcfdcd", "composer/evaluation_framework.py"),
-                 ("a7dd31f", "composer/synthetic_model_launch.py"))
+# The DAG files whose markers the overlay takes over (Rulings R2, R15):
+# master's generation and evaluation DAGs, read from master's history (the
+# v0.6.1 report commit, reachable from master).
+_MASTER_MARKED_FILES = ("composer/synthetic_beam_bigquery.py",
+                        "composer/evaluation_framework.py")
+_MASTER_COMMIT = "edcfdcd"
+# ... and the model DAG's, copied from
+# `git show a7dd31f:composer/synthetic_model_launch.py` (the plan's start).
+# That commit lives only on the feature branch, which the squash merge
+# leaves unreachable, so its markers are held here as a literal.
+_MODEL_DAG_MARKERS = frozenset({
+    "DAG_VERSION", "ENGINE", "ENV", "GCS_DATAFLOW_STAGING",
+    "GCS_DATAFLOW_TEMPLATES", "GPU", "PROJECT_VERSION",
+    "SDFB_DEFAULT_TABLE_FQN", "SDFB_DLQ_TABLE", "SDFB_EMBEDDER_URI",
+    "SDFB_FREETEXT_POOLS_TABLE", "SDFB_LANDING_TABLE", "SDFB_MODEL_URI",
+    "SDFB_RAG_CHUNKS_TABLE", "SDFB_SOURCE_STATS_TABLE",
+    "SDFB_VALIDATION_RUNS_TABLE", "WRITE_DISPOSITION"
+})
 # What generator.yaml leaves unset and a launch must name (the launcher's
 # REQUIRED_FLAGS, run_id aside).
 _REQUIRED = {"reference_table", "landing_table", "dlq_table", "model_uri"}
@@ -136,9 +151,9 @@ def test_overlay_values_survive_yaml_after_substitution(deployed, value):
 
 
 def test_the_overlay_names_every_marker_the_dags_used():
-  used: set[str] = set()
-  for commit, path in _MARKED_FILES:
-    text = subprocess.run(["git", "show", f"{commit}:{path}"],
+  used: set[str] = set(_MODEL_DAG_MARKERS)
+  for path in _MASTER_MARKED_FILES:
+    text = subprocess.run(["git", "show", f"{_MASTER_COMMIT}:{path}"],
                           cwd=_REPO,
                           check=True,
                           capture_output=True,
@@ -397,6 +412,7 @@ def test_explicit_evaluation_body_is_masters(deployed, scenario):
   body = M.evaluation_body(
       _params(layers, scenario),
       layers,
+      mode="explicit",
       generation_job_ids=["fakejob-start_sdfb"],
       variables=H.AIRFLOW_VARIABLES,
       ts_nodash=when.strftime("%Y%m%dT%H%M%S"))
@@ -404,14 +420,16 @@ def test_explicit_evaluation_body_is_masters(deployed, scenario):
 
 
 def test_the_evaluation_of_an_all_launch_names_the_landed_jobs(layers):
+  # The tables param says explicit; the resolved mode (a file's) is all.
   params = {
-      **M.param_defaults(layers), "tables": "all",
-      "run_id": "manual__x-0a1b2c3d",
+      **M.param_defaults(layers), "run_id": "manual__x-0a1b2c3d",
       "relationships_uri": "gs://b/rel/model.yaml"
   }
+  assert params["tables"] == "explicit"
   body = M.evaluation_body(
       params,
       layers,
+      mode="all",
       generation_job_ids=["j0", "j2"],
       variables=H.AIRFLOW_VARIABLES,
       ts_nodash="20261027T000000")["launchParameter"]
@@ -428,13 +446,42 @@ def test_the_evaluation_of_an_all_launch_names_the_landed_jobs(layers):
   }
   assert body["jobName"] == "sdfb-evaluation-v0-7-0-20261027t000000"
   with pytest.raises(ValueError, match="one generation job"):
-    M.evaluation_body({
-        **params, "tables": "explicit"
-    },
-                      layers,
-                      generation_job_ids=["j0", "j2"],
-                      variables=H.AIRFLOW_VARIABLES,
-                      ts_nodash="20261027T000000")
+    M.evaluation_body(
+        params,
+        layers,
+        mode="explicit",
+        generation_job_ids=["j0", "j2"],
+        variables=H.AIRFLOW_VARIABLES,
+        ts_nodash="20261027T000000")
+  with pytest.raises(ValueError, match="mode must be one of"):
+    M.evaluation_body(
+        params,
+        layers,
+        mode="both",
+        generation_job_ids=None,
+        variables=H.AIRFLOW_VARIABLES,
+        ts_nodash="20261027T000000")
+
+
+def test_the_evaluation_follows_the_file_not_the_param(layers):
+  """Review Minor 2: the tables param says all, the config file says
+  explicit; the evaluation takes the resolved mode's (explicit) shape."""
+  params = {
+      **M.param_defaults(layers), "tables": "all",
+      "run_id": "manual__x-0a1b2c3d"
+  }
+  mode = M.resolve_tables_mode(params, "launch:\n  tables: explicit\n")
+  assert mode == "explicit"
+  passed = M.evaluation_body(
+      params,
+      layers,
+      mode=mode,
+      generation_job_ids=["j0"],
+      variables=H.AIRFLOW_VARIABLES,
+      ts_nodash="20261027T000000")["launchParameter"]["parameters"]
+  assert passed["generation_job_id"] == "j0"
+  assert passed["seed_table"] == "X_TABLE"
+  assert "run_id" not in passed and "generation_job_ids" not in passed
 
 
 # -- the branch --------------------------------------------------------------
@@ -452,3 +499,47 @@ def test_the_file_switches_to_all():
     M.resolve_tables_mode(explicit, "launch:\n  tables: some\n")
   with pytest.raises(M.PlanError, match="tables"):
     M.resolve_tables_mode({"tables": "both"}, None)
+
+
+def test_a_config_file_the_launcher_refuses_is_a_plan_error():
+  """Review Minor 1: what the launcher's parse_config_text and resolve
+  refuse is a PlanError here (no retry), naming what to change."""
+  explicit = {"tables": "explicit"}
+  with pytest.raises(M.PlanError, match="not valid YAML") as caught:
+    M.resolve_tables_mode(explicit, "launch: [tables: all\n")
+  assert isinstance(caught.value.__cause__, yaml.YAMLError)
+  for launch in ("false", "''", "[]", "all"):
+    with pytest.raises(M.PlanError, match="section 'launch' must be a mapping"):
+      M.resolve_tables_mode(explicit, f"launch: {launch}\n")
+  # An empty `launch:` sets nothing, as in the launcher: the param decides.
+  assert M.resolve_tables_mode({"tables": "all"}, "launch:\n") == "all"
+  # launch.tables: null is refused, as the launcher refuses it (its
+  # generator.yaml default is not null, so null is no "unset").
+  with pytest.raises(M.PlanError, match=r"launch\.tables .* got None"):
+    M.resolve_tables_mode(explicit, "launch:\n  tables: null\n")
+
+
+@pytest.mark.parametrize("text, refused", [
+    ("launch: [tables: all\n", True),
+    ("launch: false\n", True),
+    ("launch: []\n", True),
+    ("launch:\n  tables: null\n", True),
+    ("launch:\n", False),
+    ("launch:\n  tables: all\n", False),
+])
+def test_the_launcher_reads_the_same_files_the_same_way(text, refused):
+  """The cases above, through the launcher's own reading of a config file
+  (sdfb_core.config.resolve): refused there exactly when refused here."""
+  try:
+    resolve({}, parse_config_text(text, source="c.yaml"), config_uri="c.yaml")
+  except ConfigError:
+    launcher_refuses = True
+  else:
+    launcher_refuses = False
+  try:
+    M.resolve_tables_mode({"tables": "explicit"}, text)
+  except M.PlanError:
+    dag_refuses = True
+  else:
+    dag_refuses = False
+  assert launcher_refuses == dag_refuses == refused
