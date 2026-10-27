@@ -713,8 +713,8 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "--max_parallel_jobs",
       type=int,
       help="Batch jobs scripts/launch/run_model.py runs at once (ADR 0045). "
-      "A launcher runs one job; the Composer model DAG reads the Airflow "
-      "Variable SDFB_MAX_PARALLEL_JOBS.")
+      "A launcher runs one job; the Composer DAG's tables=all branch reads "
+      "the Airflow Variable SDFB_MAX_PARALLEL_JOBS.")
   p.add_argument(
       "--prep_workers",
       type=int,
@@ -725,8 +725,8 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "--batch_index",
       type=int,
       help="With --tables=all: the batch this job generates (b00 is 0). "
-      "Set by the model DAG and scripts/launch/run_model.py; a flag only "
-      "(ADR 0045).")
+      "Set by the Composer DAG's tables=all branch and "
+      "scripts/launch/run_model.py; a flag only (ADR 0045).")
   p.add_argument(
       "--batch_count",
       type=int,
@@ -2425,7 +2425,8 @@ def chosen_batches(args: argparse.Namespace, launch: ModelLaunch) -> list[int]:
           f"of {args.batch_count}, but {launch.source} now plans {count} "
           f"batch(es) at max_tables_per_job={launch.max_tables_per_job}: the "
           f"model or K changed between planning and launch. Re-plan: "
-          f"trigger the model DAG again, or rerun scripts/launch/run_model.py.")
+          f"trigger the Composer DAG with tables=all again, or rerun "
+          f"scripts/launch/run_model.py.")
     return [args.batch_index]
   if count == 1:
     return [0]
@@ -2434,8 +2435,8 @@ def chosen_batches(args: argparse.Namespace, launch: ModelLaunch) -> list[int]:
         f"[model launch] {len(launch.selected)} enabled tables of "
         f"{launch.model} plan {count} batch jobs of at most "
         f"{launch.max_tables_per_job} tables, and a Flex launch runs one "
-        f"Dataflow job. Launch the model DAG "
-        f"(composer/synthetic_model_launch.py) or "
+        f"Dataflow job. Trigger the Composer DAG with tables=all "
+        f"(composer/synthetic_beam_bigquery.py) or run "
         f"scripts/launch/run_model.py, which give each batch its "
         f"--batch_index, or raise launch.max_tables_per_job to "
         f"{len(launch.selected)} for one job.")
@@ -2573,7 +2574,7 @@ def sanitize_job_name(prefix: str, run_id: str) -> str:
 def batch_job_name(base_run_id: str, index: int) -> str:
   """A whole-model batch job's Dataflow name, ``sdfb-<base>-bNN``
     (ADR 0045 D4): the base's name is shortened so the ``-bNN`` suffix stays
-    whole inside 63 characters — the model DAG's rule
+    whole inside 63 characters — the Composer DAG's rule
     (``composer/sdfb_batches.py::batch_job_name``) — so two batches of one
     launch running side by side never share a name, however long the base.
     Every job of the batch takes it (a one-table batch, each

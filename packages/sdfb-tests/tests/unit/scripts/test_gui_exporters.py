@@ -152,10 +152,14 @@ def test_cli_knobs_carry_their_launch_surfaces(knobs):
   assert similarity["composer_param"] == "similarity"
   # A promoted constant is set from a config file only (ADR 0043).
   assert by_id["free_text_pool_max"]["settable_via"] == ["config"]
-  # Composer and CLI defaults can differ; both are reported. A null
-  # vllm_dtype shows the dtype the default GPU (l4) derives.
+  # The DAG's defaults are generator.yaml overlaid with sdfb_env.yaml
+  # (ADR 0043): a Composer default is reported only where the overlay
+  # differs, a deploy marker as written. A null vllm_dtype shows the dtype
+  # the default GPU (l4) derives, on the CLI and on Composer alike.
   assert by_id["vllm_dtype"]["value"] == "bfloat16"
-  assert by_id["vllm_dtype"]["composer_default"] == "float16"
+  assert "composer_default" not in by_id["vllm_dtype"]
+  assert by_id["gpu"]["composer_default"] == "{{GPU}}"
+  assert "composer_default" not in by_id["num_rows"]
   # The serving launch keys are settings now, no longer Composer-only.
   for key, value in (("gpu", "l4"), ("sdk_containers", "multi"),
                      ("launcher_machine_type", "e2-standard-8")):
@@ -608,8 +612,10 @@ def test_the_relationships_export_carries_the_model_launch_keys(outputs):
 
 def test_the_model_launch_knobs(outputs):
   """ADR 0045: the six settable keys are flags and config keys; the two
-    batch keys are launch identity; the generation DAG's evaluation-only
-    `source_dataset` param is no surface of the generator's key."""
+    batch keys are launch identity; the generation DAG's `tables=all`
+    branch passes `source_dataset`, `landing_dataset`, `tables`,
+    `max_tables_per_job` and `prep_workers` (D6), its cap on parallel jobs
+    is an Airflow Variable."""
   knobs = _by_id(outputs["knobs.json"])
   assert knobs["tables"]["channel"] == "launch"
   assert knobs["tables"]["choices"] == ["explicit", "all"]
@@ -617,9 +623,13 @@ def test_the_model_launch_knobs(outputs):
       "launch.max_tables_per_job")
   assert "flex" not in knobs["max_parallel_jobs"]["settable_via"]
   assert knobs["source_dataset"]["channel"] == "io"
-  assert "composer" not in knobs["source_dataset"]["settable_via"]
+  for key in ("source_dataset", "landing_dataset", "tables",
+              "max_tables_per_job", "prep_workers"):
+    assert "composer" in knobs[key]["settable_via"], key
+    assert knobs[key]["composer_param"] == key
+  assert "composer" not in knobs["max_parallel_jobs"]["settable_via"]
   assert "composer_param" not in knobs[
-      "source_dataset"]  # `_knob` drops empties
+      "max_parallel_jobs"]  # `_knob` drops empties
   for key in ("batch_index", "batch_count"):
     assert "config_key" not in knobs[key]
     assert knobs[key]["settable_via"] == ["cli", "flex"]

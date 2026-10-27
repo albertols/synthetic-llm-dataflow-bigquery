@@ -80,7 +80,7 @@ describe("the isolated-forest launch (ADR 0045)", { timeout: 60_000 }, () => {
     expect(new Set(runs.map((r) => r.config_digest)).size).toBe(1);
     expect(final.generator_config_digest).toBe(runs[0]!.config_digest);
     expect(final.generation_job_id).toBe(runs.find((r) => r.run_id === `${base}-b00-00-T_001`)!.job_id);
-    // The model DAG's one chained evaluation records every batch job that landed, in batch order,
+    // The tables=all branch's one chained evaluation records every batch job that landed, in batch order,
     // the first as generation_job_id (ADR 0045 Rulings 2, 5 and 18).
     const jobOf = (b: number) =>
       runs.find((r) => r.run_id.startsWith(`${base}-b${String(b).padStart(2, "0")}-`))!.job_id;
@@ -95,7 +95,7 @@ describe("the isolated-forest launch (ADR 0045)", { timeout: 60_000 }, () => {
       const batch = snapshot.batch as { index: number; count: number; tables: string[] };
       expect(run.run_id.startsWith(`${base}-b${String(batch.index).padStart(2, "0")}-`), run.run_id).toBe(true);
       expect(batch.count).toBe(12);
-      // The batch's Dataflow job name is the model DAG's job name plus -bNN, never its run id.
+      // The batch's Dataflow job name is the tables=all branch's job name plus -bNN, never its run id.
       expect(run.job_name).toBe(`synthetic-sdfb-model-v0-5-3-gemma4-e4b-b${String(batch.index).padStart(2, "0")}`);
       // This job's tables only, as declared: disabled tables never appear; ADR 0045's two keys on every one.
       expect(Object.keys(snapshot.relationships!.tables!)).toEqual(batch.tables);
@@ -137,7 +137,7 @@ describe("the isolated-forest launch (ADR 0045)", { timeout: 60_000 }, () => {
     expect(record.config_digests).toHaveLength(1);
   });
 
-  it("is the evaluation by --run_id the model DAG chains: no job, so no region, job name or window; scope manual", () => {
+  it("is the evaluation by --run_id the Composer DAG's tables=all branch chains: no job, so no region, job name or window; scope manual", () => {
     // `--run_id <base> --generation_job_ids …` resolves with job=None (sdfb_evaluation/context/launch.py),
     // and the DAG passes scope=manual (ADR 0045 D7).
     for (const row of data.registry.filter((r) => r.evaluation_id === FOREST_EVALUATION)) {

@@ -173,8 +173,8 @@ class LaunchSettings(_Section):
   # margin inside the Flex Template's 12-minute window measures it.
   max_tables_per_job: int = _flag(ge=1)
   # Batch jobs scripts/launch/run_model.py runs at once: each holds its
-  # workers' GPUs. The Composer model DAG reads the Airflow Variable
-  # SDFB_MAX_PARALLEL_JOBS instead (Airflow fixes a mapped task's
+  # workers' GPUs. The Composer DAG's tables=all branch reads the Airflow
+  # Variable SDFB_MAX_PARALLEL_JOBS instead (Airflow fixes a mapped task's
   # concurrency when it parses the DAG file); a launcher runs one job.
   max_parallel_jobs: int = _flag(ge=1)
   # Threads a multi-table launcher reads schemas, reference samples and

@@ -607,7 +607,7 @@ export const generatorGuides: Readonly<Record<GeneratorKnobId, GeneratedGuide>> 
     "tip": "The default is an estimate; read each batch launch's margin to the 12-minute window and adjust."
   },
   "max_parallel_jobs": {
-    "purpose": "How many batch jobs scripts/launch/run_model.py runs at once. The Composer model DAG takes its cap from the Airflow Variable SDFB_MAX_PARALLEL_JOBS instead.",
+    "purpose": "How many batch jobs scripts/launch/run_model.py runs at once. The Composer DAG's tables=all branch takes its cap from the Airflow Variable SDFB_MAX_PARALLEL_JOBS instead.",
     "up": "The batches finish sooner; each job holds its workers' GPUs, so stay inside the GPU quota.",
     "down": "One at a time (the default): never more GPUs than one job asks for."
   },
@@ -617,7 +617,7 @@ export const generatorGuides: Readonly<Record<GeneratorKnobId, GeneratedGuide>> 
     "down": "1: each table is read in turn, exactly as before ADR 0045."
   },
   "batch_index": {
-    "purpose": "The batch of a whole-model launch this job generates (b00 is 0). The model DAG and scripts/launch/run_model.py set it.",
+    "purpose": "The batch of a whole-model launch this job generates (b00 is 0). The Composer DAG's tables=all branch and scripts/launch/run_model.py set it.",
     "up": "A later batch of the same plan.",
     "down": "Unset: the launcher runs every batch itself, in sequence on the CLI (refused on Flex above one batch)."
   },

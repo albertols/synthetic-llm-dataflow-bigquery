@@ -11,7 +11,7 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""The Composer model DAG's planner (`composer/sdfb_batches.py`, ADR 0045)
+"""The Composer DAG's planner (`composer/sdfb_batches.py`, ADR 0045)
 plans exactly what sdfb-core plans — on every committed model and on
 generated forests of up to 120 tables — and builds launch bodies a batch
 launcher accepts.
@@ -28,6 +28,7 @@ import ast
 import importlib.util
 import json
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -40,7 +41,11 @@ from sdfb_tests.model_fixtures import forest_model_text
 
 _REPO = Path(__file__).resolve().parents[5]
 _MIRROR = _REPO / "composer" / "sdfb_batches.py"
-_SINGLE_DAG = _REPO / "composer" / "synthetic_beam_bigquery.py"
+_MASTER_BODIES = (
+    _REPO / "packages" / "sdfb-tests" / "tests" / "fixtures" / "config_parity" /
+    "dag_bodies_master.json")
+# Master's generation DAG, in master's history (the v0.6.1 report commit).
+_MASTER_COMMIT = "edcfdcd"
 _METADATA = _REPO / "docker" / "flex_template_metadata.json"
 _COMMITTED = sorted((_REPO / "config" / "relationships").glob("*.yaml"))
 
@@ -313,39 +318,29 @@ def test_the_batch_parameters_are_template_parameters_and_generator_flags(
     assert name not in params
 
 
-def _single_dag_forwarded() -> set[str]:
-  """Every parameter name the single-table DAG's generation launch
-  forwards, conditional `**{...}` blocks included."""
-  tree = ast.parse(_SINGLE_DAG.read_text(encoding="utf-8"))
-  launches = [
-      n for n in ast.walk(tree) if isinstance(n, ast.Call) and
-      getattr(n.func, "id", "") == "DataflowStartFlexTemplateOperator" and any(
-          k.arg == "task_id" and "start_" in ast.unparse(k.value)
-          for k in n.keywords)
-  ]
-  assert len(launches) == 1
-  names: set[str] = set()
-  for node in ast.walk(launches[0]):
-    if isinstance(node, ast.Dict):
-      keys = [k.value for k in node.keys if isinstance(k, ast.Constant)]
-      if "num_rows" in keys or "rag_chunks_table" in keys or (
-          "freetext_pools_table"
-          in keys) or "source_stats_table" in keys or ("ddl_uri" in keys):
-        names.update(keys)
+def _master_forwarded() -> set[str]:
+  """Every parameter name master's generation launch forwarded, read from
+  its recorded launches (`dag_bodies_master.json`; its DDL marker was empty,
+  so ddl_uri is added: master forwarded it when the marker was set)."""
+  golden = json.loads(_MASTER_BODIES.read_text(encoding="utf-8"))
+  names = {"ddl_uri"}
+  for scenario in golden.values():
+    for body in scenario["bodies"]:
+      names.update(body["launchParameter"]["parameters"])
   return names
 
 
 def test_a_batch_forwards_what_the_single_table_launch_forwards(deployed):
   """A batch passes only what differs from generator.yaml (ADR 0043): every
-  key the single-table launch forwards is passed, or the batch's value for
-  it is generator.yaml's, which the launcher holds without the flag."""
+  key master's single-table launch forwarded is passed, or the batch's value
+  for it is generator.yaml's, which the launcher holds without the flag."""
   layers = M.load_layers(deployed())
   params = M.batch_parameters(
       M.common_parameters(_PARAMS, layers=layers),
       base_run_id="b",
       index=0,
       count=1)
-  missing = _single_dag_forwarded() - set(params) - {
+  missing = _master_forwarded() - set(params) - {
       "reference_table", "landing_table", "ddl_uri", "pk_cols", "identity_cols"
   }
   defaults = {
@@ -359,9 +354,10 @@ def test_a_batch_forwards_what_the_single_table_launch_forwards(deployed):
       },
       **_PARAMS
   }
-  # config_uri is no generator.yaml key: it is passed when set.
-  assert _PARAMS["config_uri"] == "" and "config_uri" in missing
-  for name in missing - {"config_uri"}:
+  # config_uri (newer than master) is no generator.yaml key: it is passed
+  # when set.
+  assert _PARAMS["config_uri"] == "" and "config_uri" not in params
+  for name in missing:
     assert M.cli_text(values[name]) == M.cli_text(defaults[name]), name
   assert len(missing) > 15  # most of them hold the default
   assert M.common_parameters({
@@ -408,18 +404,16 @@ def test_the_environment_follows_the_gpu_and_the_client(params, machine,
   assert "no_use_multiple_sdk_containers" in single["additionalExperiments"]
 
 
-def test_the_accelerators_are_the_single_table_dags():
-  """The single-table DAG writes each accelerator inside a Jinja string
-  split over adjacent literals; Python joins them into one constant, which
-  must hold ours whole."""
-  tree = ast.parse(_SINGLE_DAG.read_text(encoding="utf-8"))
-  constants = [
-      node.value
-      for node in ast.walk(tree)
-      if isinstance(node, ast.Constant) and isinstance(node.value, str)
-  ]
-  assert any(M.L4_ACCELERATOR in c for c in constants)
-  assert any(M.T4_ACCELERATOR in c for c in constants)
+def test_the_accelerators_are_masters():
+  """Master's generation launches carried these experiments (its recorded
+  l4 and t4 launches)."""
+  golden = json.loads(_MASTER_BODIES.read_text(encoding="utf-8"))
+  for scenario, accelerator in (("explicit_l4", M.L4_ACCELERATOR),
+                                ("explicit_t4", M.T4_ACCELERATOR)):
+    (body,) = golden[scenario]["bodies"]
+    experiments = body["launchParameter"]["environment"][
+        "additionalExperiments"]
+    assert accelerator in experiments, scenario
 
 
 def test_batch_job_names_are_distinct_dataflow_names():
@@ -442,8 +436,9 @@ def test_batch_job_names_are_distinct_dataflow_names():
     ids=["short", "59_chars", "58_chars", "long"])
 @pytest.mark.parametrize("index", [0, 1, 11, 100])
 def test_a_cli_batch_job_is_named_by_the_model_dags_rule(base, index):
-  """Review M2: the launcher names a CLI batch job as the model DAG names
-    its batch jobs — the name before `-bNN` shortened, the suffix whole."""
+  """Review M2: the launcher names a CLI batch job as the Composer DAG's
+    tables=all branch names its batch jobs — the name before `-bNN`
+    shortened, the suffix whole."""
   name = rp.batch_job_name(base, index)
   assert name == M.batch_job_name(rp.sanitize_job_name("sdfb", base), index)
   assert len(name) <= 63 and name.endswith(f"-b{index:02d}")
@@ -453,18 +448,25 @@ def test_a_cli_batch_job_is_named_by_the_model_dags_rule(base, index):
     "gs://b/synthetic/models/qwen3/4b-instruct-2507/v1/",
     "gs://b/synthetic/models/gemma4/e4b-it/v2/", "config/local-model"
 ])
-def test_the_model_slug_is_the_generation_dags(uri):
-  tree = ast.parse(_SINGLE_DAG.read_text(encoding="utf-8"))
+def test_the_model_slug_is_masters(uri):
+  """Master's generation DAG's `_model_slug`, read from master's history."""
+  text = subprocess.run(
+      ["git", "show", f"{_MASTER_COMMIT}:composer/synthetic_beam_bigquery.py"],
+      cwd=_REPO,
+      check=True,
+      capture_output=True,
+      text=True).stdout
+  tree = ast.parse(text)
   functions = [
       n for n in tree.body
       if isinstance(n, ast.FunctionDef) and n.name == "_model_slug"
   ]
   assert len(functions) == 1
   scope: dict = {}
-  exec(  # pylint: disable=exec-used  # one pure function of a file only Composer can import
+  exec(  # pylint: disable=exec-used  # one pure function of master's DAG file
       compile(
-          ast.Module(body=functions, type_ignores=[]), str(_SINGLE_DAG),
-          "exec"), scope)
+          ast.Module(body=functions, type_ignores=[]), "master_dag", "exec"),
+      scope)
   assert M.model_slug(uri) == scope["_model_slug"](uri)
 
 

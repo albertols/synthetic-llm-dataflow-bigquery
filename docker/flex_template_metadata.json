@@ -440,21 +440,21 @@
     {
       "name": "batch_index",
       "label": "Batch index",
-      "helpText": "With tables=all and batch_count (ADR 0045): the batch this job generates (b00 is 0). The model DAG sets it; the launcher plans the model again and generates that batch.",
+      "helpText": "With tables=all and batch_count (ADR 0045): the batch this job generates (b00 is 0). The Composer DAG's tables=all branch sets it; the launcher plans the model again and generates that batch.",
       "isOptional": true,
       "regexes": ["^[0-9]+$"]
     },
     {
       "name": "batch_count",
       "label": "Batch count",
-      "helpText": "With batch_index (ADR 0045): how many batches the model DAG planned; the launcher stops when its own plan differs.",
+      "helpText": "With batch_index (ADR 0045): how many batches the Composer DAG's tables=all branch planned; the launcher stops when its own plan differs.",
       "isOptional": true,
       "regexes": ["^[1-9][0-9]*$"]
     },
     {
       "name": "generator_defaults_digest",
       "label": "Generator defaults digest",
-      "helpText": "The digest of the generator.yaml the model DAG was imported with. The launcher logs generator_defaults_mismatch when it is not the image's. The DAG sets it.",
+      "helpText": "The digest of the generator.yaml the Composer DAG was imported with. The launcher logs generator_defaults_mismatch when it is not the image's. The DAG sets it.",
       "isOptional": true,
       "regexes": ["^[0-9a-f]{12}$"]
     },

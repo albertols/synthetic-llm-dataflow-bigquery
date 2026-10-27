@@ -99,16 +99,26 @@ ignored, so the constraints go in with `-c`:
       $S/airflow_venv/bin/airflow db migrate          # sqlite
 
 Run (from the checkout whose `composer/` is tested; `--dags` may be any
-folder holding the DAG files and what they read at parse time):
+folder holding the DAG files and what they read at parse time). The
+generation DAG reads `generator.yaml` and `sdfb_env.yaml` beside it (ADR
+0043), so `--dags` is a folder laid out as workflow 3 deploys it, with
+generator.yaml copied, not linked:
 
+    mkdir $S/dags && cp composer/*.py composer/sdfb_env.yaml $S/dags/
+    cp packages/sdfb-core/src/sdfb_core/config/generator.yaml $S/dags/
     AIRFLOW_HOME=$S/home $S/airflow_venv/bin/python \\
-      scripts/composer/check_dags.py --dags composer \\
+      scripts/composer/check_dags.py --dags $S/dags \\
       --markers packages/sdfb-tests/tests/fixtures/config_parity/dag_markers.json \\
-      --scenario explicit_l4 explicit_t4 explicit_fk_group explicit_eval_off \\
       --out $S/dag_bodies.json
 
+Without `--scenario` all nine run. `SDFB_DAG_BODIES=$S/dag_bodies.json`
+then lets `packages/sdfb-tests/tests/unit/composer/test_generation_dag.py`
+and `test_launch_helpers.py` check that output against the plan and master.
+
 `packages/sdfb-tests/tests/fixtures/config_parity/dag_bodies_master.json` is
-that command's output with `--dags` a detached worktree of master `edcfdcd`
+the same command's output for the four `MASTER_SCENARIOS` (`--scenario
+explicit_l4 explicit_t4 explicit_fk_group explicit_eval_off`) with `--dags` a
+detached worktree of master `edcfdcd`, whose DAG carried its own markers
 (`git worktree add --detach $S/master_wt edcfdcd`, then
 `--dags $S/master_wt/composer`) and `--defaults-out
 packages/sdfb-tests/tests/fixtures/config_parity/dag_param_defaults_master.json`.

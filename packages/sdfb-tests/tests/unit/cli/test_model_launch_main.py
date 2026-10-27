@@ -219,7 +219,8 @@ def test_flex_refuses_more_than_one_batch_without_an_index(
   with pytest.raises(SystemExit) as exc:
     _main(model_uri, "--max_tables_per_job=2")
   text = str(exc.value)
-  assert "composer/synthetic_model_launch.py" in text
+  assert "composer/synthetic_beam_bigquery.py" in text
+  assert "tables=all" in text
   assert "scripts/launch/run_model.py" in text
   assert "launch.max_tables_per_job to 3" in text
   assert not jobs
@@ -338,7 +339,7 @@ def test_parallel_batches_of_a_long_base_get_distinct_job_names(
 def test_a_short_base_batch_job_is_named_by_its_batch(model_uri, job_name_of):
   """b00 (two tables, one job) keeps the name it had; b01's one table runs
     as `r1-b01-00-T_RATES` and its job takes the batch's name,
-    `sdfb-<base>-bNN` (ADR 0045 D4), as the model DAG names it."""
+    `sdfb-<base>-bNN` (ADR 0045 D4), as the Composer DAG names it."""
   names = [
       job_name_of([
           *_ARGV, f"--relationships_uri={model_uri}", "--max_tables_per_job=2",

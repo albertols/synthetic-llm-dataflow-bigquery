@@ -13,7 +13,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 """Generate every enabled table of one relationships model, batch by batch
-(ADR 0045) — the CLI twin of the Composer model DAG.
+(ADR 0045) — the CLI twin of the Composer DAG's tables=all branch.
 
 It plans the batches exactly as each launcher will (it resolves the same
 flags and config file through `run_pipeline.parse_args`), runs one launcher
@@ -84,8 +84,9 @@ _COULD_NOT_START = 127
 # project.dataset.table
 _FQN_PARTS = 3
 # Printed under the evaluation command: from a checkout the evaluation job
-# needs what the model DAG's evaluation launch passes (the worker image, the
-# disk for it, the corp worker options), listed in RUN_PLAYBOOK §9d.
+# needs what the Composer DAG's tables=all evaluation launch passes (the
+# worker image, the disk for it, the corp worker options), listed in
+# RUN_PLAYBOOK §9d.
 _EVALUATION_HINT = ("# append --sdk_container_image=<image> --disk_size_gb=200 "
                     "and the worker options: RUN_PLAYBOOK §9d")
 
@@ -236,10 +237,10 @@ def evaluation_command(args: argparse.Namespace, beam_argv: list[str],
                        results: list[BatchResult]) -> str | None:
   """The `sdfb-eval run` that covers the batches that landed (ADR 0045):
   the launch's base run id and their job ids, in the batches' region.
-  `--scope=manual`, as the model DAG passes: a `--run_id` run has no
-  labelled writes, so `auto` would resolve every table to `unknown`. With
-  FK generation on, the model file too, as the model DAG passes it: the
-  fallback when the launch's records name none."""
+  `--scope=manual`, as the Composer DAG's tables=all branch passes: a
+  `--run_id` run has no labelled writes, so `auto` would resolve every table
+  to `unknown`. With FK generation on, the model file too, as that branch
+  passes it: the fallback when the launch's records name none."""
   landed = list(
       dict.fromkeys(job_id for r in results if r.returncode == 0
                     for job_id in r.job_ids))

@@ -28,8 +28,8 @@ referential integrity.
 
 The result depends only on the model's content and K, not on the order the
 file declares its tables. `composer/sdfb_batches.py` repeats this for the
-Composer model DAG, which cannot import sdfb-core; a parity test pins the
-two to the same output.
+Composer DAG's tables=all branch, which cannot import sdfb-core; a parity
+test pins the two to the same output.
 
 Design: docs/DESIGN.md §4 Relational generation
 (ADR 0030, 0045).

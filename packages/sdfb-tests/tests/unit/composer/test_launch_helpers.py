@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -365,18 +366,40 @@ def test_each_mode_leaves_out_what_it_does_not_read(deployed):
     assert name not in batch
 
 
+# The real-Airflow harness's output (scripts/composer/check_dags.py, all
+# nine scenarios on a deployed folder of this checkout's composer/): when set,
+# its explicit launches are compared with master's exactly as the helpers'
+# are. test_generation_dag.py checks the rest of that output.
+_HARNESS_OUTPUT_ENV = "SDFB_DAG_BODIES"
+
+
+def _harness_body(scenario: str) -> dict:
+  path = os.environ.get(_HARNESS_OUTPUT_ENV)
+  if not path:
+    pytest.skip(f"set {_HARNESS_OUTPUT_ENV} to a check_dags.py output")
+  output = json.loads(Path(path).read_text(encoding="utf-8"))[scenario]
+  assert output["gcs_reads"] == []  # Review Focus 4
+  (body,) = output["bodies"]
+  # Already normalised by the harness.
+  return body
+
+
+@pytest.mark.parametrize("source", ["helpers", "harness"])
 @pytest.mark.parametrize("scenario", H.MASTER_SCENARIOS)
-def test_explicit_launch_resolves_like_master(deployed, scenario):
+def test_explicit_launch_resolves_like_master(deployed, scenario, source):
   layers = M.load_layers(deployed(**H.SCENARIOS[scenario]["markers"]))
   (master,) = _GOLDEN[scenario]["bodies"]
   master = master["launchParameter"]
-  body = _normalised(
-      scenario,
-      M.explicit_body(
-          _params(layers, scenario),
-          layers,
-          job_name=M.dag_constants(layers, H.AIRFLOW_VARIABLES)["job_name"],
-          variables=H.AIRFLOW_VARIABLES))["launchParameter"]
+  if source == "harness":
+    body = _harness_body(scenario)["launchParameter"]
+  else:
+    body = _normalised(
+        scenario,
+        M.explicit_body(
+            _params(layers, scenario),
+            layers,
+            job_name=M.dag_constants(layers, H.AIRFLOW_VARIABLES)["job_name"],
+            variables=H.AIRFLOW_VARIABLES))["launchParameter"]
   assert body["environment"] == master["environment"]
   assert body["containerSpecGcsPath"] == master["containerSpecGcsPath"]
   assert body["jobName"] == master["jobName"]
@@ -401,6 +424,17 @@ def test_explicit_launch_resolves_like_master(deployed, scenario):
         theirs, "serving.vllm_dtype") == "float16"
   # Fewer keys than master's body: only what differs from generator.yaml.
   assert len(body["parameters"]) < len(master["parameters"])
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [s for s in H.MASTER_SCENARIOS if _GOLDEN[s]["evaluation_body"]])
+def test_the_harness_evaluation_body_is_masters(scenario):
+  path = os.environ.get(_HARNESS_OUTPUT_ENV)
+  if not path:
+    pytest.skip(f"set {_HARNESS_OUTPUT_ENV} to a check_dags.py output")
+  output = json.loads(Path(path).read_text(encoding="utf-8"))[scenario]
+  assert output["evaluation_body"] == _GOLDEN[scenario]["evaluation_body"]
 
 
 @pytest.mark.parametrize(
@@ -482,6 +516,27 @@ def test_the_evaluation_follows_the_file_not_the_param(layers):
   assert passed["generation_job_id"] == "j0"
   assert passed["seed_table"] == "X_TABLE"
   assert "run_id" not in passed and "generation_job_ids" not in passed
+
+
+def test_a_whole_model_launch_takes_its_datasets_from_the_overlay(deployed):
+  """Carried note 4: the launcher refuses tables=all without a source and a
+  landing dataset; an empty param takes the project.dataset of the
+  overlay's default source table and landing table, a set one is kept."""
+  layers = M.load_layers(deployed())
+  params = {**M.param_defaults(layers), "tables": "all"}
+  assert (params["source_dataset"], params["landing_dataset"]) == ("", "")
+  filled = M.whole_model_params(params, layers)
+  assert (filled["source_dataset"],
+          filled["landing_dataset"]) == ("sdfb-proj.src_ds",
+                                         "sdfb-proj.synthetic_data")
+  assert params["source_dataset"] == ""  # the input is not changed
+  kept = M.whole_model_params({**params, "source_dataset": "p.other"}, layers)
+  assert kept["source_dataset"] == "p.other"
+  bare = M.load_layers(
+      deployed(SDFB_DEFAULT_TABLE_FQN="", SDFB_LANDING_TABLE="ds.T"))
+  empty = M.whole_model_params({**M.param_defaults(bare)}, bare)
+  # Nothing to take it from: left empty, and the launcher says so.
+  assert (empty["source_dataset"], empty["landing_dataset"]) == ("", "")
 
 
 # -- the branch --------------------------------------------------------------

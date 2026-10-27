@@ -35,6 +35,8 @@ PyYAML only, what the DAG needs:
     planning_inputs    the model file and K the batch launchers will plan
                        with: a config file's keys win over the DAG params,
                        as they do in the launcher (ADR 0043)
+    whole_model_params the `all` branch's params: an empty source or
+                       landing dataset from the overlay's default tables
     launch_plan        the `all` branch's batch launch bodies
 
 Precedence: generator.yaml < sdfb_env.yaml < the trigger's values < a
@@ -51,7 +53,7 @@ The launcher stays authoritative: every batch job plans again from the same
 model and K and stops when its count differs from `batch_count`. The planner
 reads each table's `enabled` flag and its FK refs, nothing else. It refuses
 the refs sdfb-core refuses at load (an edge to the table itself, a bare ref
-the model does not declare), so a typo stops `plan` rather than every
+the model does not declare), so a typo stops `route` rather than every
 batch's Flex launch; the launcher validates the rest of the model when a
 batch job starts.
 
@@ -80,7 +82,8 @@ __all__ = [
     "common_parameters", "dag_constants", "evaluation_body", "explicit_body",
     "landed_job_ids", "launch_environment", "launch_overrides", "launch_plan",
     "load_layers", "model_slug", "param_defaults", "plan_banner",
-    "plan_batches", "planning_inputs", "resolve_tables_mode"
+    "plan_batches", "planning_inputs", "resolve_tables_mode",
+    "whole_model_params"
 ]
 
 DEFAULT_MAX_TABLES_PER_JOB = 10
@@ -90,7 +93,7 @@ _MODEL_SUFFIXES = (".yaml", ".yml")
 # applies to `enabled:`.
 _BOOL_TRUE = frozenset({"true", "yes", "on", "y", "t", "1"})
 _BOOL_FALSE = frozenset({"false", "no", "off", "n", "f", "0"})
-# The single-table DAG's GPU experiments (its `additionalExperiments`).
+# The generation DAG's GPU experiments (its `additionalExperiments`).
 L4_ACCELERATOR = (
     "worker_accelerator=type:nvidia-l4;count:1;install-nvidia-driver")
 T4_ACCELERATOR = ("worker_accelerator=type:nvidia-tesla-t4;count:1;"
@@ -675,9 +678,9 @@ def planning_inputs(params: Mapping[str, Any],
   tables = launch.get("tables", "all")
   if tables != "all":
     raise PlanError(
-        f"config_uri sets launch.tables to {tables!r}; the model DAG "
-        f"launches every enabled table (all). Remove the key, or launch the "
-        f"table from the single-table DAG")
+        f"config_uri sets launch.tables to {tables!r}; a whole-model launch "
+        f"launches every enabled table (all). Remove the key, or set "
+        f"launch.tables to explicit for one table")
   uri = relational.get("relationships_uri")
   if uri is None:
     uri = params.get("relationships_uri")
@@ -692,6 +695,25 @@ def planning_inputs(params: Mapping[str, Any],
   if k is None:
     k = params.get("max_tables_per_job", DEFAULT_MAX_TABLES_PER_JOB)
   return uri, _positive_int(k, "max_tables_per_job")
+
+
+def whole_model_params(params: Mapping[str, Any],
+                       layers: Layers) -> dict[str, Any]:
+  """`params` for a `tables=all` launch: an empty `source_dataset` or
+  `landing_dataset` takes the `project.dataset` of the overlay's
+  io.reference_table or io.landing_table (the deployment's default source
+  table and landing table), as the launcher refuses `tables=all` without
+  them; a value the trigger set is kept. A config file that sets either
+  still wins in the launcher (ADR 0043)."""
+  values = _overlaid(layers)
+  out = dict(params)
+  for param, table in (("source_dataset", "reference_table"),
+                       ("landing_dataset", "landing_table")):
+    if not cli_text(out.get(param)).strip():
+      parts = cli_text(values[table]).split(".")
+      out[param] = (".".join(parts[:2])
+                    if len(parts) == _QUALIFIED_TABLE_PARTS else "")
+  return out
 
 
 def model_slug(uri: str, max_len: int = 24) -> str:

@@ -415,7 +415,7 @@ test("a forest of 112 isolated tables reads as a bounded grid, with N/A keys, a 
   await expect(stat("Batch jobs")).toHaveText("12");
   const jobLinks = card.getByRole("list", { name: "Batch jobs" }).getByRole("link");
   await expect(jobLinks).toHaveCount(12);
-  // The model DAG's evaluation is by --run_id: the registry records no generation_region, so each link
+  // The tables=all branch's evaluation is by --run_id: the registry records no generation_region, so each link
   // takes the region from its batch job's generation record (the snapshot's beam block).
   await expect(jobLinks.first()).toHaveAttribute("href", /\/dataflow\/jobs\/europe-west3\/[^/?]+\?project=/);
 

@@ -20,10 +20,13 @@ production even when ``run_pipeline.py`` supports it. ``--prompt_debug``
 shipped in ADR 0024 without either exposure, so the milestone it gates
 (``freetext_pool_prompt``) could never be turned on from a real run.
 
-The composer check is static (the DAG imports airflow, which is not a
-laptop dependency) — same trade-off the file's other referencers accept.
-The DAG is read with ``ast``, never line-matched, so reformatting it
-(yapf, wrapped string literals) cannot break or fake these contracts.
+The DAG imports airflow, which is not a laptop dependency: its params are
+read with ``ast``, and what its launch passes is computed by the helpers it
+calls (``composer/sdfb_batches.py``) on a deployed DAGs folder (``composer/``
+with the committed markers filled, ``generator.yaml`` beside it). A launch
+passes a key only where its value differs from ``generator.yaml`` (ADR
+0043), so "the DAG forwards X" reads: a trigger that sets X to a value other
+than the default reaches the launch as that text.
 
 One template serves two jobs (ADR 0041, amendment of 2026-10-06), and
 ``docker/flex_template_metadata.json`` is the one file that declares its
@@ -48,10 +51,11 @@ contract between them, so together they leave no parameter unowned.
 
 What a generation launch must supply is therefore the CLI's to say
 (``sdfb_tests.launch_surface.generator_required``), and the DAG's launch is
-checked against that. The same DAG now holds a second launch operator
+checked against that. The same DAG launches the evaluation too
 (``trigger_evaluation``, behind the ``run_evaluation`` gate); every helper
-here reads the generation one, ``start_sdfb``, which must carry nothing of
-the evaluation: with the gate off it is the whole path.
+here reads the generation one, ``start_sdfb``'s body
+(``sdfb_batches.explicit_body``), which must carry nothing of the
+evaluation: with the gate off it is the whole path.
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
@@ -63,14 +67,21 @@ import ast
 import importlib.util
 import json
 import re
+import shutil
 from pathlib import Path
 
+import pytest
+from sdfb_core.config.defaults import GENERATOR_YAML
 from sdfb_tests.launch_surface import generator_flags, generator_required
 
 _REPO_ROOT = Path(__file__).parents[5]
 _METADATA = _REPO_ROOT / "docker" / "flex_template_metadata.json"
-_COMPOSER_DAG = _REPO_ROOT / "composer" / "synthetic_beam_bigquery.py"
+_COMPOSER = _REPO_ROOT / "composer"
+_COMPOSER_DAG = _COMPOSER / "synthetic_beam_bigquery.py"
 _FLEX_ENTRY = _REPO_ROOT / "docker" / "flex_entry.py"
+_MARKERS = (
+    _REPO_ROOT / "packages" / "sdfb-tests" / "tests" / "fixtures" /
+    "config_parity" / "dag_markers.json")
 
 # Flags the generator's CLI accepts and the template never declared: they
 # stay reachable only from a direct launch (ADR 0024 §3c precedent).
@@ -140,49 +151,40 @@ def _param_keyword(param: ast.Call, keyword: str):
   return ast.literal_eval(value)
 
 
-def _composer_launch_operator() -> ast.Call:
-  """The GENERATION launch (`start_sdfb`). The DAG holds a second launch
-    operator, the chained evaluation's, so the task id picks this one."""
-  tree = ast.parse(_COMPOSER_DAG.read_text())
-  (operator,) = [
-      node for node in ast.walk(tree)
-      if _is_call_to(node, "DataflowStartFlexTemplateOperator") and
-      _task_id(node) == "f'start_{app_name}'"
-  ]
-  return operator
+def _load(name: str, path: Path):
+  spec = importlib.util.spec_from_file_location(name, path)
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
 
 
-def _task_id(operator: ast.Call) -> str:
-  (task_id,) = [kw.value for kw in operator.keywords if kw.arg == "task_id"]
-  return ast.unparse(task_id)
+_BATCHES = _load("sdfb_batches", _COMPOSER / "sdfb_batches.py")
+_HARNESS = _load("check_dags",
+                 _REPO_ROOT / "scripts" / "composer" / "check_dags.py")
 
 
-def _composer_forwarded() -> dict[str, str]:
-  """The unconditional flex-template ``parameters`` the launch operator
-    forwards, as ``name -> string literal``."""
-  (parameters,) = [
-      value for name, value in _dict_entries(_composer_launch_operator())
-      if name == "parameters" and isinstance(value, ast.Dict)
-  ]
-  return {
-      key.value: value.value
-      for key, value in zip(parameters.keys, parameters.values, strict=True)
-      if isinstance(key, ast.Constant) and isinstance(value, ast.Constant)
-  }
+@pytest.fixture(name="layers", scope="module")
+def _layers(tmp_path_factory):
+  """The deployed DAGs folder's layers (the harness's own marker fill)."""
+  folder = tmp_path_factory.mktemp("dags")
+  _HARNESS.fill_markers(_COMPOSER, folder,
+                        json.loads(_MARKERS.read_text(encoding="utf-8")))
+  shutil.copyfile(GENERATOR_YAML, folder / "generator.yaml")
+  return _BATCHES.load_layers(str(folder))
 
 
-def _composer_experiments() -> list[str]:
-  """The launch operator's ``additionalExperiments`` string literals,
-    whitespace-normalized (Jinja is whitespace-insensitive)."""
-  (experiments,) = [
-      value for name, value in _dict_entries(_composer_launch_operator())
-      if name == "additionalExperiments" and isinstance(value, ast.List)
-  ]
-  return [
-      " ".join(str(elt.value).split())
-      for elt in experiments.elts
-      if isinstance(elt, ast.Constant)
-  ]
+def _generation_launch(layers, **given: str) -> dict:
+  """`start_sdfb`'s launch (`launchParameter`) for a trigger that sets
+  `given` over the DAG's defaults."""
+  params = {**_BATCHES.param_defaults(layers), **given, "run_id": "r1"}
+  return _BATCHES.explicit_body(
+      params, layers, job_name="j",
+      variables=_HARNESS.AIRFLOW_VARIABLES)["launchParameter"]
+
+
+def _forwarded(layers, name: str, value: str) -> str | None:
+  """What the generation launch passes for param `name` set to `value`."""
+  return _generation_launch(layers, **{name: value})["parameters"].get(name)
 
 
 def test_flex_template_exposes_prompt_debug():
@@ -199,9 +201,9 @@ def test_flex_template_prompt_debug_matches_cli_choices():
   assert not re.fullmatch(regex, "verbose")
 
 
-def test_composer_dag_declares_and_forwards_prompt_debug():
+def test_composer_dag_declares_and_forwards_prompt_debug(layers):
   assert "prompt_debug" in _composer_params()
-  assert _composer_forwarded()["prompt_debug"] == "{{ params.prompt_debug }}"
+  assert _forwarded(layers, "prompt_debug", "full") == "full"
 
 
 def test_uniqueness_mode_surfaces_accept_every_cli_mode():
@@ -217,7 +219,7 @@ def test_uniqueness_mode_surfaces_accept_every_cli_mode():
     assert f'"{mode}"' in dag_text, mode
 
 
-def test_flex_template_and_composer_expose_initial_workers():
+def test_flex_template_and_composer_expose_initial_workers(layers):
   """ADR 0034: the initial worker count is a per-trigger knob."""
   param = _metadata_param("initial_workers")
   assert param["isOptional"] is True
@@ -226,21 +228,28 @@ def test_flex_template_and_composer_expose_initial_workers():
     assert re.fullmatch(regex, ok), ok
   assert not re.fullmatch(regex, "four")
   assert "initial_workers" in _composer_params()
-  assert (_composer_forwarded()["initial_workers"] ==
-          "{{ params.initial_workers }}")
+  assert _forwarded(layers, "initial_workers", "4") == "4"
 
 
-def test_composer_dag_exposes_sdk_containers_topology():
-  """ADR 0034: `sdk_containers=multi` lifts `no_use_multiple_sdk_containers`
-    for a vLLM launch; `single` (default) keeps the RUN_PLAYBOOK §3 pin."""
+def test_composer_dag_exposes_sdk_containers_topology(layers):
+  """ADR 0034: `sdk_containers=multi` (default) lifts
+    `no_use_multiple_sdk_containers` for a vLLM launch; `single` keeps the
+    RUN_PLAYBOOK §3 pin."""
   params = _composer_params()
   assert "sdk_containers" in params
   assert _param_keyword(params["sdk_containers"], "enum") == ["single", "multi"]
-  assert any("params.sdk_containers == 'single'" in experiment
-             for experiment in _composer_experiments())
+  pin = "no_use_multiple_sdk_containers"
+  for value, pinned in (("single", True), ("multi", False)):
+    environment = _generation_launch(layers, sdk_containers=value)
+    assert (
+        pin
+        in environment["environment"]["additionalExperiments"]) is pinned, value
+  assert pin not in _generation_launch(
+      layers, sdk_containers="single",
+      client_type="fake")["environment"]["additionalExperiments"]
 
 
-def test_flex_template_and_composer_expose_autoscaling():
+def test_flex_template_and_composer_expose_autoscaling(layers):
   """ADR 0034 D9: auto (fixed when initial_workers is set) | throughput | fixed."""
   param = _metadata_param("autoscaling")
   assert param["isOptional"] is True
@@ -249,7 +258,7 @@ def test_flex_template_and_composer_expose_autoscaling():
     assert re.fullmatch(regex, ok), ok
   assert not re.fullmatch(regex, "none")
   assert "autoscaling" in _composer_params()
-  assert _composer_forwarded()["autoscaling"] == "{{ params.autoscaling }}"
+  assert _forwarded(layers, "autoscaling", "throughput") == "throughput"
 
 
 def test_flex_template_exposes_fk_candidate_cap():
@@ -292,11 +301,10 @@ def test_flex_template_driven_uniqueness_mode_matches_cli_modes():
   assert not re.fullmatch(regex, "verbose")
 
 
-def test_rag_row_docs_limit_is_settable_from_every_launch_surface():
+def test_rag_row_docs_limit_is_settable_from_every_launch_surface(layers):
   """`--rag_row_docs_limit` (B.1 row documents): the template accepts what
     the CLI accepts, and the DAG declares it with the CLI's default and
-    forwards it to the generation launch. Property checks only: the
-    deployed copy of the DAG differs from this file's bytes."""
+    forwards it to the generation launch."""
   from sdfb_beam.cli.run_pipeline import parse_rag_row_docs_limit
   from sdfb_core.rag.chunking import MAX_ROW_DOC_ROWS
 
@@ -310,10 +318,10 @@ def test_rag_row_docs_limit_is_settable_from_every_launch_surface():
     assert not re.fullmatch(regex, bad), bad
   dag_param = _composer_params()["rag_row_docs_limit"]
   assert _param_keyword(dag_param, "type") == "string"
-  assert _param_keyword(dag_param, "default") == str(MAX_ROW_DOC_ROWS)
+  assert _BATCHES.param_defaults(layers)["rag_row_docs_limit"] == str(
+      MAX_ROW_DOC_ROWS)
   assert len(_param_keyword(dag_param, "description")) > 30
-  assert (_composer_forwarded()["rag_row_docs_limit"] ==
-          "{{ params.rag_row_docs_limit }}")
+  assert _forwarded(layers, "rag_row_docs_limit", "512") == "512"
 
 
 def test_flex_template_exposes_thresholds_uri():
@@ -395,21 +403,18 @@ def test_what_the_generator_requires_is_said_where_the_template_cannot():
     assert says_so == (name in required), name
 
 
-def test_the_generation_launch_supplies_every_flag_the_cli_requires():
+def test_the_generation_launch_supplies_every_flag_the_cli_requires(layers):
   """The template used to refuse a launch without them; now only the
-    launcher does, so the DAG's own launch is checked here."""
-  (parameters,) = [
-      value for name, value in _dict_entries(_composer_launch_operator())
-      if name == "parameters" and isinstance(value, ast.Dict)
-  ]
-  passed = {
-      key.value for key in parameters.keys if isinstance(key, ast.Constant)
-  }
+    launcher does, so the DAG's own launch is checked here: with the
+    deployment's defaults, and with every store left empty."""
+  passed = set(_generation_launch(layers)["parameters"])
   assert generator_required() <= passed
-  every = passed | {
-      key for value in parameters.values for key, _ in _dict_entries(value)
-  }
-  assert every <= set(_parameters()), every - set(_parameters())
+  assert passed <= set(_parameters()), passed - set(_parameters())
+  for name in _BATCHES.GENERATOR_PARAMS:
+    if name in _parameters():
+      continue
+    # a DAG param that is no template parameter is never passed
+    assert name not in passed, name
 
 
 def test_no_generator_flag_reads_as_the_evaluations():
@@ -480,23 +485,24 @@ def test_every_template_parameter_is_well_formed():
 # --------------------------------------------------------------------------
 # the generation launch knows nothing of the evaluation
 # --------------------------------------------------------------------------
-def test_the_generation_launch_knows_nothing_of_the_evaluation():
+def test_the_generation_launch_knows_nothing_of_the_evaluation(layers):
   """With `run_evaluation` False the DAG runs this task and skips the
-    rest, so that path is this call alone. It names no evaluation
+    rest, so that path is this launch alone. It names no evaluation
     parameter and passes no job selector, so the image's entry runs
-    generation. This holds for whatever launch a deployment's own DAG
-    makes, which a pin of this repository's call could not."""
-  launch = ast.unparse(_composer_launch_operator())
+    generation."""
+  launch = json.dumps(_generation_launch(layers, run_evaluation=True))
   assert _SELECTOR not in launch
   assert "evaluation" not in launch
 
 
-def test_config_uri_reaches_every_surface():
+def test_config_uri_reaches_every_surface(layers):
   param = _metadata_param("config_uri")
   assert param["isOptional"] is True
   assert re.search(param["regexes"][0], "")
   assert "config_uri" in _composer_params()
-  assert _composer_forwarded()["config_uri"] == "{{ params.config_uri }}"
+  assert _forwarded(layers, "config_uri", "gs://b/c.yaml") == "gs://b/c.yaml"
+  # unset: not passed at all
+  assert _forwarded(layers, "config_uri", "") is None
 
 
 def test_the_model_launch_parameters_accept_what_the_cli_accepts():

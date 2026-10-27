@@ -220,7 +220,7 @@ describe("declared tables and batch jobs (whole-model launches, ADR 0045 D7)", (
   it("leaves out the rows of a batch job the evaluation did not cover; a row with no job id stays", () => {
     const record = buildGenerationRecord({ ...LAUNCH, generation_job_ids: ["J0"] }, [
       row({ run_id: "L-b00-00-T_A", job_id: "J0", config: snap({ index: 0, count: 3, tables: ["T_A"] }, one("T_A")) }),
-      // b01's job FAILED after writing its row (a BLOCKER): B's model DAG did not list it.
+      // b01's job FAILED after writing its row (a BLOCKER): B's tables=all launch did not list it.
       row({ run_id: "L-b01-00-T_C", job_id: "J1", config: snap({ index: 1, count: 3, tables: ["T_C"] }, one("T_C")) }),
       row({ run_id: "L-b02-00-T_D", job_id: null, config: snap({ index: 2, count: 3, tables: ["T_D"] }, one("T_D")) }),
     ]);

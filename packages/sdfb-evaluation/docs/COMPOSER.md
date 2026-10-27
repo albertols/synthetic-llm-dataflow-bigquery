@@ -13,14 +13,14 @@ what those launches showed and what is still unverified.
 
 | DAG | File | Use it when |
 | :-- | :-- | :-- |
-| the generation DAG | `composer/synthetic_beam_bigquery.py` | you want each generation run evaluated as soon as it lands (on by default) |
+| the generation DAG | `composer/synthetic_beam_bigquery.py` | you want each generation run evaluated as soon as it lands (on by default): one table (`tables=explicit`) or every enabled table of a relationship model (`tables=all`) |
 | `sdfb_evaluation_framework` | `composer/evaluation_framework.py` | a run has already landed and you want it evaluated on its own: again, or because the generation DAG ran with `run_evaluation` false |
 
 ## The generation DAG evaluates its own run
 
 *Claim: with `run_evaluation` true, the default, a run launches generation,
 waits for it, launches the evaluation and waits only until that launch is
-over.*
+over; `route` picks the branch first.*
 
 ```mermaid
 flowchart LR
@@ -28,12 +28,21 @@ flowchart LR
   classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
   classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
 
-  S["🔀 start_sdfb<br/>launch, no wait"]:::beam --> G{"🛡️ run_evaluation_gate"}:::cpu
+  R{"🛡️ route<br/>tables, or config_uri's launch.tables"}:::cpu
+  R -- "explicit" --> S["🔀 start_sdfb<br/>launch, no wait"]:::beam --> G{"🛡️ run_evaluation_gate"}:::cpu
   G -- "false" --> X["∅ the rest is skipped"]:::data
   G -- "true, the default" --> W["⚙️ wait_for_generation<br/>until JOB_STATE_DONE"]:::cpu
   W --> T["🔀 trigger_evaluation<br/>same template<br/>sdfb_job=evaluation"]:::beam
   T --> L["⚙️ wait_for_evaluation_launch<br/>until the job runs"]:::cpu
+  R -- "all" --> BB["⚙️ batch_bodies"]:::cpu --> SB["🔀 start_batch[b00 … bNN]<br/>each waits for its job"]:::beam
+  SB --> C["⚙️ collect_landed<br/>the jobs that reached DONE"]:::cpu
+  C --> TB["🔀 trigger_evaluation_batches<br/>--run_id base, --generation_job_ids"]:::beam
+  TB --> LB["⚙️ wait_for_batch_evaluation_launch"]:::cpu
 ```
+
+Every default of the DAG comes from `generator.yaml` overlaid with the
+deployment's `composer/sdfb_env.yaml` (ADR 0043); the launch bodies are
+built by `composer/sdfb_batches.py`, which the DAG imports beside it.
 
 | Param | Default | Goes to |
 | :-- | :-- | :-- |
@@ -42,7 +51,7 @@ flowchart LR
 | `evaluation_machine_type` | `e2-standard-8` | the evaluation job's workers |
 | `evaluation_launcher_machine_type` | `e2-standard-8` | the launcher VM (`environment.launcherMachineType`) |
 | `evaluation_max_workers` | 8 | `maxWorkers` |
-| `source_dataset` | empty: the dataset of `table_fqn` | template `reference_dataset` |
+| `source_dataset` | empty: the dataset of `table_fqn` | template `reference_dataset` (explicit; under `tables=all` it is the generator's source dataset) |
 | `evaluation_output_dataset` | the dataset of the validation-runs table, else `synthetic_data_quality` | template `output_dataset` |
 
 What `trigger_evaluation` passes, besides `sdfb_job=evaluation`:
@@ -50,7 +59,8 @@ What `trigger_evaluation` passes, besides `sdfb_job=evaluation`:
 job for its window, never its log), `seed_table` (the last part of
 `table_fqn`), `relationships_uri` (empty when `generate_fk_relationships` is
 false), `landing_dataset`, `reference_dataset`, `scope=manual`,
-`reference_rows_limit` (10000, the value the generation launch passes),
+`reference_rows_limit` (the generator's, `generator.yaml`'s 10000 unless the
+deployment's overlay sets another),
 `validation_runs_table`, `trigger=chained`, `mode`, `output_dataset` and
 `disk_size_gb=200`.
 
@@ -93,6 +103,22 @@ states from the record (from the job's rows of those tables).
 - **Run slot.** The DAG has `max_active_runs=1`, and a run holds the slot
   until the generation job ends and the evaluation's launch is over, so later
   triggers queue behind it.
+
+### A whole-model launch (`tables=all`)
+
+`route` plans the batches from the one model file `relationships_uri` names
+(a `config_uri` file's keys win, `launch.tables` included). Once every batch
+job has ended, `collect_landed` builds one evaluation over the jobs that
+reached `JOB_STATE_DONE`: `sdfb_job=evaluation`, `run_id` (the launch's base
+run id: the evaluator reads every `validation_runs` row of the launch),
+`generation_job_ids` (those jobs, in batch order), `relationships_uri` (the
+planned model, empty when `generate_fk_relationships` is false),
+`scope=manual`, `trigger=chained`, `mode`, `output_dataset` and
+`disk_size_gb=200`. A batch that failed is left out and fails the run
+(`fail_if_a_batch_failed`); with `run_evaluation` false, or nothing landed,
+the evaluation is skipped. `wait_for_batch_evaluation_launch` and its
+callback close a dead launch's `RUNNING` row as on the explicit branch, the
+row found by the base run id.
 
 ## The standalone DAG
 
@@ -137,9 +163,10 @@ flowchart LR
 | `wait_for_generation` | false | `wait_gate`: wait for `JOB_STATE_DONE` first |
 | `machine_type`, `launcher_machine_type`, `max_workers` | `e2-standard-8`, `e2-standard-8`, 8 (at least 4) | the launch environment, not the template |
 
-It is a template: the import workflow substitutes its markers, the same ones
-it substitutes for the generation DAG (`{{PROJECT_VERSION}}`, `{{ENV}}`, the
-two bucket markers and three table markers), and it reads the Airflow
+It is a template: the import workflow substitutes its markers
+(`{{PROJECT_VERSION}}`, `{{ENV}}`, the two bucket markers and three table
+markers), the same values it fills in the generation DAG's overlay
+(`composer/sdfb_env.yaml`), and it reads the Airflow
 Variables `PROJECT_ID`, `REGION`, `SA_DATAFLOW`, `DATAFLOW_SUBNET` and,
 optionally, `DATAFLOW_NETWORK_TAGS`. Its launch passes no template
 parameter named `runner`, `project`, `region`, `sdk_container_image`,
@@ -153,7 +180,8 @@ first, through the job id the launch pushed to XCom. Only a job that ended
 still running, done, or unreadable, and a launch with no job id in XCom, get
 one warning and no row. A launch whose only target is `tables` cannot be
 matched, so it is never closed this way. The generation DAG's
-`wait_for_evaluation_launch` carries a copy of this callback.
+`wait_for_evaluation_launch` and `wait_for_batch_evaluation_launch` carry a
+copy of this callback each.
 
 ## The launcher
 

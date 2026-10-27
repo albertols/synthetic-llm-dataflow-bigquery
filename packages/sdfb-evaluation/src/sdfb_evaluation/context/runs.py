@@ -228,8 +228,9 @@ def rows_of_jobs(rows: Sequence[Mapping[str, Any]], job_ids: Sequence[str],
   case is a note.
 
   By id only, unlike `of_job`, which falls back to the row's `job_name`:
-  the callers (the model DAG, `scripts/launch/run_model.py`) know only the
-  ids of the batch jobs that landed, so there is no name to match."""
+  the callers (the Composer DAG's tables=all branch,
+  `scripts/launch/run_model.py`) know only the ids of the batch jobs that
+  landed, so there is no name to match."""
   wanted = set(job_ids)
   dropped = sorted(
       str(r["run_id"])

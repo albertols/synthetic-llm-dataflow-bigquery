@@ -148,8 +148,9 @@ launch:
   max_tables_per_job: 10
 
   # Parallel batch jobs — How many batch jobs scripts/launch/run_model.py
-  # runs at once. The Composer model DAG takes its cap from the Airflow
-  # Variable SDFB_MAX_PARALLEL_JOBS instead. [--max_parallel_jobs · ADR 0045]
+  # runs at once. The Composer DAG's tables=all branch takes its cap from the
+  # Airflow Variable SDFB_MAX_PARALLEL_JOBS instead. [--max_parallel_jobs ·
+  # ADR 0045]
   # ↑ The batches finish sooner; each job holds its workers' GPUs, so stay
   # inside the GPU quota. · ↓ One at a time (the default): never more GPUs
   # than one job asks for.
@@ -163,8 +164,8 @@ launch:
   prep_workers: 8
 
   # Batch index — The batch of a whole-model launch this job generates (b00
-  # is 0). The model DAG and scripts/launch/run_model.py set it.
-  # [--batch_index]
+  # is 0). The Composer DAG's tables=all branch and
+  # scripts/launch/run_model.py set it. [--batch_index]
   # ↑ A later batch of the same plan. · ↓ Unset: the launcher runs every
   # batch itself, in sequence on the CLI (refused on Flex above one batch).
   # batch_index: null

@@ -1259,7 +1259,6 @@
       "config_key": "serving.vllm_dtype",
       "cli_flag": "--vllm_dtype",
       "composer_param": "vllm_dtype",
-      "composer_default": "float16",
       "flex_param": "vllm_dtype",
       "choices": [
         "auto",
@@ -1697,11 +1696,13 @@
       "unit": null,
       "settable_via": [
         "cli",
+        "composer",
         "flex",
         "config"
       ],
       "config_key": "io.source_dataset",
       "cli_flag": "--source_dataset",
+      "composer_param": "source_dataset",
       "flex_param": "source_dataset",
       "help": "With --tables=all: the project.dataset every table's source is read from under its own name, unless the model gives it a source_table (ADR 0045).",
       "comment": "ADR 0045 — a whole-model launch (`launch.tables: all`) reads every table's source from `source_dataset` under the table's own name (unless the model gives it a source_table) and lands it in `landing_dataset`. Both project.dataset; an explicit launch reads neither.",
@@ -1721,11 +1722,13 @@
       "unit": null,
       "settable_via": [
         "cli",
+        "composer",
         "flex",
         "config"
       ],
       "config_key": "io.landing_dataset",
       "cli_flag": "--landing_dataset",
+      "composer_param": "landing_dataset",
       "flex_param": "landing_dataset",
       "help": "With --tables=all: the project.dataset every table lands in (ADR 0045).",
       "source": "packages/sdfb-core/src/sdfb_core/config/model.py:159",
@@ -1763,11 +1766,13 @@
       "unit": null,
       "settable_via": [
         "cli",
+        "composer",
         "flex",
         "config"
       ],
       "config_key": "launch.tables",
       "cli_flag": "--tables",
+      "composer_param": "tables",
       "flex_param": "tables",
       "choices": [
         "explicit",
@@ -1791,11 +1796,13 @@
       "unit": "tables",
       "settable_via": [
         "cli",
+        "composer",
         "flex",
         "config"
       ],
       "config_key": "launch.max_tables_per_job",
       "cli_flag": "--max_tables_per_job",
+      "composer_param": "max_tables_per_job",
       "flex_param": "max_tables_per_job",
       "help": "With --tables=all: the most tables one Dataflow job generates; a connected component is never split, so a larger one gets a job of its own (ADR 0045).",
       "comment": "Under `all`, at most this many tables per Dataflow job; a connected component is never split. An estimate (ADR 0045): each batch launch's margin inside the Flex Template's 12-minute window measures it.",
@@ -1819,8 +1826,8 @@
       ],
       "config_key": "launch.max_parallel_jobs",
       "cli_flag": "--max_parallel_jobs",
-      "help": "Batch jobs scripts/launch/run_model.py runs at once (ADR 0045). A launcher runs one job; the Composer model DAG reads the Airflow Variable SDFB_MAX_PARALLEL_JOBS.",
-      "comment": "Batch jobs scripts/launch/run_model.py runs at once: each holds its workers' GPUs. The Composer model DAG reads the Airflow Variable SDFB_MAX_PARALLEL_JOBS instead (Airflow fixes a mapped task's concurrency when it parses the DAG file); a launcher runs one job.",
+      "help": "Batch jobs scripts/launch/run_model.py runs at once (ADR 0045). A launcher runs one job; the Composer DAG's tables=all branch reads the Airflow Variable SDFB_MAX_PARALLEL_JOBS.",
+      "comment": "Batch jobs scripts/launch/run_model.py runs at once: each holds its workers' GPUs. The Composer DAG's tables=all branch reads the Airflow Variable SDFB_MAX_PARALLEL_JOBS instead (Airflow fixes a mapped task's concurrency when it parses the DAG file); a launcher runs one job.",
       "source": "packages/sdfb-core/src/sdfb_core/config/model.py:179",
       "source_token": "max_parallel_jobs",
       "related_adrs": [
@@ -1837,11 +1844,13 @@
       "unit": "threads",
       "settable_via": [
         "cli",
+        "composer",
         "flex",
         "config"
       ],
       "config_key": "launch.prep_workers",
       "cli_flag": "--prep_workers",
+      "composer_param": "prep_workers",
       "flex_param": "prep_workers",
       "help": "Threads a multi-table launcher reads schemas, reference samples and source stats on (ADR 0045). 1 = one table after another, as before.",
       "comment": "Threads a multi-table launcher reads schemas, reference samples and source stats on before the cross-table steps run in plan order. 1 = one table after another, exactly as before ADR 0045.",
@@ -1865,7 +1874,7 @@
       ],
       "cli_flag": "--batch_index",
       "flex_param": "batch_index",
-      "help": "With --tables=all: the batch this job generates (b00 is 0). Set by the model DAG and scripts/launch/run_model.py; a flag only (ADR 0045).",
+      "help": "With --tables=all: the batch this job generates (b00 is 0). Set by the Composer DAG's tables=all branch and scripts/launch/run_model.py; a flag only (ADR 0045).",
       "comment": "The batch this job generates and the count its orchestrator planned.",
       "source": "packages/sdfb-core/src/sdfb_core/config/model.py:185",
       "source_token": "batch_index",
@@ -3737,7 +3746,9 @@
     }
   ],
   "exported_from": {
-    "commit": "03d6a1698f4c91360b83c091b8be43a3632ceb27",
-    "dirty": []
+    "commit": "ee7266c36c876d794deffb13431f93d76df08e02",
+    "dirty": [
+      "packages/sdfb-core/src/sdfb_core/config/model.py"
+    ]
   }
 }

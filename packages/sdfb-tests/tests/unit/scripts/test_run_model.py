@@ -310,8 +310,8 @@ def test_stop_gives_every_launcher_one_shared_grace_period(monkeypatch):
 def test_the_evaluation_command_names_what_to_append_for_dataflow(
     argv, monkeypatch, capsys):
   """From a checkout the printed command needs the worker image, the disk
-    and the worker options the model DAG's evaluation passes: the line under
-    it says so (ADR 0045, RUN_PLAYBOOK §9d)."""
+    and the worker options the tables=all branch's evaluation passes: the
+    line under it says so (ADR 0045, RUN_PLAYBOOK §9d)."""
   monkeypatch.setattr(RM.subprocess, "Popen", _Launchers())
   assert RM.main([*argv, "--max_tables_per_job=2"]) == 0
   lines = capsys.readouterr().out.splitlines()
@@ -452,8 +452,9 @@ def test_the_region_stays_a_placeholder_when_the_launch_named_none(
 
 def test_the_evaluation_has_the_model_when_no_record_names_it(
     argv, monkeypatch, capsys, tmp_path):
-  """Review M9: the model DAG passes the planned model to its evaluation as
-    the fallback for records that name none — when FK generation is on."""
+  """Review M9: the Composer DAG's tables=all branch passes the planned
+    model to its evaluation as the fallback for records that name none —
+    when FK generation is on."""
   monkeypatch.setattr(RM.subprocess, "Popen", _Launchers())
   assert RM.main([*argv, "--max_tables_per_job=2"]) == 0
   line = _evaluation_line(capsys.readouterr().out)

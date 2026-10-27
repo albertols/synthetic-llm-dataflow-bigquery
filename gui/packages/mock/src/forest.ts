@@ -131,7 +131,7 @@ export const FOREST_RELATIONSHIP_MODEL: RelationshipModel = {
 FOREST_RELATIONSHIP_MODEL.sha12 = sha256Hex(JSON.stringify(FOREST_RELATIONSHIP_MODEL.tables)).slice(0, 12);
 
 /**
- * The model DAG chains one evaluation over every batch that landed (ADR 0045 D6, D7):
+ * The Composer DAG's tables=all branch chains one evaluation over every batch that landed (ADR 0045 D6, D7):
  * the adjusted-keys launch's spec, in streaming uniqueness, over the 112 generated tables.
  */
 export const FOREST_SPEC: EvalSpec = {
@@ -143,7 +143,7 @@ export const FOREST_SPEC: EvalSpec = {
 export const FOREST_EVALUATION = FOREST_SPEC.id;
 
 /**
- * A batch job's Dataflow name as the model DAG builds it (ADR 0045, `sdfb_batches.batch_job_name`):
+ * A batch job's Dataflow name as the Composer DAG's tables=all branch builds it (ADR 0045, `sdfb_batches.batch_job_name`):
  * its job name `synthetic-sdfb-model-v<version>-<model slug>` plus `-bNN` — never the batch's run id
  * `<base>-bNN`, which only its launch_config log carries. Version and slug as `registryBase` writes them
  * (42 characters: inside Dataflow's 63, so nothing is truncated). On Composer the provider appends
@@ -186,7 +186,7 @@ function planDigest(t: ForestTable): string {
  * The launch's `values` (ADR 0044 D2) — the record's builder for the spec, then the whole-model keys
  * of ADR 0045: `io.source_dataset` / `io.landing_dataset`, and `launch` holds exactly its four settable
  * keys (the batch identity is the snapshot's `batch` block, never a value). `max_parallel_jobs` is 1,
- * the default: the model DAG does not forward it (its cap is the Airflow Variable
+ * the default: the Composer DAG's tables=all branch does not forward it (its cap is the Airflow Variable
  * SDFB_MAX_PARALLEL_JOBS, Ruling 13).
  */
 function forestValues(): Record<string, Record<string, unknown>> {
@@ -218,7 +218,7 @@ const declaredOf = (t: ForestTable) => ({
 
 /**
  * One batch job's snapshot: the launch's values, this job's tables as declared, its batch block, and the
- * Dataflow region in its beam block (`run_pipeline.beam_block`): the model DAG's evaluation, by `--run_id`,
+ * Dataflow region in its beam block (`run_pipeline.beam_block`): the tables=all branch's evaluation, by `--run_id`,
  * records no region, so a job link reads it here.
  */
 function batchSnapshot(values: Record<string, Record<string, unknown>>, b: number, region: string): GeneratorSnapshot {
@@ -424,7 +424,7 @@ export function buildForestLaunch(
         sourceRows: sourceRowsOf(t),
         rows: rowsOf(t),
       };
-      // scope=manual: the model DAG reads each landing table whole (ADR 0045 D7).
+      // scope=manual: the Composer DAG's tables=all branch reads each landing table whole (ADR 0045 D7).
       return {
         ...tableEntry(spec, facts, run.run_id, run.reference_digest!, true),
         encoding_plan_digest: planDigest(t),

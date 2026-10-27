@@ -16,7 +16,7 @@ sources, with how many rows, and in which batch jobs (ADR 0045).
 
 Pure Python, like the rest of sdfb-core: the launcher (`sdfb_beam.cli.
 run_pipeline`) and `scripts/launch/run_model.py` read it, and the Composer
-model DAG mirrors `batches` in `composer/sdfb_batches.py`.
+Composer DAG mirrors `batches` in `composer/sdfb_batches.py`.
 
 Design: docs/DESIGN.md §4 Relational generation
 (ADR 0045).

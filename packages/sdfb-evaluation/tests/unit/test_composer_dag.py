@@ -16,7 +16,9 @@
     composer/synthetic_beam_bigquery.py   the generation DAG: with
                                           `run_evaluation` it waits for its
                                           own job and launches the evaluation
-                                          itself (Ruling R118)
+                                          itself (Ruling R118; a tables=all
+                                          launch evaluates its batches the
+                                          same way, ADR 0045 D6)
     composer/evaluation_framework.py      the standalone DAG: one evaluation
                                           per run, for a job id, a run id or
                                           tables (Task 29)
@@ -26,9 +28,13 @@ and each closes the RUNNING registry row of a launch that died, with its own
 copy of one statement (Ruling R160; the last section).
 
 Airflow is not a dependency here, so the DAG files are read with ``ast`` and
-never imported; a pure function of a DAG is executed on its own. The files
-live at the repository root (``composer/``); when the package is copied out
-as a standalone unit they are absent and the whole module skips.
+never imported; a pure function of a DAG is executed on its own. The
+generation DAG builds its launch bodies with ``composer/sdfb_batches.py``
+(standard library and PyYAML only, ADR 0043), which these tests run on a
+deployed folder: ``composer/sdfb_env.yaml`` with its markers filled and
+sdfb-core's ``generator.yaml`` beside it, read as files. The files live at
+the repository root; when the package is copied out as a standalone unit
+they are absent and the whole module skips.
 """
 
 from __future__ import annotations
@@ -36,12 +42,16 @@ from __future__ import annotations
 import ast
 import copy
 import difflib
+import functools
+import importlib.util
 import itertools
 import json
 import logging
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import types
 from datetime import UTC, datetime
 from pathlib import Path
@@ -55,6 +65,13 @@ PACKAGE = Path(__file__).resolve().parents[2]
 REPO_ROOT = PACKAGE.parents[1]
 EVALUATION_DAG = REPO_ROOT / "composer" / "evaluation_framework.py"
 GENERATION_DAG = REPO_ROOT / "composer" / "synthetic_beam_bigquery.py"
+# What the generation DAG reads beside it (ADR 0043): its launch helpers,
+# the env overlay workflow 3 fills, and sdfb-core's defaults.
+HELPERS = REPO_ROOT / "composer" / "sdfb_batches.py"
+OVERLAY = REPO_ROOT / "composer" / "sdfb_env.yaml"
+GENERATOR_YAML = (
+    REPO_ROOT / "packages" / "sdfb-core" / "src" / "sdfb_core" / "config" /
+    "generator.yaml")
 # The repository's ONE template, and the one file that declares its
 # parameters: both DAGs launch from it.
 MAIN_METADATA = REPO_ROOT / "docker" / "flex_template_metadata.json"
@@ -63,6 +80,85 @@ if not (EVALUATION_DAG.parent.is_dir() and GENERATION_DAG.is_file()):
   pytest.skip(
       "composer/ is not part of this copy of the package",
       allow_module_level=True)
+
+
+def _load_file(name: str, path: Path):
+  spec = importlib.util.spec_from_file_location(name, path)
+  module = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(module)
+  return module
+
+
+# The generation DAG's launch bodies are this module's (standard library and
+# PyYAML only): the tests run it, as the DAG does, on a deployed folder.
+BATCHES = _load_file("sdfb_batches", HELPERS)
+# The Composer Variables the generation DAG passes the helpers.
+_VARIABLES = {
+    "PROJECT_ID": "demo-project",
+    "REGION": "europe-west1",
+    "DATAFLOW_SUBNET": "regions/europe-west1/subnetworks/demo-subnet",
+    "SA_DATAFLOW": "demo-dataflow@example.com",
+}
+# The deploy markers workflow 3 fills in the overlay, as one deployment.
+_MARKER_VALUES = {
+    "DAG_VERSION":
+        "0.7.0_20260914T0400",
+    "ENGINE":
+        "b1_rag",
+    "ENV":
+        "dev",
+    "GCS_DATAFLOW_STAGING":
+        "demo-dataflow-staging",
+    "GCS_DATAFLOW_TEMPLATES":
+        "demo-dataflow-templates",
+    "GPU":
+        "l4",
+    "PROJECT_VERSION":
+        "0.7.0",
+    "SDFB_DDL_URI":
+        "",
+    "SDFB_DEFAULT_TABLE_FQN":
+        "demo-project.thelook_source.orders",
+    "SDFB_DLQ_TABLE":
+        "demo-project.synthetic_data_quality.dlq",
+    "SDFB_EMBEDDER_URI":
+        "",
+    "SDFB_FREETEXT_POOLS_TABLE":
+        "demo-project.synthetic_rag.freetext_pools",
+    "SDFB_LANDING_TABLE":
+        "demo-project.thelook_synthetic.orders",
+    "SDFB_MODEL_URI":
+        "gs://demo-bucket/synthetic/models/qwen3/4b/v1/",
+    "SDFB_RAG_CHUNKS_TABLE":
+        "demo-project.synthetic_rag.rag_chunks",
+    "SDFB_SOURCE_STATS_TABLE":
+        "demo-project.synthetic_rag.source_table_stats",
+    "SDFB_VALIDATION_RUNS_TABLE":
+        "demo-project.synthetic_data_quality.validation_runs",
+    "WRITE_DISPOSITION":
+        "append",
+}
+_DEPLOYED = tempfile.TemporaryDirectory(prefix="sdfb_dags_")
+
+
+@functools.cache
+def _deployed_layers(markers: tuple[tuple[str, str], ...]):
+  folder = Path(
+      _DEPLOYED.name) / f"dags{len(list(Path(_DEPLOYED.name).iterdir()))}"
+  folder.mkdir()
+  values = {**_MARKER_VALUES, **dict(markers)}
+  text = re.sub(r"\{\{([A-Z_]+)\}\}", lambda m: values[m.group(1)],
+                OVERLAY.read_text(encoding="utf-8"))
+  (folder / "sdfb_env.yaml").write_text(text, encoding="utf-8")
+  shutil.copyfile(GENERATOR_YAML, folder / "generator.yaml")
+  return BATCHES.load_layers(str(folder))
+
+
+def _layers(**markers: str):
+  """The generation DAG's layers as deployed: the overlay with its markers
+  filled (`_MARKER_VALUES`, `markers` over them), generator.yaml beside it."""
+  return _deployed_layers(tuple(sorted(markers.items())))
+
 
 _NEVER_PASSED = ("runner", "project", "region", "sdk_container_image",
                  "experiments", "fail_on")
@@ -287,20 +383,26 @@ def _assigned(tree: ast.Module, name: str) -> ast.expr:
 
 def test_launch_points_at_the_one_template_the_generation_dag_launches():
   """No evaluator template to build and no marker of its own: the path is
-  the generation DAG's, typed the same way from {{PROJECT_VERSION}}."""
-  tree, generation = _tree(EVALUATION_DAG), _tree(GENERATION_DAG)
+  the generation DAG's, from the same {{PROJECT_VERSION}} and templates
+  bucket (the generation DAG's come from its overlay)."""
+  tree = _tree(EVALUATION_DAG)
   start = _one(tree, "DataflowStartFlexTemplateOperator")
-  spec = ast.unparse(_entry(start, "containerSpecGcsPath"))
-  assert spec == ast.unparse(
-      _entry(_launch(generation, "start_sdfb"), "containerSpecGcsPath"))
-  assert "flex_template" in spec and "synthetic/" in spec
-  for name in ("flex_template", "project_version", "templates_path"):
-    assert ast.unparse(_assigned(tree, name)) == ast.unparse(
-        _assigned(generation, name)), name
+  spec = _entry(start, "containerSpecGcsPath")
+  assert ast.unparse(spec) == (
+      "f'gs://{templates_path}/synthetic/{flex_template}'")
   assert ast.unparse(_assigned(
       tree, "flex_template")) == "f'sdfb-{project_version}-template.json'"
   assert ast.literal_eval(_assigned(
       tree, "project_version")) == "{{" + "PROJECT_VERSION" + "}}"
+  imported = ast.parse(
+      _as_imported(
+          EVALUATION_DAG,
+          PROJECT_VERSION=_MARKER_VALUES["PROJECT_VERSION"],
+          GCS_DATAFLOW_TEMPLATES=_MARKER_VALUES["GCS_DATAFLOW_TEMPLATES"]))
+  scope = _pure(imported, "project_version", "templates_path", "flex_template")
+  templates, flex = scope["templates_path"], scope["flex_template"]
+  ours = f"gs://{templates}/synthetic/{flex}"
+  assert ours == _generation_launch()["containerSpecGcsPath"]
 
 
 def test_the_import_workflow_needs_no_marker_it_does_not_already_substitute():
@@ -398,10 +500,8 @@ def test_launch_selects_the_evaluator_and_sizes_the_shared_images_disk():
   assert _value(tree, _entry(parameters, "sdfb_job")) == "evaluation"
   # the same number the generation DAG's chained evaluation passes
   disk = _value(tree, _entry(parameters, "disk_size_gb"))
-  generation = _tree(GENERATION_DAG)
-  assert disk == _value(
-      generation,
-      _entry(_launch(generation, "trigger_evaluation"), "disk_size_gb"))
+  assert disk == BATCHES.EVALUATION_WORKER_DISK_GB
+  assert disk == _chained_evaluation()["parameters"]["disk_size_gb"]
 
 
 def test_nothing_the_launcher_owns_appears_anywhere_in_the_launch():
@@ -537,7 +637,8 @@ def _pure(tree: ast.Module, *names: str, path: Path = EVALUATION_DAG) -> dict:
           isinstance(t, ast.Name) and t.id in names for t in n.targets))
   ]
   assert len(body) == len(names), names
-  scope: dict = {}
+  # the generation DAG's helpers module, which its constants name
+  scope: dict = {"sdfb_batches": BATCHES}
   code = compile(ast.Module(body=body, type_ignores=[]), str(path), "exec")
   exec(code, scope)  # pylint: disable=exec-used  # two pure definitions of a file Airflow alone can import
   return scope
@@ -1007,15 +1108,20 @@ def test_runs_are_sequential_and_the_header_says_which_knob_changes_that():
 # The generation DAG's evaluation, chained inside the DAG itself
 # --------------------------------------------------------------------------- #
 #
-#   start_sdfb >> run_evaluation_gate >> wait_for_generation
-#              >> trigger_evaluation >> wait_for_evaluation_launch
+#   route ─► start_sdfb >> run_evaluation_gate >> wait_for_generation
+#                       >> trigger_evaluation >> wait_for_evaluation_launch
 #
-# One import of composer/synthetic_beam_bigquery.py is all the deployment
-# needs: the evaluation is launched by this DAG, from the SAME template as the
-# generation, with `sdfb_job=evaluation` (Ruling R118). The gate is off by
-# default, and then only `start_sdfb` runs, as before. The fifth task waits
-# for the evaluation's LAUNCH to be over, and its failure closes the RUNNING
-# registry row of a launch that died (Ruling R165; the last section).
+# One import of composer/synthetic_beam_bigquery.py (with sdfb_batches.py,
+# generator.yaml and sdfb_env.yaml beside it) is all the deployment needs: the
+# evaluation is launched by this DAG, from the SAME template as the
+# generation, with `sdfb_job=evaluation` (Ruling R118). With the gate off only
+# `start_sdfb` runs. The fifth task waits for the evaluation's LAUNCH to be
+# over, and its failure closes the RUNNING registry row of a launch that died
+# (Ruling R165; the last section). The launch bodies are computed by
+# composer/sdfb_batches.py (ADR 0043): the tests below run those helpers on a
+# deployed folder (`_layers`), and read the DAG file with `ast` for its wiring.
+# A tables=all launch (ADR 0045 D6) takes the DAG's other branch; the
+# generator's suite (test_generation_dag.py) holds it.
 
 _JOB_ID_XCOM = "{{ ti.xcom_pull(task_ids='start_sdfb')['id'] }}"
 # The evaluation job's id, in the same form: neither launch waits, so each
@@ -1033,7 +1139,8 @@ _SENSOR_ARGUMENTS = {
     "task_id", "job_id", "expected_statuses", "project_id", "location", "mode",
     "poke_interval", "timeout"
 }
-# What workflow 3 substitutes at import. It refuses a file in which any other
+# What workflow 3 substitutes at import, in composer/sdfb_env.yaml (the DAG
+# file carries none since ADR 0043). It refuses a file in which any other
 # {{UPPERCASE}} marker is left, so a new one would break the import.
 _GENERATION_MARKERS = {
     "DAG_VERSION", "ENGINE", "ENV", "GCS_DATAFLOW_STAGING",
@@ -1043,34 +1150,57 @@ _GENERATION_MARKERS = {
     "SDFB_RAG_CHUNKS_TABLE", "SDFB_SOURCE_STATS_TABLE",
     "SDFB_VALIDATION_RUNS_TABLE", "WRITE_DISPOSITION"
 }
-# Four more that a deployment's copy of the DAG may carry: its import workflow
-# then fills the defaults of `num_rows`, `uniqueness_mode`,
-# `pool_seed_strategy` and `initial_workers`, which the committed DAG writes
-# out. They are generation defaults; the chained evaluation still adds none.
-_GENERATION_DEFAULT_MARKERS = {
-    "NUM_ROWS_DEFAULT", "UNIQUENESS_MODE_DEFAULT", "POOL_SEED_STRATEGY_DEFAULT",
-    "INITIAL_WORKERS_DEFAULT"
-}
 _HOUSE_VARIABLES = {
     "PROJECT_ID", "REGION", "DATAFLOW_SUBNET", "SA_DATAFLOW",
     "DATAFLOW_NETWORK_TAGS"
 }
 _GPU_ONLY = ("accelerator", "nvidia", "reservation",
-             "no_use_multiple_sdk_containers", "params.gpu",
-             "params.client_type", "g2-standard", "n1-standard")
+             "no_use_multiple_sdk_containers", "g2-standard", "n1-standard")
+# The generation job the chained evaluation is launched for, and the run's
+# timestamp, in the tests below.
+_GENERATION_JOB = "2026-09-14_01_00_00-111"
+_TS_NODASH = "20260914T040000"
+
+
+def _generation_launch(**given) -> dict:
+  """`start_sdfb`'s launch (`launchParameter`): `route`'s
+  `sdfb_batches.explicit_body` for a trigger that sets `given` over the
+  DAG's defaults."""
+  layers = _layers()
+  params = {**BATCHES.param_defaults(layers), **given, "run_id": "r1"}
+  return BATCHES.explicit_body(
+      params, layers, job_name="j", variables=_VARIABLES)["launchParameter"]
+
+
+def _chained_evaluation(markers: dict | None = None, **given) -> dict:
+  """`trigger_evaluation`'s launch: the gate's
+  `sdfb_batches.evaluation_body` for the explicit branch."""
+  layers = _layers(**(markers or {}))
+  params = {**BATCHES.param_defaults(layers), **given}
+  return BATCHES.evaluation_body(
+      params,
+      layers,
+      mode="explicit",
+      generation_job_ids=[_GENERATION_JOB],
+      variables=_VARIABLES,
+      ts_nodash=_TS_NODASH)["launchParameter"]
 
 
 def test_generation_dag_evaluates_its_run_unless_turned_off():
   param = _params(_tree(GENERATION_DAG))["run_evaluation"]
-  assert ast.literal_eval(_kw(param, "default")) is True
+  assert ast.unparse(_kw(param, "default")) == "DEFAULTS['run_evaluation']"
+  assert BATCHES.param_defaults(_layers())["run_evaluation"] is True
   assert ast.literal_eval(_kw(param, "type")) == "boolean"
 
 
 def test_generation_dag_chain_is_five_tasks_of_this_dag():
   tree = _tree(GENERATION_DAG)
-  assert _edges(tree) == _CHAIN_EDGES
+  assert _edges(tree) >= _CHAIN_EDGES
   # the four-task line is as it was; the fifth task hangs off its last
-  assert _chains(tree) == [_CHAIN[:-1], _CHAIN[-2:]]
+  chains = _chains(tree)
+  assert _CHAIN[:-1] in chains and _CHAIN[-2:] in chains
+  # nothing else reaches into the chain but `route`, by start_sdfb's body
+  assert not {(a, b) for a, b in _edges(tree) if b in _CHAIN} - _CHAIN_EDGES
   task_ids = {}
   for node in ast.walk(tree):
     if not (isinstance(node, ast.Assign) and isinstance(node.value, ast.Call)):
@@ -1079,18 +1209,17 @@ def test_generation_dag_chain_is_five_tasks_of_this_dag():
       (target,) = node.targets
       assert isinstance(target, ast.Name)
       task_ids[target.id] = ast.unparse(_kw(node.value, "task_id"))
-  assert task_ids == {
-      "start_sdfb": "f'start_{app_name}'",
+  assert {
+      k: v for k, v in task_ids.items() if k in _CHAIN
+  } == {
+      "start_sdfb": "'start_sdfb'",
       "run_evaluation_gate": "'run_evaluation_gate'",
       "wait_for_generation": "'wait_for_generation'",
       "trigger_evaluation": "'trigger_evaluation'",
       "wait_for_evaluation_launch": "'wait_for_evaluation_launch'",
   }
-  (app_name,) = [
-      n.value for n in tree.body if isinstance(n, ast.Assign) and
-      [t.id for t in n.targets if isinstance(t, ast.Name)] == ["app_name"]
-  ]
-  assert ast.literal_eval(app_name) == "sdfb"  # the XCom pulls 'start_sdfb'
+  assert ast.unparse(_kw(_launch(tree, "start_sdfb"),
+                         "body")) == ("XComArg(routed.operator, key='body')")
 
 
 def test_generation_dag_triggers_no_other_dag():
@@ -1110,20 +1239,50 @@ def test_generation_dag_triggers_no_other_dag():
   assert "evaluation_framework" not in code
 
 
+class _GateTi:
+  """The gate's task instance: answers `route`'s mode and `start_sdfb`'s
+  return value, and keeps what is pushed."""
+
+  def __init__(self):
+    self.pushed: dict = {}
+
+  def xcom_pull(self, task_ids=None, key="return_value"):
+    return {
+        ("route", "mode"): "explicit",
+        ("start_sdfb", "return_value"): {
+            "id": _GENERATION_JOB
+        },
+    }.get((task_ids, key))
+
+  def xcom_push(self, key, value):
+    self.pushed[key] = value
+
+
 def test_generation_dag_gate_is_the_run_evaluation_short_circuit():
   tree = _tree(GENERATION_DAG)
   gate = _one(tree, "ShortCircuitOperator")
   callable_name = _kw(gate, "python_callable")
   assert isinstance(callable_name, ast.Name)
-  enabled = _pure(tree, callable_name.id, path=GENERATION_DAG)[callable_name.id]
-  assert enabled({"run_evaluation": False}) is False
-  assert enabled({"run_evaluation": True}) is True
+  scope = _pure(tree, callable_name.id, path=GENERATION_DAG)
+  scope.update(LAYERS=_layers(), VARIABLES=_VARIABLES)
+  gated = scope[callable_name.id]
+  layers = _layers()
+  off, on = _GateTi(), _GateTi()
+  params = BATCHES.param_defaults(layers)
+  assert gated({**params, "run_evaluation": False}, off, _TS_NODASH) is False
+  assert not off.pushed
+  assert gated({**params, "run_evaluation": True}, on, _TS_NODASH) is True
+  # True: the evaluation's body, for the job start_sdfb launched
+  assert on.pushed["evaluation_body"]["launchParameter"] == (
+      _chained_evaluation())
   # the default: a skipped gate skips EVERYTHING downstream of it
   assert {k.arg for k in gate.keywords} == {"task_id", "python_callable"}
   trigger = _launch(tree, "trigger_evaluation")
-  sensors = _calls(tree, "DataflowJobStatusSensor")
-  assert len(sensors) == 2
-  for downstream in (*sensors, trigger):
+  assert ast.unparse(
+      _kw(trigger,
+          "body")) == ("XComArg(run_evaluation_gate, key='evaluation_body')")
+  for downstream in (_task(tree, "wait_for_generation"),
+                     _task(tree, "wait_for_evaluation_launch"), trigger):
     assert "trigger_rule" not in {k.arg for k in downstream.keywords}
 
 
@@ -1179,8 +1338,9 @@ def test_trigger_evaluation_launches_from_the_generation_template():
   tree = _tree(GENERATION_DAG)
   start, trigger = _launch(tree, "start_sdfb"), _launch(tree,
                                                         "trigger_evaluation")
-  assert ast.unparse(_entry(trigger, "containerSpecGcsPath")) == ast.unparse(
-      _entry(start, "containerSpecGcsPath"))
+  generation, evaluation = _generation_launch(), _chained_evaluation()
+  assert evaluation["containerSpecGcsPath"] == (
+      generation["containerSpecGcsPath"])
   for keyword in ("project_id", "location"):
     assert ast.unparse(_kw(trigger,
                            keyword)) == ast.unparse(_kw(start, keyword))
@@ -1190,18 +1350,12 @@ def test_trigger_evaluation_launches_from_the_generation_template():
   assert ast.literal_eval(_kw(trigger, "do_xcom_push")) is True
   assert "deferrable" not in {k.arg for k in trigger.keywords}
   # its own job name, not the generation job's
-  assert ast.unparse(_entry(trigger, "jobName")) != ast.unparse(
-      _entry(start, "jobName"))
-  assert "evaluation" in ast.unparse(_entry(trigger, "jobName"))
+  assert evaluation["jobName"] != generation["jobName"]
+  assert "evaluation" in evaluation["jobName"]
 
 
 def test_trigger_evaluation_parameters_select_the_evaluator_for_this_job():
-  tree = _tree(GENERATION_DAG)
-  parameters = _entry(_launch(tree, "trigger_evaluation"), "parameters")
-  assert isinstance(parameters, ast.Dict)
-  keys = [k.value for k in parameters.keys if isinstance(k, ast.Constant)]
-  assert len(keys) == len(parameters.keys), "no ** unpacking in parameters"
-  values = dict(zip(keys, parameters.values, strict=True))
+  values = _chained_evaluation()["parameters"]
   assert set(values) == {
       "sdfb_job", "generation_job_id", "seed_table", "relationships_uri",
       "landing_dataset", "reference_dataset", "scope", "reference_rows_limit",
@@ -1210,90 +1364,96 @@ def test_trigger_evaluation_parameters_select_the_evaluator_for_this_job():
   }
   # a hand-named target has no write disposition: without this every table
   # would be planned as "not evaluated"
-  assert _value(tree, values["scope"]) == "manual"
-  assert _value(tree, values["sdfb_job"]) == "evaluation"
+  assert values["scope"] == "manual"
+  assert values["sdfb_job"] == "evaluation"
   # the tables come from the launched table and the model; the job id is the
   # launch's identity (the evaluator reads only the Dataflow job for it, R134),
-  # the one the sensor waits on
+  # the one the sensor waits on: the gate passes start_sdfb's returned id
   assert "job_id" not in values
-  assert _value(tree, values["generation_job_id"]) == _JOB_ID_XCOM
-  sensor = _task(tree, "wait_for_generation")
-  assert _value(tree,
-                values["generation_job_id"]) == _value(tree,
-                                                       _kw(sensor, "job_id"))
-  seed = _value(tree, values["seed_table"])
-  assert "params.table_fqn" in seed and "rsplit('.', 1)[-1]" in seed
-  uri = _value(tree, values["relationships_uri"])
-  assert "params.relationships_uri" in uri
+  assert values["generation_job_id"] == _GENERATION_JOB
+  tree = _tree(GENERATION_DAG)
+  gate = ast.unparse(_function(tree, "_run_evaluation_gate"))
+  assert "ti.xcom_pull(task_ids='start_sdfb')['id']" in gate
+  (task,) = re.findall(r"xcom_pull\(task_ids='(\w+)'\)\['id'\]", _JOB_ID_XCOM)
+  assert task == "start_sdfb"
+  table = _MARKER_VALUES["SDFB_DEFAULT_TABLE_FQN"]
+  assert values["seed_table"] == table.rsplit(".", 1)[-1]
+  assert _chained_evaluation(
+      table_fqn="p.ds.OTHER")["parameters"]["seed_table"] == "OTHER"
   # an isolated generation is evaluated as one table: no model
-  assert "params.generate_fk_relationships == 'true'" in uri
-  assert uri.endswith("else '' }}")
-  assert "SDFB_LANDING_TABLE" in _value(tree, values["landing_dataset"])
-  source = _value(tree, values["reference_dataset"])
-  assert "params.source_dataset" in source and "params.table_fqn" in source
+  assert values["relationships_uri"] == "config/relationships"
+  assert _chained_evaluation(generate_fk_relationships="false"
+                            )["parameters"]["relationships_uri"] == ""
+  assert values["landing_dataset"] == (
+      _MARKER_VALUES["SDFB_LANDING_TABLE"].rsplit(".", 1)[0])
+  assert values["reference_dataset"] == table.rsplit(".", 1)[0]
+  assert _chained_evaluation(
+      source_dataset="p.src")["parameters"]["reference_dataset"] == "p.src"
   assert "source_dataset" in _params(tree)
-  assert _value(tree, values["trigger"]) == "chained"
-  assert _value(tree, values["mode"]) == "{{ params.evaluation_mode }}"
-  assert _value(
-      tree,
-      values["output_dataset"]) == "{{ params.evaluation_output_dataset }}"
+  assert values["trigger"] == "chained"
+  assert values["mode"] == ""
+  assert _chained_evaluation(
+      evaluation_mode="sampled")["parameters"]["mode"] == "sampled"
+  assert values["output_dataset"] == "synthetic_data_quality"
   # the same image as generation: the same boot disk, and for the reason
   # run_pipeline pins it (the evaluator pins none)
-  assert int(_value(tree, values["disk_size_gb"])) >= 100
+  assert int(values["disk_size_gb"]) >= 100
   # every key is a parameter of the ONE template, and one the evaluation reads
   assert set(values) <= _main_metadata_names()
   assert set(values) <= _evaluation_names()
   assert not set(values) & set(_NEVER_PASSED)
-  declared = set(_params(tree))
-  for key, value in values.items():
-    refs = re.findall(r"params\.(\w+)", str(_value(tree, value)))
-    assert set(refs) <= declared, (key, refs)
 
 
 def test_both_launches_pass_the_same_validation_runs_table():
-  tree = _tree(GENERATION_DAG)
-  generation = _entry(_launch(tree, "start_sdfb"), "parameters")
-  evaluation = _entry(_launch(tree, "trigger_evaluation"), "parameters")
-  given = _value(tree, _entry(generation, "validation_runs_table"))
-  assert given
-  assert _value(tree, _entry(evaluation, "validation_runs_table")) == given
+  given = _generation_launch()["parameters"]["validation_runs_table"]
+  assert given == _MARKER_VALUES["SDFB_VALIDATION_RUNS_TABLE"]
+  assert _chained_evaluation()["parameters"]["validation_runs_table"] == given
 
 
 def test_both_launches_pass_the_same_reference_rows_limit():
-  tree = _tree(GENERATION_DAG)
-  generation = _entry(_launch(tree, "start_sdfb"), "parameters")
-  evaluation = _entry(_launch(tree, "trigger_evaluation"), "parameters")
-  given = _value(tree, _entry(generation, "reference_rows_limit"))
+  """The generation launch passes it only where it differs from
+  generator.yaml; the launcher then holds the yaml's value."""
+  layers = _layers()
+  yaml_value = BATCHES.cli_text(
+      layers.defaults["sampling"]["reference_rows_limit"])
+  given = _generation_launch()["parameters"].get("reference_rows_limit",
+                                                 yaml_value)
   assert given.isdigit() and int(given) > 0
-  assert _value(tree, _entry(evaluation, "reference_rows_limit")) == given
+  assert _chained_evaluation()["parameters"]["reference_rows_limit"] == given
 
 
 def test_trigger_evaluation_is_a_cpu_job_in_the_generation_jobs_network():
-  tree = _tree(GENERATION_DAG)
-  start, trigger = _launch(tree, "start_sdfb"), _launch(tree,
-                                                        "trigger_evaluation")
-  ours, theirs = _entry(trigger, "environment"), _entry(start, "environment")
-  for key in ("tempLocation", "stagingLocation", "subnetwork",
-              "ipConfiguration", "serviceAccountEmail", "workerRegion",
-              "additionalUserLabels"):
-    assert ast.unparse(_entry(ours, key)) == ast.unparse(_entry(theirs,
-                                                                key)), key
-  experiments = _entry(ours, "additionalExperiments")
-  assert isinstance(experiments, ast.List)
-  assert [e.value for e in experiments.elts if isinstance(e, ast.Constant)
-         ] == ["use_runner_v2", "enable_secure_boot"]
-  (starred,) = [e for e in experiments.elts if isinstance(e, ast.Starred)]
-  assert ast.unparse(starred.value) == "network_tag_experiments"
-  assert ast.unparse(starred.value) in ast.unparse(
-      _entry(theirs, "additionalExperiments"))
-  launch = ast.unparse(_entry(trigger, "launchParameter"))
+  for tags in ("", "tag-a;tag-b"):
+    variables = {**_VARIABLES, "DATAFLOW_NETWORK_TAGS": tags}
+    layers = _layers()
+    params = {**BATCHES.param_defaults(layers), "run_id": "r1"}
+    theirs = BATCHES.explicit_body(
+        params, layers, job_name="j",
+        variables=variables)["launchParameter"]["environment"]
+    ours = BATCHES.evaluation_body(
+        params,
+        layers,
+        mode="explicit",
+        generation_job_ids=[_GENERATION_JOB],
+        variables=variables,
+        ts_nodash=_TS_NODASH)["launchParameter"]["environment"]
+    for key in ("tempLocation", "stagingLocation", "subnetwork",
+                "ipConfiguration", "serviceAccountEmail", "workerRegion",
+                "additionalUserLabels"):
+      assert ours[key] == theirs[key], key
+    tagged = [e for e in theirs["additionalExperiments"] if "tags" in e]
+    assert ours["additionalExperiments"] == [
+        "use_runner_v2", "enable_secure_boot", *tagged
+    ]
+    assert bool(tagged) == bool(tags)
+  launch = json.dumps(_chained_evaluation())
   for gpu_only in (*_GPU_ONLY, "enable_data_sampling", "sdk_container_image",
                    "fail_on"):
     assert gpu_only not in launch, gpu_only
-  assert ast.literal_eval(_entry(
-      ours, "machineType")) == "{{ params.evaluation_machine_type }}"
-  assert ast.literal_eval(_entry(
-      ours, "maxWorkers")) == "{{ params.evaluation_max_workers }}"
+  evaluation = _chained_evaluation(
+      evaluation_machine_type="n2-standard-4", evaluation_max_workers=3)
+  assert evaluation["environment"]["machineType"] == "n2-standard-4"
+  assert evaluation["environment"]["maxWorkers"] == "3"
 
 
 def test_generation_dag_gains_four_evaluation_params_and_nothing_else():
@@ -1304,22 +1464,17 @@ def test_generation_dag_gains_four_evaluation_params_and_nothing_else():
       "evaluation_launcher_machine_type", "evaluation_max_workers",
       "evaluation_output_dataset"
   }
-
-  def default(name: str):
-    return ast.literal_eval(_kw(params[name], "default"))
-
-  assert default("evaluation_mode") == ""  # the evaluator's own default
+  defaults = BATCHES.param_defaults(_layers())
+  assert defaults["evaluation_mode"] == ""  # the evaluator's own default
   assert ast.literal_eval(_kw(params["evaluation_mode"],
                               "enum")) == ["", "exact", "sampled"]
-  assert default("evaluation_machine_type") == "e2-standard-8"
-  assert default("evaluation_max_workers") == 8
+  assert defaults["evaluation_machine_type"] == "e2-standard-8"
+  assert defaults["evaluation_max_workers"] == 8
   assert ast.literal_eval(_kw(params["evaluation_max_workers"],
                               "type")) == "integer"
-  # the quality dataset of the DAG's own validation-runs table, read in
-  # Python: no new marker (the executed test below)
-  assert _kw(params["evaluation_output_dataset"],
-             "default") is not None and isinstance(
-                 _kw(params["evaluation_output_dataset"], "default"), ast.Name)
+  # no default is written in the DAG: each is the helpers'
+  for name in about_evaluation:
+    assert ast.unparse(_kw(params[name], "default")) == f"DEFAULTS[{name!r}]"
 
 
 @pytest.mark.parametrize("table,dataset", [
@@ -1332,52 +1487,24 @@ def test_generation_dag_gains_four_evaluation_params_and_nothing_else():
 def test_the_evaluation_dataset_defaults_to_the_validation_runs_dataset(
     table, dataset):
   """The default of `evaluation_output_dataset` is the dataset part of the
-  DAG's `{{SDFB_VALIDATION_RUNS_TABLE}}` value (`project.dataset.table`),
-  and `synthetic_data_quality` when the value has not three parts."""
-  tree = _tree(GENERATION_DAG)
-  default = _kw(_params(tree)["evaluation_output_dataset"], "default")
-  assert isinstance(default, ast.Name)
-  names = {
-      "validation_runs_table", "_QUALIFIED_TABLE_PARTS",
-      "_validation_runs_parts", default.id
-  }
-  body = [
-      n for n in tree.body if isinstance(n, ast.Assign) and any(
-          isinstance(t, ast.Name) and t.id in names for t in n.targets)
-  ]
-  scope: dict = {}
-  for node in body:  # the table marker's own assignment, as the import sets it
-    if node.targets[0].id == "validation_runs_table":
-      scope["validation_runs_table"] = table
-      continue
-    exec(  # pylint: disable=exec-used  # a pure module-level assignment of the DAG file
-        compile(
-            ast.Module(body=[node], type_ignores=[]), str(GENERATION_DAG),
-            "exec"), scope)
-  assert scope[default.id] == dataset
+  overlay's validation-runs table (`project.dataset.table`), and
+  `synthetic_data_quality` when the value has not three parts."""
+  layers = _layers(SDFB_VALIDATION_RUNS_TABLE=table)
+  assert BATCHES.param_defaults(layers)["evaluation_output_dataset"] == dataset
 
 
-def _unexpected_generation_markers(markers: set[str]) -> set[str]:
-  """The markers the generation DAG must not carry, and the ones it lacks."""
-  allowed = _GENERATION_MARKERS | _GENERATION_DEFAULT_MARKERS
-  return (markers - allowed) | (_GENERATION_MARKERS - markers)
+def test_generation_dag_needs_no_marker_and_no_new_variable():
+  assert not _markers(GENERATION_DAG)
+  assert _markers(OVERLAY) == _GENERATION_MARKERS
+  # the batch branch's cap is the one Variable the generation DAG adds
+  assert _variables(
+      _tree(GENERATION_DAG)) == _HOUSE_VARIABLES | {"SDFB_MAX_PARALLEL_JOBS"}
 
 
-def test_generation_dag_needs_no_new_marker_and_no_new_variable():
-  assert not _unexpected_generation_markers(_markers(GENERATION_DAG))
-  assert _variables(_tree(GENERATION_DAG)) == _HOUSE_VARIABLES
-
-
-def test_only_the_four_generation_defaults_may_join_the_markers():
-  assert not _unexpected_generation_markers(_GENERATION_MARKERS)
-  assert not _unexpected_generation_markers(_GENERATION_MARKERS
-                                            | _GENERATION_DEFAULT_MARKERS)
-  assert _unexpected_generation_markers(_GENERATION_MARKERS
-                                        | {"EVALUATION_IMAGE"}) == {
-                                            "EVALUATION_IMAGE"
-                                        }
-  assert _unexpected_generation_markers(_GENERATION_MARKERS -
-                                        {"ENGINE"}) == {"ENGINE"}
+def test_generation_dag_is_valid_python_without_a_marker():
+  text = GENERATION_DAG.read_text(encoding="utf-8")
+  assert not re.search(r"\{\{[A-Z_]+\}\}", text)  # the workflow's own check
+  compile(text, str(GENERATION_DAG), "exec")
 
 
 def _as_imported(path: Path, **values: str) -> str:
@@ -1385,12 +1512,6 @@ def _as_imported(path: Path, **values: str) -> str:
   ones not named get a placeholder)."""
   return re.sub(r"\{\{([A-Z_]+)\}\}", lambda m: values.get(m.group(1), "x"),
                 path.read_text(encoding="utf-8"))
-
-
-def test_generation_dag_is_valid_python_once_its_markers_are_substituted():
-  text = _as_imported(GENERATION_DAG, PROJECT_VERSION="0.5.3")
-  assert not re.search(r"\{\{[A-Z_]+\}\}", text)  # the workflow's own check
-  compile(text, str(GENERATION_DAG), "exec")
 
 
 @pytest.mark.parametrize("version,expected", [
@@ -1403,35 +1524,34 @@ def test_evaluation_job_name_is_a_dataflow_job_name(version, expected):
   """Lowercase letters, digits and hyphens, and short enough that the
   run's timestamp (16 characters with its hyphen) and the suffix the
   operator may append (9) still fit Dataflow's 63."""
-  tree = ast.parse(_as_imported(GENERATION_DAG, PROJECT_VERSION=version))
-  name = _pure(
-      tree,
-      "app_name",
-      "project_version",
-      "_evaluation_job_base",
-      "evaluation_job_name",
-      path=GENERATION_DAG)["evaluation_job_name"]
+  layers = _layers(PROJECT_VERSION=version)
+  name = BATCHES.dag_constants(layers, _VARIABLES)["evaluation_job_name"]
   assert name == expected
   assert re.fullmatch(r"[a-z][-a-z0-9]*[a-z0-9]", name)
   assert len(name) + 16 + 9 <= 63
-  job_name = _entry(_launch(tree, "trigger_evaluation"), "jobName")
-  assert ast.unparse(job_name) == (
-      "f'{evaluation_job_name}-{{{{ ts_nodash | lower }}}}'")
+  job_name = _chained_evaluation({"PROJECT_VERSION": version})["jobName"]
+  assert job_name == f"{name}-{_TS_NODASH.lower()}"
 
 
 def test_generation_dag_path_without_evaluation_is_unchanged():
   """With `run_evaluation` False the gate skips the rest, so that path is
-  `start_sdfb` alone. Its call is pinned whole, against the commit
-  before this chain, in the generator's own surface test
-  (packages/sdfb-tests/tests/unit/docker/test_launch_surfaces.py); here:
-  nothing is upstream of it and nothing of the evaluation is inside it."""
+  `start_sdfb` alone. Its launch is compared with master's recorded one in
+  the generator's own suite
+  (packages/sdfb-tests/tests/unit/composer/test_launch_helpers.py); here:
+  nothing of the chain is upstream of it and nothing of the evaluation is
+  inside it."""
   tree = _tree(GENERATION_DAG)
   start = _launch(tree, "start_sdfb")
-  assert ast.unparse(_kw(start, "task_id")) == "f'start_{app_name}'"
+  assert ast.literal_eval(_kw(start, "task_id")) == "start_sdfb"
   assert ast.literal_eval(_kw(start, "wait_until_finished")) is False
   assert ast.literal_eval(_kw(start, "do_xcom_push")) is True
-  assert {b for _, b in _edges(tree)} == set(_CHAIN[1:])
-  launch = ast.unparse(_entry(start, "launchParameter"))
+  edges = _edges(tree)
+  reached, frontier = set(), {"start_sdfb"}
+  while frontier:
+    frontier = {b for a, b in edges if a in frontier} - reached
+    reached |= frontier
+  assert reached == set(_CHAIN[1:])
+  launch = json.dumps(_generation_launch(run_evaluation=True))
   assert "evaluation" not in launch and "sdfb_job" not in launch
 
 
@@ -1535,10 +1655,8 @@ def test_the_standalone_dags_params_and_their_defaults():
   assert defaults["scope"] == "" and defaults["reference_dataset"] == ""
   assert defaults["launcher_machine_type"] == "e2-standard-8"
   # the generation's own value, typed once there
-  generation = _tree(GENERATION_DAG)
-  passed = _entry(_launch(generation, "start_sdfb"), "parameters")
-  assert str(defaults["reference_rows_limit"]) == _value(
-      generation, _entry(passed, "reference_rows_limit"))
+  assert str(defaults["reference_rows_limit"]) == (
+      _chained_evaluation()["parameters"]["reference_rows_limit"])
   assert ast.literal_eval(_kw(params["scope"], "enum")) == [
       "", "auto", "table", "as_of", "appends", "as_of_diff", "manual"
   ]
@@ -1668,31 +1786,34 @@ def test_every_launch_names_the_launcher_machine():
   inside the same 12 minutes as the image pull (the launch of 2026-10-12 was
   shut down 66 s into handing its graph over)."""
   generation = _tree(GENERATION_DAG)
-  ours = _entry(
-      _launch(generation, "trigger_evaluation"), "launcherMachineType")
-  assert ast.literal_eval(
-      ours) == "{{ params.evaluation_launcher_machine_type }}"
-  generator = _entry(_launch(generation, "start_sdfb"), "launcherMachineType")
-  assert ast.literal_eval(generator) == "{{ params.launcher_machine_type }}"
+  ours = _chained_evaluation(evaluation_launcher_machine_type="n2-standard-16")
+  assert ours["environment"]["launcherMachineType"] == "n2-standard-16"
+  generator = _generation_launch(launcher_machine_type="n2-standard-32")
+  assert generator["environment"]["launcherMachineType"] == "n2-standard-32"
   standalone = _tree(EVALUATION_DAG)
   theirs = _entry(
       _one(standalone, "DataflowStartFlexTemplateOperator"),
       "launcherMachineType")
   assert ast.literal_eval(theirs) == "{{ params.launcher_machine_type }}"
+  assert ast.literal_eval(
+      _kw(_params(standalone)["launcher_machine_type"],
+          "default")) == "e2-standard-8"
+  defaults = BATCHES.param_defaults(_layers())
+  for name in ("evaluation_launcher_machine_type", "launcher_machine_type"):
+    assert defaults[name] == "e2-standard-8", name
   for tree, name in ((generation, "evaluation_launcher_machine_type"),
                      (generation, "launcher_machine_type"),
                      (standalone, "launcher_machine_type")):
-    param = _params(tree)[name]
-    assert ast.literal_eval(_kw(param, "default")) == "e2-standard-8"
-    description = ast.literal_eval(_kw(param, "description"))
+    description = ast.literal_eval(_kw(_params(tree)[name], "description"))
     assert "launcher" in description.lower() and "12" in description
   # no timeout field exists in the public API: none is invented
-  launches = [
-      _launch(generation, name) for name in ("start_sdfb", "trigger_evaluation")
-  ]
-  launches.append(_one(standalone, "DataflowStartFlexTemplateOperator"))
-  for launch in launches:
-    assert "timeout" not in ast.unparse(_entry(launch, "environment")).lower()
+  for environment in (_generation_launch()["environment"],
+                      _chained_evaluation()["environment"]):
+    assert "timeout" not in json.dumps(environment).lower()
+  assert "timeout" not in ast.unparse(
+      _entry(
+          _one(standalone, "DataflowStartFlexTemplateOperator"),
+          "environment")).lower()
 
 
 # --------------------------------------------------------------------------- #
@@ -1753,12 +1874,14 @@ _LAUNCH_XCOM = {
 
 
 def _chained_trigger_name(tree: ast.Module) -> str:
-  """The module-level name the chained launch passes as `trigger`: typed
-  once, so the callback cannot look for another value than the launch wrote."""
-  node = _entry(
-      _entry(_launch(tree, "trigger_evaluation"), "parameters"), "trigger")
-  assert isinstance(node, ast.Name), "a name, not a second literal"
-  return node.id
+  """The module-level name the callback binds as `trigger`: the helpers'
+  constant, which the chained launch passes (`sdfb_batches.evaluation_body`),
+  typed once, so the callback cannot look for another value than the launch
+  wrote."""
+  name = "EVALUATION_TRIGGER"
+  assert ast.unparse(_assigned(tree, name)) == (
+      "sdfb_batches.EVALUATION_TRIGGER"), "the helpers' name, not a literal"
+  return name
 
 
 def _callback_scope(path_id: str) -> dict:
@@ -1923,7 +2046,7 @@ def test_the_chain_waits_for_the_evaluations_launch_not_for_its_end():
 
 def test_the_wait_for_the_launch_comes_last_behind_the_launch_it_watches():
   tree = _tree(GENERATION_DAG)
-  edges = _edges(tree)
+  edges = {(a, b) for a, b in _edges(tree) if b in _CHAIN}
   assert edges == _CHAIN_EDGES
   assert {a for a, b in edges if b == "wait_for_evaluation_launch"
          } == {"trigger_evaluation"}
@@ -2230,8 +2353,9 @@ def test_the_chained_callback_binds_the_trigger_its_launch_passes(monkeypatch):
   the launch wrote. One module-level name serves both: no second literal."""
   tree = _tree(GENERATION_DAG)
   name = _chained_trigger_name(tree)
-  passed = _value(tree, ast.Name(name))
+  passed = _pure(tree, name, path=GENERATION_DAG)[name]
   assert passed == "chained"
+  assert _chained_evaluation()["parameters"]["trigger"] == passed
   # what the standalone DAG's own `trigger` param admits for such a run
   enum = _kw(_params(_tree(EVALUATION_DAG))["trigger"], "enum")
   assert passed in ast.literal_eval(enum)
@@ -2251,10 +2375,7 @@ def test_the_chained_callback_finds_the_row_by_this_runs_generation_job(
   instance because a callback has no Jinja."""
   tree = _tree(GENERATION_DAG)
   (task,) = re.findall(r"xcom_pull\(task_ids='(\w+)'\)\['id'\]", _JOB_ID_XCOM)
-  assert ast.unparse(_kw(_launch(tree, "start_sdfb"),
-                         "task_id")) == "f'start_{app_name}'"
-  app_name = _value(tree, ast.Name("app_name"))
-  assert task == f"start_{app_name}"
+  assert ast.literal_eval(_kw(_launch(tree, "start_sdfb"), "task_id")) == task
   body = ast.unparse(_function(tree, "_close_running_row"))
   assert f"xcom_pull(task_ids='{task}')" in body
   # its own launch's job id: the return value, then the key pushed before
@@ -2305,7 +2426,8 @@ def test_the_generation_dags_header_says_what_closes_a_running_row():
   for said in ("_close_running_row", "does not wait",
                "wait_for_evaluation_launch", "JOB_STATE_RUNNING",
                "max_active_runs", "composer/evaluation_framework.py",
-               "None of this has been parsed or run by Airflow"):
+               "What has run, and what has not",
+               "scripts/composer/check_dags.py", "Not run against Google"):
     assert said in docstring, said
   # the chain's drawing names its five tasks, in order
   at = [docstring.index(task) for task in _CHAIN]

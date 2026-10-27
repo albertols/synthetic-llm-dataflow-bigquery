@@ -25,8 +25,11 @@ catalogue (`sdfb_core/config/catalogue.yaml`, ADR 0043), in its order:
 - a settable entry takes its value and its `path:line` from the config model
   (`sdfb_core/config/model.py`) and its config-file key (`config_key`); a
   flag also takes its help text and choices from `run_pipeline.parse_args`'s
-  own parser (called with the minimal required flags), and its Composer and
-  flex surfaces from the DAG and the template metadata;
+  own parser (called with the minimal required flags), its Composer surface
+  from the DAG's params and their defaults from the DAG's own helpers
+  (`composer/sdfb_batches.py`'s `param_defaults` over generator.yaml and
+  `composer/sdfb_env.yaml`, markers raw), and its flex surface from the
+  template metadata;
 - a fixed or derived entry is read from the code or file that owns it
   (an imported constant, `thresholds.yml`, a Composer DAG param, a function
   the value is derived by).
@@ -110,6 +113,8 @@ EVAL_CLI = (
     "main.py")
 _MODEL = REPO / "packages/sdfb-core/src/sdfb_core/config/model.py"
 _COMPOSER = REPO / "composer" / "synthetic_beam_bigquery.py"
+_COMPOSER_HELPERS = REPO / "composer" / "sdfb_batches.py"
+_COMPOSER_OVERLAY = REPO / "composer" / "sdfb_env.yaml"
 _FLEX = REPO / "docker" / "flex_template_metadata.json"
 _THRESHOLDS = REPO / "config" / "thresholds.yml"
 _MEASURED_SCRIPTS = (
@@ -353,34 +358,55 @@ def _cli_actions() -> dict[str, argparse.Action]:
   }
 
 
+def _composer_layers():
+  """The generation DAG's layers as the repository holds them: sdfb-core's
+  generator.yaml and `composer/sdfb_env.yaml` with its deploy markers left
+  raw (`{{GPU}}`), read by the DAG's own helpers (ADR 0043)."""
+  import shutil
+  import tempfile
+
+  from sdfb_core.config.defaults import GENERATOR_YAML
+
+  spec = importlib.util.spec_from_file_location("gui_sdfb_batches",
+                                                _COMPOSER_HELPERS)
+  helpers = importlib.util.module_from_spec(spec)
+  spec.loader.exec_module(helpers)
+  with tempfile.TemporaryDirectory(prefix="export_knobs_") as folder:
+    shutil.copyfile(GENERATOR_YAML, Path(folder) / helpers.GENERATOR_YAML)
+    shutil.copyfile(_COMPOSER_OVERLAY, Path(folder) / helpers.ENV_OVERLAY)
+    return helpers, helpers.load_layers(folder)
+
+
 @functools.cache
-def _composer_params() -> dict[str, tuple[str, int]]:
-  """DAG param → (default as written, line). Deploy-time markers stay raw."""
-  tree = _tree(_COMPOSER)
-  literals: dict[str, Any] = {}
-  params: dict[str, tuple[str, int]] = {}
-  for node in tree.body:
-    if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(
-        node.targets[0], ast.Name):
-      name = node.targets[0].id
-      if name == "default_dag_params" and isinstance(node.value, ast.Dict):
-        for key, value in zip(node.value.keys, node.value.values, strict=True):
-          if not isinstance(key, ast.Constant):
-            continue
-          default = _param_default(value, literals)
-          params[str(key.value)] = (default, key.lineno)
-      else:
-        try:
-          literals[name] = ast.literal_eval(node.value)
-        except ValueError:
-          continue
+def _composer_params() -> dict[str, tuple[str, str]]:
+  """DAG param → (its default, generator.yaml's text of the same key, ""
+  for a param with no key). Every param the DAG declares (`ast`); each
+  default is the DAG's own, `sdfb_batches.param_defaults` (generator.yaml
+  overlaid with `sdfb_env.yaml`). Deploy-time markers stay raw."""
+  helpers, layers = _composer_layers()
+  defaults = helpers.param_defaults(layers)
+  yaml_text = {
+      key: helpers.cli_text(value) for values in layers.defaults.values()
+      for key, value in values.items()
+  }
+  params: dict[str, tuple[str, str]] = {}
+  for node in _tree(_COMPOSER).body:
+    if not (isinstance(node, ast.Assign) and len(node.targets) == 1 and
+            isinstance(node.targets[0], ast.Name) and node.targets[0].id
+            == "default_dag_params" and isinstance(node.value, ast.Dict)):
+      continue
+    for key in node.value.keys:
+      if isinstance(key, ast.Constant):
+        name = str(key.value)
+        params[name] = (helpers.cli_text(defaults[name]),
+                        yaml_text.get(name, ""))
   return params
 
 
 # A generation-DAG param only its chained evaluation reads says so first in
-# its description. It is no surface of a generator flag, even under the
-# flag's name: the DAG's `source_dataset` names the evaluation's sources,
-# never the generator's io.source_dataset (ADR 0045).
+# its description. It is no surface of a generator flag, even under a flag's
+# name. (`source_dataset` is not one: with tables=all the DAG passes it as
+# the generator's io.source_dataset, ADR 0045 D6.)
 _EVALUATION_ONLY_PARAM = "Only with run_evaluation"
 
 
@@ -401,7 +427,7 @@ def _composer_descriptions() -> dict[str, str]:
   return out
 
 
-def _generation_composer_params() -> dict[str, tuple[str, int]]:
+def _generation_composer_params() -> dict[str, tuple[str, str]]:
   """`_composer_params`, without the params only the evaluation reads."""
   descriptions = _composer_descriptions()
   return {
@@ -409,19 +435,6 @@ def _generation_composer_params() -> dict[str, tuple[str, int]]:
       for name, param in _composer_params().items()
       if not descriptions.get(name, "").startswith(_EVALUATION_ONLY_PARAM)
   }
-
-
-def _param_default(call: ast.expr, literals: dict[str, Any]) -> str:
-  if isinstance(call, ast.Call):
-    for keyword in call.keywords:
-      if keyword.arg == "default":
-        node = keyword.value
-        if isinstance(node, ast.Constant):
-          return str(node.value)
-        if isinstance(node, ast.Name) and node.id in literals:
-          return str(literals[node.id])
-        return ast.unparse(node)
-  return ""
 
 
 @functools.cache
@@ -455,7 +468,7 @@ def _model_field_line(dotted: str) -> int:
 
 
 def _settable_knob(entry: Entry, actions: dict[str, argparse.Action],
-                   composer: dict[str, tuple[str, int]],
+                   composer: dict[str, tuple[str, str]],
                    flex: frozenset[str]) -> dict[str, Any]:
   """A key of the config model: value and line from the model; a flag also
   gets its help, choices and launch surfaces from argparse, the DAG and the
@@ -477,9 +490,11 @@ def _settable_knob(entry: Entry, actions: dict[str, argparse.Action],
   if in_file:
     via.append("config")
   value = None if key in REQUIRED_FLAGS else value_of(DEFAULT_CONFIG, entry.key)
+  # The DAG's default where it is not generator.yaml's (a deploy marker the
+  # overlay fills, or a value it sets); a null the launcher derives (an
+  # unset vllm_dtype) is generator.yaml's own.
   composer_default = None
-  if "composer" in via and str(
-      composer[key][0]) != str(value if value is not None else ""):
+  if "composer" in via and composer[key][0] != composer[key][1]:
     composer_default = composer[key][0]
   help_text = " ".join((action.help or "").split()) if action else ""
   comment = _comment_above(_MODEL, line)
