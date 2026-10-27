@@ -53,8 +53,8 @@ def abbreviations() -> dict[str, str]:
     for size in range(MIN_PREFIX, len(name) + 1):
       prefix = name[:size]
       matches = {
-          id(by_option[other]): by_option[other]
-          for other in by_option
+          id(action): action
+          for other, action in by_option.items()
           if other.startswith(prefix)
       }
       if len(matches) == 1:
@@ -83,9 +83,10 @@ def main() -> int:
         file=sys.stderr)
     return 1
   path = GOLDEN
-  data = {"prefixes": abbreviations(), "dests": kinds()}
+  prefixes = abbreviations()
+  data = {"prefixes": prefixes, "dests": kinds()}
   path.write_text(json.dumps(data, sort_keys=True, indent=2) + "\n")
-  print(f"wrote {path}: {len(data['prefixes'])} prefixes")
+  print(f"wrote {path}: {len(prefixes)} prefixes")
   return 0
 
 
