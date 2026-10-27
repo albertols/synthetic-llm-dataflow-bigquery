@@ -89,34 +89,109 @@ Run Release builds from the release tag: the release Action stamps the tag's
 version into `version.py` in the commit it tags, so a Release build of an
 earlier commit carries the previous release's base.
 
-### 0b. Workflow edits for whole-model launches (untracked workflows)
+Workflow 3's two version variables now land in the env overlay
+`composer/sdfb_env.yaml` (`dag.project_version`, `dag.dag_version`), not in
+the DAG file: its `sed` targets the overlay ([§0b](#0b-workflow-3-for-the-one-generation-dag-untracked-workflows)).
 
-The model DAG (`composer/synthetic_model_launch.py`,
-[ADR 0045](adr/0045-whole-model-launches.md)) is a template with a subset of
-the generation DAG's markers (it adds none, and has no `{{SDFB_DDL_URI}}`),
-and it imports `composer/sdfb_batches.py` from the DAGs folder. Workflow 3
-imports all three files; workflows 1, 2 and 3e need no edit for ADR 0045 (the
-image carries the code, the template file declares the new parameters).
+### 0b. Workflow 3 for the one generation DAG (untracked workflows)
+
+The generation DAG `composer/synthetic_beam_bigquery.py` launches every
+shape, one table, an FK group or a whole model (`tables=all`), and carries
+no deploy marker ([ADR 0043](adr/0043-generator-config.md#revision-2026-10-26-the-yaml-holds-the-values),
+[ADR 0045](adr/0045-whole-model-launches.md#d6--one-generation-dag-two-branches)
+D6). Its 18 markers, the same 18 master's DAG carried, live in the env
+overlay `composer/sdfb_env.yaml`, so the workflow's `sed -e` list is
+unchanged; only its target file changes. At parse time the DAG reads
+`generator.yaml` and `sdfb_env.yaml` from its own folder
+(`sdfb_batches.load_layers`): every param default, its DAG id, its Flex
+Template, its buckets and its job names come from the two files. The
+separate model DAG (`composer/synthetic_model_launch.py`) of the first build
+of this branch is deleted.
+
+*Workflow 3 copies four files, runs ONE `sed`, on the overlay, and imports
+the four; the DAG file itself is never edited:*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  D[("📄 synthetic_beam_bigquery.py<br/>sdfb_batches.py")]:::store
+  Y[("📄 config/generator.yaml<br/>dereferenced")]:::store
+  O[("📄 sdfb_env.yaml<br/>18 markers")]:::store
+  S["⚙️ sed -e …<br/>the existing list"]:::cpu
+  C["🛡️ marker check<br/>+ load check"]:::cpu
+  F[("🪣 Composer<br/>DAGs folder")]:::store
+  O --> S --> C --> F
+  D -->|"unchanged"| F
+  Y -->|"byte for byte"| F
+```
+
+| DAGs-folder file | From the checkout | Workflow 3 |
+| :-- | :-- | :-- |
+| `synthetic_beam_bigquery.py` | `composer/synthetic_beam_bigquery.py` | imported unchanged: **no `sed` on the DAG** |
+| `sdfb_batches.py` | `composer/sdfb_batches.py` | imported unchanged (the launch helpers; Composer cannot import sdfb-core) |
+| `generator.yaml` | `config/generator.yaml`, a symlink to `packages/sdfb-core/src/sdfb_core/config/generator.yaml`: copy the file it names (`cp -L`), not the link | imported byte for byte: its sha12 is the `generator_defaults_digest` every launch passes, which the launcher compares with the image's copy |
+| `sdfb_env.yaml` | `composer/sdfb_env.yaml` | the one `sed`, then the marker check and the load check |
 
 | Workflow | Step | Edit |
 |---|---|---|
-| `3_import_dag.yaml` | "Substitute build-time placeholders" | run the same `sed -i -e …` expressions on `composer/synthetic_model_launch.py` (a second `sed -i` with the same `-e` list and that file) |
-| `3_import_dag.yaml` | "Substitute build-time placeholders" — the marker check | run the `grep -nE '\{\{[A-Z_]+\}\}'` check on `composer/synthetic_model_launch.py` too |
-| `3_import_dag.yaml` | "Substitute build-time placeholders" — the resolved-values check | for the model DAG, check `$MODEL_URI`, `$DEFAULT_TABLE_FQN`, `$LANDING_TABLE`, `$DLQ_TABLE`, `$VALIDATION_RUNS_TABLE` (empty, no batch writes its generation record and the launch's evaluation has nothing to read) — not `$DDL_URI`: a whole-model launch extracts every schema live and the file has no pin |
-| `3_import_dag.yaml` | "Import DAG into Composer" | two more `gcloud composer environments storage dags import` calls, the same flags as the existing one, with `--source=composer/synthetic_model_launch.py` and `--source=composer/sdfb_batches.py` (the latter is not a template: import it unchanged) |
+| `3_import_dag.yaml` | "Substitute build-time placeholders" | run the existing `sed -i -e …` list on `sdfb_env.yaml` instead of the DAG. Every marker sits inside double quotes, so a value stays a string (`prd`, `append`, `l4`, a version, `''`) and must not itself contain `"` |
+| `3_import_dag.yaml` | "Substitute build-time placeholders" — the marker check | run the `grep -nE '\{\{[A-Z_]+\}\}'` check on `sdfb_env.yaml` (it must print nothing), then the load check below |
+| `3_import_dag.yaml` | "Substitute build-time placeholders" — the resolved-values check | unchanged: the same variables, now substituted into the overlay |
+| `3_import_dag.yaml` | "Import DAG into Composer" | four `gcloud composer environments storage dags import` calls, the same flags as the existing one, one per file of the table above |
+| `3_import_dag.yaml` | once, if a build of this branch from before 2026-10-26 imported it | `gcloud composer environments storage dags delete synthetic_model_launch.py` (same `--environment` and `--location`) |
+
+The standalone evaluation DAG `composer/evaluation_framework.py` still
+carries seven markers (`{{PROJECT_VERSION}}`, `{{ENV}}`,
+`{{GCS_DATAFLOW_STAGING}}`, `{{GCS_DATAFLOW_TEMPLATES}}`,
+`{{SDFB_DEFAULT_TABLE_FQN}}`, `{{SDFB_LANDING_TABLE}}`,
+`{{SDFB_VALIDATION_RUNS_TABLE}}`): keep the `sed` on that file wherever the
+workflow that imports it runs one today (workflow 3, or 3e). "No `sed` on the
+DAG" is about the generation DAG only.
+
+The step, in full (`<the -e list>` is the workflow's existing one; the load
+check needs PyYAML on the runner):
+
+```bash
+OUT=dags_out && mkdir -p "$OUT"
+cp composer/synthetic_beam_bigquery.py composer/sdfb_batches.py composer/sdfb_env.yaml "$OUT/"
+cp -L config/generator.yaml "$OUT/generator.yaml"      # the file, not the symlink
+sed -i <the -e list> "$OUT/sdfb_env.yaml"              # the ONE sed of the generation DAG
+if grep -nE '\{\{[A-Z_]+\}\}' "$OUT/sdfb_env.yaml"; then echo "unfilled marker"; exit 1; fi
+python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import sdfb_batches as b; d = b.param_defaults(b.load_layers(sys.argv[1])); print(d["table_fqn"], d["gpu"], d["engine"], d["write_disposition"])' "$OUT"
+for f in synthetic_beam_bigquery.py sdfb_batches.py generator.yaml sdfb_env.yaml; do
+  gcloud composer environments storage dags import \
+    --environment="$COMPOSER_ENV" --location="$REGION" --source="$OUT/$f"
+done
+```
+
+The load check prints the default table, GPU, engine and write disposition
+the DAG will show, and fails on an overlay key `generator.yaml` does not have
+or on YAML the `sed` broke. Rebuild the Flex Template (workflow 2) before
+this import: every launch passes `generator_defaults_digest`, and `gpu`,
+`sdk_containers` or `launcher_machine_type` when they differ from
+`generator.yaml`, which an older template does not declare. Workflows 1 and
+2 need no edit for this: the image carries `generator.yaml` inside sdfb-core,
+and the template file declares the parameters.
 
 Once per Composer environment, set the Airflow Variable
-`SDFB_MAX_PARALLEL_JOBS` (default `1` when unset): how many batch jobs run at
-once. Each holds its workers' GPUs (up to `maxWorkers` 4 workers of one GPU
-each), so keep it within the regional GPU quota divided by 4. It is read when
-Composer parses the file; a change applies at the next parse, without a
-re-import. Each running batch also holds one Airflow worker slot until its
-job ends.
+`SDFB_MAX_PARALLEL_JOBS` (default `1` when unset): how many batch jobs of a
+`tables=all` launch run at once. Each holds its workers' GPUs (up to
+`maxWorkers` 4 workers of one GPU each), so keep it within the regional GPU
+quota divided by 4. It is read when Composer parses the file; a change
+applies at the next parse, without a re-import. Each running batch also
+holds one Airflow worker slot until its job ends.
 
-The model DAG's `plan` task reads the model file and the config file from
-GCS as the Composer environment's own service account (the generation DAG
-never reads GCS from Airflow): grant it `storage.objects.get` on the bucket
-or prefix that holds them (`roles/storage.objectViewer`).
+The DAG's `route` task reads from GCS, as the Composer environment's own
+service account, only the config file of a launch with `config_uri` and the
+model file of a `tables=all` launch. An explicit launch without `config_uri`
+reads nothing from GCS, as master's DAG read nothing. For the other two,
+grant that account `storage.objects.get` on the bucket or prefix that holds
+the files (`roles/storage.objectViewer`).
 
 ---
 
@@ -182,15 +257,18 @@ staging, and a missing `special_tokens_map.json` is expected and handled.
 
 ## 2. Run defaults + universal pass criteria
 
-Common to every vLLM run: `client_type=vllm`, qwen + `vllm_dtype=float16`
-(the DAG default — qwen ships bf16, T4 is CC 7.5), `vllm_max_model_len=8192`
+Common to every vLLM run: `client_type=vllm`, qwen, and `vllm_dtype` left
+unset: it follows `gpu` (`t4` → `float16`, since qwen ships bf16 and a T4 is
+CC 7.5; `l4` → `bfloat16`; [ADR 0043](adr/0043-generator-config.md) R5, and
+the launcher logs `vllm_dtype_resolved`), `vllm_max_model_len=8192`
 (it caps the KV-cache allocation; uncapped Qwen3-2507 at native 262K context
 needs a 36GiB KV cache and the T4 EngineCore exits 1 at startup),
 `identity_cols`/`pk_cols` set to the table's real columns via
 `config/relationships/`, fresh Airflow trigger per run (salted `run_id` is
 derived). `batch_size=1000` for 1M/10M rows; the DAG's `16` default is sized
-for smokes. Params not listed = DAG defaults, which already carry the current
-posture: `source_stats=sample`, `freetext_expansion=identifiers`,
+for smokes. Params not listed = the defaults of
+[`config/generator.yaml`](../config/generator.yaml) (the DAG shows them, with
+its env overlay's values), which already carry the current posture: `source_stats=sample`, `freetext_expansion=identifiers`,
 `prompt_constraints=on`, `build_pool_layer=true`, `build_rag_layer=true`,
 `rag_row_docs_limit=1024`, `uniqueness_mode=exact`, `pool_seed_strategy=centroid`.
 
@@ -344,8 +422,9 @@ flowchart LR
    The Flex parameter and the DAG param exist only in an image and template
    built from this release, and in a DAG re-imported from it. A DAG that is
    not re-imported launches exactly as before. Rebuild the Flex template
-   before re-importing the Composer DAG — the DAG always forwards
-   `config_uri`, which an old template does not declare.
+   before re-importing the Composer DAG: the DAG forwards `config_uri` when
+   it is set and `generator_defaults_digest` on every launch, which an old
+   template does not declare (§0b).
 
 4. **Read the launcher log.** Every launch logs one `config_resolved` line
    (`uri=-` without a file). A launch with the example file that types the
@@ -617,10 +696,14 @@ flowchart LR
    adds no template parameter; the rebuild points the template at the new
    image. Build the template before step 5.
 
-5. **Re-import the generation DAG** (workflow 3; and 3e if you use the
-   standalone evaluation DAG). Expect the `config_uri` param's description in
-   the trigger form to say the chained evaluation follows the generation
-   record in `validation_runs`.
+5. **Re-import the generation DAG** (workflow 3, with
+   [§0b](#0b-workflow-3-for-the-one-generation-dag-untracked-workflows)'s four
+   files; and 3e if you use the standalone evaluation DAG). Expect the
+   `config_uri` param's description in the trigger form to say the chained
+   evaluation follows the generation record in `validation_runs`. Step 6
+   passes a `config_uri`, which the DAG's `route` task reads as the Composer
+   environment's service account: grant it §0b's read on
+   `gs://<bucket>/synthetic/config/` first.
 
 6. **Write a config file that changes two evaluation inputs, upload it, and
    launch.**
@@ -639,11 +722,13 @@ flowchart LR
    Trigger the generation DAG with `config_uri` =
    `gs://<bucket>/synthetic/config/a2-acceptance.yaml`, `run_evaluation` true
    (the default), your usual `table_fqn`, and `similarity` left at the DAG's
-   0.5: the DAG passes every param, so the file overrides both keys. A
+   0.5. The DAG passes only the keys whose value differs from
+   `generator.yaml` ([ADR 0043](adr/0043-generator-config.md) R2), and neither
+   key does, so the file sets both and replaces no typed value. A
    5,000-row sample has its own reference digest, so this launch builds its
    free-text pools and RAG chunks cold; to keep the stores warm, drop the
-   `sampling` line (steps 7, 9 and 10 then show one override and the DAG's
-   `reference_rows_limit`). Note the `run_id` and the Dataflow job id, and
+   `sampling` line (steps 7, 9 and 10 then show one `file` key and
+   `generator.yaml`'s `reference_rows_limit`). Note the `run_id` and the Dataflow job id, and
    the launch day for the queries.
 
 7. **Read the launcher log** (the DRIVER log, as in §2a). Expect:
@@ -651,12 +736,14 @@ flowchart LR
    ```text
    SDFB_MILESTONE name=build_info commit=<sha> component=launcher version=0.6.1-feat-config-record-model-<sha7>
    config_resolved uri=gs://<bucket>/synthetic/config/a2-acceptance.yaml file=2 flag=<n> default=<n>
-   config_override key=generation.similarity typed=0.5 file=0.6 (the file wins)
-   config_override key=sampling.reference_rows_limit typed=10000 file=5000 (the file wins)
+   SDFB_MILESTONE name=vllm_dtype_resolved dtype=bfloat16 gpu=l4 source=derived
    ```
 
    (`0.6.1` is the checkout's `GENERATOR_VERSION_BASE`; the branch is cut to
-   24 characters). And **no** `generation_record_degraded`, **no**
+   24 characters; on a T4 environment, `dtype=float16 gpu=t4`). And **no**
+   `config_override` (the DAG passed neither key), **no**
+   `generator_defaults_mismatch` (the DAG and the image come from one
+   commit), **no** `generation_record_degraded`, **no**
    `config_sets_evaluation_input`.
 
 8. **Read the worker log** (Cloud Logging, the job's worker logs; search
@@ -681,8 +768,8 @@ flowchart LR
    per landed table, and on every row: `job_id` = the Dataflow job id
    (AC-A2-5), `job_name` = the job's name in the console, `generator_version`
    = `launcher_version` = step 7's version, `similarity` = `0.6`, the same
-   `config_digest`, and `overridden` naming `generation.similarity` and
-   `sampling.reference_rows_limit`. Add
+   `config_digest`, and `overridden` empty (the DAG passed neither key; the
+   file set both, so their provenance is `file`, step 11). Add
    `JSON_VALUE(config, '$.values.sampling.reference_rows_limit')` to the
    select list: `5000`. Then run the AC-A2-5 probe, which asserts every record
    column on every row of the launch:
@@ -742,9 +829,9 @@ flowchart LR
       list this launch's values, and each keeps the row.
     - **The run's Parameters tab**, the Generator panel: the values by
       section with `file` / `flag` / `default` badges (`file` on
-      `generation.similarity` and `sampling.reference_rows_limit`), the
-      warning "The config file overrode 2 typed params" listing both, **no**
-      `launcher … ≠ worker …` badge, the Relationships model card when the
+      `generation.similarity` and `sampling.reference_rows_limit`), **no**
+      "The config file overrode … typed params" warning (the DAG passed
+      neither key), **no** `launcher … ≠ worker …` badge, the Relationships model card when the
       launch loaded a model, and the job link.
     - **Download as config.yaml** (the file is `config.<run id>.yaml`), then,
       from the repository root in another terminal,
@@ -786,6 +873,30 @@ flowchart LR
     `test_the_landed_rows_do_not_depend_on_the_record` pins that the rows are
     identical).
 
+13. **The parity control** (optional; `run_evaluation` false is enough). A
+    DAG launch without `config_uri` resolves like master's but for the seven
+    deliberate changes of [ADR 0043](adr/0043-generator-config.md) R6, which
+    the laptop pins against master's recorded launches
+    (`test_launch_helpers.py::test_explicit_launch_resolves_like_master`). The
+    one a launch shows is the dtype: **an L4 DAG launch now serves
+    `bfloat16`** (`vllm_dtype_resolved dtype=bfloat16 gpu=l4 source=derived`)
+    where master's DAG served `float16`. For master's float16, pass
+    `serving: {vllm_dtype: float16}` in a `config_uri` file:
+
+    ```yaml
+    # parity-fp16.yaml
+    config_version: 1
+    serving: {vllm_dtype: float16}
+    ```
+
+    Upload it as in step 6 and trigger the DAG with `config_uri` set to it.
+    Expect `SDFB_MILESTONE name=vllm_dtype_resolved dtype=float16 gpu=l4
+    source=file`. Typing `float16` in the trigger form's `vllm_dtype` does the
+    same with `source=flag`. A T4 environment (`GPU` = `t4` in the overlay)
+    logs `dtype=float16 gpu=t4 source=derived` with no file: master's value.
+    Never pass `float16` for a Gemma checkpoint: the worker refuses it before
+    vLLM starts (§1).
+
 **If it degrades** — what each line means and the one fix:
 
 | You see | It means | Fix |
@@ -796,6 +907,10 @@ flowchart LR
 | `generation_record_job_id … source=none` (worker) | no metadata attribute gave the job id: `job_id` is NULL (step 9 and AC-A2-5 fail), readers match `job_name` | nothing to fix in the run; report it (step 8) |
 | `generation_record_job_id … source=not_dataflow` (worker) | a DirectRunner launch: no job id to read | none |
 | `generator_version_mismatch launcher=… worker=…` (worker) | the launcher's code is not the workers' image: a template on an older image, or a launch from a checkout | rebuild the template on the image (step 4) and launch from it |
+| `SDFB_MILESTONE name=generator_defaults_mismatch dag=… image=…` (launcher, WARNING) | the DAG folder's `generator.yaml` is not the image's: the DAG was imported from another commit than the template's image, and a key the DAG did not pass takes the image's default. The digest is the sha12 of the file's bytes, so a comment-only difference logs it too (Ruling R9) | re-import the DAG (workflow 3) from the image's commit, or rebuild the image and template (steps 3–4) from the DAG's; `diff` the two files to see whether a value differs |
+| `SDFB_MILESTONE name=vllm_dtype_resolved dtype=… gpu=… source=…` (launcher) | the dtype vLLM runs with and why: `source=derived` follows the GPU (`t4` → `float16`, `l4` → `bfloat16`); `flag` or `file` names where it was set | for master's L4 `float16`, step 13; a value you did not expect with `source=file`: the file sets it |
+| the DAG's `route` task fails naming `config_uri` (`no such object`, `not valid YAML`, `serving.gpu must be one of …`) | a file the DAG cannot use: it fails once, without a retry, since the same file fails the same way | the file or its path |
+| the DAG's `route` task fails reading the config file (a 403, retried) | the Composer environment's service account cannot read it | §0b's grant |
 | the evaluation fails at its registry write, naming `generator_version`, `generator_config_digest` or `generation_job_ids` | the registry is not migrated | step 1's registry `bq update` |
 | the evaluation fails at its registry write with `Provided Schema does not match Table … Field generator_version is missing in new schema` (or `generation_job_ids`) | an evaluator image from before ADR 0044 (or ADR 0045) wrote to the migrated registry | steps 3–4 (the new image and template), or step 1's rollback (for an image between ADR 0044 and ADR 0045, drop only `generation_job_ids`) |
 | the GUI's evaluation list fails with `Unrecognized name: generator_version` | the registry or its views are not migrated | step 1's registry `bq update` and `sdfb-eval schemas --apply` |
@@ -820,12 +935,12 @@ lands there, never in `<landing_dataset>`; and, once the DAG has planned,
 `<base>`, the launch's base run id. Every evaluation here is a `--run_id`
 evaluation, which reads `validation_runs` from its output dataset and
 writes its registry into that same dataset: in this checklist
-`<evaluation_dataset>` IS `<quality_dataset>` (the model DAG's
+`<evaluation_dataset>` IS `<quality_dataset>` (the DAG's
 `evaluation_output_dataset` default, and the dataset `run_model.py`
 prints), so steps 11 and 15 read the registry from `<quality_dataset>`.
 It closes AC-B-5 of
-[ADR 0045](adr/0045-whole-model-launches.md): a model-DAG launch with at
-least two batches, each launched inside the Flex Template's 12-minute
+[ADR 0045](adr/0045-whole-model-launches.md): a launch of the generation DAG
+with `tables=all` and at least two batches, each launched inside the Flex Template's 12-minute
 window, and one evaluation covering every landed table.
 
 **Why a scratch landing dataset, overwritten.** The evaluation reads each
@@ -851,9 +966,9 @@ flowchart LR
   classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
 
   M[("🗄️ 1 registry<br/>migrated")]:::store
-  B["⚙️ 2–4 workflows, image,<br/>template, DAGs"]:::cpu
+  B["⚙️ 2–4 workflows, image,<br/>template, DAG"]:::cpu
   S[("📄 5 five-table<br/>model copy")]:::store
-  D["🔀 6–11 model DAG<br/>two batches"]:::beam
+  D["🔀 6–11 the DAG, tables=all<br/>two batches"]:::beam
   F["🛡️ 12 a failed<br/>batch"]:::cpu
   C["⚙️ 13 run_model.py"]:::cpu
   W["🔀 14 the whole<br/>model"]:::beam
@@ -862,11 +977,12 @@ flowchart LR
   M --> B --> S --> D --> F --> C --> W --> P --> X
 ```
 
-The laptop has already run the model DAG under Airflow 2.10.5's `dag.test()`
-with GCS and Dataflow stubbed — no batch, one batch and every batch failing,
-`plan` failing, the evaluation off — and every final state matched ADR 0045
-D6. What only Composer can show (mapped tasks on Composer 2, the provider's
-job-name suffix, `on_kill`) is steps 8, 9 and 12.
+The laptop has already run the DAG under Airflow 2.10.5's `dag.test()`
+with GCS and Dataflow stubbed (`scripts/composer/check_dags.py`): four
+explicit launches, an explicit trigger whose config file says `all`, one
+batch, two batches, a failed batch and a failing `route`; every final state
+matched ADR 0045 D6. What only Composer can show (mapped tasks on Composer 2,
+the provider's job-name suffix, `on_kill`) is steps 8, 9 and 12.
 
 1. **The registry.** §2d step 1's registry `bq update` uses the committed
    schema, which appends ADR 0045's `generation_job_ids` (REPEATED) after
@@ -880,21 +996,26 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
    GUI is deployed. Rolling back to an image from between ADR 0044 and
    ADR 0045 drops only `generation_job_ids` (§2d step 1).
 
-2. **Apply the workflow 3 edits of [§0b](#0b-workflow-edits-for-whole-model-launches-untracked-workflows)**,
+2. **Apply the workflow 3 edits of [§0b](#0b-workflow-3-for-the-one-generation-dag-untracked-workflows)**
+   (§2d already did, if it ran from this build),
    set the Airflow Variable `SDFB_MAX_PARALLEL_JOBS` to `2`, and grant the
    Composer environment's service account read on the bucket that will hold
-   the model file (§0b). The job's service account must be able to read every
+   the model file (§0b: a `tables=all` launch reads it in `route`). The job's service account must be able to read every
    source the model names, a `source_table` in another dataset included.
 
 3. **Rebuild the image** (workflow 1) and **the Flex template** (workflow 2)
    on it: the template now declares `tables`, `source_dataset`,
    `landing_dataset`, `max_tables_per_job`, `prep_workers`, `batch_index`,
    `batch_count` and `generation_job_ids` (six new parameters; `tables` and
-   `landing_dataset` are names the evaluation already read).
+   `landing_dataset` are names the evaluation already read), and
+   `generator.yaml`'s four (`gpu`, `sdk_containers`,
+   `launcher_machine_type`, `generator_defaults_digest`).
 
-4. **Re-import the DAGs** (workflow 3): the Composer UI lists
-   `synthetic_sdfb_model_<DAG_VERSION>` beside the generation DAG, the DAGs
-   folder holds `sdfb_batches.py`, and neither shows an import error.
+4. **Re-import the DAG** (workflow 3): the Composer UI lists one generation
+   DAG, `synthetic_sdfb_<DAG_VERSION>`, with a `tables` param, and no import
+   error; the DAGs folder holds `sdfb_batches.py`, `generator.yaml` and
+   `sdfb_env.yaml` beside it, and no `synthetic_model_launch.py` (§0b's
+   delete, if an earlier build put it there).
 
 5. **A small model first.** Copy your 100+-table model (git-ignored, never
    committed) to `<model>-acceptance.yaml` and set `enabled: false` on all
@@ -953,20 +1074,25 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
    (`roles/bigquery.dataEditor`), and the evaluator's read access
    (`roles/bigquery.dataViewer`).
 
-6. **Trigger the model DAG** with `relationships_uri` = the uploaded file
+6. **Trigger the generation DAG** with `tables` = `all`,
+   `relationships_uri` = the uploaded file
    (`gs://<bucket>/synthetic/relationships/acceptance/<model>-acceptance.yaml`),
    `source_dataset` = `<project>.<source_dataset>`, `landing_dataset` =
-   `<project>.<scratch_landing_dataset>` (its default is the real landing
-   dataset: change it), `write_disposition` = `overwrite` (on the scratch
+   `<project>.<scratch_landing_dataset>` (left empty, it takes the
+   `project.dataset` of the overlay's landing table, the real landing
+   dataset: set it; an empty `source_dataset` likewise takes the default
+   source table's), `write_disposition` = `overwrite` (on the scratch
    dataset only), `num_rows` = `1000`, `max_tables_per_job` = `3`,
    `run_evaluation` true (the default) and `create_if_not_exists` false (the
    default: step 5 created the tables).
 
-7. **The `plan` task's log:** the `MODEL LAUNCH PLAN | 2 batch job(s) of <= 3
+7. **The `route` task's log:** the `MODEL LAUNCH PLAN | 2 batch job(s) of <= 3
    tables` banner with `b00` and `b01`, the same tables as the dry run. Its
-   XComs: the return value (two launch bodies) and the keys `base_run_id`
-   (note it: `<base>`), `batch_count` (`2`), `relationships_uri`, `batches`
-   and `banner`.
+   XComs: the return value `batch_bodies` (the branch it took) and the keys
+   `bodies` (two launch bodies), `base_run_id` (note it: `<base>`),
+   `batch_count` (`2`), `relationships_uri`, `batches`, `banner` and `mode`
+   (`all`). `batch_bodies` returns the two bodies; `start_sdfb` and the rest
+   of the explicit chain are skipped.
 
 8. **Each `start_batch` instance** (two, running together with the Variable
    at 2). In each Flex launcher's log (the job's launcher log in the Dataflow
@@ -998,10 +1124,11 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
 
 9. **The mapped-task behaviours the DAG relies on** (unverified until now):
    each `start_batch` instance stays running until its Dataflow job is DONE;
-   `collect_landed` runs after both and returns `{"job_ids": "<b00's job
-   id>,<b01's job id>"}` in batch order; `trigger_evaluation` and
-   `wait_for_evaluation_launch` succeed; `fail_if_a_batch_failed` is skipped;
-   the run ends success.
+   `collect_landed` runs after both and returns the evaluation's launch body,
+   whose `generation_job_ids` parameter is `<b00's job id>,<b01's job id>` in
+   batch order; `trigger_evaluation_batches` and
+   `wait_for_batch_evaluation_launch` succeed; `fail_if_a_batch_failed` is
+   skipped; the run ends success.
 
 10. **`validation_runs`** — the launch's rows (the table is DAY-partitioned
     on `created_at`, so keep the date filter):
@@ -1101,8 +1228,8 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
     file itself in place of the acceptance copy; `IF NOT EXISTS` skips the
     five already there). If the model is not on GCS yet, upload it under
     `gs://<bucket>/synthetic/relationships/acceptance/`; if it already lives in
-    the folder, point `relationships_uri` at that file. Trigger the model DAG
-    with it, step 6's `source_dataset`, `landing_dataset` (the scratch one)
+    the folder, point `relationships_uri` at that file. Trigger the DAG
+    with `tables` = `all`, that file, step 6's `source_dataset`, `landing_dataset` (the scratch one)
     and `write_disposition` (`overwrite`), and the default
     `max_tables_per_job` (10). Every batch's launcher re-plans the whole
     model, so each launcher's log carries one `model_batch_oversized` WARNING
@@ -1143,10 +1270,11 @@ job-name suffix, `on_kill`) is steps 8, 9 and 12.
 
 | You see | It means | Fix |
 | :-- | :-- | :-- |
-| `plan` fails with a `PlanError` | the model or config file, or K, cannot be planned: `relationships_uri` is not one `gs://…/<model>.yaml` file, the config file sets `launch.tables` to `explicit`, or K is not a positive integer | the param or the file the message names |
-| `plan` fails reading the file (a 403) | the Composer environment's service account cannot read the model or config file | §0b's grant |
+| `route` fails at once, no retry (a `PlanError`) | the model or config file, or K, cannot be planned: `relationships_uri` is not one `gs://…/<model>.yaml` file, a file that does not exist or is not UTF-8 or YAML, a bad `launch:` or `serving:` value, or K is not a positive integer | the param or the file the message names |
+| the explicit chain ran instead of the batches | the config file sets `launch.tables: explicit`, which wins over the `tables` param | drop the key from the file, or set it to `all` |
+| `route` fails reading the file (a 403, retried) | the Composer environment's service account cannot read the model or config file | §0b's grant |
 | `model_batch_count_mismatch` (launcher, ERROR) | the model file or K changed between `plan` and this batch's launch | trigger the DAG again |
-| `[model launch] … a Flex launch runs one Dataflow job` | a Flex launch of `tables=all` that plans several batches without `batch_index` (the template launched by hand, or the single-table DAG pointed at a config file with `launch.tables: all`) | the model DAG, `run_model.py`, or `max_tables_per_job` ≥ the enabled tables |
+| `[model launch] … a Flex launch runs one Dataflow job` | a Flex launch of `tables=all` that plans several batches without `batch_index` (the template launched by hand; the DAG gives every batch its index) | the DAG with `tables=all`, `run_model.py`, or `max_tables_per_job` ≥ the enabled tables |
 | `launch_option_unused key=…` (launcher, WARNING) | a key the launch's `tables` mode does not read was given | drop it |
 | `collect_landed` skipped, no evaluation | `run_evaluation` is off, or no batch job reached DONE | the failed batches first |
 | the evaluation finds no row for `<base>` | `evaluation_output_dataset` is not the dataset of `validation_runs` | its default |
@@ -1289,7 +1417,7 @@ flowchart LR
    `tables`, `jobs` and `batches` are higher than the card. Add
    `AND job_id IN UNNEST(['<id>', …])`, §2e step 11's `generation_job_ids`,
    to count only the evaluated jobs. In the console a batch job is named
-   `<job name>-bNN-<8 hex>`: the model DAG's `<job_name>-bNN`, plus the
+   `<job name>-bNN-<8 hex>`: the DAG's batch name `<job_name>-bNN`, plus the
    Composer provider's suffix. Match a link to its job by the id, not the
    name.
 
@@ -1580,11 +1708,12 @@ an unpredictable time. Use this for one-off runs and for anything where a
 delayed start is tolerable.
 
 **(b) The `automatically_use_created_reservation` experiment — already in the
-DAG, inert by default.** `composer/synthetic_beam_bigquery.py:183` already
-templates this experiment onto every `client_type=vllm` launch:
+DAG, inert by default.** The DAG's launch environment
+(`composer/sdfb_batches.py::launch_environment`) already adds this
+experiment to every `client_type=vllm` launch, on both branches:
 
 ```python
-"{{ 'automatically_use_created_reservation' if params.client_type == 'vllm' else 'upload_graph' }}",
+"automatically_use_created_reservation" if vllm else "upload_graph",
 ```
 
 This tells Dataflow to consume a matching Compute Engine reservation **if one
@@ -2118,6 +2247,8 @@ Stats / DDL / build provenance:
 | `generation_record_degraded table= reason=` (WARNING, launcher; a plain log line) | the launch writes no generation record: `reason=missing_columns missing=…` (the line carries the `bq update` that adds them) or `reason=schema_unreadable`; today's 21-column row is written (§2c, ADR 0044) |
 | `generation_record_job_id job_id= source=` (worker) | a summary DoFn's job-id read, once per instance: `source=metadata:job_id` / `metadata:dataflow_job_id` (the attribute that answered), `none` (neither: `job_id` NULL) or `not_dataflow` (DirectRunner, no read) (§2c) |
 | `generator_version_mismatch launcher= worker=` (WARNING, worker) | the worker's generator version is not the launcher's (a template on an older image, a launch from a checkout); the row keeps the worker's (§2c) |
+| `generator_defaults_mismatch dag= image=` (WARNING, launcher) | the `generator.yaml` the DAG was imported with is not the image's (sha12 of the bytes, so a comment-only difference counts): a key the DAG did not pass takes the image's default, which may not be the one the DAG showed. Re-import the DAG or rebuild the image and template from one commit (§2d's table, [ADR 0043](adr/0043-generator-config.md) R3) |
+| `vllm_dtype_resolved dtype= gpu= source=` (launcher, every launch) | the dtype vLLM runs with: `source=derived` from `gpu` (`t4` → `float16`, `l4` → `bfloat16`), else `flag` or `file`. An L4 DAG launch logs `bfloat16` where master's DAG served `float16`; §2d step 13 is the parity control |
 | `ddl_live_extracted` | the LIVE `INFORMATION_SCHEMA` schema is what this launch generates from — BigQuery metadata edits always take effect |
 | `target_metadata_overlaid constraint_columns=` / `target_metadata_unavailable` (WARNING) | constraints + contract come from the LANDING table's descriptions; unavailable = NO constraints this run |
 | `ddl_live_extract_failed` (WARNING) → `ddl_loaded_from_uri fallback=True` | live extraction unreachable — OFFLINE mode, the pin's (possibly stale) constraints/contract apply |
@@ -2187,10 +2318,10 @@ Whole-model launches ([ADR 0045](adr/0045-whole-model-launches.md), §9d):
 
 | Milestone | Reads as |
 |---|---|
-| `model_launch_plan batches= max_tables_per_job= model= skipped= tables=` + the multi-line `MODEL LAUNCH` block (launcher, once per launcher of a `tables: all` launch) | the whole plan: the model and its file, the tables enabled and disabled, every batch with its tables, `[OVERSIZED — one component of N tables]` on a batch larger than K, and the skipped tables. `scripts/launch/run_model.py --dry_run` prints the same block; the model DAG's `plan` task logs its own `MODEL LAUNCH PLAN` banner |
+| `model_launch_plan batches= max_tables_per_job= model= skipped= tables=` + the multi-line `MODEL LAUNCH` block (launcher, once per launcher of a `tables: all` launch) | the whole plan: the model and its file, the tables enabled and disabled, every batch with its tables, `[OVERSIZED — one component of N tables]` on a batch larger than K, and the skipped tables. `scripts/launch/run_model.py --dry_run` prints the same block; the generation DAG's `route` task logs its own `MODEL LAUNCH PLAN` banner on a `tables=all` launch |
 | `model_batch batch= count= index= launch_run_id= run_id= tables=` (launcher, once per batch it runs) | this job is batch `index` of `count`: its run id `<base>-bNN`, the launch's base run id, its table count. Its tables run as `<base>-bNN-MM-<table>` |
 | `model_batch_oversized batch= max_tables_per_job= note= tables=` (launcher, **WARNING**) | one connected component is larger than `max_tables_per_job`: it runs whole, as its own batch job (`batch=`), never split. Every batch's launcher re-plans the whole model, so every launcher's log carries one per oversized batch of the plan, not only the oversized batch's own |
-| `model_batch_count_mismatch max_tables_per_job= planned= replanned=` (launcher, **ERROR**) | the orchestrator planned `planned` batches and this launcher plans `replanned`: the model file or K changed in between. The batch stops before reading any table; trigger the model DAG again, or rerun `run_model.py` |
+| `model_batch_count_mismatch max_tables_per_job= planned= replanned=` (launcher, **ERROR**) | the orchestrator planned `planned` batches and this launcher plans `replanned`: the model file or K changed in between. The batch stops before reading any table; trigger the DAG with `tables=all` again, or rerun `run_model.py` |
 | `model_batches_in_sequence batches= note=` (launcher, **WARNING**) | a CLI `--tables=all` launch of several batches without `--batch_index`: they run one after another in this process (`run_model.py` runs them in parallel). A Flex launch refuses instead |
 | `model_batch_failed batch= rc=` (launcher, **ERROR**) | in that CLI sequence, a batch returned non-zero (`rc=`) or raised (no `rc=`, the traceback above it); the next batch runs, and the launch ends naming every failed batch |
 | `table_override num_rows= source_table= table=` (launcher, one per table the model overrides, before any table is read) | the model's `source_table` (resolved: a two-part name carries the source dataset's project) and/or `num_rows` for this table, each only when set. In both `tables` modes |
@@ -2688,9 +2819,9 @@ folder (`gs://<bucket>/synthetic/relationships/<model>.yaml`), and a copy or
 a variant of it goes under a sub-prefix, e.g.
 `gs://<bucket>/synthetic/relationships/whole-model/<model>.yaml`.
 
-*The model DAG plans once, launches one Flex job per batch, at most
-`SDFB_MAX_PARALLEL_JOBS` at a time, and evaluates the batches that landed
-once:*
+*The generation DAG with `tables=all` plans once, launches one Flex job per
+batch, at most `SDFB_MAX_PARALLEL_JOBS` at a time, and evaluates the batches
+that landed once:*
 
 ```mermaid
 flowchart LR
@@ -2701,7 +2832,7 @@ flowchart LR
   classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
 
   M[("📄 gs:// model file")]:::store
-  P["⚙️ plan<br/>b00 … bNN"]:::cpu
+  P["⚙️ route<br/>b00 … bNN"]:::cpu
   J["🔀 one Flex job<br/>per batch"]:::beam
   V[("🗄️ validation_runs<br/>launch_run_id = base")]:::store
   E["⚙️ one evaluation<br/>landed batches"]:::cpu
@@ -2724,12 +2855,18 @@ It prints the `MODEL LAUNCH` block: every batch, its tables, an
 usage error (a refused flag, a folder for `--relationships_uri`, a model that
 does not load), with nothing launched.
 
-**2a. Launch from Composer:** trigger `synthetic_sdfb_model_<DAG_VERSION>`
-with `relationships_uri` (the `gs://` file), `source_dataset`,
-`landing_dataset`, `num_rows`, and optionally `max_tables_per_job`,
-`prep_workers`, `config_uri` (its keys win, the planning ones included:
-`relational.relationships_uri` and `launch.max_tables_per_job`; it may not
-set `launch.tables` to `explicit`) and the usual generation params. At most
+**2a. Launch from Composer:** trigger the generation DAG,
+`synthetic_sdfb_<DAG_VERSION>`, with `tables` = `all`, `relationships_uri`
+(the `gs://` file), `source_dataset`, `landing_dataset` (either left empty
+takes the `project.dataset` of the overlay's default source or landing
+table), `num_rows`, and optionally `max_tables_per_job`, `prep_workers`,
+`config_uri` (its keys win, the planning ones included:
+`relational.relationships_uri` and `launch.max_tables_per_job`; its
+`launch.tables` decides the branch, so a file that says `explicit` runs the
+explicit chain, and one that says `all` runs the batches even when the
+trigger says `explicit`) and the usual generation params. The Composer
+environment's service account reads the model file and the config file
+(§0b). At most
 `SDFB_MAX_PARALLEL_JOBS` batches run at once (§0b; a config file's
 `launch.max_parallel_jobs` does nothing here), and the DAG runs one launch
 at a time. With `run_evaluation` on, one evaluation covers the batches that
@@ -2743,10 +2880,11 @@ Dataflow job.
 **2b. Launch from a checkout** (GCP credentials; from a checkout, not inside
 the image: the image sets `FLEX_TEMPLATE_PYTHON_PY_FILE` for every process,
 so a launcher there counts as Flex and refuses a multi-batch plan without
-`--batch_index`). To launch what the model DAG launches, pass what its launch
-passes: the launcher flags of `composer/sdfb_batches.py::common_parameters`
-and the worker options of `::launch_environment`, here for its `gpu` param
-`l4` and `sdk_containers` `multi`. A checkout has no
+`--batch_index`). To launch what the DAG's `tables=all` branch launches,
+pass what its launch passes: the launcher flags of
+`composer/sdfb_batches.py::common_parameters` and the worker options of
+`::launch_environment`, here for `gpu` `l4` and `sdk_containers` `multi`
+(the `generator.yaml` defaults). A checkout has no
 `SDFB_SDK_CONTAINER_IMAGE`, so the image the template runs is passed too.
 Give the launch its own run id (not step 1's `plan`):
 
@@ -2759,10 +2897,10 @@ uv run --no-sync python3 scripts/launch/run_model.py \
   --validation_runs_table=<project>.synthetic_data_quality.validation_runs \
   --model_uri=gs://<bucket>/synthetic/models/<family>/<model>/<version>/ \
   --embedder_uri=<the build's embedder URI> --env=<env> \
-  --engine=<b1_rag or b2_library> --vllm_dtype=float16 \
+  --engine=<b1_rag or b2_library> \
   --write_disposition=<append or overwrite> \
-  --rag_chunks_table=<rag_chunks table> --build_rag_layer=true \
-  --freetext_pools_table=<freetext_pools table> --build_pool_layer=true \
+  --rag_chunks_table=<rag_chunks table> \
+  --freetext_pools_table=<freetext_pools table> \
   --source_stats_table=<source_table_stats table> \
   --runner=DataflowRunner --project=<project> --region=<region> \
   --temp_location=gs://<bucket>/temp --staging_location=gs://<bucket>/staging \
@@ -2781,11 +2919,17 @@ uv run --no-sync python3 scripts/launch/run_model.py \
   write its generation record: without it (the launcher's default is empty)
   no row is written and the evaluation has nothing to read. The embedder, the
   `env` and the three store tables are the values workflow 3 substitutes into
-  the DAG (an empty store: drop its two flags; an empty embedder: drop it,
-  B.1 then uses the `HashingEmbedder`). The DAG forwards its other params
-  with defaults equal to the launcher's, except `vllm_dtype` (`float16`; the
-  launcher's is `auto`) and `engine` and `write_disposition` (the build's
-  defaults), passed above; `reference_rows_limit` is `10000` in both.
+  the env overlay `sdfb_env.yaml` (an empty store: drop its flag; an empty
+  embedder: drop it, B.1 then uses the `HashingEmbedder`). The DAG passes
+  only the keys whose value differs from `generator.yaml` (ADR 0043 R2), and
+  the launcher reads every other one from the same `generator.yaml` in the
+  image, so the two agree: `engine` and `write_disposition` are passed above
+  because the overlay sets them per build; `vllm_dtype` is left unset on
+  both surfaces and follows `--gpu` (default `l4` → `bfloat16`; add
+  `--gpu=t4` for a T4, whose dtype is `float16`); `build_rag_layer` and
+  `build_pool_layer` default to `true`, a no-op for a store whose table is
+  not given (typing `--build_rag_layer=true` or `--build_pool_layer=true`
+  without its table is refused).
 - **The worker options.** `use_network_tags` only when the Composer
   Variable `DATAFLOW_NETWORK_TAGS` is set (its value; the DAG's second tag
   experiment is for the Flex launcher VM, which a checkout launch has not);
@@ -2811,7 +2955,7 @@ id>/bNN.log` (a character of the run id outside `[A-Za-z0-9._-]` becomes
 the landed ones (`--scope=manual`: a `--run_id` evaluation has no labelled
 writes, so `auto` would resolve every table's scope to `unknown`; with FK
 generation on it also passes `--relationships_uri=<the model file>`, as the
-model DAG does, for records that name no model; its `--region` is the
+DAG's `tables=all` branch does, for records that name no model; its `--region` is the
 launch's), and under it the line
 `# append --sdk_container_image=<image> --disk_size_gb=200 and the worker options: RUN_PLAYBOOK §9d`.
 A batch that finished OK but logged no job id marks the command
@@ -2824,8 +2968,9 @@ launcher does not cancel its job.
 **The evaluation options.** Run the printed command from the repository
 root with `<BUCKET>` filled in (and `<REGION>`, printed only when the launch
 named no `--region`) and, appended, the options the
-model DAG's evaluation launch gives its CPU workers
-(`composer/synthetic_model_launch.py`, `trigger_evaluation`):
+DAG's batch evaluation launch gives its CPU workers
+(`composer/sdfb_batches.py::evaluation_body`, launched by
+`trigger_evaluation_batches`):
 
 ```bash
   --sdk_container_image=<the image the template runs> --disk_size_gb=200 \

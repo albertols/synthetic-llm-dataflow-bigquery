@@ -475,10 +475,15 @@ declare `pk:` / `identity:` per table. `--reference_table`,
 WARNING each when given).
 
 **In the source repository (golden source)**, see the plan without
-launching, then launch it with the Composer model DAG or `run_model.py`
+launching, then launch it with the Composer generation DAG
+(`composer/synthetic_beam_bigquery.py`, trigger `tables` = `all`; an empty
+`source_dataset` or `landing_dataset` takes the `project.dataset` of the
+deployment's default source or landing table) or `run_model.py`
 (RUN_PLAYBOOK §9d). Both, and this dry run, exist only there:
 `scripts/launch/run_model.py` and `composer/` are not shipped in the
-Dataflow Solution Guides copy.
+Dataflow Solution Guides copy. A `config_uri` file's `launch.tables` decides
+the DAG's branch: a file that says `all` runs the batches whatever the
+trigger says.
 
 ```bash
 # golden source only

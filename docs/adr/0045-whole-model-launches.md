@@ -1,10 +1,10 @@
 # ADR 0045 — Whole-model launches: every enabled table of one model, in batch jobs
 
-**Status:** Accepted (2026-10-21). Built and tested on a laptop (DirectRunner, fake client; the model DAG pinned by static tests and run under Airflow 2.10.5's `dag.test()` with GCS and Dataflow stubbed, D6); the Dataflow acceptance (AC-B-5) is the corp run of [RUN_PLAYBOOK §2e](../RUN_PLAYBOOK.md#2e-corp-acceptance-of-whole-model-launches-b). Built in phase B of the config, record and model-launch work (the phase design is local to the branch and not committed).
+**Status:** Accepted (2026-10-21). Built and tested on a laptop (DirectRunner, fake client; the generation DAG's `tables=all` branch run under Airflow 2.10.5's `dag.test()` with GCS and Dataflow stubbed, D6); the Dataflow acceptance (AC-B-5) is the corp run of [RUN_PLAYBOOK §2e](../RUN_PLAYBOOK.md#2e-corp-acceptance-of-whole-model-launches-b). Built in phase B of the config, record and model-launch work (the phase design is local to the branch and not committed). **Revised 2026-10-26** (unreleased, amended in place): D6's separate model DAG is deleted; the generation DAG launches `tables=all` on a second branch (see [D6](#d6--one-generation-dag-two-branches)).
 **Design:** [`docs/DESIGN.md` §4 Relational generation](../DESIGN.md#4-relational-generation) ([§4.5 Whole-model launches](../DESIGN.md#45-whole-model-launches))
-**Code:** [`sdfb_core/launch/tables.py`](../../packages/sdfb-core/src/sdfb_core/launch/tables.py) (the launch modes, a table's source and rows) · [`sdfb_core/launch/batches.py`](../../packages/sdfb-core/src/sdfb_core/launch/batches.py) (the planner) · `sdfb_beam/cli/run_pipeline.py` (`_run_model`, `chosen_batches`, `_run_batch`, `PrepReadAhead`) · [`composer/synthetic_model_launch.py`](../../composer/synthetic_model_launch.py) (the model DAG) · [`composer/sdfb_batches.py`](../../composer/sdfb_batches.py) (its planner mirror) · [`scripts/launch/run_model.py`](../../scripts/launch/run_model.py) (the CLI runner) · `sdfb_evaluation/context/runs.py` (`rows_of_jobs`), `sdfb_evaluation/context/launch.py` (`_launch_of`)
+**Code:** [`sdfb_core/launch/tables.py`](../../packages/sdfb-core/src/sdfb_core/launch/tables.py) (the launch modes, a table's source and rows) · [`sdfb_core/launch/batches.py`](../../packages/sdfb-core/src/sdfb_core/launch/batches.py) (the planner) · `sdfb_beam/cli/run_pipeline.py` (`_run_model`, `chosen_batches`, `_run_batch`, `PrepReadAhead`) · [`composer/synthetic_beam_bigquery.py`](../../composer/synthetic_beam_bigquery.py) (the generation DAG, its `tables=all` branch) · [`composer/sdfb_batches.py`](../../composer/sdfb_batches.py) (its launch helpers and the planner mirror) · [`scripts/launch/run_model.py`](../../scripts/launch/run_model.py) (the CLI runner) · `sdfb_evaluation/context/runs.py` (`rows_of_jobs`), `sdfb_evaluation/context/launch.py` (`_launch_of`)
 **Builds on:** [ADR 0030](0030-single-job-relational-generation.md) (a component in one job) · [ADR 0032](0032-relationships-as-config.md) (relationships are configuration) · [ADR 0036](0036-parent-driven-fanout-generation.md) (a child's rows follow its parents) · [ADR 0043](0043-generator-config.md) (the config keys) · [ADR 0044](0044-generation-record.md) (the record each batch writes)
-**Operations:** [RUN_PLAYBOOK §0b](../RUN_PLAYBOOK.md#0b-workflow-edits-for-whole-model-launches-untracked-workflows) (workflow edits) · [§2e](../RUN_PLAYBOOK.md#2e-corp-acceptance-of-whole-model-launches-b) (corp acceptance) · [§9d](../RUN_PLAYBOOK.md#9d-whole-model-launch--every-enabled-table-of-one-model) (the recipe) · [`config/relationships/README.md`](../../config/relationships/README.md#whole-model-launches-tables-all-adr-0045) (the two model keys)
+**Operations:** [RUN_PLAYBOOK §0b](../RUN_PLAYBOOK.md#0b-workflow-3-for-the-one-generation-dag-untracked-workflows) (workflow edits) · [§2e](../RUN_PLAYBOOK.md#2e-corp-acceptance-of-whole-model-launches-b) (corp acceptance) · [§9d](../RUN_PLAYBOOK.md#9d-whole-model-launch--every-enabled-table-of-one-model) (the recipe) · [`config/relationships/README.md`](../../config/relationships/README.md#whole-model-launches-tables-all-adr-0045) (the two model keys)
 
 ## Context
 
@@ -240,9 +240,9 @@ Three things run the batches (`run_pipeline.py::chosen_batches`):
 
 | Orchestrator | What it does |
 | :-- | :-- |
-| the Composer model DAG, `composer/synthetic_model_launch.py` (D6) | one Flex Template launch per batch, `tables=all`, `batch_index`, `batch_count`, `run_id=<base>`; at most `SDFB_MAX_PARALLEL_JOBS` at once |
+| the Composer generation DAG with `tables=all`, `composer/synthetic_beam_bigquery.py` (D6) | one Flex Template launch per batch, `tables=all`, `batch_index`, `batch_count`, `run_id=<base>`; at most `SDFB_MAX_PARALLEL_JOBS` at once |
 | `scripts/launch/run_model.py`, from a checkout | one launcher process per batch, `--tables=all --batch_index=i --batch_count=N`, at most `launch.max_parallel_jobs` at once; refuses `--batch_index`, `--batch_count`, `--job_name` and any abbreviation of them of three or more characters; on Ctrl-C or SIGTERM stops its launchers and prints every Dataflow job already created with the `gcloud dataflow jobs cancel` command (stopping a launcher does not cancel its job); exit 0 (every batch finished, or `--dry_run`), 1 (a batch failed; the others ran), 2 (a usage error: nothing was launched) |
-| the launcher alone, `--tables=all` without `--batch_index` | a one-batch plan runs as one job, Flex included. Above one batch: on the CLI every batch in sequence (`model_batches_in_sequence` WARNING); a batch that fails is logged (`model_batch_failed`) and the next one runs, and the launch then exits naming every failed batch (Ruling 15). On Flex it refuses, naming the model DAG, `run_model.py` and the K that would make one job |
+| the launcher alone, `--tables=all` without `--batch_index` | a one-batch plan runs as one job, Flex included. Above one batch: on the CLI every batch in sequence (`model_batches_in_sequence` WARNING); a batch that fails is logged (`model_batch_failed`) and the next one runs, and the launch then exits naming every failed batch (Ruling 15). On Flex it refuses, naming the Composer DAG with `tables=all`, `run_model.py` and the K that would make one job |
 
 - **"On Flex"** (Ruling 16) means the environment variable
   `FLEX_TEMPLATE_PYTHON_PY_FILE` is set. `docker/Dockerfile` sets it for every
@@ -252,13 +252,13 @@ Three things run the batches (`run_pipeline.py::chosen_batches`):
 - **The count check** happens before any BigQuery read of the batch's tables
   (only the model file has been loaded): `model_batch_count_mismatch
   max_tables_per_job=… planned=… replanned=…` (ERROR), then a stop that says
-  to trigger the model DAG again or rerun `run_model.py`. A model edit or a K
+  to trigger the Composer DAG with `tables=all` again or rerun `run_model.py`. A model edit or a K
   change that keeps the count is not detected by it; every row's snapshot
   carries the model's `sha12` (`relationships_digest`) and `batch.tables`, so
   one digest across the launch proves one model (RUN_PLAYBOOK §2e step 10).
 - **Run ids** (Ruling 14): the job of batch *i* runs as `<base>-bNN`, its
   tables as `<base>-bNN-MM-<table>` (a one-table batch too), and every row's
-  `launch_run_id` is `<base>`. The model DAG names each job
+  `launch_run_id` is `<base>`. The DAG's `tables=all` branch names each job
   `<job_name>-bNN`, to which the Dataflow provider appends `-<8 hex>`; a CLI
   batch job is named from its run id (`sdfb-<base>-bNN`, sanitized).
 - **One `config_digest` per launch**: `launch.batch_index` and
@@ -315,7 +315,7 @@ flowchart LR
 ```
 
 b00 and b01 start together; b02 takes the slot of whichever ends first. Each
-running batch job holds its workers' GPUs (the model DAG's launch asks for up
+running batch job holds its workers' GPUs (the DAG's batch launch asks for up
 to `maxWorkers` 4 workers of one GPU each), so the cap is bounded by the
 regional GPU quota. Ruling 13 says where each cap lives:
 
@@ -323,17 +323,28 @@ regional GPU quota. Ruling 13 says where each cap lives:
   (`--max_parallel_jobs`, default 1: the only value inside every GPU quota,
   Ruling 12). The launcher accepts the key but never reads it, since a
   launcher runs one job or a sequence; the Flex Template does not declare it.
-- The model DAG's cap is the Airflow Variable `SDFB_MAX_PARALLEL_JOBS`
+- The DAG's cap is the Airflow Variable `SDFB_MAX_PARALLEL_JOBS`
   (default `"1"`), read when Composer parses the file into the mapped task's
   `max_active_tis_per_dag`: Airflow fixes a mapped task's concurrency at parse
   time ([Airflow: dynamic task mapping](https://airflow.apache.org/docs/apache-airflow/stable/authoring-and-scheduling/dynamic-task-mapping.html)).
   A change applies at the next parse, without a re-import. A config file's
   `launch.max_parallel_jobs` does nothing in the DAG.
 
-### D6 — The model DAG
+### D6 — One generation DAG, two branches
 
-*One evaluation covers the batches that landed; a failed batch fails the run,
-not its neighbours.*
+*Revised 2026-10-26 (unreleased, amended in place).* D6 first decided a
+second Composer DAG, `composer/synthetic_model_launch.py`
+(`synthetic_sdfb_model_<DAG_VERSION>`), with six tasks of its own. It
+duplicated most of the generation DAG, and it is deleted. The generation
+DAG, `composer/synthetic_beam_bigquery.py` (DAG id
+`synthetic_sdfb_<dag_version>`, master's), launches every shape: one table,
+an FK group, or every enabled table of a model. Its params are the union of
+the two DAGs' plus `tables` (`explicit` | `all`), and its defaults come from
+`generator.yaml` and the env overlay ([ADR 0043](0043-generator-config.md),
+revision of 2026-10-26).
+
+*One evaluation covers what the launch landed; under `all` a failed batch
+fails the run, not its neighbours.*
 
 ```mermaid
 flowchart LR
@@ -343,57 +354,89 @@ flowchart LR
   classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
   classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
 
-  P["⚙️ plan<br/>sdfb_batches"]:::cpu
-  S["🔀 start_batch × N<br/>≤ SDFB_MAX_PARALLEL_JOBS"]:::beam
-  V[("🗄️ validation_runs<br/>rows of every batch")]:::store
-  C["⚙️ collect_landed<br/>all_done"]:::cpu
-  E["⚙️ trigger_evaluation<br/>--run_id base"]:::cpu
-  W["🛡️ wait_for_evaluation_launch<br/>reschedule sensor"]:::cpu
-  F["🛡️ fail_if_a_batch_failed<br/>one_failed"]:::cpu
-  P --> S
-  S --> V
-  S --> C
-  C --> E
-  V --> E
-  E --> W
-  S --> F
+  R{"⚙️ route<br/>resolves tables"}:::cpu
+  subgraph EX["explicit: master's chain"]
+    S["🔀 start_sdfb"]:::beam
+    G["🛡️ run_evaluation_gate"]:::cpu
+    WG["🛡️ wait_for_generation"]:::cpu
+    TE["⚙️ trigger_evaluation"]:::cpu
+    WE["🛡️ wait_for_evaluation_launch"]:::cpu
+  end
+  subgraph AL["all: one launch per batch"]
+    BB["⚪ batch_bodies"]:::data
+    SB["🔀 start_batch × N<br/>≤ SDFB_MAX_PARALLEL_JOBS"]:::beam
+    CL["⚙️ collect_landed<br/>all_done"]:::cpu
+    TB["⚙️ trigger_evaluation_batches"]:::cpu
+    WB["🛡️ wait_for_batch_evaluation_launch"]:::cpu
+    F["🛡️ fail_if_a_batch_failed<br/>one_failed"]:::cpu
+  end
+  R -->|"explicit"| S --> G --> WG --> TE --> WE
+  R -->|"all"| BB --> SB --> CL --> TB --> WB
+  SB --> F
 ```
 
-`composer/synthetic_model_launch.py`, DAG id `synthetic_sdfb_model_<DAG_VERSION>`
-(Ruling 18):
+**Which branch.** `route` is a `@task.branch`. It resolves `tables` with
+`sdfb_batches.resolve_tables_mode`: a `config_uri` file's `launch.tables`
+wins over the param (ADR 0043's file wins), so a file that says `all` takes
+the batch branch whatever the trigger says. It reads the file through
+`GCSHook` only when `config_uri` is set, and the model file only on the
+`all` branch: an explicit launch without `config_uri` reads nothing from GCS,
+as master's DAG read nothing. The file's `serving.client_type`, `gpu`,
+`sdk_containers` and `launcher_machine_type` go over the params before any
+launch body is built (`with_file_hardware`, ADR 0043 R2). Explicit: it mints
+the run id (`<dag run id>-<8 hex>`), pushes `sdfb_batches.explicit_body`
+under `body` and returns `start_sdfb`. All: it plans with
+`sdfb_batches.launch_plan` over `whole_model_params` (an empty
+`source_dataset` or `landing_dataset` takes the `project.dataset` of the
+overlay's default source table or landing table), pushes the bodies, the base
+run id, the batch count, the model file, the batches and the banner, and
+returns `batch_bodies`. It pushes the resolved `mode` either way.
 
-| Task | Trigger rule | Does |
-| :-- | :-- | :-- |
-| `plan` | `all_success` | reads the model file and the config file (whose keys win, the planning ones included) from GCS, plans the batches with `sdfb_batches`, mints the base run id (`<dag run id>-<8 hex>`, salted like the single-table DAG's run id) and builds one Flex launch body per batch. The bodies are its **return value**, which `start_batch` expands over; `base_run_id`, `batch_count`, `relationships_uri`, `batches` and `banner` are pushed under their own XCom keys. Logs the `MODEL LAUNCH PLAN` banner |
-| `start_batch` | `all_success` | one mapped `DataflowStartFlexTemplateOperator` per body, `wait_until_finished=True`, `max_active_tis_per_dag` = the Variable. A job that ends in any state but DONE fails its own instance; the other instances run on (the DAG sets no fail-stop) |
-| `collect_landed` | `all_done` | after every instance, the failed ones included: returns `{"job_ids": "<id>,<id>"}`, the ids of the jobs that reached DONE in batch order; skips (and so skips the evaluation) when `run_evaluation` is off or nothing landed |
-| `trigger_evaluation` | `all_success` | one CPU Flex launch of the same template: `sdfb_job=evaluation`, `run_id=<base>`, `generation_job_ids=<the landed ids>`, `relationships_uri` (empty when `generate_fk_relationships` is false), `scope=manual`, `trigger=chained`, `output_dataset` = `evaluation_output_dataset`; neither `reference_rows_limit` nor `validation_runs_table` (Ruling 30: the rows and the sample size come from the record, so `evaluation_output_dataset` must be the quality dataset, its default). Not waited for |
-| `wait_for_evaluation_launch` | `all_success` | the single-table DAG's reschedule sensor (the evaluation job running or done); its failure callback closes the evaluation's RUNNING registry row, found by `base_run_id`, with a copy of the single-table DAG's statement pinned equal by test |
-| `fail_if_a_batch_failed` | `one_failed` | a leaf that fails once a `start_batch` instance failed (or `plan` did); skipped when every batch succeeded |
+| Task | Branch | Trigger rule | Does |
+| :-- | :-- | :-- | :-- |
+| `route` | both | `all_success` | the branch, the bodies, the plan's `MODEL LAUNCH PLAN` banner (above). A `PlanError` (bad YAML, a bad `launch:` or `serving:` value, a missing or non-UTF-8 object, a model that is not one gs:// file, K below one) fails it with `AirflowFailException`, never retried; any other error (a transient GCS read) is retried as the environment says |
+| `start_sdfb` → `run_evaluation_gate` → `wait_for_generation` → `trigger_evaluation` → `wait_for_evaluation_launch` | explicit | `all_success` | master's five tasks, ids and arguments; the gate builds the evaluation body (the job id `start_sdfb` returned, the mode `route` resolved) |
+| `batch_bodies` | all | `all_success` | returns `route`'s bodies: Airflow maps a task only over another task's return value, never a custom XCom key, and a branch's return value is the branch it takes |
+| `start_batch` | all | `all_success` | one mapped `DataflowStartFlexTemplateOperator` per body, `wait_until_finished=True`, `retries=0`, `max_active_tis_per_dag` = the Variable. A job that ends in any state but DONE fails its own instance; the other instances run on (the DAG sets no fail-stop) |
+| `collect_landed` | all | `all_done` | after every instance, the failed ones included: returns the evaluation's launch body over the jobs that reached DONE, in batch order; skips (and so skips the evaluation) when `route` planned no batch, when `run_evaluation` is off, or when nothing landed |
+| `trigger_evaluation_batches` | all | `all_success` | one CPU Flex launch of the same template, its body `collect_landed`'s: `sdfb_job=evaluation`, `run_id=<base>`, `generation_job_ids=<the landed ids>`, `relationships_uri` (empty when `generate_fk_relationships` is false), `scope=manual`, `trigger=chained`, `output_dataset` = `evaluation_output_dataset`; neither `reference_rows_limit` nor `validation_runs_table` (Ruling 30). Not waited for |
+| `wait_for_batch_evaluation_launch` | all | `all_success` | master's reschedule sensor on the evaluation job; its failure callback `_close_batch_running_row` closes the evaluation's RUNNING registry row, found by `base_run_id` |
+| `fail_if_a_batch_failed` | all | `one_failed` | a leaf that fails once a `start_batch` instance failed; skipped when every batch succeeded, when the explicit branch ran, or when `route` failed (which fails the run itself) |
 
 - **`wait_until_finished=True` is what makes the cap count running jobs**: an
   instance holds its slot, and an Airflow worker slot (the operator is not
   deferrable), until its job ends. Killing a running instance (a Composer
   worker restart, marking it failed) cancels that batch's Dataflow job: the
   operator's `on_kill` cancels the job it waits for.
-- **Retries**: `plan` and `start_batch` pass `retries=0`. A plan error fails
-  the same way every time, and a retried batch would launch again under the
-  same base run id, landing its rows twice under append after a BLOCKER. To
-  run a failed batch again, fix the cause and clear its `start_batch`
-  instance with its downstream tasks. The other tasks leave retries to the
-  environment, as the single-table DAG does.
-- **Manual trigger only** (`schedule_interval=None`, `max_active_runs=1`).
-- **The Composer environment's service account** reads the model file and the
-  config file (`plan` uses `GCSHook`), so it needs `storage.objects.get` on
-  them; the single-table DAG never reads GCS from Airflow.
+- **Retries**: `start_batch` passes `retries=0`: a retried batch would launch
+  again under the same base run id, landing its rows twice under append after
+  a BLOCKER. To run a failed batch again, fix the cause and clear its
+  `start_batch` instance with its downstream tasks. Every other task leaves
+  retries to the environment, as master's chain does; a `PlanError` in
+  `route` is an `AirflowFailException`, which Airflow does not retry.
+- **The schedule is master's** (`schedule_interval="@once"`,
+  `max_active_runs=1`): Composer runs one explicit launch of the overlay's
+  default table when it imports the DAG, as master's DAG did. The deleted
+  model DAG was manual-only; a `tables=all` launch is a manual trigger.
+- **The Composer environment's service account** reads the config file and
+  the model file (`GCSHook`), so it needs `storage.objects.get` on them, and
+  only for a launch with `config_uri` or `tables=all`.
 - **The run's outcome**: Airflow fails a run by a failed leaf. After a failed
   batch the watcher fails at once and the run ends failed once the
   evaluation's launch has been waited for; with every batch landed the watcher
   is skipped and the run ends as the evaluation's launch did.
-- **Laptop evidence, no Composer**: the DAG file was imported and run under
-  Airflow 2.10.5's `dag.test()` with GCS and Dataflow stubbed — no batch, one
-  batch and every batch failing, `plan` failing, the evaluation off — and every
-  final state matched the table above.
+- **Laptop evidence, no Composer**:
+  [`scripts/composer/check_dags.py`](../../scripts/composer/check_dags.py)
+  imports the DAG folder (the DAG, `sdfb_batches.py`, `generator.yaml` and a
+  filled `sdfb_env.yaml`) into Airflow 2.10.5 with the Google provider 12.0.0
+  and runs nine triggers through `dag.test()` with every Google call patched:
+  four explicit launches (L4, T4, an FK group, the evaluation off), an explicit
+  trigger whose config file says `all`, one batch, two batches, a failed
+  batch and a plan that fails. Every task state, launch body and GCS read
+  matched (`test_generation_dag.py::test_the_harness_run_is_the_plans`); the
+  explicit launches resolve like master's recorded ones but for
+  `DELIBERATE_CHANGES` and read nothing from GCS
+  (`test_launch_helpers.py::test_explicit_launch_resolves_like_master`).
 - **Unverified on Composer**, checked by RUN_PLAYBOOK §2e: a mapped
   `DataflowStartFlexTemplateOperator` with `wait_until_finished=True` holding
   its slot until its job ends and failing on any other terminal state;
@@ -423,7 +466,7 @@ source its `validation_runs` row names, an override included.
   it is a usage error. It narrows ONE evaluation, unlike the standalone
   evaluation DAG's `generation_job_ids` param, which fans out one evaluation
   per job.
-- **`scope=manual`**: the model DAG and `run_model.py` pass it, because a
+- **`scope=manual`**: the DAG's `tables=all` branch and `run_model.py` pass it, because a
   `--run_id` evaluation has no labelled writes and `auto` would resolve every
   table's scope to `unknown`.
 - **The registry** `evaluation_data_history` gains `generation_job_ids`
@@ -546,7 +589,9 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
 17. **Parallel prep is pull-based and output-neutral**; `prep_workers: 1`
     restores the previous sequence (D8).
 18. **The model DAG's shape**: the six tasks and trigger rules of D6, `plan`'s
-    return value the launch bodies.
+    return value the launch bodies. *(Revised 2026-10-26: no model DAG; the
+    generation DAG's `tables=all` branch, D6, with `route` planning and
+    `batch_bodies` returning the bodies.)*
 19. **`composer/sdfb_batches.py` holds the planner mirror and every pure
     piece of the launch**, unit-tested without Airflow (D4).
 20. **Logging under `all`**: a batch gets no "N targets WITH relationships"
@@ -563,13 +608,18 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
 24. **The single-table DAG's `source_dataset` param is evaluation-only**:
     `scripts/gui/export_knobs.py` does not count a DAG param whose
     description begins "Only with run_evaluation" as a surface of a generator
-    flag.
+    flag. *(Revised 2026-10-26: the one DAG's `source_dataset`,
+    `landing_dataset`, `tables`, `max_tables_per_job` and `prep_workers` are
+    surfaces of their generator keys.)*
 25. **Abbreviated flags**: argparse's prefix matching stays on; the
     abbreviations only `--landing_table` (`--l` … `--landing_`),
     `--batch_size` (`--ba` … `--batch_`) or `--thresholds_uri` (`--t`)
     matched before are now ambiguous with `--landing_dataset`,
     `--batch_index` / `--batch_count` and `--tables`, and stop the launch at
-    parse time.
+    parse time. *(Revised 2026-10-26: hidden aliases keep master's prefixes of
+    three or more characters on their flags, `--lan…`, `--bat…` and `--gen…`
+    included ([ADR 0043](0043-generator-config.md) R6); a shorter one, such as
+    `--t`, can still be ambiguous.)*
 26. **The Dataflow Solution Guides copy** ships neither `composer/` nor
     `scripts/launch/`; it ships `example_isolated_forest.yaml`, and its form of
     a whole-model launch is the launcher's `--tables=all` (batches in
@@ -577,9 +627,11 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
 27. **The committed example uses generic names** (`T_ACCOUNTS`,
     `T_EVENTS_LOG`, `T_RATES`, `T_LEGACY`, dataset `other_ds`).
 28. **No Terraform, `tiers.yaml` or single-table DAG change**: the
-    single-table DAG keeps its params and its launch.
+    single-table DAG keeps its params and its launch. *(Revised 2026-10-26:
+    the one DAG keeps master's explicit chain, task ids and launch, with the
+    `tables=all` branch beside it, D6.)*
 29. **`_evaluation_key` is unchanged** (D7).
-30. **The model DAG's evaluation passes neither `reference_rows_limit` nor
+30. **The `tables=all` branch's evaluation passes neither `reference_rows_limit` nor
     `validation_runs_table`** (D6).
 31. **Every batch job logs its own `launch_scenario` and `launch_config`**
     (D4).
@@ -597,8 +649,9 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
   (D5).
 - **A Composer pool for the cap** ([Airflow: pools](https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/pools.html)).
   An Airflow admin setting outside the DAG file; possible later.
-- **Sharing the single-table DAG's file.** It stays as it is (Ruling 28); the
-  model DAG is a second file built from the same markers.
+- **A second DAG file for whole-model launches.** Decided first (the model
+  DAG of 2026-10-21) and reversed on 2026-10-26: it duplicated most of the
+  generation DAG, and every launch shape now goes through one DAG (D6).
 - **Splitting a component across jobs to fill bins.** It would break
   referential integrity (D3).
 - **Merging the per-table DLQ and `validation_runs` sinks per job.** Deferred
@@ -624,8 +677,9 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
      `batch_index`, `batch_count`, `generation_job_ids`), and `tables` and
      `landing_dataset` are now names both jobs read.
   3. **Workflow 3** takes the edits of
-     [RUN_PLAYBOOK §0b](../RUN_PLAYBOOK.md#0b-workflow-edits-for-whole-model-launches-untracked-workflows)
-     (substitute and import the model DAG, import `sdfb_batches.py`), and the
+     [RUN_PLAYBOOK §0b](../RUN_PLAYBOOK.md#0b-workflow-3-for-the-one-generation-dag-untracked-workflows)
+     (one `sed` on `composer/sdfb_env.yaml`; import the DAG,
+     `sdfb_batches.py`, `generator.yaml` and `sdfb_env.yaml`), and the
      Composer environment gets the Variable `SDFB_MAX_PARALLEL_JOBS`.
 - **The load-job budget of the shared tables.** Each batch job writes its
   tables' landing, DLQ and `validation_runs` rows with FILE_LOADS, at least
@@ -638,10 +692,11 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
   batch's margin to the Flex launcher's 12 minutes
   ([Dataflow: troubleshoot Flex Templates](https://cloud.google.com/dataflow/docs/guides/troubleshoot-templates))
   and lowers K where a margin is thin.
-- **Abbreviated flags.** `--landing`, `--batch`, `--t` and the other
-  abbreviations of Ruling 25 are now ambiguous; a script that abbreviated
-  `--landing_table`, `--batch_size` or `--thresholds_uri` that way fails at
-  parse time and must spell the flag out.
+- **Abbreviated flags.** Master's abbreviations of three or more characters
+  reach the same flags (hidden aliases, Ruling 25's revision). One- and
+  two-character ones a new flag shares can be ambiguous (`--t` matches
+  `--tables` and `--thresholds_uri`) and fail at parse time: spell the flag
+  out.
 - **A held Airflow worker slot per running batch**, for the job's duration
   (D6), at most `SDFB_MAX_PARALLEL_JOBS` slots.
 - **A run id ending in `-bNN`**, written without a record and evaluated by a
@@ -650,7 +705,7 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
   model evaluation is listed under its first batch job only.
 - **A CLI sequence repeats the record's schema read per batch** (D4).
 - **The Dataflow Solution Guides copy** has `--tables=all` (batches in
-  sequence on the CLI) but no parallel runner and no model DAG (Ruling 26).
+  sequence on the CLI) but no parallel runner and no Composer DAG (Ruling 26).
 - **Forbids**: a component split across jobs; a batch launch that runs after
   its count disagrees with the orchestrator's; a global key applied to every
   table of a model.
@@ -663,7 +718,7 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
 | AC-B-2 | `plan_batches` is deterministic, never splits a component, and the Composer mirror matches it | `packages/sdfb-tests/tests/unit/launch/test_batches.py` (`test_the_plan_depends_only_on_the_content_and_k`, `test_a_component_is_never_split_and_every_table_runs_once`); `packages/sdfb-tests/tests/unit/composer/test_sdfb_batches.py` |
 | AC-B-3 | `source_table` and `num_rows` land in `validation_runs.reference_table` / `num_rows_requested` | `packages/sdfb-tests/tests/unit/cli/test_model_launch_main.py::test_every_batch_records_its_tables_sources_rows_and_one_digest` |
 | AC-B-4 | Every committed model's sha12 is unchanged; the explicit relational launch plan equals its golden | `packages/sdfb-tests/tests/unit/contracts/test_relationship_launch_keys.py::test_absent_keys_leave_every_committed_sha_unchanged`; `packages/sdfb-tests/tests/unit/cli/test_launch_plan_golden.py` |
-| AC-B-5 | (GCP) A model-DAG launch with at least two batches: every batch launches inside the 12-minute window, and one evaluation covers every landed table | the corp run of [RUN_PLAYBOOK §2e](../RUN_PLAYBOOK.md#2e-corp-acceptance-of-whole-model-launches-b) (pending) and `packages/sdfb-tests/tests/integration/test_model_launch_gcp.py` |
+| AC-B-5 | (GCP) A `tables=all` DAG launch with at least two batches: every batch launches inside the 12-minute window, and one evaluation covers every landed table | the corp run of [RUN_PLAYBOOK §2e](../RUN_PLAYBOOK.md#2e-corp-acceptance-of-whole-model-launches-b) (pending) and `packages/sdfb-tests/tests/integration/test_model_launch_gcp.py` |
 
 ## Figure provenance
 
@@ -675,10 +730,11 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
 | M4, per-table resolution (D2) | inline mermaid, this file | a table's source and rows come from the model when it says so, else from the launch |
 | M5, the launcher is authoritative (D4) | inline mermaid, this file | every batch job plans the model again and stops when its count is not the orchestrator's |
 | M6, `max_parallel_jobs` = 1 and = 2 (D5) | inline mermaid, two panels, this file | the cap decides how many batch jobs hold GPUs at once, never what they generate |
-| M7, the model DAG (D6) | inline mermaid, this file | one evaluation covers the batches that landed; a failed batch fails the run, not its neighbours |
+| M7, one DAG, two branches (D6; revised 2026-10-26) | inline mermaid, this file | one evaluation covers what the launch landed; under `all` a failed batch fails the run, not its neighbours |
 | M8, `prep_workers` = 1 and = W (D8) | inline mermaid, two panels, this file | threads read ahead; the cross-table steps keep the plan's order, so the outputs do not change |
 
 The figures use the repository's mermaid house style (node classes and icons
 as in `.claude/skills/visual-first-documentation/`) and carry no measured
 number: every shape, count and name is read from the code and tests named
-above. Links retrieved 2026-10-21.
+above. Links retrieved 2026-10-21. M7 was redrawn on 2026-10-26 from
+`composer/synthetic_beam_bigquery.py` (its header and `route`).

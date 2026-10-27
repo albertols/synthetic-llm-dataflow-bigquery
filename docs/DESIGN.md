@@ -413,8 +413,8 @@ flowchart LR
 table may name its own `source_table` and `num_rows`. The planner packs whole
 components first-fit-decreasing into batches of at most
 `launch.max_tables_per_job` tables, and every batch's launcher plans again and
-checks the count; the Composer model DAG and `scripts/launch/run_model.py`
-run the batches, and one evaluation reads every landed batch's
+checks the count; the generation DAG's `tables=all` branch and
+`scripts/launch/run_model.py` run the batches, and one evaluation reads every landed batch's
 `validation_runs` rows by the launch's base run id
 ([ADR 0045](adr/0045-whole-model-launches.md)). Code:
 [`launch/batches.py::plan_batches`](../packages/sdfb-core/src/sdfb_core/launch/batches.py),
@@ -572,18 +572,19 @@ edge keeps the table and stops drawing keys through that edge.*
 
 | Knob | Where | Read by |
 | :-- | :-- | :-- |
-| Every generator setting (flags + tunable constants) | [`config/generator.yaml`](../config/generator.yaml), rendered from [`sdfb_core/config/`](../packages/sdfb-core/src/sdfb_core/config/) | launcher (`--config_uri`, file wins), workers via `generator_config` ([ADR 0043](adr/0043-generator-config.md)) |
+| Every generator setting (flags + tunable constants) | the value lines of [`config/generator.yaml`](../config/generator.yaml) (a link to the copy packaged in [`sdfb_core/config/`](../packages/sdfb-core/src/sdfb_core/config/), whose `catalogue.yaml` renders its comments); a Composer environment's values in `composer/sdfb_env.yaml` | launcher (`--config_uri`, file wins), workers via `generator_config`, the Composer DAG's param defaults from its own copy ([ADR 0043](adr/0043-generator-config.md)) |
 | Tables, keys, edges, `enabled` / `enforced` / `drives` | `config/relationships/*.yaml` | launcher and workers; one relationship card is logged per run |
-| Which tables a launch generates, each table's source and rows | `launch.tables`, `launch.max_tables_per_job` ([`config/generator.yaml`](../config/generator.yaml)); `source_table`, `num_rows` per table (`config/relationships/*.yaml`) | launcher, the model DAG, `scripts/launch/run_model.py` (§4.5) |
+| Which tables a launch generates, each table's source and rows | `launch.tables`, `launch.max_tables_per_job` ([`config/generator.yaml`](../config/generator.yaml)); `source_table`, `num_rows` per table (`config/relationships/*.yaml`) | launcher, the generation DAG with `tables=all`, `scripts/launch/run_model.py` (§4.5) |
 | Model URI, vLLM server flags, licence | [`config/models.yml`](../config/models.yml) | nobody at runtime — a reference registry; `serving.model_uri` points at one of its entries |
 | Severity budgets per environment | [`config/thresholds.yml`](../config/thresholds.yml) | thresholds gate (§7) |
 | Column constraints | the table's DDL contract | constraint router (§5) |
 | B.1 row documents, `rag_row_docs_limit` (default 1,024) | launch flag / DAG param | launcher (store check), population branch, `b1_rag` setup (§2) |
-| GPU type, machine family, dtype | the Terraform module's `gpu` variable | launch scripts and the Flex Template job |
+| GPU type, machine family, dtype | `serving.gpu` (`l4` \| `t4`; a null `serving.vllm_dtype` follows it: `bfloat16`, `float16`); the Terraform module's `gpu` variable | the Composer DAG (machine, accelerator), the launcher (dtype), launch scripts and the Flex Template job |
 
-Every generator setting has one typed home, `sdfb_core/config/model.py`, and
-one explanation in `catalogue.yaml`; [`config/generator.yaml`](../config/generator.yaml)
-renders both. A launch may pass a sparse file of the keys it pins
+Every generator setting has one default value, its line in
+[`config/generator.yaml`](../config/generator.yaml), one type in
+`sdfb_core/config/model.py` and one explanation in `catalogue.yaml`, rendered
+as the yaml's comments. A launch may pass a sparse file of the keys it pins
 (`--config_uri`, a local path or `gs://`; the `config_uri` param of the Flex
 Template, the generation DAG and the Terraform module).
 
@@ -601,7 +602,7 @@ flowchart LR
   classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
 
   A["⚪ flags / params<br/>as typed"]:::data
-  D["⚪ defaults<br/>= the old values"]:::data
+  D["⚪ generator.yaml<br/>defaults"]:::data
   R["⚙️ flag > default"]:::cpu
   O["⚪ the namespace<br/>argparse built"]:::data
   A -->|"1st"| R
@@ -632,10 +633,45 @@ flowchart LR
   R --> W
 ```
 
-*Without a file the launcher rebuilds exactly the namespace argparse built
-before, string encodings included (`"true"`, `""`, `"8192"`). With one, the
-file decides every key it sets, even against a Composer DAG that passes every
-param; the launcher logs `config_resolved` with the count per source and one
+*Mode 3 — a Composer launch: four layers.*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  Y[("📄 1 generator.yaml<br/>every default")]:::store
+  O[("📄 2 sdfb_env.yaml<br/>workflow 3 fills it")]:::store
+  T["⚪ 3 trigger values<br/>DAG params"]:::data
+  F[("🪣 4 config_uri file<br/>keys it sets")]:::store
+  D["⚙️ DAG<br/>launch_overrides"]:::cpu
+  L["⚙️ launcher<br/>file > flag > default"]:::cpu
+  Y --> D
+  O --> D
+  T --> D
+  D -->|"keys ≠ yaml<br/>+ digest"| L
+  Y -->|"image copy"| L
+  F --> L
+```
+
+*A key takes the value of the highest layer that sets it.* The DAG reads
+`generator.yaml` and the env overlay from its own folder and passes only the
+keys whose value differs from `generator.yaml`, plus the yaml's digest; the
+launcher logs `generator_defaults_mismatch` (WARNING) when that digest is not
+the image's, and `vllm_dtype_resolved` with the dtype and why. A config
+file's `serving.client_type`, `gpu`, `sdk_containers` and
+`launcher_machine_type` also reach the machine the DAG asks for
+([ADR 0043](adr/0043-generator-config.md), revision of 2026-10-26). Code:
+[`config/defaults.py::load_defaults`](../packages/sdfb-core/src/sdfb_core/config/defaults.py),
+[`composer/sdfb_batches.py::launch_overrides`](../composer/sdfb_batches.py).
+
+*Without a file the launcher rebuilds the namespace argparse built on
+`master`, string encodings included (`"true"`, `""`, `"8192"`), but for the
+seven deliberate changes [ADR 0043](adr/0043-generator-config.md) lists. With one, the file decides every key
+it sets, even against a value the Composer DAG passes; the launcher logs `config_resolved` with the count per source and one
 `config_override` WARNING per typed param the file replaced.* A non-default
 value of a constant that shapes a persisted store (`source_table_stats`,
 `freetext_pools`, `rag_chunks`, `fk_fanout_stats`) salts that store's key, so

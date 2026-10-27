@@ -18,9 +18,11 @@ table (`tables=explicit`) or every enabled table of a relationships model
 The DAG file carries no deploy marker and no default of its own. Workflow
 `3_import_dag.yaml` imports it with three files beside it in the DAGs
 folder: `sdfb_batches.py` (the launch helpers; Composer cannot import
-sdfb-core), `generator.yaml` (sdfb-core's defaults, copied byte for byte) and
-`sdfb_env.yaml` (the env overlay, the one file the workflow runs its `sed`
-over). At parse time `sdfb_batches.load_layers` reads the two YAML files from
+sdfb-core), `generator.yaml` (sdfb-core's defaults: the file
+`config/generator.yaml` links to, copied byte for byte) and `sdfb_env.yaml`
+(the env overlay: of these four files, the only one the workflow runs its
+`sed` over; docs/RUN_PLAYBOOK.md §0b is the recipe). At parse time
+`sdfb_batches.load_layers` reads the two YAML files from
 this file's folder: every param default is generator.yaml overlaid with
 `sdfb_env.yaml`'s `config:`, and the DAG's id
 (`synthetic_sdfb_<dag_version>`), its Flex Template

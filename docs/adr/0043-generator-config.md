@@ -1,8 +1,8 @@
 # ADR 0043 — Generator config: a typed model, a catalogue, file wins
 
-**Status:** Accepted (2026-10-20). Built and tested on a laptop with the fake client and the DirectRunner; not yet run on Dataflow. It ships in one release with the generation record that `validation_runs` carries, [ADR 0044](0044-generation-record.md) (see Consequences, "Depends on the generation record").
+**Status:** Accepted (2026-10-20). Built and tested on a laptop with the fake client and the DirectRunner; not yet run on Dataflow. It ships in one release with the generation record that `validation_runs` carries, [ADR 0044](0044-generation-record.md) (see Consequences, "Depends on the generation record"). **Revised 2026-10-26** (unreleased, same release): `generator.yaml` holds the default values, a Composer env overlay sits between it and the trigger, the DAG passes only what differs plus the yaml's digest, three DAG-only machine knobs become `serving` keys and `vllm_dtype` follows the GPU; see [the revision](#revision-2026-10-26-the-yaml-holds-the-values).
 **Design:** [`docs/DESIGN.md` §8 Configuration](../DESIGN.md#8-configuration)
-**Code:** [`sdfb_core/config/`](../../packages/sdfb-core/src/sdfb_core/config/) (`model.py`, `catalogue.yaml`, `resolve.py`, `salt.py`, `render.py`) · the rendered reference [`config/generator.yaml`](../../config/generator.yaml) · an example [`config/generator.personal.example.yaml`](../../config/generator.personal.example.yaml)
+**Code:** [`sdfb_core/config/`](../../packages/sdfb-core/src/sdfb_core/config/) (`generator.yaml`, `defaults.py`, `model.py`, `catalogue.yaml`, `resolve.py`, `salt.py`, `render.py`) · [`config/generator.yaml`](../../config/generator.yaml), a link to the packaged file · [`composer/sdfb_env.yaml`](../../composer/sdfb_env.yaml) and [`composer/sdfb_batches.py`](../../composer/sdfb_batches.py) (`load_layers`, `launch_overrides`, `with_file_hardware`) · an example [`config/generator.personal.example.yaml`](../../config/generator.personal.example.yaml)
 **Builds on:** [ADR 0007](0007-dry-documentation-policy.md) (one source of truth across docs and code) · [ADR 0032](0032-relationships-as-config.md) (relationships are configuration; this ADR does the same for every other generator setting) · [ADR 0042](0042-self-hosted-platform-gui.md) (the GUI's `/config` page renders what this ADR defines)
 **Keeps:** [ADR 0041](0041-evaluation-standalone-package.md): the evaluator's settings stay on its own CLI, and their GUI prose stays in `config.ts`.
 
@@ -82,7 +82,7 @@ plus `io` and `launch`: `io`, `launch`, `sampling`, `generation`, `free_text`,
 Three kinds of entry are documented but not settable:
 
 - **Launch identity**, `launch.run_id`: a flag only, because it names one launch.
-- **12 fixed values**: identities and versions (`sampling.profiler_version`, the embedder dimensions, the fallback embedder's identity), the gate's budgets and rules (set in `config/thresholds.yml`, or in code for the rule ids the gate counts), and the Composer-only machine params `gpu` and `sdk_containers`. `generation.generation_max_retries` is also here: no engine reads it (the retry ladder is `escalating_sampling()`), and it stays documented as unused until it is removed.
+- **12 fixed values**: identities and versions (`sampling.profiler_version`, the embedder dimensions, the fallback embedder's identity), the gate's budgets and rules (set in `config/thresholds.yml`, or in code for the rule ids the gate counts), and the Composer-only machine params `gpu` and `sdk_containers`. `generation.generation_max_retries` is also here: no engine reads it (the retry ladder is `escalating_sampling()`), and it stays documented as unused until it is removed. *(Revised 2026-10-26: `gpu` and `sdk_containers` are now settable `serving` keys, with `launcher_machine_type`; ten fixed values remain. See [the revision](#revision-2026-10-26-the-yaml-holds-the-values).)*
 - **2 derived values**: `generation.temperature_ladder` and `free_text.sampling_ladder`.
 
 Every other internal constant stays in code. The module constants that were
@@ -92,7 +92,7 @@ duplicated (`PipelineConfig.batch_size`, `io/bq_sources.py`,
 
 ### D2 — A typed model holds the values; a strict catalogue holds the prose
 
-- **`sdfb_core/config/model.py`**: `GeneratorConfig`, one frozen [Pydantic](https://docs.pydantic.dev/latest/api/config/) model per section with `extra="forbid"` and `Field(ge=…, le=…)` ranges. mypy checks every read in `sdfb-core`, where the engines live. The module imports nothing from `sdfb_core`, so every other module may import it.
+- **`sdfb_core/config/model.py`**: `GeneratorConfig`, one frozen [Pydantic](https://docs.pydantic.dev/latest/api/config/) model per section with `extra="forbid"` and `Field(ge=…, le=…)` ranges. mypy checks every read in `sdfb-core`, where the engines live. The module imports nothing from `sdfb_core`, so every other module may import it. *(Revised 2026-10-26: the model keeps the types and validators; the default values are the value lines of `generator.yaml`, which `defaults.py` loads. See [the revision](#revision-2026-10-26-the-yaml-holds-the-values).)*
 - **`sdfb_core/config/catalogue.yaml`**: per dotted key, a label, group, purpose, what raising and what lowering it does, and optionally a tip, a formula, sources, ADRs, docs, `shapes_cache` (D8) and `null_means`. The `fixed:` and `derived:` blocks document the entries a file may not set, with `why_fixed`. `null_means` says what a null value means: for `free_text.pool_stagnation_min_novel` the derived `max(1, pool_values_per_call // 8)`, for `serving.vllm_max_model_len` no cap (the checkpoint's native context, which a T4 cannot hold).
 - **The loader is strict**, like the evaluator's metric catalogue: an unknown or missing key is a load error, and a test enforces a 1:1 match between the model and the catalogue.
 - **Two renders, both checked in CI**: `scripts/doc/render_generator_config.py` writes [`config/generator.yaml`](../../config/generator.yaml), every key with its default and explanation; `scripts/gui/export_knobs.py` writes `knobs.json` and `knob_guides.json` for the GUI. Each has a `--check` mode that fails on drift.
@@ -145,7 +145,7 @@ flowchart LR
   R --> W
 ```
 
-- A key the file sets wins over any flag or DAG param; flags fill only the keys the file leaves out. The Composer DAG passes every param on every trigger, so under this rule the file still decides what it sets.
+- A key the file sets wins over any flag or DAG param; flags fill only the keys the file leaves out. The Composer DAG passes every param on every trigger, so under this rule the file still decides what it sets. *(Revised 2026-10-26: the DAG now passes only the keys whose value differs from `generator.yaml`; the file still wins over every one of them. See [the revision](#revision-2026-10-26-the-yaml-holds-the-values).)*
 - The parser is built with [`argument_default=argparse.SUPPRESS`](https://docs.python.org/3/library/argparse.html#argument-default), so a flag appears in the parsed namespace only when it was typed. That is what tells "typed" from "default" and makes the three-level order possible.
 - Every key gets a provenance (`file`, `flag` or `default`). The launcher logs one line, `config_resolved uri=… file=N flag=N default=N`, and one `config_override key=… typed=… file=… (the file wins)` WARNING for each typed flag whose value the file replaced. A flag typed with the same value the file sets is not an override and gets no row.
 - Files may be **sparse**: a file pins only the keys it lists. The reference file's header says so, because passing the whole reference pins every key and makes every flag a no-op.
@@ -297,6 +297,327 @@ FK key-sample floor, ceiling and margin, and the cap on a fan-out request's
 values) change how work is done or checked, not what a store holds, so they
 shape no store. A test pins the mapping.
 
+## Revision 2026-10-26: the yaml holds the values
+
+The release is unreleased, so this ADR is amended in place. The D1–D8 text
+above stays as decided on 2026-10-20; where it no longer holds, an italic
+note points here.
+
+**Claim:** every default of every launch surface is a value line of one
+file, `generator.yaml`; an environment and a launch override it in layers,
+and the Composer DAG passes only what differs.
+
+### R1 — `generator.yaml` holds the default values
+
+The value lines of
+[`sdfb_core/config/generator.yaml`](../../packages/sdfb-core/src/sdfb_core/config/generator.yaml)
+are the defaults. The file ships inside the sdfb-core package, so the image,
+the wheel and the Solution Guides copy carry it; `config/generator.yaml` at
+the repository root is a symlink to it. `sdfb_core/config/defaults.py` loads
+it (`load_defaults`), and `model.py` keeps the types, ranges and validators
+and no value. The comments are still rendered from `catalogue.yaml`:
+`scripts/doc/render_generator_config.py --check` fails on a stale comment and
+`--fix` rewrites the comments and never a value.
+
+### R2 — Four layers, file wins
+
+**Claim (Figure C):** a key takes the value of the highest layer that sets
+it; the image and the DAG read the same `generator.yaml`.
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  Y[("📄 1 generator.yaml<br/>every default")]:::store
+  O[("📄 2 sdfb_env.yaml<br/>workflow 3 fills it")]:::store
+  T["⚪ 3 trigger values<br/>DAG params"]:::data
+  F[("🪣 4 config_uri file<br/>keys it sets")]:::store
+  D["⚙️ DAG<br/>launch_overrides"]:::cpu
+  L["⚙️ launcher<br/>file > flag > default"]:::cpu
+  R[("🗄️ validation_runs.config<br/>values + provenance")]:::store
+  Y --> D
+  O --> D
+  T --> D
+  D -->|"keys ≠ yaml<br/>+ digest"| L
+  Y -->|"image copy"| L
+  F --> L
+  L --> R
+```
+
+The order is `generator.yaml` < `composer/sdfb_env.yaml` < the trigger's
+values < the `config_uri` file. On the CLI the overlay is absent: the
+flags override `generator.yaml` and the file overrides the flags; an
+operator can pass an environment's values as a `config_uri` file. The
+provenance names are unchanged: a key the DAG passed is `flag`, a key the
+file set is `file`, every other key is `default`.
+
+- **The overlay.** [`composer/sdfb_env.yaml`](../../composer/sdfb_env.yaml)
+  holds the generation DAG's 18 deploy markers, the same 18 master's DAG
+  carried, under three sections: `dag:` (`project_version`, `dag_version`),
+  `infra:` (the staging and templates buckets) and `config:` (section → key
+  over `generator.yaml`: the default source, landing, DLQ, DDL-pin,
+  validation-runs and three store tables, `engine`, `embedder_uri`, `env`,
+  `write_disposition`, `model_uri` and `gpu`). Every value is a quoted
+  string, so a substituted `prd`, `append`, `l4`, `0.7.0_20261026T1200` or
+  `''` stays that string. `composer/sdfb_batches.py::load_layers` reads both
+  files from the DAG's own folder at parse time and refuses an overlay key
+  `generator.yaml` does not have. The DAG's id
+  (`synthetic_sdfb_<dag_version>`), its Flex Template
+  (`sdfb-<project_version>-template.json`), its buckets and job names come
+  from the overlay (`dag_constants`). The DAG file itself carries no marker:
+  workflow 3 runs its `sed` on the overlay alone and imports the DAG,
+  `sdfb_batches.py`, `generator.yaml` and the overlay side by side
+  ([RUN_PLAYBOOK §0b](../RUN_PLAYBOOK.md#0b-workflow-3-for-the-one-generation-dag-untracked-workflows)).
+- **What the DAG passes** (`launch_overrides`): each key whose text differs
+  from `generator.yaml`'s, whether the overlay or the trigger set it, plus
+  `run_id`, `config_uri` when set, and `generator_defaults_digest`. A key the
+  trigger sets back to `generator.yaml`'s value is not passed even where the
+  overlay set another, because the launcher's default is that value. A key
+  the launch's mode does not read is left out (`reference_table`,
+  `landing_table` and `ddl_uri` under `tables=all`; `source_dataset` and
+  `landing_dataset` under `explicit`).
+- **The file's hardware keys** (Rulings R16, R16b). The machine, the
+  accelerator, the SDK-container experiment and the launcher VM belong to
+  the Flex launch, which the DAG builds itself (`launch_environment`), not
+  the launcher. So when a trigger names a `config_uri`, the DAG reads the
+  file once and lays its `serving.client_type` (`vllm` | `fake`),
+  `serving.gpu` (`l4` | `t4`), `serving.sdk_containers` (`multi` | `single`)
+  and `serving.launcher_machine_type` (non-empty text) over the params before
+  it builds any launch body (`with_file_hardware`). A file's `gpu: t4` thus
+  launches a T4 machine, and a file's `client_type: fake` a CPU machine with
+  no accelerator, as the file says. Any other value fails the DAG's `route`
+  task once (a `PlanError`, never retried). Without `config_uri` the DAG reads
+  nothing from GCS for an explicit launch, as master's DAG read nothing.
+
+### R3 — The defaults digest
+
+**Claim (Figure D):** a DAG imported from another commit than the image's
+says so in the launcher log.
+
+*Mode 1: the DAG's `generator.yaml` is the image's.*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  D["⚪ DAG digest<br/>sha12 of its yaml"]:::data
+  I["⚪ image digest<br/>sha12 of its yaml"]:::data
+  C{"⚙️ equal?"}:::cpu
+  N["∅ nothing logged"]:::data
+  D --> C
+  I --> C
+  C -->|"yes"| N
+```
+
+*Mode 2: they differ.*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  D["⚪ DAG digest<br/>newer commit"]:::data
+  I["⚪ image digest<br/>older commit"]:::data
+  C{"⚙️ equal?"}:::cpu
+  W["🛡️ WARNING<br/>generator_defaults_mismatch"]:::cpu
+  D --> C
+  I --> C
+  C -->|"no"| W
+```
+
+The digest is the first 12 hex characters of the SHA-256 of the file's
+bytes (`defaults.py::defaults_digest`, mirrored by `load_layers`). The DAG
+passes it as `--generator_defaults_digest`; the launcher compares it with the
+image's and logs `SDFB_MILESTONE name=generator_defaults_mismatch dag=
+image=` at WARNING when they differ (`run_pipeline.py::log_defaults_mismatch`).
+Nothing is logged on a match, or when no digest was given (a CLI launch). A
+key the DAG did not pass takes the image's value, so a mismatch means a key
+whose default changed between the two commits may not be the one the DAG
+showed. The digest is launch identity, a flag only (a file that sets it is
+refused), and the snapshot records the image's as
+`config.launcher.defaults_digest`. Byte identity is the test (Ruling R9): a
+comment-only difference between the two files also logs the WARNING. The
+warning is advisory, and the comments are rendered from the catalogue, so a
+comment change is a catalogue change between the two commits.
+
+### R4 — Three DAG-only machine knobs become `serving` keys
+
+| Key | Default | Flag | The DAG turns it into | The launcher |
+| :-- | :-- | :-- | :-- | :-- |
+| `serving.gpu` | `l4` (the overlay sets the environment's) | `--gpu` (`l4` \| `t4`) | `g2-standard-8` + the L4 accelerator, or `n1-standard-8` + the T4 accelerator (with `client_type` `vllm`) | derives `vllm_dtype` from it (R5) and records it |
+| `serving.sdk_containers` | `multi` | `--sdk_containers` (`multi` \| `single`) | `no_use_multiple_sdk_containers` under `single` (vLLM launches only) | records it; a direct launch passes Beam's experiments itself |
+| `serving.launcher_machine_type` | `e2-standard-8` | `--launcher_machine_type` | the Flex launch's `launcherMachineType` | records it |
+
+All three are settable from a file (R2's hardware keys); `gpu` and
+`sdk_containers` leave D1's fixed list, which keeps ten entries. A DAG launch
+passes each only when it differs from `generator.yaml`; the Flex Template
+declares the three and the digest, so the template must be rebuilt before the
+DAG is re-imported.
+
+**Claim (Figure E):** one key picks the GPU workers' machine, accelerator
+and, unless set, the dtype. One panel per mode (`client_type` `vllm`; with
+`fake` the launch takes `e2-standard-8` and no accelerator on either).
+
+*`serving.gpu: l4` (the default).*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  G["⚪ gpu: l4"]:::data
+  M["🧠 g2-standard-8<br/>nvidia-l4 × 1"]:::gpu
+  T["⚪ vllm_dtype unset<br/>→ bfloat16"]:::data
+  G --> M
+  G --> T
+```
+
+*`serving.gpu: t4`.*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  G["⚪ gpu: t4"]:::data
+  M["🧠 n1-standard-8<br/>nvidia-tesla-t4 × 1"]:::gpu
+  T["⚪ vllm_dtype unset<br/>→ float16"]:::data
+  G --> M
+  G --> T
+```
+
+**Claim (Figure F):** `sdk_containers` changes only the workers' SDK-process
+topology.
+
+*`serving.sdk_containers: multi` (the default).*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  S["⚪ sdk_containers: multi"]:::data
+  E["🔀 no extra experiment<br/>one SDK process per vCPU"]:::beam
+  S --> E
+```
+
+*`serving.sdk_containers: single`.*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  S["⚪ sdk_containers: single"]:::data
+  E["🔀 no_use_multiple_sdk_containers<br/>one SDK process per worker"]:::beam
+  S --> E
+```
+
+`launcher_machine_type` has no modes: its value is the launcher VM's machine
+type, which must hold the image pull and the table prep inside the Flex
+launcher's 12 minutes.
+
+### R5 — `vllm_dtype` follows the GPU
+
+*`serving.vllm_dtype: null` (the default) is derived from `serving.gpu`; an
+explicit value wins on either GPU.*
+
+| `serving.gpu` | `vllm_dtype` unset (null) | `vllm_dtype` set |
+| :-- | :-- | :-- |
+| `t4` | `float16`: a T4 (compute capability 7.5) has no bfloat16 | the set value |
+| `l4` | `bfloat16`: a bf16 checkpoint keeps its own precision | the set value |
+
+The value is vLLM's
+[`--dtype` engine argument](https://docs.vllm.ai/en/latest/configuration/engine_args.html)
+(`auto` is the checkpoint's own dtype). The derivation is
+`model.py::DTYPE_OF_GPU` and `ServingSettings.effective_vllm_dtype`; the
+launcher logs `SDFB_MILESTONE name=vllm_dtype_resolved dtype= gpu= source=`,
+where `source` is `derived` for a null, else the key's provenance (`flag`,
+`file`). The derivation does not loosen the Gemma guard: an explicit
+`float16` for a Gemma checkpoint is still refused before vLLM starts,
+because fp16 Gemma silently emits empty output
+([`google/gemma-3-4b-it` discussion #33](https://huggingface.co/google/gemma-3-4b-it/discussions/33),
+[vLLM issue #40290](https://github.com/vllm-project/vllm/issues/40290);
+`vllm_client.py::_assert_dtype_supported`, RUN_PLAYBOOK §1).
+
+*Rejected:* keeping the DAG's `float16` as the L4 default. It reproduces
+master's L4 launch, but it serves bf16 checkpoints in fp16 on a GPU that has
+bf16, and it keeps two defaults for one key on two surfaces, which this ADR
+exists to remove. A launch that needs master's L4 dtype sets
+`serving: {vllm_dtype: float16}` in its file (RUN_PLAYBOOK §2d's parity
+control).
+
+### R6 — What changes from `master`, on purpose
+
+The master goldens (`packages/sdfb-tests/tests/fixtures/config_parity/`,
+captured at `edcfdcd`) are never regenerated. The differences are one table
+in code, `sdfb_tests/config_parity.py::DELIBERATE_CHANGES`, which the golden
+comparison applies before it compares, and nothing else:
+
+| Key | Master's CLI | Now (`generator.yaml`) | Effect |
+| :-- | :-- | :-- | :-- |
+| `generation.num_rows` | required | `1000` | the CLI no longer requires it; master's DAG already defaulted it to 1000 |
+| `rag.build_rag_layer` | `''` | `'true'` | builds the RAG layer when `rag_chunks_table` is set; a no-op without it |
+| `free_text.build_pool_layer` | `''` | `'true'` | builds the pools when `freetext_pools_table` is set; a no-op without it |
+| `serving.vllm_dtype` | `auto` | null, derived from `serving.gpu` (R5) | an L4 DAG launch moves from master's `float16` to `bfloat16`; a CLI L4 launch from `auto` to `bfloat16`; T4 stays `float16` |
+| `serving.gpu` | absent (a DAG param) | `l4` | none: master's DAG default |
+| `serving.sdk_containers` | absent (a DAG param) | `multi` | none: master's DAG default |
+| `serving.launcher_machine_type` | absent (a DAG param) | `e2-standard-8` | none: master's DAG default |
+
+The two build layers' no-op is the default's (Ruling R8): a typed
+`--build_rag_layer=true` without `--rag_chunks_table`, or
+`--build_pool_layer=true` without `--freetext_pools_table`, is still refused
+at parse time, as on master (`run_pipeline.py::parse_args`). A file's `true`
+without its table is the no-op too.
+
+Every flag added since `v0.6.1` made some of master's abbreviations
+ambiguous. Hidden aliases keep master's unambiguous prefixes of three or more
+characters on the same flag (`--lan…` → `--landing_table`, `--bat…` →
+`--batch_size`, `--gen…` → `--generate_fk_relationships`); they never appear
+in `--help` or on a launch surface (`run_pipeline.py::_FLAG_ALIASES`, pinned
+by `fixtures/config_parity/abbreviations.json`).
+
+### Acceptance criteria of the revision
+
+7. **AC-A1-7** An explicit DAG launch without `config_uri` resolves like
+   master's except for `DELIBERATE_CHANGES`, and reads nothing from GCS
+   (`test_launch_helpers.py::test_explicit_launch_resolves_like_master`,
+   `test_generation_dag.py::test_route_reads_gcs_only_for_a_config_file_or_a_whole_model_launch`).
+8. **AC-A1-8** The overlay's substituted values parse to exactly those
+   strings (`test_overlay_values_survive_yaml_after_substitution`).
+9. **AC-A1-9** A DAG digest that differs from the image's logs
+   `generator_defaults_mismatch` with both
+   (`test_defaults_digest.py::test_mismatched_digest_warns_with_both`).
+10. **AC-A1-10** An explicit `vllm_dtype` wins over the GPU derivation, and the
+    launcher logs the dtype and why
+    (`test_serving_launch_keys.py::test_explicit_vllm_dtype_wins_over_the_gpu_derivation`).
+11. **AC-A1-11** Every abbreviation of three or more characters that master
+    accepted reaches the same flag
+    (`test_flag_abbreviations.py::test_every_master_abbreviation_reaches_the_same_dest`).
+
 ## Alternatives rejected
 
 - **YAML holds everything: values and prose in one file, no typed model.** One file to edit, and the GUI and the reference read it directly. But the values would be untyped until runtime: an engine's read of a misspelt key, or of a string where it expects an int, fails on a Dataflow worker instead of under mypy on a laptop, and the types would be declared again in every loader that reads the file. D2 splits the two: values in the typed model, prose in the catalogue, and a 1:1 test so neither can drift from the other.
@@ -316,7 +637,7 @@ shape no store. A test pins the mapping.
   - **File wins can surprise an operator** who types a param the file also sets. The `config_override` WARNING names each one.
   - **A deployment needs a rebuild to use it.** The image and the Flex Template must be rebuilt for the `config_uri` parameter, and the Composer DAG re-imported for its param. A DAG that is not re-imported keeps working as before. Rebuild the Flex Template before re-importing the Composer DAG: the DAG always forwards `config_uri`, which an old template does not declare.
   - **The chained evaluation does not read the file.** The Composer DAG builds the evaluation's inputs from its own params: the seed table from `table_fqn`, the reference dataset from `source_dataset` (or `table_fqn`), the landing dataset from the landing-table marker, `relationships_uri` and `generate_fk_relationships` from their params, and `reference_rows_limit` fixed at 10000. A file that sets `io.reference_table`, `io.landing_table`, `relational.relationships_uri`, `relational.generate_fk_relationships` or `sampling.reference_rows_limit` therefore generates one thing and evaluates another. The launcher logs one `config_sets_evaluation_input key=… (no generation record is written — <reason> — so a chained evaluation reads the DAG param, not the file)` WARNING per such key; the structural fix is the generation record (below), which the evaluation can read instead of the params. *Resolved by [ADR 0044](0044-generation-record.md): when the launch writes its generation record, the chained evaluation takes these inputs from `validation_runs`; the WARNING is now logged only when no record is written.*
-  - **The Composer DAG keeps its own param defaults.** It cannot import `sdfb-core`, so its defaults stay where they were (including `vllm_dtype` `float16` against the CLI's `auto`), pinned by the launch-surface parity tests. A file that sets the key decides it for both.
+  - **The Composer DAG keeps its own param defaults.** It cannot import `sdfb-core`, so its defaults stay where they were (including `vllm_dtype` `float16` against the CLI's `auto`), pinned by the launch-surface parity tests. A file that sets the key decides it for both. *(Superseded 2026-10-26: the DAG reads its defaults from a copy of `generator.yaml` in its own folder, and the two surfaces now share `vllm_dtype`'s derivation from the GPU. See [the revision](#revision-2026-10-26-the-yaml-holds-the-values).)*
   - **`generation.generation_max_retries` is documented as unused** (fixed, read by no engine) until it is removed.
 - **Depends on the generation record.** Under a non-default pool-shaping value the pools are stored under the salted `model_uri`. The evaluator reads pools by `(reference_digest, model_uri)` with the unsalted URI, so it does not find them: its pool-memorization metrics read as not evaluated, for the wrong reason. The GUI's RAG pages show a salted `embedder_version` as a separate embedding set. The evaluator cannot import the salt ([ADR 0041](0041-evaluation-standalone-package.md)), so the next phase, the generation record, carries the effective cache keys in `validation_runs` for the evaluator and the GUI to follow. This ADR and that record ship in one release; neither ships alone. At the defaults nothing is salted and nothing is affected. *Resolved by ADR 0044: the record carries `derived.cache_keys` and the evaluator binds `cache_keys.freetext_pools`.*
 - **Forbids:**
@@ -336,9 +657,14 @@ shape no store. A test pins the mapping.
 
 ## Figures
 
-The five figures above are inline mermaid in the repository's house style
+The twelve figures above are inline mermaid in the repository's house style
 (node classes and icons as in `.claude/skills/visual-first-documentation/`).
 They carry no measured number: the shape, both resolution modes and both salt
-modes are read from the code in `sdfb_core/config/`. Figure A also appears in
-[`docs/DESIGN.md` §8](../DESIGN.md#8-configuration). Sources retrieved
-2026-10-21.
+modes are read from the code in `sdfb_core/config/`; the revision's four
+layers (Figure C) and both digest modes (Figure D) from `sdfb_core/config/defaults.py`,
+`composer/sdfb_batches.py` and `run_pipeline.py::log_defaults_mismatch`; the
+GPU and SDK-container panels (Figures E, F) from
+`composer/sdfb_batches.py::launch_environment` and `model.py::DTYPE_OF_GPU`.
+Figure A also appears in [`docs/DESIGN.md` §8](../DESIGN.md#8-configuration),
+Figure C too. Sources retrieved 2026-10-21; the revision's (vLLM's `--dtype`,
+the two Gemma fp16 reports) 2026-10-27.
