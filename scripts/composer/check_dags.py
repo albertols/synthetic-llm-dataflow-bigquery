@@ -17,12 +17,25 @@ The workspace tests read the DAG files with `ast`, which misses parse-time
 Airflow errors and never runs a trigger rule, a branch or a mapped task.
 This harness imports the DAG folder into a real Airflow 2.10.5 `DagBag`
 (exit 2 on any import error), then runs `dag.test(run_conf=...)` on the
-generation DAG once per scenario with every Google call patched:
+generation DAG once per scenario with every Google call patched.
+
+Each scenario runs in its own Python process (the script re-runs itself
+with `--child`), on its own filled copy of the folder and its own `DagBag`.
+Nothing carries over from one scenario to the next: `dag.test` writes the
+trigger's values into the DAG's `Param` objects (Airflow 2.10
+`process_params` copies them by reference and `ParamsDict.__setitem__`
+resolves the conf into them), and `sdfb_batches` stays cached in
+`sys.modules`. So a scenario's output does not depend on which scenarios
+ran before it, or in what order.
+
+The patches:
 
 - `GCSHook.__init__` / `GCSHook.download`: no connection; each read is
   recorded in `gcs_reads` and served from the scenario's `gcs_objects`. A
   scenario without objects (every explicit one) makes any read raise, so an
   explicit launch that touches GCS fails its task (an IAM regression).
+- `GCSHook.get_conn`: every other hook method (`exists`, `list`, ...)
+  goes through it; it is recorded as `<GCSHook.get_conn>` and raises.
 - `DataflowStartFlexTemplateOperator.execute`: records the rendered `body`
   and returns a fake job `{"id": "fakejob-<task_id>[-<map_index>]"}`; a
   launch whose `jobName` ends with one of the scenario's `fail_job_suffixes`
@@ -60,7 +73,8 @@ Deploy markers (`{{NAME}}`, upper-case, no spaces) are filled from
 `--markers` (a JSON object NAME -> value; the committed one is
 `packages/sdfb-tests/tests/fixtures/config_parity/dag_markers.json`) plus the
 scenario's `markers` overrides, in every text file of a copy of `--dags`
-(`*.py`, `*.yaml`, `*.yml`, `*.json`). A marker left unfilled is exit 2. The
+(`*.py`, `*.yaml`, `*.yml`, `*.json`; subfolders are copied too, except
+`__pycache__`). A marker left unfilled is exit 2. The
 Airflow Variables the DAGs read are `AIRFLOW_VARIABLES`, set by the script.
 Airflow's own Jinja (`{{ params.x }}`) is not a marker and is left alone.
 
@@ -96,8 +110,13 @@ folder holding the DAG files and what they read at parse time):
 `packages/sdfb-tests/tests/fixtures/config_parity/dag_bodies_master.json` is
 that command's output with `--dags` a detached worktree of master `edcfdcd`
 (`git worktree add --detach $S/master_wt edcfdcd`, then
-`--dags $S/master_wt/composer`). It is a golden: never regenerated, never
-hand-edited.
+`--dags $S/master_wt/composer`) and `--defaults-out
+packages/sdfb-tests/tests/fixtures/config_parity/dag_param_defaults_master.json`.
+`--defaults-out` writes, per scenario, the generation DAG's param defaults
+as the freshly loaded DAG holds them before the run, so a test can check
+that every value the trigger did not set is the DAG's default. Both are
+goldens: never hand-edited (regenerated once under Ruling R13, after the
+first recording leaked one scenario's params into the next).
 
 The script sets `AIRFLOW__CORE__DAGS_FOLDER` to the filled copy (which puts
 `sdfb_batches` on sys.path, as Composer does) and
@@ -106,8 +125,11 @@ imported inside functions only: the workspace's tests import this module
 (without Airflow) for `SCENARIOS` and `OUTPUT_KEYS`.
 
 Exit status: 0 when every scenario ran (a scenario whose DAG run fails on
-purpose still counts), 2 on an import error or an unfilled marker, 1 on a
-usage error or a harness failure.
+purpose still counts); 3 (`EXIT_FORBIDDEN_GCS`) when a scenario read GCS
+where it may not (any read in a scenario without `gcs_objects`, any
+`get_conn`), with one stderr line per such read and the output still
+written; 2 on an import error or an unfilled marker; 1 on a usage error or
+a harness failure.
 """
 from __future__ import annotations
 
@@ -119,6 +141,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 from collections.abc import Iterable, Mapping
@@ -131,6 +154,8 @@ from unittest import mock
 GENERATION_DAG_FILE = "synthetic_beam_bigquery.py"
 OUTPUT_KEYS = ("task_states", "bodies", "evaluation_body", "gcs_reads")
 MARKER = re.compile(r"\{\{([A-Z_]+)\}\}")
+EXIT_FORBIDDEN_GCS = 3
+GET_CONN_READ = "<GCSHook.get_conn>"
 _FILLED_SUFFIXES = (".py", ".yaml", ".yml", ".json")
 # The Airflow Variables the DAGs read (anonymised; DATAFLOW_NETWORK_TAGS and
 # SDFB_MAX_PARALLEL_JOBS keep their in-DAG defaults).
@@ -297,16 +322,22 @@ def normalise(value: Any, *, run_id: str, when: dt.datetime) -> Any:
 
 def fill_markers(source: Path, target: Path, markers: Mapping[str,
                                                               str]) -> None:
-  """Copy `source`'s files into `target`, filling every deploy marker.
+  """Copy `source`'s tree into `target`, filling every deploy marker.
 
-  Raises HarnessError naming each marker left unfilled.
+  Subfolders are copied too; `__pycache__` (bytecode) is the one thing left
+  out. Raises HarnessError naming each marker left unfilled.
   """
   target.mkdir(parents=True, exist_ok=True)
   missing: set[str] = set()
-  for path in sorted(source.iterdir()):
-    if not path.is_file():
+  for path in sorted(source.rglob("*")):
+    relative = path.relative_to(source)
+    if "__pycache__" in relative.parts:
       continue
-    destination = target / path.name
+    destination = target / relative
+    if path.is_dir():
+      destination.mkdir(parents=True, exist_ok=True)
+      continue
+    destination.parent.mkdir(parents=True, exist_ok=True)
     if path.suffix not in _FILLED_SUFFIXES:
       shutil.copyfile(path, destination)
       continue
@@ -320,7 +351,7 @@ def fill_markers(source: Path, target: Path, markers: Mapping[str,
     raise HarnessError(f"unfilled deploy markers in {source}: {names}")
 
 
-class _Recorder:
+class Recorder:
   """What one scenario's DAG run launched and read."""
 
   def __init__(self, scenario: Mapping[str, Any]):
@@ -339,6 +370,11 @@ class _Recorder:
     if uri not in objects:
       raise RuntimeError(f"check_dags: no such object {uri}")
     return objects[uri].encode("utf-8")
+
+  def get_conn(self) -> Any:
+    self.gcs_reads.append(GET_CONN_READ)
+    raise RuntimeError("check_dags: the DAG used a GCS client "
+                       "(GCSHook.get_conn); only download is served")
 
   def execute(self, task: Any, context: Mapping[str, Any]) -> dict[str, Any]:
     ti = context["ti"]
@@ -366,6 +402,14 @@ class _Recorder:
     return bodies, (evaluations[0] if evaluations else None)
 
 
+def forbidden_gcs_reads(scenario: Mapping[str, Any],
+                        gcs_reads: Iterable[str]) -> list[str]:
+  """The reads scenario `scenario` may not make: all of them when it has no
+  `gcs_objects`, and every `get_conn` in any scenario."""
+  allowed = bool(scenario["gcs_objects"])
+  return [r for r in gcs_reads if not allowed or r == GET_CONN_READ]
+
+
 def _airflow(name: str) -> Any:
   return importlib.import_module(name)
 
@@ -389,7 +433,7 @@ def _load_dagbag(folder: Path) -> Any:
 def run_scenario(dag: Any, name: str) -> dict[str, Any]:
   """One DAG run of scenario `name`, normalised."""
   scenario = SCENARIOS[name]
-  recorder = _Recorder(scenario)
+  recorder = Recorder(scenario)
   gcs = _airflow("airflow.providers.google.cloud.hooks.gcs").GCSHook
   operators = _airflow("airflow.providers.google.cloud.operators.dataflow")
   sensors = _airflow("airflow.providers.google.cloud.sensors.dataflow")
@@ -405,6 +449,7 @@ def run_scenario(dag: Any, name: str) -> dict[str, Any]:
   when = logical_date(name)
   with mock.patch.object(gcs, "__init__", lambda *_, **__: None), \
       mock.patch.object(gcs, "download", download), \
+      mock.patch.object(gcs, "get_conn", lambda *_, **__: recorder.get_conn()), \
       mock.patch.object(operators.DataflowStartFlexTemplateOperator,
                         "execute", execute), \
       mock.patch.object(sensors.DataflowJobStatusSensor, "poke",
@@ -428,13 +473,18 @@ def run_scenario(dag: Any, name: str) -> dict[str, Any]:
   return normalise(result, run_id=dag_run.run_id, when=when)
 
 
+def param_defaults(dag: Any) -> dict[str, Any]:
+  """The DAG's params as loaded, before any run resolves a trigger into
+  them."""
+  return {key: dag.params[key] for key in sorted(dag.params)}
+
+
 def _set_environment(folder: Path) -> None:
   os.environ["AIRFLOW__CORE__DAGS_FOLDER"] = str(folder)
   os.environ["AIRFLOW__CORE__LOAD_EXAMPLES"] = "False"
   for name, value in AIRFLOW_VARIABLES.items():
     os.environ[f"AIRFLOW_VAR_{name}"] = value
-  if str(folder) not in sys.path:
-    sys.path.insert(0, str(folder))
+  sys.path.insert(0, str(folder))
 
 
 def _parse(argv: list[str] | None) -> argparse.Namespace:
@@ -446,9 +496,52 @@ def _parse(argv: list[str] | None) -> argparse.Namespace:
       nargs="+",
       default=list(SCENARIOS),
       choices=list(SCENARIOS),
-      help="scenarios to run (default: all)")
+      help="scenarios to run, each in its own process (default: all)")
   parser.add_argument("--out", required=True, type=Path)
+  parser.add_argument(
+      "--defaults-out",
+      type=Path,
+      help="also write each scenario's DAG param defaults here")
+  # Internal: run exactly one scenario in this process.
+  parser.add_argument("--child", action="store_true", help=argparse.SUPPRESS)
   return parser.parse_args(argv)
+
+
+def _run_child(args: argparse.Namespace) -> int:
+  """One scenario, in this process: writes {"result", "defaults"}."""
+  (name,) = args.scenario
+  scenario = SCENARIOS[name]
+  markers = json.loads(args.markers.read_text(encoding="utf-8"))
+  with tempfile.TemporaryDirectory(prefix="check_dags_") as work:
+    folder = Path(work) / "dags"
+    try:
+      fill_markers(args.dags, folder, {**markers, **scenario["markers"]})
+      _set_environment(folder)
+      dag = _load_dagbag(folder)
+    except HarnessError as error:
+      print(f"check_dags: {name}: {error}", file=sys.stderr)
+      return 2
+    defaults = param_defaults(dag)
+    try:
+      result = run_scenario(dag, name)
+    except HarnessError as error:
+      print(f"check_dags: {error}", file=sys.stderr)
+      return 1
+  args.out.write_text(
+      json.dumps({
+          "result": result,
+          "defaults": defaults
+      }, sort_keys=True),
+      encoding="utf-8")
+  forbidden = forbidden_gcs_reads(scenario, result["gcs_reads"])
+  for read in forbidden:
+    print(f"check_dags: {name}: forbidden GCS read {read}", file=sys.stderr)
+  return EXIT_FORBIDDEN_GCS if forbidden else 0
+
+
+def _write(path: Path, data: Mapping[str, Any]) -> None:
+  path.write_text(
+      json.dumps(data, sort_keys=True, indent=2) + "\n", encoding="utf-8")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -458,37 +551,36 @@ def main(argv: list[str] | None = None) -> int:
         "check_dags: set AIRFLOW_HOME to a migrated scratch home",
         file=sys.stderr)
     return 1
-  markers = json.loads(args.markers.read_text(encoding="utf-8"))
+  if args.child:
+    return _run_child(args)
+  output, defaults, status = {}, {}, 0
   with tempfile.TemporaryDirectory(prefix="check_dags_") as work:
-    folders: dict[str, Path] = {}
-    try:
-      for name in args.scenario:
-        overrides = SCENARIOS[name]["markers"]
-        key = json.dumps(overrides, sort_keys=True)
-        if key not in folders:
-          folders[key] = Path(work) / f"dags_{len(folders)}"
-          fill_markers(args.dags, folders[key], {**markers, **overrides})
-      _set_environment(next(iter(folders.values())))
-      dags = {key: _load_dagbag(folder) for key, folder in folders.items()}
-    except HarnessError as error:
-      print(f"check_dags: {error}", file=sys.stderr)
-      return 2
-    output = {}
-    try:
-      for name in args.scenario:
-        key = json.dumps(SCENARIOS[name]["markers"], sort_keys=True)
-        output[name] = run_scenario(dags[key], name)
-    except HarnessError as error:
-      print(f"check_dags: {error}", file=sys.stderr)
-      return 1
-  args.out.write_text(
-      json.dumps(output, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    for name in args.scenario:
+      part = Path(work) / f"{name}.json"
+      code = subprocess.run([
+          sys.executable,
+          str(Path(__file__).resolve()), "--child", "--dags",
+          str(args.dags.resolve()), "--markers",
+          str(args.markers.resolve()), "--scenario", name, "--out",
+          str(part)
+      ],
+                            check=False).returncode
+      if code not in (0, EXIT_FORBIDDEN_GCS):
+        print(f"check_dags: scenario {name} exited {code}", file=sys.stderr)
+        return code
+      data = json.loads(part.read_text(encoding="utf-8"))
+      output[name], defaults[name] = data["result"], data["defaults"]
+      if code == EXIT_FORBIDDEN_GCS:
+        status = EXIT_FORBIDDEN_GCS
+  _write(args.out, output)
+  if args.defaults_out:
+    _write(args.defaults_out, defaults)
   for name, result in output.items():
     launches, reads = len(result["bodies"]), len(result["gcs_reads"])
     evaluation = "yes" if result["evaluation_body"] else "no"
     print(f"{name}: {launches} generation launch(es), evaluation "
           f"{evaluation}, {reads} GCS read(s)")
-  return 0
+  return status
 
 
 if __name__ == "__main__":

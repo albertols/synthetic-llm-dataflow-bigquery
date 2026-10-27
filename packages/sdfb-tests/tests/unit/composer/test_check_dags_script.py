@@ -21,16 +21,24 @@ so it loads here from its file.
 """
 from __future__ import annotations
 
+import datetime as dt
 import importlib.util
 import json
 import re
 from pathlib import Path
+
+import pytest
 
 _REPO = Path(__file__).resolve().parents[5]
 _SCRIPT = _REPO / "scripts" / "composer" / "check_dags.py"
 _FIXTURES = _REPO / "packages" / "sdfb-tests" / "tests" / "fixtures" / "config_parity"
 _GOLDEN = _FIXTURES / "dag_bodies_master.json"
 _MARKERS = _FIXTURES / "dag_markers.json"
+_DEFAULTS = _FIXTURES / "dag_param_defaults_master.json"
+# Generation-body parameters fed by a DAG param of another name (master's
+# `start_sdfb`); every other parameter is named after its param, or is a
+# deploy constant with no param at all.
+_BODY_KEY_PARAM = {"reference_table": "table_fqn"}
 
 _PLAN_SCENARIOS = [
     "explicit_l4", "explicit_t4", "explicit_fk_group", "explicit_eval_off",
@@ -41,6 +49,9 @@ _EXPLICIT_TASKS = {
     "start_sdfb", "run_evaluation_gate", "wait_for_generation",
     "trigger_evaluation", "wait_for_evaluation_launch"
 }
+
+_WHEN = dt.datetime(2026, 3, 4, 0, 5, tzinfo=dt.UTC)
+_RUN_ID = "manual__2026-03-04T00:05:00+00:00"
 
 
 def _load():
@@ -100,3 +111,105 @@ def test_marker_values_are_deployable():
   assert all(isinstance(v, str) for v in markers.values())
   assert markers["WRITE_DISPOSITION"] in {"append", "overwrite"}
   assert markers["GPU"] == "l4"
+
+
+def test_untriggered_params_are_masters_defaults():
+  """Critical 1 of the Task 7 review: one scenario's trigger values leaked
+  into the next through the DAG's shared Param objects. Every generation
+  parameter whose param the scenario does not set is the default master's
+  freshly loaded DAG holds."""
+  golden = json.loads(_GOLDEN.read_text(encoding="utf-8"))
+  defaults = json.loads(_DEFAULTS.read_text(encoding="utf-8"))
+  assert sorted(defaults) == sorted(golden)
+  checked = 0
+  for name, result in golden.items():
+    run_conf = M.SCENARIOS[name]["run_conf"]
+    parameters = result["bodies"][0]["launchParameter"]["parameters"]
+    for key, value in parameters.items():
+      param = _BODY_KEY_PARAM.get(key, key)
+      if param in defaults[name] and param not in run_conf:
+        assert value == str(defaults[name][param]), (name, key)
+        checked += 1
+  assert checked > 100
+  by_name = {
+      n: r["bodies"][0]["launchParameter"]["parameters"]
+      for n, r in golden.items()
+  }
+  assert by_name["explicit_fk_group"]["similarity"] == "0.5"
+  assert by_name["explicit_eval_off"]["relationships_uri"] == (
+      "config/relationships")
+  assert by_name["explicit_eval_off"]["num_rows"] == "1000"
+  assert defaults["explicit_t4"]["gpu"] == "t4"
+  assert defaults["explicit_l4"]["gpu"] == "l4"
+
+
+def test_normalise_replaces_run_and_time_values():
+  ts_nodash = "20260304T000500"
+  value = {
+      "run_id": f"{_RUN_ID}-0a1b2c3d",
+      "names": [f"eval-{ts_nodash.lower()}", f"x-{ts_nodash}"],
+      "when": ["2026-03-04T00:05:00+00:00", "day 2026-03-04"],
+      "kept": 8,
+      "other": "manual__2026-03-05T00:00:00+00:00",
+  }
+  assert M.normalise(
+      value, run_id=_RUN_ID, when=_WHEN) == {
+          "run_id": "<DAG_RUN_ID>-<SALT8>",
+          "names": ["eval-<TS_NODASH>", "x-<TS_NODASH>"],
+          "when": ["<TS>", "day <DS>"],
+          "kept": 8,
+          "other": "manual__2026-03-05T00:00:00+00:00",
+      }
+
+
+def test_fill_markers_fills_the_tree_and_names_unfilled_markers(tmp_path):
+  source = tmp_path / "src"
+  (source / "sub").mkdir(parents=True)
+  (source / "__pycache__").mkdir()
+  (source / "dag.py").write_text('X = "{{ENV}}"  # {{ params.x }}\n')
+  (source / "sub" / "env.yaml").write_text("gpu: '{{GPU}}'\n")
+  (source / "notes.txt").write_text("{{ENV}} stays\n")
+  (source / "__pycache__" / "dag.cpython-311.pyc").write_bytes(b"\0")
+  target = tmp_path / "out"
+  M.fill_markers(source, target, {"ENV": "prd", "GPU": "t4"})
+  assert (target / "dag.py").read_text() == 'X = "prd"  # {{ params.x }}\n'
+  assert (target / "sub" / "env.yaml").read_text() == "gpu: 't4'\n"
+  assert (target / "notes.txt").read_text() == "{{ENV}} stays\n"
+  assert not (target / "__pycache__").exists()
+  with pytest.raises(M.HarnessError, match=r"unfilled deploy markers.*GPU"):
+    M.fill_markers(source, tmp_path / "out2", {"ENV": "prd"})
+
+
+def test_recorder_records_and_refuses_reads_it_cannot_serve():
+  explicit = M.Recorder(M.SCENARIOS["explicit_l4"])
+  with pytest.raises(RuntimeError, match="reads nothing from GCS"):
+    explicit.download("sdfb-bucket", "a.yaml")
+  with pytest.raises(RuntimeError, match="get_conn"):
+    explicit.get_conn()
+  assert explicit.gcs_reads == ["gs://sdfb-bucket/a.yaml", M.GET_CONN_READ]
+  assert M.forbidden_gcs_reads(M.SCENARIOS["explicit_l4"],
+                               explicit.gcs_reads) == explicit.gcs_reads
+  batch = M.Recorder(M.SCENARIOS["all_one_batch"])
+  uri = "gs://sdfb-bucket/synthetic/relationships/model.yaml"
+  assert batch.download("sdfb-bucket",
+                        uri.split("/", 3)[3]).startswith(b"model:")
+  with pytest.raises(RuntimeError, match="no such object"):
+    batch.download("sdfb-bucket", "missing.yaml")
+  assert M.forbidden_gcs_reads(M.SCENARIOS["all_one_batch"],
+                               [uri, M.GET_CONN_READ]) == [M.GET_CONN_READ]
+
+
+def test_split_refuses_two_evaluation_launches():
+  recorder = M.Recorder(M.SCENARIOS["all_two_batches"])
+
+  def body(job):
+    return {"launchParameter": {"parameters": {"sdfb_job": job}}}
+
+  recorder.launches = [("start_batch", 1, body("generation")),
+                       ("start_batch", 0, body("generation")),
+                       ("trigger_evaluation", -1, body("evaluation"))]
+  bodies, evaluation = recorder.split()
+  assert len(bodies) == 2 and evaluation == body("evaluation")
+  recorder.launches.append(("trigger_evaluation_2", -1, body("evaluation")))
+  with pytest.raises(M.HarnessError, match="2 evaluation launches"):
+    recorder.split()
