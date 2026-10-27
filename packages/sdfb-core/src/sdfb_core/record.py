@@ -33,6 +33,7 @@ from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from sdfb_core.config.defaults import defaults_digest
 from sdfb_core.config.model import (CONFIG_VERSION, IDENTITY_KEYS,
                                     GeneratorConfig)
 from sdfb_core.observability import sha12
@@ -158,7 +159,8 @@ def build_snapshot(resolution: ConfigResolution,
       "relationships": _jsonable(dict(relationships)),
       "beam": _jsonable(dict(beam)),
       "launcher": {
-          "version": launcher_version
+          "version": launcher_version,
+          "defaults_digest": defaults_digest()
       },
       "batch": _jsonable(dict(batch)) if batch is not None else None,
   }

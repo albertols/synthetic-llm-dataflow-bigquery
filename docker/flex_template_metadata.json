@@ -452,6 +452,13 @@
       "regexes": ["^[1-9][0-9]*$"]
     },
     {
+      "name": "generator_defaults_digest",
+      "label": "Generator defaults digest",
+      "helpText": "The digest of the generator.yaml the model DAG was imported with. The launcher logs generator_defaults_mismatch when it is not the image's. The DAG sets it.",
+      "isOptional": true,
+      "regexes": ["^[0-9a-f]{12}$"]
+    },
+    {
       "name": "multi_table_mode",
       "label": "Multi-table execution mode",
       "helpText": "single_job (default): every planned table in ONE Dataflow job \u2014 one worker fleet, one vLLM ignition, in-DAG FK key handoff (ADR 0030). sequential_jobs: one job per table, parents first (fallback/debugging).",

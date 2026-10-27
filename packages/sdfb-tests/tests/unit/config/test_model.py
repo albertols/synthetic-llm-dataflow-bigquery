@@ -41,7 +41,9 @@ _MODEL_LAUNCH_FLAGS = {
     "source_dataset", "landing_dataset", "tables", "max_tables_per_job",
     "max_parallel_jobs", "prep_workers"
 }
-_MODEL_LAUNCH_IDENTITY = {"batch_index", "batch_count"}
+_MODEL_LAUNCH_IDENTITY = {
+    "batch_index", "batch_count", "generator_defaults_digest"
+}
 
 
 def test_every_master_flag_has_one_field():

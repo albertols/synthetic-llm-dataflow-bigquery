@@ -78,6 +78,7 @@ from apache_beam.options.pipeline_options import (
 )
 from google.cloud import bigquery
 from sdfb_core.codegen import derive_bq_load_schema
+from sdfb_core.config.defaults import defaults_digest
 from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig, value_of
 from sdfb_core.config.resolve import (
     PROVENANCE_FILE,
@@ -323,7 +324,7 @@ def resolve_batch_size(requested: int, num_rows: int) -> int:
 
 
 # argparse takes any unambiguous prefix of a long option. Flags added since
-# v0.6.1 (`--landing_*`, `--batch_*`) made these master spellings ambiguous;
+# v0.6.1 (`--landing_*`, `--batch_*`, `--generator_defaults_digest`) made these master spellings ambiguous;
 # an exact entry wins over prefix matching, so they keep reaching the same
 # flag (ADR 0043). They are registered by string only: they never appear in
 # `option_strings`, `--help` or the launch surface. Pinned by
@@ -331,6 +332,8 @@ def resolve_batch_size(requested: int, num_rows: int) -> int:
 _FLAG_ALIASES = {
     "--landing_table":
         ("--lan", "--land", "--landi", "--landin", "--landing", "--landing_"),
+    "--generate_fk_relationships":
+        ("--gen", "--gene", "--gener", "--genera", "--generat", "--generate"),
     "--batch_size": ("--bat", "--batc", "--batch", "--batch_"),
 }
 
@@ -731,6 +734,10 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "the launcher plans again and stops when its own count differs "
       "(ADR 0045).")
   p.add_argument(
+      "--generator_defaults_digest",
+      help="The digest of the generator.yaml the DAG shipped with; the "
+      "launcher warns when it is not the image's. A flag only.")
+  p.add_argument(
       "--config_uri",
       help="gs:// or local path to a generator config file (ADR 0043). "
       "Keys it sets win over the same flags; flags fill the keys it leaves "
@@ -845,6 +852,19 @@ def log_config_resolution(resolution: ConfigResolution) -> None:
   for item in resolution.overridden:
     logger.warning("config_override key=%s typed=%r file=%r (the file wins)",
                    item.key, item.typed, item.file)
+
+
+def log_defaults_mismatch(resolution: ConfigResolution) -> None:
+  """WARN when the DAG's generator.yaml is not the image's; nothing on a
+    match or when no digest was given."""
+  dag = resolution.config.launch.generator_defaults_digest
+  image = defaults_digest()
+  if dag and dag != image:
+    log_milestone(
+        "generator_defaults_mismatch",
+        level=logging.WARNING,
+        dag=dag,
+        image=image)
 
 
 def log_vllm_dtype(resolution: ConfigResolution) -> None:
@@ -3283,6 +3303,7 @@ def main(argv: list[str] | None = None) -> int:
   log_build_info("launcher")
   args, beam_argv = parse_args(argv or sys.argv[1:])
   log_config_resolution(args.config_resolution)
+  log_defaults_mismatch(args.config_resolution)
   log_vllm_dtype(args.config_resolution)
   if args.tables == TABLES_ALL:
     # ADR 0045 — every enabled table of one model, batch by batch.

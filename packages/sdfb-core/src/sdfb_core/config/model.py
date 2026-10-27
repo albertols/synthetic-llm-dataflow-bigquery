@@ -184,6 +184,9 @@ class LaunchSettings(_Section):
   # The batch this job generates and the count its orchestrator planned.
   batch_index: int | None = _identity()
   batch_count: int | None = _identity()
+  # The digest of the generator.yaml the DAG shipped with (ADR 0043); the
+  # launcher compares it with its image's own.
+  generator_defaults_digest: str | None = _identity()
 
 
 class SamplingSettings(_Section):

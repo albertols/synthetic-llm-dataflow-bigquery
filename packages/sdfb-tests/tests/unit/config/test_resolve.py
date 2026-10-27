@@ -108,7 +108,8 @@ def test_namespace_values_cover_every_flag():
   assert values["build_rag_layer"] == "true"
   assert values["vllm_max_model_len"] == "8192"
   # master's 47 + the eight ADR 0045 keys + the three serving launch keys
-  assert len(values) == 58
+  # + the generator defaults digest (Task 5)
+  assert len(values) == 59
 
 
 def test_a_file_null_on_a_null_default_leaves_the_key_to_the_flag():

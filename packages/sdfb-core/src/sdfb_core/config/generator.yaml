@@ -176,6 +176,14 @@ launch:
   # batch_index unset.
   # batch_count: null
 
+  # Generator defaults digest — The digest of the generator.yaml the DAG was
+  # imported with. The launcher compares it with the image's own and logs
+  # generator_defaults_mismatch when they differ.
+  # [--generator_defaults_digest]
+  # ↑ A DAG from a newer commit than the image names a different digest, and
+  # the launcher says so. · ↓ Unset: nothing is compared, as on a CLI launch.
+  # generator_defaults_digest: null
+
 # =========================================================================
 # SAMPLING — the reference sample and the source-stats profiler
 # =========================================================================

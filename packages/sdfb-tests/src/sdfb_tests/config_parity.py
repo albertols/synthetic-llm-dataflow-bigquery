@@ -46,7 +46,8 @@ GOLDENS_DIR = (
 # defaults on every master argv instead.
 MODEL_LAUNCH_ATTRS = frozenset({
     "source_dataset", "landing_dataset", "tables", "max_tables_per_job",
-    "max_parallel_jobs", "prep_workers", "batch_index", "batch_count"
+    "max_parallel_jobs", "prep_workers", "batch_index", "batch_count",
+    "generator_defaults_digest"
 })
 EXCLUDED_ATTRS = frozenset({"config_uri", "config_resolution"
                            }) | MODEL_LAUNCH_ATTRS

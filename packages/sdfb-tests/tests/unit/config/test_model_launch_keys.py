@@ -36,6 +36,7 @@ _DEFAULTS = {
     "prep_workers": 8,
     "batch_index": None,
     "batch_count": None,
+    "generator_defaults_digest": None,
 }
 
 
@@ -80,7 +81,9 @@ def test_a_file_sets_the_settable_launch_keys():
   assert config.io.source_dataset == "p.src"
 
 
-@pytest.mark.parametrize("key", ["batch_index", "batch_count", "run_id"])
+@pytest.mark.parametrize(
+    "key",
+    ["batch_index", "batch_count", "run_id", "generator_defaults_digest"])
 def test_launch_identity_is_refused_in_a_file(key):
   with pytest.raises(ConfigError, match=f"launch.{key} is launch identity"):
     parse_config_text(f"launch: {{{key}: 1}}\n", source="f.yaml")

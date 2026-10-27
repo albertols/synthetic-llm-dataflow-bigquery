@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 
 import yaml
+from sdfb_core.config.defaults import defaults_digest
 from sdfb_core.config.model import SECTION_TYPES
 from sdfb_core.config.resolve import parse_config_text, resolve
 from sdfb_core.contracts.relationships import RelationshipRegistry
@@ -133,7 +134,10 @@ def test_the_snapshot_carries_provenance_overrides_and_every_block():
       "typed": 0.3,
       "file": 0.7
   }]
-  assert snap["launcher"] == {"version": "0.6.1-master-edcfdcd"}
+  assert snap["launcher"] == {
+      "version": "0.6.1-master-edcfdcd",
+      "defaults_digest": defaults_digest()
+  }
   assert snap["batch"] is None
   json.dumps(snap)  # JSON-serialisable as is
 

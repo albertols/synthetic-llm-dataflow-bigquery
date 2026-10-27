@@ -33,6 +33,7 @@ from sdfb_beam import pipeline as pipeline_mod
 from sdfb_beam.cli import run_pipeline as rp
 from sdfb_beam.io.local_sinks import WriteToJsonLines
 from sdfb_beam.pipeline import PipelineConfig, TableSpec
+from sdfb_core.config.defaults import defaults_digest
 from sdfb_core.contracts.relationships import RelationshipRegistry
 from sdfb_core.record import RECORD_COLUMNS, SCHEMA_PATH, config_digest
 from sdfb_core.validation import Thresholds
@@ -154,7 +155,10 @@ def test_a_launch_writes_every_record_column_and_its_values_replay(
   assert datetime.fromisoformat(row["launched_at"]).tzinfo is not None
   snapshot = json.loads(row["config"])
   assert snapshot["provenance"]["generation.similarity"] == "file"
-  assert snapshot["launcher"] == {"version": _VERSION}
+  assert snapshot["launcher"] == {
+      "version": _VERSION,
+      "defaults_digest": defaults_digest()
+  }
   assert snapshot["beam"]["runner"] == "DirectRunner"
   assert snapshot["batch"] is None
   assert snapshot["derived"]["cache_keys"]["freetext_pools"] == (

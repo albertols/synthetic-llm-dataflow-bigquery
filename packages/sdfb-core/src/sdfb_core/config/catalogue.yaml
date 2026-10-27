@@ -881,6 +881,13 @@ settings:
       count differs, because the model or K changed in between.
     up: Must equal the launcher's own plan.
     down: 'Unset: only together with batch_index unset.'
+  launch.generator_defaults_digest:
+    label: Generator defaults digest
+    group: Identity
+    purpose: The digest of the generator.yaml the DAG was imported with. The launcher compares it with the
+      image's own and logs generator_defaults_mismatch when they differ.
+    up: A DAG from a newer commit than the image names a different digest, and the launcher says so.
+    down: 'Unset: nothing is compared, as on a CLI launch.'
   relational.identity_cols:
     label: Identity columns
     group: Keys
