@@ -57,7 +57,16 @@ export interface GeneratorSnapshot {
     [key: string]: unknown;
   };
   beam?: Record<string, unknown>;
-  launcher?: { version?: string; [key: string]: unknown };
+  /**
+   * The launcher's version and two generator.yaml digests (ADR 0043): the image's (`defaults_digest`) and the one
+   * the DAG passed (`dag_defaults_digest`, null without one). Two that differ mark an image/DAG skew.
+   */
+  launcher?: {
+    version?: string;
+    defaults_digest?: string;
+    dag_defaults_digest?: string | null;
+    [key: string]: unknown;
+  };
   batch?: unknown;
   [key: string]: unknown;
 }

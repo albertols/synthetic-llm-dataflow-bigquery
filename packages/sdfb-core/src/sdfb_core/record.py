@@ -134,6 +134,13 @@ def _jsonable(value: object) -> Any:
   return json.loads(json.dumps(value, default=str))
 
 
+def dag_defaults_digest(config: GeneratorConfig) -> str | None:
+  """The generator.yaml digest the DAG passed (`launch.
+    generator_defaults_digest`), normalised; None when none was passed."""
+  digest = (config.launch.generator_defaults_digest or "").strip().lower()
+  return digest or None
+
+
 def build_snapshot(resolution: ConfigResolution,
                    *,
                    derived: Mapping[str, Any],
@@ -144,7 +151,11 @@ def build_snapshot(resolution: ConfigResolution,
                    batch: Mapping[str, Any] | None = None) -> dict[str, Any]:
   """The `config` column: `values` replays the launch; the other blocks say
     where each value came from and what the launch derived and ran on.
-    `batch` is a batched launch's {index, count, tables} (phase B)."""
+    `batch` is a batched launch's {index, count, tables} (phase B).
+    `launcher` holds the image's generator.yaml digest and the one the DAG
+    passed (null without one): two that differ mark an image/DAG skew, the
+    `generator_defaults_mismatch` WARNING's condition (ADR 0043). Neither
+    enters `config_digest`, which hashes `values` only."""
   return {
       "config_version": CONFIG_VERSION,
       "values": config_values(resolution.config),
@@ -160,7 +171,8 @@ def build_snapshot(resolution: ConfigResolution,
       "beam": _jsonable(dict(beam)),
       "launcher": {
           "version": launcher_version,
-          "defaults_digest": defaults_digest()
+          "defaults_digest": defaults_digest(),
+          "dag_defaults_digest": dag_defaults_digest(resolution.config),
       },
       "batch": _jsonable(dict(batch)) if batch is not None else None,
   }

@@ -136,7 +136,8 @@ def test_the_snapshot_carries_provenance_overrides_and_every_block():
   }]
   assert snap["launcher"] == {
       "version": "0.6.1-master-edcfdcd",
-      "defaults_digest": defaults_digest()
+      "defaults_digest": defaults_digest(),
+      "dag_defaults_digest": None,
   }
   assert snap["batch"] is None
   json.dumps(snap)  # JSON-serialisable as is
@@ -207,3 +208,31 @@ def test_a_derived_seed_and_a_b2_engine():
       read_job_id=False).columns
   assert c["seed"] == "derived"
   assert c["retrieval_method"] is None
+
+
+def test_the_launcher_block_records_the_digest_the_dag_passed():
+  """An image/DAG skew is readable from the record: both digests are there."""
+  typed = dict(_TYPED, generator_defaults_digest="  ABCDEF012345 ")
+  resolution = resolve(
+      typed, parse_config_text(_FILE, source="f.yaml"), config_uri="f.yaml")
+  snap = build_snapshot(
+      resolution,
+      derived={},
+      thresholds={},
+      relationships={},
+      beam={},
+      launcher_version="v")
+  assert snap["launcher"]["dag_defaults_digest"] == "abcdef012345"
+  assert snap["launcher"]["defaults_digest"] == defaults_digest()
+
+
+def test_no_dag_digest_records_null():
+  assert _snapshot()["launcher"]["dag_defaults_digest"] is None
+
+
+def test_the_dag_digest_stays_out_of_the_config_digest():
+  typed = dict(_TYPED, generator_defaults_digest="abcdef012345")
+  with_digest = resolve(
+      typed, parse_config_text(_FILE, source="f.yaml"), config_uri="f.yaml")
+  assert config_digest(with_digest.config) == config_digest(
+      _resolution().config)

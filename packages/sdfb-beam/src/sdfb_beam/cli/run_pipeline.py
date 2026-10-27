@@ -145,6 +145,7 @@ from sdfb_core.record import (
     LaunchRecord,
     bq_update_command,
     build_snapshot,
+    dag_defaults_digest,
     launch_record,
     missing_record_columns,
     relationships_block,
@@ -859,8 +860,7 @@ def log_config_resolution(resolution: ConfigResolution) -> None:
 def log_defaults_mismatch(resolution: ConfigResolution) -> None:
   """WARN when the DAG's generator.yaml is not the image's; nothing on a
     match or when no digest was given."""
-  dag = (resolution.config.launch.generator_defaults_digest or "").strip()
-  dag = dag.lower()
+  dag = dag_defaults_digest(resolution.config)
   image = defaults_digest()
   if dag and dag != image:
     log_milestone(

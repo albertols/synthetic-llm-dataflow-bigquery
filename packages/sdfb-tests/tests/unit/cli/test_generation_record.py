@@ -157,7 +157,8 @@ def test_a_launch_writes_every_record_column_and_its_values_replay(
   assert snapshot["provenance"]["generation.similarity"] == "file"
   assert snapshot["launcher"] == {
       "version": _VERSION,
-      "defaults_digest": defaults_digest()
+      "defaults_digest": defaults_digest(),
+      "dag_defaults_digest": None,
   }
   assert snapshot["beam"]["runner"] == "DirectRunner"
   assert snapshot["batch"] is None
@@ -171,6 +172,21 @@ def test_a_launch_writes_every_record_column_and_its_values_replay(
   args, _ = rp.parse_args(["--run_id=r1", f"--config_uri={replay}"])
   assert config_digest(rp.config_of(args)) == row["config_digest"]
   assert args.similarity == 0.7
+
+
+def test_the_record_carries_the_dag_digest_beside_the_images(
+    tmp_path, launcher):
+  """A skewed DAG's digest lands in validation_runs.config, where a reader
+    can compare it with the image's (ADR 0043); config_digest ignores it."""
+  assert _main(launcher, tmp_path / "plain") == 0
+  plain = _only_row(tmp_path / "plain", "vr_t")
+  assert _main(launcher, tmp_path / "skew",
+               "--generator_defaults_digest=abcdef012345") == 0
+  skew = _only_row(tmp_path / "skew", "vr_t")
+  launcher_block = json.loads(skew["config"])["launcher"]
+  assert launcher_block["dag_defaults_digest"] == "abcdef012345"
+  assert launcher_block["defaults_digest"] == defaults_digest()
+  assert skew["config_digest"] == plain["config_digest"]
 
 
 def test_a_table_without_the_columns_gets_todays_row(tmp_path, launcher,

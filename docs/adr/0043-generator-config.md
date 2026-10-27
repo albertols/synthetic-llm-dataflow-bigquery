@@ -446,7 +446,10 @@ key the DAG did not pass takes the image's value, so a mismatch means a key
 whose default changed between the two commits may not be the one the DAG
 showed. The digest is launch identity, a flag only (a file that sets it is
 refused), and the snapshot records the image's as
-`config.launcher.defaults_digest`. Byte identity is the test (Ruling R9): a
+`config.launcher.defaults_digest` and the DAG's as
+`config.launcher.dag_defaults_digest` (null when none was passed), so a
+skewed run stays readable in `validation_runs` after the log is gone; neither
+enters `config_digest`. Byte identity is the test (Ruling R9): a
 comment-only difference between the two files also logs the WARNING. The
 warning is advisory, and the comments are rendered from the catalogue, so a
 comment change is a catalogue change between the two commits.
