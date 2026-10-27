@@ -263,9 +263,12 @@ def _param(name: str) -> dict:
 
 
 def test_flex_metadata_declares_the_serving_launch_keys():
-  for name, good, bad in (("gpu", ("", "l4", "t4"), "a100"),
-                          ("sdk_containers", ("", "multi", "single"), "many"),
-                          ("launcher_machine_type", ("", "e2-standard-8",
+  # Optional means omitted, never '': an empty gpu or sdk_containers is
+  # refused by argparse's choices, and an empty launcher_machine_type would
+  # record no VM, so the template refuses '' before a launcher VM starts.
+  for name, good, bad in (("gpu", ("l4", "t4"), "a100"),
+                          ("sdk_containers", ("multi", "single"), "many"),
+                          ("launcher_machine_type", ("e2-standard-8",
                                                      "n1-highmem-4"), "e2 8")):
     param = _param(name)
     assert param["isOptional"] is True
@@ -273,8 +276,28 @@ def test_flex_metadata_declares_the_serving_launch_keys():
     for value in good:
       assert re.fullmatch(regex, value), (name, value)
     assert not re.fullmatch(regex, bad), (name, bad)
+    assert not re.fullmatch(regex, ""), name
   # The template states no default the yaml would contradict.
   dtype = _param("vllm_dtype")["helpText"]
   assert "auto (default)" not in dtype
   assert "gpu" in dtype
   assert "Required" not in _param("num_rows")["helpText"]
+
+
+@pytest.mark.parametrize("source", ["flag", "file"])
+def test_an_empty_launcher_machine_type_is_refused(source):
+  """'' would record no launcher VM; neither a flag nor a file may set it."""
+  typed = {
+      "reference_table": "p.src.A_TABLE",
+      "landing_table": "p.land.A_TABLE",
+      "dlq_table": "p.q.dlq",
+      "run_id": "r1",
+  }
+  file = None
+  if source == "flag":
+    typed["launcher_machine_type"] = ""
+  else:
+    file = parse_config_text(
+        "serving: {launcher_machine_type: ''}\n", source="f.yaml")
+  with pytest.raises(ConfigError, match="launcher_machine_type"):
+    resolve(typed, file, config_uri="f.yaml" if file else None)

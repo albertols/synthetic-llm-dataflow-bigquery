@@ -419,7 +419,7 @@ class ServingSettings(_Section):
   # three.
   gpu: GpuProfile = _flag()
   sdk_containers: Literal["multi", "single"] = _flag()
-  launcher_machine_type: str = _flag()
+  launcher_machine_type: str = _flag(min_length=1)
 
   @property
   def effective_vllm_dtype(self) -> VllmDtype:

@@ -212,7 +212,7 @@
       "helpText": "l4 or t4: the workers' GPU. The launcher derives vllm_dtype from it when vllm_dtype is omitted, and records it; the worker machine and accelerator are the launch's own (workerMachineType, the accelerator experiment). Omitted: config/generator.yaml's default.",
       "isOptional": true,
       "regexes": [
-        "^(l4|t4)?$"
+        "^(l4|t4)$"
       ]
     },
     {
@@ -221,7 +221,7 @@
       "helpText": "multi or single (ADR 0034): the worker topology of a vLLM launch. Recorded by the launcher; the topology itself is the launch's experiments (no_use_multiple_sdk_containers for single). Omitted: config/generator.yaml's default.",
       "isOptional": true,
       "regexes": [
-        "^(multi|single)?$"
+        "^(multi|single)$"
       ]
     },
     {
@@ -230,7 +230,7 @@
       "helpText": "Machine type of the Flex Template launcher VM, recorded by the launcher; the VM itself is the launch's launcherMachineType. Omitted: config/generator.yaml's default.",
       "isOptional": true,
       "regexes": [
-        "^[a-z0-9-]*$"
+        "^[a-z0-9-]+$"
       ]
     },
     {
