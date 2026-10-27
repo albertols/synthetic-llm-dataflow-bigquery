@@ -149,8 +149,8 @@ The standalone evaluation DAG `composer/evaluation_framework.py` still
 carries seven markers (`{{PROJECT_VERSION}}`, `{{ENV}}`,
 `{{GCS_DATAFLOW_STAGING}}`, `{{GCS_DATAFLOW_TEMPLATES}}`,
 `{{SDFB_DEFAULT_TABLE_FQN}}`, `{{SDFB_LANDING_TABLE}}`,
-`{{SDFB_VALIDATION_RUNS_TABLE}}`): keep the `sed` on that file wherever the
-workflow that imports it runs one today (workflow 3, or 3e). "No `sed` on the
+`{{SDFB_VALIDATION_RUNS_TABLE}}`): workflow 3e (`3_import_eval_dag.yaml`),
+which imports it, keeps its `sed` on that file unchanged. "No `sed` on the
 DAG" is about the generation DAG only.
 
 The step, in full (`<the -e list>` is the workflow's existing one; the load
@@ -1007,9 +1007,10 @@ the provider's job-name suffix, `on_kill`) is steps 8, 9 and 12.
    on it: the template now declares `tables`, `source_dataset`,
    `landing_dataset`, `max_tables_per_job`, `prep_workers`, `batch_index`,
    `batch_count` and `generation_job_ids` (six new parameters; `tables` and
-   `landing_dataset` are names the evaluation already read), and
-   `generator.yaml`'s four (`gpu`, `sdk_containers`,
-   `launcher_machine_type`, `generator_defaults_digest`).
+   `landing_dataset` are names the evaluation already read), and four more:
+   the `generator.yaml` keys `gpu`, `sdk_containers` and
+   `launcher_machine_type`, and the launch-identity flag
+   `generator_defaults_digest`.
 
 4. **Re-import the DAG** (workflow 3): the Composer UI lists one generation
    DAG, `synthetic_sdfb_<DAG_VERSION>`, with a `tables` param, and no import
@@ -1273,7 +1274,7 @@ the provider's job-name suffix, `on_kill`) is steps 8, 9 and 12.
 | `route` fails at once, no retry (a `PlanError`) | the model or config file, or K, cannot be planned: `relationships_uri` is not one `gs://…/<model>.yaml` file, a file that does not exist or is not UTF-8 or YAML, a bad `launch:` or `serving:` value, or K is not a positive integer | the param or the file the message names |
 | the explicit chain ran instead of the batches | the config file sets `launch.tables: explicit`, which wins over the `tables` param | drop the key from the file, or set it to `all` |
 | `route` fails reading the file (a 403, retried) | the Composer environment's service account cannot read the model or config file | §0b's grant |
-| `model_batch_count_mismatch` (launcher, ERROR) | the model file or K changed between `plan` and this batch's launch | trigger the DAG again |
+| `model_batch_count_mismatch` (launcher, ERROR) | the model file or K changed between `route` and this batch's launch | trigger the DAG again |
 | `[model launch] … a Flex launch runs one Dataflow job` | a Flex launch of `tables=all` that plans several batches without `batch_index` (the template launched by hand; the DAG gives every batch its index) | the DAG with `tables=all`, `run_model.py`, or `max_tables_per_job` ≥ the enabled tables |
 | `launch_option_unused key=…` (launcher, WARNING) | a key the launch's `tables` mode does not read was given | drop it |
 | `collect_landed` skipped, no evaluation | `run_evaluation` is off, or no batch job reached DONE | the failed batches first |
@@ -2922,8 +2923,8 @@ uv run --no-sync python3 scripts/launch/run_model.py \
   the env overlay `sdfb_env.yaml` (an empty store: drop its flag; an empty
   embedder: drop it, B.1 then uses the `HashingEmbedder`). The DAG passes
   only the keys whose value differs from `generator.yaml` (ADR 0043 R2), and
-  the launcher reads every other one from the same `generator.yaml` in the
-  image, so the two agree: `engine` and `write_disposition` are passed above
+  the launcher reads every other one from the same `generator.yaml` (the
+  image's, or the checkout's for a checkout launch), so the two agree: `engine` and `write_disposition` are passed above
   because the overlay sets them per build; `vllm_dtype` is left unset on
   both surfaces and follows `--gpu` (default `l4` → `bfloat16`; add
   `--gpu=t4` for a T4, whose dtype is `float16`); `build_rag_layer` and
