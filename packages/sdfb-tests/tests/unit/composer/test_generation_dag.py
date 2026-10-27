@@ -38,6 +38,8 @@ import itertools
 import json
 import os
 import re
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -335,8 +337,11 @@ def test_route_resolves_the_branch_and_fails_a_plan_error_once():
   assert ast.unparse(decorator.func) == "task.branch"
   assert "retries" not in _keywords(decorator)  # a GCS read may be retried
   route = _task("route")
-  assert "sdfb_batches.resolve_tables_mode(params, config_text)" in (
-      ast.unparse(route))
+  text = ast.unparse(route)
+  # The file is parsed once; every helper takes the parsed mapping.
+  assert "config = sdfb_batches.parse_config(config_text)" in text
+  assert "sdfb_batches.resolve_tables_mode(params, config)" in text
+  assert "sdfb_batches.planning_inputs(params, config)" in text
   branches = {
       ast.literal_eval(n.value)
       for n in ast.walk(route)
@@ -348,6 +353,78 @@ def test_route_resolves_the_branch_and_fails_a_plan_error_once():
   ]
   assert ast.unparse(handler.type) == "sdfb_batches.PlanError"
   assert "AirflowFailException" in ast.unparse(handler)
+
+
+def test_route_puts_the_files_hardware_over_the_params_before_any_body():
+  """Ruling R16: a config file's serving.gpu, sdk_containers and
+  launcher_machine_type reach the machine, the accelerator, the experiments
+  and the launcher VM the DAG builds, on both branches."""
+  route = _task("route")
+  (overlay,) = [
+      n for n in ast.walk(route) if isinstance(n, ast.Assign) and ast.unparse(n)
+      == "params = sdfb_batches.with_file_hardware(params, config)"
+  ]
+  builders = [
+      c for name in ("explicit_body", "launch_plan", "planning_inputs",
+                     "whole_model_params") for c in _calls(route, name)
+  ]
+  assert len(builders) == 4
+  for call in builders:
+    assert call.lineno > overlay.lineno, ast.unparse(call)
+
+
+class _NotFoundError(Exception):
+  """Stands in for google.api_core.exceptions.NotFound."""
+
+
+def _read_gcs_text(monkeypatch, download):
+  """The DAG's `_read_gcs_text`, run on a fake `GCSHook` whose `download`
+  is `download`, and a fake `google.api_core.exceptions.NotFound`."""
+  hooks = types.ModuleType("airflow.providers.google.cloud.hooks.gcs")
+  hooks.GCSHook = type(
+      "GCSHook",
+      (),
+      {  # type: ignore[attr-defined]
+          "download": lambda self, **kwargs: download(**kwargs)
+      })
+  exceptions = types.ModuleType("google.api_core.exceptions")
+  exceptions.NotFound = _NotFoundError  # type: ignore[attr-defined]
+  parts = ["airflow", "providers", "google", "cloud", "hooks"]
+  for depth in range(1, len(parts) + 1):
+    name = ".".join(parts[:depth])
+    monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+  monkeypatch.setitem(sys.modules, hooks.__name__, hooks)
+  monkeypatch.setitem(sys.modules, "google.api_core.exceptions", exceptions)
+  function = _functions()["_read_gcs_text"]
+  scope: dict = {"sdfb_batches": M}
+  exec(  # pylint: disable=exec-used  # one function of a file only Airflow imports
+      compile(ast.Module(body=[function], type_ignores=[]), str(_DAG), "exec"),
+      scope)
+  return scope["_read_gcs_text"]
+
+
+def test_a_read_that_fails_the_same_way_every_time_is_a_plan_error(monkeypatch):
+  """Review M2: a missing object and bytes that are not UTF-8 are
+  PlanErrors (route fails once); a transient GCS error is raised as it is,
+  for the environment's retries."""
+  read = _read_gcs_text(monkeypatch, lambda **kw: b"launch:\n  tables: all\n")
+  assert read("gs://b/c.yaml") == "launch:\n  tables: all\n"
+
+  def missing(**_):
+    raise _NotFoundError("404 No such object: b/c.yaml")
+
+  with pytest.raises(M.PlanError, match="no such object"):
+    _read_gcs_text(monkeypatch, missing)("gs://b/c.yaml")
+  with pytest.raises(M.PlanError, match="not UTF-8"):
+    _read_gcs_text(monkeypatch, lambda **kw: b"\xff\xfe\x00")("gs://b/c.yaml")
+  with pytest.raises(M.PlanError, match="from GCS"):
+    _read_gcs_text(monkeypatch, missing)("config/relationships/m.yaml")
+
+  def transient(**_):
+    raise ConnectionError("503 backend unavailable")
+
+  with pytest.raises(ConnectionError):
+    _read_gcs_text(monkeypatch, transient)("gs://b/c.yaml")
 
 
 def test_route_pushes_every_key_a_task_pulls():

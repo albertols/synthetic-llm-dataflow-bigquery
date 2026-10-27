@@ -28,8 +28,13 @@ PyYAML only, what the DAG needs:
     explicit_body      the explicit branch's Flex launch body (master's
                        `start_sdfb`)
     evaluation_body    the chained evaluation's launch body
+    parse_config       a config_uri file, parsed once (a PlanError when it
+                       is no YAML mapping)
     resolve_tables_mode  which branch runs: a config file's launch.tables
                        wins over the param
+    with_file_hardware the file's serving.gpu / sdk_containers /
+                       launcher_machine_type over the params, for the
+                       hardware the DAG itself builds
     plan_batches       the batches of sdfb_core.launch.batches
                        (first-fit-decreasing over whole components)
     planning_inputs    the model file and K the batch launchers will plan
@@ -77,13 +82,14 @@ from typing import Any, Literal
 import yaml
 
 __all__ = [
-    "DEFAULT_MAX_TABLES_PER_JOB", "L4_ACCELERATOR", "T4_ACCELERATOR", "Layers",
-    "PlanError", "TablesMode", "batch_job_name", "batch_parameters", "cli_text",
-    "common_parameters", "dag_constants", "evaluation_body", "explicit_body",
+    "DEFAULT_MAX_TABLES_PER_JOB", "FILE_HARDWARE_KEYS", "L4_ACCELERATOR",
+    "T4_ACCELERATOR", "ConfigInput", "Layers", "PlanError", "TablesMode",
+    "batch_job_name", "batch_parameters", "cli_text", "common_parameters",
+    "dag_constants", "decode_object", "evaluation_body", "explicit_body",
     "landed_job_ids", "launch_environment", "launch_overrides", "launch_plan",
-    "load_layers", "model_slug", "param_defaults", "plan_banner",
-    "plan_batches", "planning_inputs", "resolve_tables_mode",
-    "whole_model_params"
+    "load_layers", "model_slug", "param_defaults", "parse_config",
+    "plan_banner", "plan_batches", "planning_inputs", "resolve_tables_mode",
+    "whole_model_params", "with_file_hardware"
 ]
 
 DEFAULT_MAX_TABLES_PER_JOB = 10
@@ -307,8 +313,73 @@ def launch_overrides(params: Mapping[str, object],
   return out
 
 
+# A config file is its text (the DAG reads it once) or that text parsed by
+# `parse_config`.
+ConfigInput = str | Mapping[str, Any] | None
+
+
+def parse_config(config: ConfigInput) -> dict[str, Any]:
+  """A config_uri file as `{section: value}`: empty or absent is `{}`. Text
+  that is no valid YAML, or whose top level is no mapping, is a PlanError
+  (the launcher refuses the same file). A mapping passes through, so the
+  DAG parses the file once and hands every helper the result."""
+  if isinstance(config, Mapping):
+    return dict(config)
+  try:
+    data = yaml.safe_load(config) if config else None
+  except yaml.YAMLError as e:
+    raise PlanError(f"config_uri: not valid YAML — {e}") from e
+  data = {} if data is None else data
+  if not isinstance(data, Mapping):
+    raise PlanError("config_uri: the top level must be a mapping of sections")
+  return {str(k): v for k, v in data.items()}
+
+
+# The serving keys a config file sets that change the hardware the DAG
+# itself asks for (`launch_environment`): each with the values a launch
+# accepts, None for any non-empty text.
+FILE_HARDWARE_KEYS: dict[str, tuple[str, ...] | None] = {
+    "gpu": ("l4", "t4"),
+    "sdk_containers": ("multi", "single"),
+    "launcher_machine_type": None,
+}
+
+
+def with_file_hardware(params: Mapping[str, Any],
+                       config: ConfigInput) -> dict[str, Any]:
+  """`params` with a config file's serving.gpu, serving.sdk_containers and
+  serving.launcher_machine_type over them (Ruling R16).
+
+  The launcher applies the file's keys over the flags (ADR 0043), but the
+  machine, accelerator, SDK-container experiments and launcher VM are the
+  Flex launch's own, which the DAG builds from these params: without this a
+  file's `gpu: t4` would launch an L4 machine while the launcher derives
+  float16 for a T4. A key the file does not set leaves the param as it is;
+  a value no launch accepts is a PlanError."""
+  data = parse_config(config)
+  serving = data.get("serving")
+  out = dict(params)
+  if serving is None:
+    return out
+  if not isinstance(serving, Mapping):
+    raise PlanError(f"config_uri: section 'serving' must be a mapping, got "
+                    f"{serving!r}")
+  for key, allowed in FILE_HARDWARE_KEYS.items():
+    if key not in serving:
+      continue
+    value = serving[key]
+    if not isinstance(value, str) or not value.strip() or (
+        allowed is not None and value not in allowed):
+      expected = (f"one of {list(allowed)}"
+                  if allowed is not None else "a non-empty machine type")
+      raise PlanError(f"config_uri's serving.{key} must be {expected}, got "
+                      f"{value!r}")
+    out[key] = value
+  return out
+
+
 def resolve_tables_mode(params: Mapping[str, object],
-                        config_text: str | None) -> TablesMode:
+                        config_text: ConfigInput) -> TablesMode:
   """The branch a launch takes: the config file's launch.tables when it sets
   one (a file's keys win, ADR 0043), else the `tables` param.
 
@@ -317,14 +388,9 @@ def resolve_tables_mode(params: Mapping[str, object],
   mapping, and a launch.tables that is neither explicit nor all (null
   included: its generator.yaml default is not null, so the launcher refuses
   it rather than reading it as unset), are refused. Every refusal is a
-  PlanError: the same file fails the same way on every retry."""
-  try:
-    data = yaml.safe_load(config_text) if config_text else None
-  except yaml.YAMLError as e:
-    raise PlanError(f"config_uri: not valid YAML — {e}") from e
-  data = {} if data is None else data
-  if not isinstance(data, Mapping):
-    raise PlanError("config_uri: the top level must be a mapping of sections")
+  PlanError: the same file fails the same way on every retry. The file may
+  come parsed (`parse_config`)."""
+  data = parse_config(config_text)
   launch = data.get("launch")
   if launch is None:
     launch = {}
@@ -578,7 +644,10 @@ def _tables(model_text: str) -> dict[str, tuple[bool, tuple[str, ...]]]:
   """table → (enabled, the in-model tables its FK edges name), in file
   order. An edge whose ref is dotted names another dataset and is left out;
   a ref the core refuses at load is refused (`_check_refs`)."""
-  raw = yaml.safe_load(model_text) or {}
+  try:
+    raw = yaml.safe_load(model_text) or {}
+  except yaml.YAMLError as e:
+    raise PlanError(f"the model file is not valid YAML — {e}") from e
   if not isinstance(raw, Mapping):
     raise PlanError("the model file's top level must be a mapping")
   tables = raw.get("tables") or {}
@@ -664,13 +733,11 @@ def plan_batches(model_text: str,
 
 
 def planning_inputs(params: Mapping[str, Any],
-                    config_text: str | None) -> tuple[str, int]:
+                    config_text: ConfigInput) -> tuple[str, int]:
   """(the model file, K) the batch launchers will plan with: a key the
-  config file sets wins over the DAG param, as in the launcher (ADR 0043)."""
-  data = yaml.safe_load(config_text) if config_text else None
-  data = {} if data is None else data
-  if not isinstance(data, Mapping):
-    raise PlanError("config_uri: the top level must be a mapping of sections")
+  config file sets wins over the DAG param, as in the launcher (ADR 0043).
+  The file may come parsed (`parse_config`)."""
+  data = parse_config(config_text)
   launch = data.get("launch") or {}
   relational = data.get("relational") or {}
   if not isinstance(launch, Mapping) or not isinstance(relational, Mapping):
@@ -714,6 +781,15 @@ def whole_model_params(params: Mapping[str, Any],
       out[param] = (".".join(parts[:2])
                     if len(parts) == _QUALIFIED_TABLE_PARTS else "")
   return out
+
+
+def decode_object(data: bytes, uri: str) -> str:
+  """A GCS object's bytes as UTF-8 text; bytes that are not UTF-8 are a
+  PlanError (the same object fails the same way on every retry)."""
+  try:
+    return data.decode("utf-8")
+  except UnicodeDecodeError as e:
+    raise PlanError(f"{uri}: not UTF-8 text — {e}") from e
 
 
 def model_slug(uri: str, max_len: int = 24) -> str:

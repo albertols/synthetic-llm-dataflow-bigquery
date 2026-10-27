@@ -539,6 +539,127 @@ def test_a_whole_model_launch_takes_its_datasets_from_the_overlay(deployed):
   assert (empty["source_dataset"], empty["landing_dataset"]) == ("", "")
 
 
+# -- a config file's hardware (Ruling R16) ---------------------------------
+def _gpu_launches(layers, params, config) -> list[dict]:
+  """The explicit body and the batch bodies `route` builds once the file's
+  hardware is over the params."""
+  params = M.with_file_hardware(params, config)
+  explicit = M.explicit_body(
+      params, layers, job_name="j", variables=H.AIRFLOW_VARIABLES)
+  plan = M.launch_plan(
+      M.whole_model_params({
+          **params, "tables": "all"
+      }, layers),
+      model_text="tables:\n  X_TABLE: {}\n  Y_TABLE: {}\n",
+      max_tables_per_job=1,
+      relationships_uri="gs://b/rel/model.yaml",
+      base_run_id="r",
+      constants=M.dag_constants(layers, H.AIRFLOW_VARIABLES),
+      layers=layers)
+  return [explicit, *plan["bodies"]]
+
+
+def test_a_file_gpu_t4_launches_t4_machines_on_both_branches(layers):
+  params = {**M.param_defaults(layers), "run_id": "r"}
+  assert params["gpu"] == "l4"
+  text = ("serving:\n  gpu: t4\n  sdk_containers: single\n"
+          "  launcher_machine_type: n2-standard-16\n")
+  launches = _gpu_launches(layers, params, text)
+  assert len(launches) == 3
+  for body in launches:
+    launch = body["launchParameter"]
+    environment = launch["environment"]
+    assert environment["machineType"] == "n1-standard-8"
+    assert M.T4_ACCELERATOR in environment["additionalExperiments"]
+    assert M.L4_ACCELERATOR not in environment["additionalExperiments"]
+    assert "no_use_multiple_sdk_containers" in (
+        environment["additionalExperiments"])
+    assert environment["launcherMachineType"] == "n2-standard-16"
+    # the launcher is told the same GPU it derives vllm_dtype from
+    assert launch["parameters"]["gpu"] == "t4"
+  # the parsed file works the same as its text
+  assert _gpu_launches(layers, params, M.parse_config(text)) == _gpu_launches(
+      layers, params, text)
+
+
+@pytest.mark.parametrize("text", [
+    None, "", "launch:\n  tables: all\n", "serving:\n", "serving: {}\n",
+    "serving:\n  vllm_dtype: auto\n"
+])
+def test_a_file_without_the_keys_leaves_the_params(layers, text):
+  params = {**M.param_defaults(layers), "gpu": "t4", "run_id": "r"}
+  assert M.with_file_hardware(params, text) == params
+  assert M.with_file_hardware(params, text) is not params
+
+
+@pytest.mark.parametrize(
+    "text, key",
+    [
+        ("serving:\n  gpu: a100\n", "gpu"),
+        ("serving:\n  gpu: ''\n", "gpu"),
+        ("serving:\n  gpu: null\n", "gpu"),
+        ("serving:\n  gpu: on\n", "gpu"),  # YAML 1.1: a boolean
+        ("serving:\n  sdk_containers: many\n", "sdk_containers"),
+        ("serving:\n  launcher_machine_type: ''\n", "launcher_machine_type"),
+        ("serving:\n  launcher_machine_type: 8\n", "launcher_machine_type"),
+    ])
+def test_a_file_hardware_value_no_launch_accepts_is_a_plan_error(
+    layers, text, key):
+  with pytest.raises(M.PlanError, match=rf"serving\.{key} must be"):
+    M.with_file_hardware(M.param_defaults(layers), text)
+
+
+def test_a_serving_section_that_is_no_mapping_is_a_plan_error(layers):
+  with pytest.raises(M.PlanError, match="section 'serving'"):
+    M.with_file_hardware(M.param_defaults(layers), "serving: t4\n")
+  with pytest.raises(M.PlanError, match="not valid YAML"):
+    M.with_file_hardware(M.param_defaults(layers), "serving: [gpu: t4\n")
+
+
+def test_yaml_1_1_hardware_values_stay_text(layers):
+  out = M.with_file_hardware(
+      M.param_defaults(layers), "serving:\n  gpu: l4\n  sdk_containers: multi\n"
+      "  launcher_machine_type: e2-standard-8\n")
+  assert (out["gpu"], out["sdk_containers"],
+          out["launcher_machine_type"]) == ("l4", "multi", "e2-standard-8")
+  assert all(
+      isinstance(out[k], str)
+      for k in ("gpu", "sdk_containers", "launcher_machine_type"))
+  assert set(M.FILE_HARDWARE_KEYS) == {
+      "gpu", "sdk_containers", "launcher_machine_type"
+  }
+
+
+def test_the_file_is_parsed_once_and_read_alike():
+  text = ("launch:\n  tables: all\n  max_tables_per_job: 3\n"
+          "relational:\n  relationships_uri: gs://b/rel/m.yaml\n")
+  parsed = M.parse_config(text)
+  params = {
+      "tables": "explicit",
+      "relationships_uri": "",
+      "max_tables_per_job": "10"
+  }
+  assert M.resolve_tables_mode(params, parsed) == M.resolve_tables_mode(
+      params, text) == "all"
+  assert M.planning_inputs(params, parsed) == M.planning_inputs(
+      params, text) == ("gs://b/rel/m.yaml", 3)
+  assert M.parse_config(None) == M.parse_config("") == {}
+  with pytest.raises(M.PlanError, match="top level must be a mapping"):
+    M.parse_config("[1, 2]\n")
+  # planning_inputs refused bad YAML only by chance before (Review M2)
+  with pytest.raises(M.PlanError, match="not valid YAML"):
+    M.planning_inputs(params, "launch: [tables\n")
+
+
+def test_a_model_or_object_that_fails_the_same_way_is_a_plan_error():
+  """Review M2: bad model YAML and non-UTF-8 bytes fail `route` once."""
+  with pytest.raises(M.PlanError, match="model file is not valid YAML"):
+    M.plan_batches("tables: [X_TABLE: {}\n", 10)
+  with pytest.raises(M.PlanError, match="not UTF-8"):
+    M.decode_object(b"\xff\xfe", "gs://b/m.yaml")
+  assert M.decode_object("é".encode(), "gs://b/m.yaml") == "é"
+
+
 # -- the branch --------------------------------------------------------------
 def test_the_file_switches_to_all():
   explicit, everything = {"tables": "explicit"}, {"tables": "all"}

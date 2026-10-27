@@ -55,15 +55,21 @@ The two branches::
 `route` (a `@task.branch`) resolves the launch's shape with
 `sdfb_batches.resolve_tables_mode`: a `config_uri` file's `launch.tables`
 wins over the `tables` param (ADR 0043), so a file saying `all` takes the
-batch branch whatever the trigger says. `route` reads `config_uri` through `GCSHook` only when the param is set:
-an explicit launch without it reads nothing from GCS, as master's DAG read
-nothing (the launcher reads the relationship model itself). A file or a plan
-the DAG cannot use (`sdfb_batches.PlanError`: bad YAML, a bad `launch:`, a
-model that is no gs:// file, K below one) fails `route` with
-`AirflowFailException`, which is never retried: the same file fails the same
-way every time. Any other error (a GCS read) is retried as the environment
-says. Explicit: `route` mints the run id (`<dag run id>-<8 hex>`: a retrigger
-of the same logical date must not replay the same rows), pushes
+batch branch whatever the trigger says. `route` reads `config_uri` through
+`GCSHook` only when the param is set: an explicit launch without it reads
+nothing from GCS, as master's DAG read nothing (the launcher reads the
+relationship model itself). The file's serving.gpu, serving.sdk_containers
+and serving.launcher_machine_type go over the params before any launch body
+is built (`with_file_hardware`, Ruling R16): the machine, the accelerator,
+the SDK-container experiment and the launcher VM are the Flex launch's own,
+so a file's `gpu: t4` must reach them, not only the launcher. A file or a
+plan the DAG cannot use (`sdfb_batches.PlanError`: bad YAML, a bad
+`launch:` or `serving:` value, a missing or non-UTF-8 object, a model that
+is no gs:// file, K below one) fails `route` with `AirflowFailException`,
+which is never retried: the same file fails the same way every time. Any
+other error (a transient GCS read) is retried as the environment says.
+Explicit: `route` mints the run id (`<dag run id>-<8 hex>`: a retrigger of
+the same logical date must not replay the same rows), pushes
 `sdfb_batches.explicit_body` under `body` and returns `start_sdfb`. All: it
 reads the model file (`planning_inputs`: a config file's
 relational.relationships_uri and launch.max_tables_per_job win over the
@@ -943,22 +949,34 @@ default_dag_params = {
 
 def _read_gcs_text(uri: str) -> str:
   """One gs:// object's text: the config file, the model file. Downloaded
-  as bytes (no local file)."""
+  as bytes (no local file).
+
+  What fails the same way on every retry is a PlanError: a path that is no
+  gs:// one, an object that does not exist, bytes that are not UTF-8. Any
+  other error (a transient GCS failure) is raised as it is and retried as
+  the environment says."""
   from airflow.providers.google.cloud.hooks.gcs import GCSHook
+  from google.api_core.exceptions import NotFound
 
   if not uri.startswith("gs://"):
     raise sdfb_batches.PlanError(
         f"{uri!r}: the DAG reads config and model files from GCS (gs://…)")
   bucket, _, name = uri[len("gs://"):].partition("/")
-  return GCSHook().download(
-      bucket_name=bucket, object_name=name).decode("utf-8")
+  try:
+    data = GCSHook().download(bucket_name=bucket, object_name=name)
+  except NotFound as error:
+    raise sdfb_batches.PlanError(f"{uri}: no such object — {error}") from error
+  return sdfb_batches.decode_object(data, uri)
 
 
 @task.branch(task_id="route")
 def route(**context) -> str:
   """Which branch the launch takes, and its launch bodies.
 
-  Reads `config_uri` only when it is set. Explicit: pushes `body` and
+  Reads `config_uri` only when it is set, and parses it once; its
+  serving.gpu, sdk_containers and launcher_machine_type go over the params
+  before any body is built (the hardware is the launch's own, Ruling R16).
+  Explicit: pushes `body` and
   returns `start_sdfb`. All: plans the batches and pushes the bodies, the
   base run id, the batch count, the model file, the batches and the banner,
   and returns `batch_bodies`. Pushes `mode` (the resolved branch) either
@@ -977,7 +995,9 @@ def route(**context) -> str:
   run_id = f"{context['dag_run'].run_id}-{uuid.uuid4().hex[:8]}"
   try:
     config_text = _read_gcs_text(config_uri) if config_uri else None
-    mode = sdfb_batches.resolve_tables_mode(params, config_text)
+    config = sdfb_batches.parse_config(config_text)
+    mode = sdfb_batches.resolve_tables_mode(params, config)
+    params = sdfb_batches.with_file_hardware(params, config)
     if mode == "explicit":
       pushed = {
           "body":
@@ -991,7 +1011,7 @@ def route(**context) -> str:
       branch = "start_sdfb"
     else:
       relationships_uri, max_tables = sdfb_batches.planning_inputs(
-          params, config_text)
+          params, config)
       plan = sdfb_batches.launch_plan(
           sdfb_batches.whole_model_params(params, LAYERS),
           model_text=_read_gcs_text(relationships_uri),
