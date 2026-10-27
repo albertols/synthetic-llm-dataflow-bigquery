@@ -50,6 +50,10 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 - `validation_runs.run_id`'s description names the `dlq` table; `repeat_share_within_tolerance`'s names `guardrails.repeat_share_tolerance`; the four store-key column descriptions name the `+cfg.<salt>` suffix; `DEPLOYMENT_PREREQUISITES.md` counts ADR 0038's five columns.
 - Master's abbreviated flags parse again: the flags added since `v0.6.1` made some of master's unambiguous prefixes ambiguous, and hidden argparse aliases put them back on their flags (`--t` → `--thresholds_uri`, `--ba…` → `--batch_size`, `--l…` → `--landing_table`, `--g…` → `--generate_fk_relationships`). The aliases appear in no `--help` and on no launch surface; `packages/sdfb-tests/tests/fixtures/config_parity/abbreviations.json` pins every prefix of three or more characters `v0.6.1` accepted, and `test_flag_abbreviations.py` hand-lists the six shorter ones (`--t`, `--l`, `--la`, `--ba`, `--g`, `--ge`).
 
+- A bfloat16 serve dtype on a GPU below compute capability 8.0 (a T4 launch that left `gpu` at its `l4` default, or an explicit `vllm_dtype: bfloat16`) is refused before the vLLM server starts, naming the fix: `gpu=t4` (which derives float16) or `vllm_dtype=float16`. The bf16-checkpoint message no longer offers `qwen3_4b_instruct_2507` as a drop-in: it is a bf16 checkpoint too and runs on a T4 only served in float16.
+- The Flex Template refuses an empty `gpu`, `sdk_containers` or `launcher_machine_type` (`''` was accepted, then refused by the launcher or recorded as no VM); `serving.launcher_machine_type` needs at least one character from a flag or a file.
+- The personal-GCP tiers pass `gpu: t4` and `sdk_containers` matching their job, and `config/generator.personal.example.yaml` sets `gpu: t4`, so their runs record the hardware they ran on.
+
 ### 🗑️ Removed
 
 ### 📗 Docs
