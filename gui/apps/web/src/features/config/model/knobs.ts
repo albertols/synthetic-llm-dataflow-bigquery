@@ -125,7 +125,7 @@ export function positions(k: Knob, current: KnobValue): { values: KnobValue[]; i
   return null;
 }
 
-/** The value a scenario starts from: the code default, or the preset's for the required `num_rows`. */
+/** The value a scenario starts from: the code default. */
 export function defaultValue(k: Knob): KnobValue {
   return k.value;
 }

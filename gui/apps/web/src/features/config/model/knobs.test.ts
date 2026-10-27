@@ -32,8 +32,8 @@ describe("the knob model (knobs.json is the truth)", () => {
       ).toBeDefined();
     }
     for (const id of Object.keys(knobGuides)) expect(ids.has(id), id).toBe(true);
-    // 97 generator knobs (the setting catalogue) + 11 evaluator flags.
-    expect(Object.keys(knobGuides)).toHaveLength(108);
+    // 98 generator knobs (the setting catalogue) + 11 evaluator flags.
+    expect(Object.keys(knobGuides)).toHaveLength(109);
   });
 
   it("generator guides are the setting catalogue's, links included; evaluator guides are written in config.ts", () => {
@@ -55,8 +55,9 @@ describe("the knob model (knobs.json is the truth)", () => {
     // The knobs new since master carry catalogue prose too.
     expect(knobGuides.run_id.down).toBe("Required, and a flag only — a config file may not set it.");
     expect(knobGuides.ddl_uri.purpose).toMatch(/^A pinned _ddl\.json read only when live schema extraction fails/);
-    // {{GPU}} is the Composer DAG's deploy-time marker, quoted in the prose — not a template slot.
-    expect(knobGuides.gpu.purpose).toContain("from the {{GPU}} marker");
+    // The serving launch keys are settings now; their longer story is the catalogue's tip.
+    expect(knobGuides.gpu.purpose).toBe("The workers' GPU; a null vllm_dtype follows it.");
+    expect(knobGuides.launcher_machine_type.tip).toContain("12-minute launch limit");
     // A paper keeps its URL, an external doc its URL, a repo doc resolves at the exported commit.
     expect(knobGuides.reference_rows_limit.refs).toEqual([
       expect.objectContaining({ kind: "paper", url: "https://doi.org/10.1214/aoms/1177728174" }),
@@ -134,7 +135,8 @@ describe("the knob model (knobs.json is the truth)", () => {
 
   it("formats values without inventing any", () => {
     expect(formatKnobValue(knob("reference_rows_limit"))).toBe("10,000 rows");
-    expect(formatKnobValue(knob("num_rows"))).toBe("required");
+    expect(formatKnobValue(knob("num_rows"))).toBe("1,000 rows");
+    expect(formatKnobValue(knob("run_id"))).toBe("required");
     expect(formatKnobValue(knob("seed"))).toBe("(empty)");
     expect(shortValue(knob("temperature_ladder"))).toBe("0.7·1·1.3");
     expect(shortValue(knob("sampling_ladder"))).toBe("3 items");
