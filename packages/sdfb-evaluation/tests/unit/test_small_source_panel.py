@@ -32,8 +32,12 @@ from beam.membership_data import planned
 from beam.privacy_data import DETECTION_ROWS, LABEL_KEY, SALT, SAMPLE_ROWS
 from beam.privacy_data import encode_all
 from sdfb_evaluation.beam.privacy import PRIVACY_METRIC_IDS, privacy_outputs
+from sdfb_evaluation.catalogue import load_catalogue
 from sdfb_evaluation.context.reference import fetch_panel
+from sdfb_evaluation.scoring import status_for
+from sdfb_evaluation.types import Status
 
+_CATALOGUE = load_catalogue()
 N_SOURCE = 37
 REFERENCE_ROWS_LIMIT = 10_000
 
@@ -89,5 +93,6 @@ def test_a_small_source_panel_is_not_evaluated_with_its_reason():
   for metric_id in PRIVACY_METRIC_IDS:
     mv = by[metric_id]
     assert mv.value is None, metric_id
+    assert status_for(_CATALOGUE.get(metric_id), mv) is Status.NOT_EVALUATED
     reason = mv.detail["reason"]
     assert f"|R| = {N_SOURCE} and |H| = 0 differ" in reason, reason

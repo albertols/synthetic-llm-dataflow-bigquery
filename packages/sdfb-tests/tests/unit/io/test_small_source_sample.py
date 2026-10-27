@@ -14,13 +14,10 @@
 """A source smaller than `sampling.reference_rows_limit` is sampled whole.
 
 37 source rows against the default limit of 10000: the reference read
-returns all 37, and a launch on them (P1-P5, the profiler,
-`resolve_row_docs_limit`, the pools, the source stats) lands rows without
-tripping the BLOCKER gate, whether the table is named (`explicit`) or
+returns all 37, and a launch on them (preflight P1-P5 with the PK
+capacity check, the profiler and source stats, the clamped row-document
+limit) completes without tripping the BLOCKER gate, whether the table is named (`explicit`) or
 found by the model (`all`).
-
-Design: docs/DESIGN.md §4 Relational generation
-(ADR 0045).
 """
 
 from __future__ import annotations
@@ -38,7 +35,6 @@ from sdfb_beam.io.local_sinks import WriteToJsonLines
 from sdfb_beam.pipeline import build_pipeline
 from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.engines.generation_plan import clear_generation_plan_log
-from sdfb_core.rag.chunking import resolve_row_docs_limit
 from sdfb_core.record import SCHEMA_PATH
 from sdfb_tests.fixtures import load_ddl, load_reference
 from sdfb_tests.launcher_logging import restoring_root_handlers
@@ -125,7 +121,8 @@ _COMMON = [
 ]
 _EXPLICIT = [
     "--reference_table=proj.src.customers",
-    "--landing_table=proj.land.customers", "--relationships_uri="
+    "--landing_table=proj.land.customers", "--relationships_uri=",
+    "--pk_cols=customer_id"
 ]
 
 
@@ -168,15 +165,39 @@ def _land(tmp: Path, spec) -> tuple[list[dict], dict]:
   return read("landing"), run
 
 
-def test_a_launch_on_a_37_row_source_lands_rows(reads, tmp_path):
+def test_a_launch_on_a_37_row_source_lands_rows(reads, monkeypatch, capsys,
+                                                tmp_path):
+  real_preflight = rp.preflight
+  seen: list = []
+
+  def spy(schema, pk, identity, rows, **kwargs):
+    result = real_preflight(schema, pk, identity, rows, **kwargs)
+    seen.append((pk, len(rows), kwargs["num_rows"], result))
+    return result
+
+  monkeypatch.setattr(rp, "preflight", spy)
   assert _launch(*_EXPLICIT) == 0
   (spec,) = reads.specs
   assert reads.client.queries[0].endswith(f"LIMIT {_LIMIT}")
   assert len(spec.reference_rows) == _N_SOURCE
-  # The row-document prefix is clamped to the 37 rows the source holds.
-  assert resolve_row_docs_limit(
-      spec.config.generator_config.rag.rag_row_docs_limit,
-      _N_SOURCE) <= _N_SOURCE
+  # Preflight (P1-P5, PK capacity included) ran on the 37 rows against the
+  # 1000 requested and let the launch through unadjusted.
+  assert len(seen) == 1
+  pk, n_rows, num_rows, result = seen[0]
+  assert (pk, n_rows, num_rows) == (("customer_id",), _N_SOURCE, 1000)
+  assert not result.adjustments
+  assert spec.config.pk_columns == ("customer_id",)
+  # The profiler and source stats ran over the 37 rows (7 columns).
+  stats = [
+      line for line in capsys.readouterr().err.splitlines()
+      if "name=source_table_stats " in line
+  ]
+  assert len(stats) == 1 and " columns=7 " in stats[0]
+  # The launch's own row-document prefix is the whole 37-row sample.
+  assert spec.config.rag_row_docs_limit == _N_SOURCE
+  # No rag_chunks / free-text pool table is named, so those layers are the
+  # no-op the build_* defaults promise: nothing is built.
+  assert spec.freetext_pools_store is None and spec.rag_chunks_sink is None
   rows, run = _land(tmp_path, spec)
   # Every one of the 1000 requested rows is accounted for, none lost to a
   # crash, and the gate is not tripped. How many LAND is the fake model
