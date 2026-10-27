@@ -202,8 +202,12 @@ NVIDIA T4 under vLLM.** This was verified, not assumed, and it is now enforced
 in code: `ModelGpuIncompatibleError` in
 [`packages/sdfb-beam/src/sdfb_beam/handlers/vllm_client.py`](../packages/sdfb-beam/src/sdfb_beam/handlers/vllm_client.py)
 raises at `VLLMModelClient.setup()` — before the vLLM server subprocess spawns
-— whenever the pulled model's `config.json` says `torch_dtype: bfloat16` and
-the worker's reported CUDA compute capability is below `8.0`. That guard
+— whenever the serve dtype is bfloat16 and the worker's reported CUDA compute
+capability is below `8.0`. The serve dtype is `serving.vllm_dtype`, derived
+from `serving.gpu` when unset (`l4`, the default, gives bfloat16), or under
+`vllm_dtype=auto` the pulled model's `config.json` `torch_dtype`. A T4 launch
+that leaves `gpu` at `l4` is therefore refused with the fix: pass `gpu=t4`
+(which derives float16) or `vllm_dtype=float16`. That guard
 exists because, before it, a Gemma-on-T4 job didn't fail — it silently sailed
 past a ~24-minute stall and let the engines fall back to copying reference
 exemplars into the batch (a privacy leak, not a crash), which is worse than a

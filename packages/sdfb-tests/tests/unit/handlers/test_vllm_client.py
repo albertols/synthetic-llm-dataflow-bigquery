@@ -765,6 +765,54 @@ def test_assert_dtype_supported_passes_fp16_on_turing():
   _assert_dtype_supported("float16", (7, 5))  # must not raise
 
 
+def test_assert_dtype_supported_bf16_override_on_turing_names_the_t4_fix():
+  # A T4 launch that left serving.gpu at its l4 default derives bfloat16
+  # (ADR 0043): refused before the spawn, naming both fixes.
+  with pytest.raises(ModelGpuIncompatibleError) as err:
+    _assert_dtype_supported(
+        "bfloat16", (7, 5), dtype_override="bfloat16", model_type="qwen3")
+  message = str(err.value)
+  assert "gpu=t4" in message
+  assert "vllm_dtype=float16" in message
+  assert "7.5" in message
+
+
+def test_assert_dtype_supported_bf16_override_refuses_an_fp16_checkpoint():
+  # The serve dtype decides, not the checkpoint's: an fp16 checkpoint served
+  # in bfloat16 cannot run on Turing either.
+  with pytest.raises(ModelGpuIncompatibleError, match="gpu=t4"):
+    _assert_dtype_supported("float16", (7, 5), dtype_override="bfloat16")
+
+
+def test_assert_dtype_supported_bf16_override_for_gemma_points_at_l4():
+  with pytest.raises(ModelGpuIncompatibleError) as err:
+    _assert_dtype_supported(
+        "bfloat16", (7, 5), dtype_override="bfloat16", model_type="gemma3")
+  message = str(err.value)
+  assert "cannot run on this GPU in any dtype" in message
+  assert "gpu=l4" in message
+
+
+def test_assert_dtype_supported_fp16_override_passes_on_turing():
+  _assert_dtype_supported(
+      "bfloat16", (7, 5), dtype_override="float16", model_type="qwen3")
+
+
+def test_assert_dtype_supported_bf16_override_passes_on_ada():
+  _assert_dtype_supported("bfloat16", (8, 9), dtype_override="bfloat16")
+
+
+def test_assert_dtype_supported_bf16_checkpoint_message_offers_the_fp16_fix():
+  # qwen3_4b_instruct_2507 is itself a bf16 checkpoint: the message must say
+  # it runs on a T4 served in float16, not that pointing at it is enough.
+  with pytest.raises(ModelGpuIncompatibleError) as err:
+    _assert_dtype_supported("bfloat16", (7, 5), model_type="qwen3")
+  message = str(err.value)
+  assert "gpu=t4" in message and "vllm_dtype=float16" in message
+  assert "itself a bf16 checkpoint" in message
+  assert "Run with gpu=l4, or point" not in message
+
+
 # ---------------------------------------------------------------------------
 # setup() — fatal GPU/dtype guard, fires BEFORE the vLLM server spawn.
 # ---------------------------------------------------------------------------
@@ -801,6 +849,33 @@ def test_setup_raises_on_bf16_turing_before_spawn(tmp_path, fake_torch):
       mock.patch.object(c, "_pull_weights"),
       mock.patch.object(c, "_spawn_server") as spawn,
       pytest.raises(ModelGpuIncompatibleError, match="qwen3_4b_instruct_2507"),
+  ):
+    c.setup()
+  spawn.assert_not_called()
+
+
+def test_setup_raises_on_derived_bf16_serve_dtype_on_turing(
+    tmp_path, fake_torch):
+  """A T4 launch without gpu=t4 derives bfloat16; fatal before the spawn."""
+  fake_torch((7, 5))  # T4
+  model_dir = tmp_path / "model"
+  model_dir.mkdir()
+  (model_dir / "config.json").write_text(
+      json.dumps({
+          "torch_dtype": "bfloat16",
+          "model_type": "qwen3"
+      }))
+  c = VLLMModelClient(
+      model_uri=str(model_dir),
+      local_model_dir=str(model_dir),
+      vllm_server_kwargs={"dtype": "bfloat16"},
+  )
+  with (
+      mock.patch.object(c, "_pull_weights"),
+      mock.patch.object(c, "_spawn_server") as spawn,
+      mock.patch.object(c, "_wait_until_ready"),
+      mock.patch.object(c, "_build_openai_client", return_value=object()),
+      pytest.raises(ModelGpuIncompatibleError, match="gpu=t4"),
   ):
     c.setup()
   spawn.assert_not_called()
