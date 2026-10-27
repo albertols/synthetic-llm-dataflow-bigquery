@@ -270,9 +270,9 @@ def test_configure_options_directrunner_leaves_disk_size_unset():
   assert opts.view_as(WorkerOptions).disk_size_gb is None
 
 
-def test_parse_args_vllm_dtype_defaults_auto():
+def test_parse_args_vllm_dtype_derives_from_the_default_gpu():
   args, _ = parse_args(_common_args())
-  assert args.vllm_dtype == "auto"
+  assert (args.gpu, args.vllm_dtype) == ("l4", "bfloat16")
 
 
 def test_parse_args_vllm_dtype_accepts_float16():
@@ -376,9 +376,9 @@ def test_resolve_engine_strictness(client_type, expected):
   assert resolve_engine_strictness(client_type) is expected
 
 
-def test_parse_args_rag_layer_flags_default_off():
+def test_parse_args_rag_layer_defaults_on_without_a_table():
   args, _ = parse_args(_common_args())
-  assert parse_bool_flag(args.build_rag_layer) is False
+  assert parse_bool_flag(args.build_rag_layer) is True
   assert args.rag_chunks_table == ""
 
 

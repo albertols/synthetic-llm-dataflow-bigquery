@@ -238,7 +238,9 @@
     }
   ],
   "exported_from": {
-    "commit": "9c0abd784820413cc5272f8d7fa0eb74b37665a0",
-    "dirty": []
+    "commit": "6208649f01b48cbf37af0785b4f336ad36fd44f0",
+    "dirty": [
+      "packages/sdfb-core/src/sdfb_core/config/model.py"
+    ]
   }
 }

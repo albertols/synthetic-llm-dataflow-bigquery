@@ -60,9 +60,10 @@ def test_settings_match_the_model_one_to_one():
 
 def test_not_settable_entries():
   cat = load_catalogue()
-  assert len(cat.not_settable) == 14
+  assert len(cat.not_settable) == 12
   assert "generation.temperature_ladder" in cat.not_settable
-  assert "serving.gpu" in cat.not_settable
+  # A Composer-only parameter until the serving launch keys (ADR 0043).
+  assert "serving.gpu" not in cat.not_settable
 
 
 def test_cache_map_is_pinned():

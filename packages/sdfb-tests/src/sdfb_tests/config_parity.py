@@ -19,16 +19,22 @@ of argv shapes, the launcher's error for a set of bad argv, every promoted
 constant's value, and DirectRunner output for b1_rag, b2_library and a
 two-table relational launch with fixed seeds.
 
+The goldens are never regenerated. What the branch changes on purpose is one
+table, `DELIBERATE_CHANGES`, which `master_golden` applies to a golden before
+it is compared (ADR 0043).
+
 Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
 (ADR 0043, 0045).
 """
 from __future__ import annotations
 
 import contextlib
+import copy
 import importlib
 import io
 import json
 from pathlib import Path
+from typing import Any
 
 GOLDENS_DIR = (
     Path(__file__).resolve().parents[2] / "tests" / "fixtures" /
@@ -44,6 +50,27 @@ MODEL_LAUNCH_ATTRS = frozenset({
 })
 EXCLUDED_ATTRS = frozenset({"config_uri", "config_resolution"
                            }) | MODEL_LAUNCH_ATTRS
+
+# A key master's CLI did not have: a Composer-only DAG parameter then.
+ABSENT = "<absent on master>"
+# A key master's CLI refused a launch without.
+REQUIRED = "<required on master>"
+
+# The seven deliberate differences from master (spec §4.4), and nothing
+# else: dotted key -> (master's CLI, now). `now` is the generator.yaml value
+# line. The three serving keys and the two build layers take master's DAG
+# defaults (master's DAG also defaulted num_rows to 1000); vllm_dtype's null
+# derives the dtype from serving.gpu, so an L4 DAG launch moves from
+# master's float16 to bfloat16, and a CLI L4 launch from auto to bfloat16.
+DELIBERATE_CHANGES: dict[str, tuple[object, object]] = {
+    "generation.num_rows": (REQUIRED, 1000),
+    "rag.build_rag_layer": ("", "true"),
+    "free_text.build_pool_layer": ("", "true"),
+    "serving.vllm_dtype": ("auto", None),
+    "serving.gpu": (ABSENT, "l4"),
+    "serving.sdk_containers": (ABSENT, "multi"),
+    "serving.launcher_machine_type": (ABSENT, "e2-standard-8"),
+}
 
 ARGV_BASE = [
     "--reference_table=p.src.t",
@@ -201,6 +228,80 @@ CONSTANT_SOURCES: dict[str, tuple[str, str]] = {
     "max_conditional_values_per_request":
         ("sdfb_beam.cli.run_pipeline", "_MAX_CONDITIONAL_VALUES_PER_REQUEST"),
 }
+
+
+def _resolved(dotted: str, now: object) -> object:
+  """What a launch that leaves the key unset holds: `now`, or, for a null
+    default, the value the model derives from the other defaults."""
+  if now is not None:
+    return now
+  from sdfb_core.config.model import DEFAULT_CONFIG, value_of  # pylint: disable=import-outside-toplevel  # test-time only
+  return value_of(DEFAULT_CONFIG, dotted)
+
+
+def _typed(argv: list[str], dest: str) -> bool:
+  """Whether an argv sets `--dest`, abbreviated as argparse allows."""
+  return any(
+      arg.startswith("--") and f"--{dest}".startswith(arg.split("=", 1)[0])
+      for arg in argv)
+
+
+_REQUIRED_PREFIX = "the following arguments are required: "
+
+
+def _not_required_any_more(error: str, dest: str) -> str:
+  if not error.startswith(_REQUIRED_PREFIX):
+    return error
+  flags = error[len(_REQUIRED_PREFIX):].split(", ")
+  return _REQUIRED_PREFIX + ", ".join(f for f in flags if f != f"--{dest}")
+
+
+def _apply_to_namespaces(golden: dict[str, Any]) -> dict[str, Any]:
+  """An argv that does not type a changed key now holds its new value; the
+    missing-required error no longer names a key that is not required."""
+  for case, observed in golden.items():
+    for dotted, (master, now) in DELIBERATE_CHANGES.items():
+      dest = dotted.split(".", 1)[1]
+      if "args" not in observed:
+        if master == REQUIRED:
+          observed["error"] = _not_required_any_more(observed["error"], dest)
+        continue
+      if master == ABSENT or not _typed(ARGV_CASES[case], dest):
+        observed["args"][dest] = _resolved(dotted, now)
+  return golden
+
+
+def _apply_to_parser(golden: dict[str, Any]) -> dict[str, Any]:
+  """Each changed flag's default is its new value (a new flag is added,
+    its choices left to the model's tests), and none is required."""
+  for dotted, (master, now) in DELIBERATE_CHANGES.items():
+    dest = dotted.split(".", 1)[1]
+    action = golden.setdefault(dest, {
+        "choices": None,
+        "const": None,
+        "nargs": None,
+        "required": False
+    }) if master == ABSENT else golden[dest]
+    action["default"] = _resolved(dotted, now)
+    action["required"] = False
+  return golden
+
+
+_APPLY = {"namespaces": _apply_to_namespaces, "parser": _apply_to_parser}
+
+
+def raw_golden(name: str) -> dict[str, Any]:
+  """A master golden exactly as captured."""
+  return json.loads((GOLDENS_DIR / f"{name}.json").read_text())
+
+
+def master_golden(name: str) -> dict[str, Any]:
+  """A master golden with `DELIBERATE_CHANGES` applied: what the branch must
+    observe. The constants and pipeline goldens hold none of the seven keys
+    and come back unchanged."""
+  golden = raw_golden(name)
+  apply = _APPLY.get(name)
+  return apply(copy.deepcopy(golden)) if apply else golden
 
 
 def jsonable(value):

@@ -79,6 +79,9 @@ export type GeneratorKnobId =
   | "vllm_max_model_len"
   | "autoscaling"
   | "initial_workers"
+  | "gpu"
+  | "sdk_containers"
+  | "launcher_machine_type"
   | "ddl_uri"
   | "reference_table"
   | "landing_table"
@@ -114,8 +117,6 @@ export type GeneratorKnobId =
   | "blocker_failure_ratio_prd"
   | "blocker_rules_declared"
   | "blocker_rule_ids"
-  | "gpu"
-  | "sdk_containers"
   | "temperature_ladder"
   | "sampling_ladder";
 
@@ -359,9 +360,8 @@ export const generatorGuides: Readonly<Record<GeneratorKnobId, GeneratedGuide>> 
   },
   "build_pool_layer": {
     "purpose": "Build free-text pools in their own branch and persist them (skipped when this reference digest and model are already stored).",
-    "up": "true: pools are built once and every worker reads them (warm runs skip the LLM entirely).",
-    "down": "empty: pools are inferred inside every worker process's setup().",
-    "tip": "The Composer DAG defaults it to true."
+    "up": "true: pools are built once and every worker reads them (warm runs skip the LLM); a no-op without freetext_pools_table.",
+    "down": "empty: pools are inferred inside every worker process's setup()."
   },
   "rag_row_docs_limit": {
     "purpose": "How many fingerprint-ordered reference rows are embedded as row documents: exactly the rows the engine reads back.",
@@ -399,9 +399,8 @@ export const generatorGuides: Readonly<Record<GeneratorKnobId, GeneratedGuide>> 
   },
   "build_rag_layer": {
     "purpose": "Populate synthetic_rag.rag_chunks from this run's reference sample (skipped when the digest is already present for this embedder).",
-    "up": "true: chunks and vectors persist, and later runs read them instead of re-embedding.",
-    "down": "empty: the engine embeds its 1,024 rows in setup on every fresh digest.",
-    "tip": "The Composer DAG defaults it to true."
+    "up": "true: chunks and vectors persist, and later runs read them instead of re-embedding; a no-op without rag_chunks_table.",
+    "down": "empty: the engine embeds its 1,024 rows in setup on every fresh digest."
   },
   "env": {
     "purpose": "The threshold tier (dev, uat, prd) that selects the BLOCKER ratio a run may reach before it fails.",
@@ -489,8 +488,7 @@ export const generatorGuides: Readonly<Record<GeneratorKnobId, GeneratedGuide>> 
   "vllm_dtype": {
     "purpose": "vLLM's --dtype: auto (the checkpoint's), float16 or bfloat16.",
     "up": "bfloat16 needs an L4-class GPU.",
-    "down": "float16 is required on T4 for bf16 checkpoints like Qwen; refused for Gemma (empty output).",
-    "tip": "The Composer DAG defaults it to float16."
+    "down": "float16 is required on T4 for bf16 checkpoints like Qwen; refused for Gemma (empty output)."
   },
   "vllm_max_model_len": {
     "purpose": "vLLM's --max-model-len cap; without it the KV cache is sized for the checkpoint's native context.",
@@ -506,6 +504,24 @@ export const generatorGuides: Readonly<Record<GeneratorKnobId, GeneratedGuide>> 
     "purpose": "The initial Dataflow worker count; empty keeps Dataflow's own default.",
     "up": "A scale run starts at its max_num_workers and skips the ramp.",
     "down": "Empty: the R6 pair started on 2 workers and ran 8 min at a quarter of its steady rate."
+  },
+  "gpu": {
+    "purpose": "The workers' GPU; a null vllm_dtype follows it.",
+    "up": "l4: bfloat16, more VRAM.",
+    "down": "t4: cheaper; float16 only, no Gemma.",
+    "tip": "The Composer DAG picks the worker machine and accelerator from it (l4 or t4); the launcher derives a null vllm_dtype from it (t4 → float16, l4 → bfloat16) and records it. Gemma cannot run on a T4, and models too large for its VRAM fit only an L4."
+  },
+  "sdk_containers": {
+    "purpose": "SDK processes per worker.",
+    "up": "multi: one per vCPU, past the GIL ceiling.",
+    "down": "single: one per worker.",
+    "tip": "The worker topology of a vLLM launch: the Composer DAG turns single into the no_use_multiple_sdk_containers experiment. multi lets generation escape the one-interpreter GIL ceiling (the sheet charts the measured pair); with single one process owns the GPU. A direct launch passes its experiments itself, and the launcher only records the value."
+  },
+  "launcher_machine_type": {
+    "purpose": "The Flex launcher's machine.",
+    "up": "Faster image pull and table prep.",
+    "down": "Cheaper; risks the 12-min limit.",
+    "tip": "The Flex Template launcher VM, not the workers. It pulls the multi-GB image, reads every table's reference sample and builds the graph inside Google's 12-minute launch limit, so a large model wants a larger one. The Composer DAG launches with it; a direct launch sets launcherMachineType itself, and the launcher only records the value."
   },
   "ddl_uri": {
     "purpose": "A pinned _ddl.json read only when live schema extraction fails (air-gap, BigQuery outage).",
@@ -690,16 +706,6 @@ export const generatorGuides: Readonly<Record<GeneratorKnobId, GeneratedGuide>> 
     "up": "Counting more rules fails more runs.",
     "down": "A rule left out diverts rows to the DLQ without ever moving the gate.",
     "tip": "engine_failure is weighted by the lost batch size, not one per envelope."
-  },
-  "gpu": {
-    "purpose": "The Composer DAG's GPU profile (l4 or t4), resolved at deploy time from the {{GPU}} marker.",
-    "up": "l4: bfloat16 and larger models fit.",
-    "down": "t4: cheaper, float16 only, tighter VRAM."
-  },
-  "sdk_containers": {
-    "purpose": "SDK-container topology for vLLM launches: single (one Python process per worker) or multi (one per vCPU).",
-    "up": "multi: generation escapes the one-interpreter GIL ceiling; the sheet charts the measured pair.",
-    "down": "single (default): one process owns the GPU; generation is bound by one interpreter."
   },
   "temperature_ladder": {
     "purpose": "The temperatures a free-text pool call escalates through when its novel yield is empty (every value a copy).",

@@ -220,7 +220,7 @@ class GenerationSettings(_Section):
   """What is generated and how close it stays to the reference."""
   SECTION = "generation"
   engine: str = _flag()
-  num_rows: int | None = _flag()
+  num_rows: int = _flag()
   similarity: float = _flag()
   seed: NumericText = _flag()
   batch_size: int = _flag()
@@ -393,15 +393,37 @@ class RelationalSettings(_Section):
     return self
 
 
+VllmDtype = Literal["auto", "float16", "bfloat16"]
+GpuProfile = Literal["l4", "t4"]
+# The dtype each GPU profile runs when vllm_dtype is null: a T4 has no
+# bfloat16, an L4 does (and bf16 checkpoints keep their own precision).
+DTYPE_OF_GPU: dict[str, VllmDtype] = {"t4": "float16", "l4": "bfloat16"}
+
+
 class ServingSettings(_Section):
   """The model, the vLLM server and the worker fleet."""
   SECTION = "serving"
   client_type: Literal["vllm", "mlx", "fake"] = _flag()
   model_uri: str | None = _flag()
-  vllm_dtype: Literal["auto", "float16", "bfloat16"] = _flag()
+  # None = derived from gpu (DTYPE_OF_GPU); an explicit value wins.
+  vllm_dtype: VllmDtype | None = _flag()
   vllm_max_model_len: NumericText = _flag()
   autoscaling: Literal["auto", "throughput", "fixed"] = _flag()
   initial_workers: NumericText = _flag()
+  # The launch's GPU, worker topology and launcher VM: the Composer DAG
+  # turns them into the Flex launch's machine, experiments and launcher
+  # machine type; the launcher derives vllm_dtype from gpu and records all
+  # three.
+  gpu: GpuProfile = _flag()
+  sdk_containers: Literal["multi", "single"] = _flag()
+  launcher_machine_type: str = _flag()
+
+  @property
+  def effective_vllm_dtype(self) -> VllmDtype:
+    """`vllm_dtype`, or the GPU profile's dtype when unset."""
+    if self.vllm_dtype is not None:
+      return self.vllm_dtype
+    return DTYPE_OF_GPU[self.gpu]
 
 
 SECTION_TYPES: dict[str, type[_Section]] = {
@@ -461,9 +483,8 @@ IDENTITY_KEYS: dict[str, str] = _keys(KIND_IDENTITY)
 CONSTANT_KEYS: tuple[str, ...] = tuple(_keys(KIND_CONSTANT).values())
 ALL_KEYS: tuple[str, ...] = (
     tuple(FLAG_KEYS.values()) + tuple(IDENTITY_KEYS.values()) + CONSTANT_KEYS)
-REQUIRED_FLAGS: tuple[str,
-                      ...] = ("reference_table", "landing_table", "dlq_table",
-                              "num_rows", "run_id", "model_uri")
+REQUIRED_FLAGS: tuple[str, ...] = ("reference_table", "landing_table",
+                                   "dlq_table", "run_id", "model_uri")
 
 DEFAULT_CONFIG = GeneratorConfig()
 
@@ -473,4 +494,6 @@ def value_of(config: GeneratorConfig, dotted: str) -> Any:
   section, key = dotted.split(".", 1)
   if dotted == "free_text.pool_stagnation_min_novel":
     return config.free_text.stagnation_min_novel
+  if dotted == "serving.vllm_dtype":
+    return config.serving.effective_vllm_dtype
   return getattr(getattr(config, section), key)

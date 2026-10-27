@@ -56,7 +56,7 @@
     {
       "name": "num_rows",
       "label": "Number of synthetic rows to generate",
-      "helpText": "Positive integer. Required for generation.",
+      "helpText": "Positive integer: the rows a root table generates; a driven child derives its own (ADR 0036). Omitted: config/generator.yaml's default.",
       "isOptional": true,
       "regexes": [
         "^[1-9][0-9]*$"
@@ -161,7 +161,7 @@
     {
       "name": "build_rag_layer",
       "label": "Populate the RAG chunk store",
-      "helpText": "true/false. Populate rag_chunks from this run's reference sample (skipped when the reference_digest already exists for the embedder id+version). Requires rag_chunks_table.",
+      "helpText": "true/false. Populate rag_chunks from this run's reference sample (skipped when the reference_digest already exists for the embedder id+version). Takes effect with rag_chunks_table; an explicit true without it is refused. Omitted: config/generator.yaml's default.",
       "isOptional": true,
       "regexes": [
         "^(true|false|1|0|yes|no)?$"
@@ -200,10 +200,37 @@
     {
       "name": "vllm_dtype",
       "label": "vLLM serve dtype override",
-      "helpText": "auto (default) = checkpoint dtype (bf16 for Gemma/Qwen). float16 = explicit downcast REQUIRED on T4 for fp16-safe bf16 checkpoints (Qwen); refused for gemma-family models.",
+      "helpText": "Omitted: derived from gpu (t4 = float16, l4 = bfloat16); a value given here wins. auto = checkpoint dtype (bf16 for Gemma/Qwen). float16 = explicit downcast REQUIRED on T4 for fp16-safe bf16 checkpoints (Qwen); refused for gemma-family models.",
       "isOptional": true,
       "regexes": [
         "^(auto|float16|bfloat16)$"
+      ]
+    },
+    {
+      "name": "gpu",
+      "label": "Worker GPU profile",
+      "helpText": "l4 or t4: the workers' GPU. The launcher derives vllm_dtype from it when vllm_dtype is omitted, and records it; the worker machine and accelerator are the launch's own (workerMachineType, the accelerator experiment). Omitted: config/generator.yaml's default.",
+      "isOptional": true,
+      "regexes": [
+        "^(l4|t4)?$"
+      ]
+    },
+    {
+      "name": "sdk_containers",
+      "label": "SDK containers per worker",
+      "helpText": "multi or single (ADR 0034): the worker topology of a vLLM launch. Recorded by the launcher; the topology itself is the launch's experiments (no_use_multiple_sdk_containers for single). Omitted: config/generator.yaml's default.",
+      "isOptional": true,
+      "regexes": [
+        "^(multi|single)?$"
+      ]
+    },
+    {
+      "name": "launcher_machine_type",
+      "label": "Launcher machine type",
+      "helpText": "Machine type of the Flex Template launcher VM, recorded by the launcher; the VM itself is the launch's launcherMachineType. Omitted: config/generator.yaml's default.",
+      "isOptional": true,
+      "regexes": [
+        "^[a-z0-9-]*$"
       ]
     },
     {
@@ -254,7 +281,7 @@
     {
       "name": "build_pool_layer",
       "label": "Build the free-text pool store",
-      "helpText": "true/false. Build free-text pools in their own branch and persist them (skipped when this reference_digest already exists for this model_uri). Requires freetext_pools_table.",
+      "helpText": "true/false. Build free-text pools in their own branch and persist them (skipped when this reference_digest already exists for this model_uri). Takes effect with freetext_pools_table; an explicit true without it is refused. Omitted: config/generator.yaml's default.",
       "isOptional": true,
       "regexes": [
         "^(true|false|True|False|1|0|yes|no)?$"

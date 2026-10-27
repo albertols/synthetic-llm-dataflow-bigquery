@@ -524,19 +524,6 @@ def _const_knob(entry: Entry, module, name: str) -> dict[str, Any]:
   )
 
 
-def _composer_only_knob(entry: Entry) -> dict[str, Any]:
-  param = _knob_id(entry)
-  default, line = _composer_params()[param]
-  return _knob(
-      **_place(entry),
-      value=default,
-      settable_via=["composer"],
-      composer_param=param,
-      source=_source(_COMPOSER, line),
-      source_token=f'"{param}"',
-  )
-
-
 def _profiler_version(entry: Entry) -> dict[str, Any]:
   from sdfb_core.stats import source_stats
 
@@ -706,10 +693,6 @@ _FIXED_BUILDERS: dict[str, Callable[[Entry], dict[str, Any]]] = {
         _blocker_rules_declared,
     "blocker_rule_ids":
         _blocker_rule_ids,
-    "gpu":
-        _composer_only_knob,
-    "sdk_containers":
-        _composer_only_knob,
 }
 
 

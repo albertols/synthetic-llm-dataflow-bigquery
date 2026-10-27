@@ -21,6 +21,8 @@ Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
 from __future__ import annotations
 
 import json
+import types
+import typing
 
 import pytest
 from pydantic import ValidationError
@@ -29,7 +31,9 @@ from sdfb_core.config.model import (CONSTANT_KEYS, DEFAULT_CONFIG, FLAG_KEYS,
                                     SECTION_TYPES, GeneratorConfig, value_of)
 from sdfb_tests import config_parity as cp
 
-_PARSER = json.loads((cp.GOLDENS_DIR / "parser.json").read_text())
+# Master's parser, with the deliberate changes applied (num_rows not
+# required, the new defaults, the serving launch keys added).
+_PARSER = cp.master_golden("parser")
 _CONSTANTS = json.loads((cp.GOLDENS_DIR / "constants.json").read_text())
 
 # ADR 0045 — the whole-model launch keys, new since master.
@@ -44,7 +48,7 @@ def test_every_master_flag_has_one_field():
   master = set(_PARSER) - {"help"}
   assert set(FLAG_KEYS) | set(IDENTITY_KEYS) == (
       master | _MODEL_LAUNCH_FLAGS | _MODEL_LAUNCH_IDENTITY)
-  assert len(FLAG_KEYS) == 52
+  assert len(FLAG_KEYS) == 55
   assert set(IDENTITY_KEYS) == {"run_id"} | _MODEL_LAUNCH_IDENTITY
 
 
@@ -57,7 +61,15 @@ def test_flag_default_and_choices_match_master(dest):
   expected_default = None if master["required"] else master["default"]
   assert cp.jsonable(value_of(DEFAULT_CONFIG, dotted)) == expected_default
   if master["choices"] is not None:
-    assert list(field.annotation.__args__) == master["choices"]
+    assert _choices(field.annotation) == master["choices"]
+
+
+def _choices(annotation) -> list:
+  """A Literal's values; an optional Literal's (`vllm_dtype`) without None."""
+  if isinstance(annotation, types.UnionType):
+    (annotation,) = [a for a in annotation.__args__ if a is not types.NoneType]
+  assert typing.get_origin(annotation) is typing.Literal, annotation
+  return list(annotation.__args__)
 
 
 def test_required_flags_match_master():

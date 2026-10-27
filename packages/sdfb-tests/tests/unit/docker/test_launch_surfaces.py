@@ -388,8 +388,7 @@ def test_every_template_parameter_is_optional():
 def test_what_the_generator_requires_is_said_where_the_template_cannot():
   required = generator_required()
   assert required == {
-      "reference_table", "landing_table", "dlq_table", "num_rows", "run_id",
-      "model_uri"
+      "reference_table", "landing_table", "dlq_table", "run_id", "model_uri"
   }
   for name, parameter in _parameters().items():
     says_so = "required for generation" in parameter["helpText"].lower()

@@ -152,9 +152,16 @@ def test_cli_knobs_carry_their_launch_surfaces(knobs):
   assert similarity["composer_param"] == "similarity"
   # A promoted constant is set from a config file only (ADR 0043).
   assert by_id["free_text_pool_max"]["settable_via"] == ["config"]
-  # Composer and CLI defaults can differ; both are reported.
-  assert by_id["vllm_dtype"]["value"] == "auto"
+  # Composer and CLI defaults can differ; both are reported. A null
+  # vllm_dtype shows the dtype the default GPU (l4) derives.
+  assert by_id["vllm_dtype"]["value"] == "bfloat16"
   assert by_id["vllm_dtype"]["composer_default"] == "float16"
+  # The serving launch keys are settings now, no longer Composer-only.
+  for key, value in (("gpu", "l4"), ("sdk_containers", "multi"),
+                     ("launcher_machine_type", "e2-standard-8")):
+    assert by_id[key]["value"] == value
+    assert set(
+        by_id[key]["settable_via"]) == {"cli", "composer", "flex", "config"}
 
 
 def _schema_vocabulary(table: str, *path: str) -> list[str]:
@@ -536,7 +543,8 @@ def test_every_generator_knob_has_a_guide(outputs):
       if k["channel"] != "evaluation"
   }
   assert set(outputs["knob_guides.json"]["guides"]) == ids
-  assert len(ids) == 97
+  # 97 + serving.launcher_machine_type (gpu and sdk_containers were knobs).
+  assert len(ids) == 98
 
 
 def test_knob_values_are_unchanged(knobs_module, outputs):

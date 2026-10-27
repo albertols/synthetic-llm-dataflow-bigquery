@@ -95,21 +95,20 @@ def test_type_errors_name_the_key():
 
 def test_missing_required_in_argparse_order():
   assert missing_required(resolve({}).config) == [
-      "reference_table", "landing_table", "dlq_table", "num_rows", "run_id",
-      "model_uri"
+      "reference_table", "landing_table", "dlq_table", "run_id", "model_uri"
   ]
   assert missing_required(resolve({
-      "run_id": "r",
-      "num_rows": 1
+      "run_id": "r"
   }).config) == ["reference_table", "landing_table", "dlq_table", "model_uri"]
 
 
 def test_namespace_values_cover_every_flag():
   values = namespace_values(resolve({"run_id": "r1"}))
   assert values["run_id"] == "r1"
-  assert values["build_rag_layer"] == ""
+  assert values["build_rag_layer"] == "true"
   assert values["vllm_max_model_len"] == "8192"
-  assert len(values) == 55  # master's 47 + the eight ADR 0045 keys
+  # master's 47 + the eight ADR 0045 keys + the three serving launch keys
+  assert len(values) == 58
 
 
 def test_a_file_null_on_a_null_default_leaves_the_key_to_the_flag():
@@ -169,8 +168,6 @@ def test_literal_top_values_above_the_enum_cap_are_refused():
 def test_a_model_launch_needs_no_reference_or_landing_table():
   """ADR 0045: with launch.tables all the model names every table."""
   config = GeneratorConfig.model_validate({"launch": {"tables": "all"}})
-  assert missing_required(config) == [
-      "dlq_table", "num_rows", "run_id", "model_uri"
-  ]
+  assert missing_required(config) == ["dlq_table", "run_id", "model_uri"]
   assert missing_required(
       GeneratorConfig())[:2] == ["reference_table", "landing_table"]

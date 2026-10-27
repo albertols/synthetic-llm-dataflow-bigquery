@@ -159,6 +159,9 @@ def test_a_launch_writes_every_record_column_and_its_values_replay(
   assert snapshot["batch"] is None
   assert snapshot["derived"]["cache_keys"]["freetext_pools"] == (
       "gs://b/synthetic/models/m/v1/")
+  # A null vllm_dtype replays as null; the dtype the launch ran is derived.
+  assert snapshot["values"]["serving"]["vllm_dtype"] is None
+  assert snapshot["derived"]["serving.vllm_dtype"] == "bfloat16"
   replay = tmp_path / "replay.yaml"
   replay.write_text(yaml.safe_dump(snapshot["values"]))
   args, _ = rp.parse_args(["--run_id=r1", f"--config_uri={replay}"])

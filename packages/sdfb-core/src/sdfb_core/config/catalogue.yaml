@@ -416,9 +416,9 @@ settings:
     group: Persistence
     purpose: Build free-text pools in their own branch and persist them (skipped when this reference digest
       and model are already stored).
-    up: 'true: pools are built once and every worker reads them (warm runs skip the LLM entirely).'
+    up: 'true: pools are built once and every worker reads them (warm runs skip the LLM); a no-op without
+      freetext_pools_table.'
     down: 'empty: pools are inferred inside every worker process''s setup().'
-    tip: The Composer DAG defaults it to true.
     adrs:
     - '0020'
   rag.rag_row_docs_limit:
@@ -491,10 +491,10 @@ settings:
     group: Population
     purpose: Populate synthetic_rag.rag_chunks from this run's reference sample (skipped when the digest
       is already present for this embedder).
-    up: 'true: chunks and vectors persist, and later runs read them instead of re-embedding.'
+    up: 'true: chunks and vectors persist, and later runs read them instead of re-embedding; a no-op without
+      rag_chunks_table.'
     down: 'empty: the engine embeds its {{value:rag.rag_row_docs_limit}} rows in setup on every fresh
       digest.'
-    tip: The Composer DAG defaults it to true.
     adrs:
     - '0017'
     - '0019'
@@ -658,7 +658,9 @@ settings:
     purpose: 'vLLM''s --dtype: auto (the checkpoint''s), float16 or bfloat16.'
     up: bfloat16 needs an L4-class GPU.
     down: float16 is required on T4 for bf16 checkpoints like Qwen; refused for Gemma (empty output).
-    tip: The Composer DAG defaults it to float16.
+    null_means: 'derived from gpu: t4 → float16, l4 → bfloat16'
+    adrs:
+    - '0014'
   serving.vllm_max_model_len:
     label: vLLM max model len
     group: LLM
@@ -686,6 +688,37 @@ settings:
     unit: workers
     adrs:
     - '0034'
+  serving.gpu:
+    label: GPU profile
+    group: Fleet
+    purpose: The workers' GPU; a null vllm_dtype follows it.
+    up: 'l4: bfloat16, more VRAM.'
+    down: 't4: cheaper; float16 only, no Gemma.'
+    tip: 'The Composer DAG picks the worker machine and accelerator from it (l4 or t4); the launcher derives
+      a null vllm_dtype from it (t4 → float16, l4 → bfloat16) and records it. Gemma cannot run on a T4,
+      and models too large for its VRAM fit only an L4.'
+  serving.sdk_containers:
+    label: SDK containers
+    group: Fleet
+    purpose: SDK processes per worker.
+    up: 'multi: one per vCPU, past the GIL ceiling.'
+    down: 'single: one per worker.'
+    tip: 'The worker topology of a vLLM launch: the Composer DAG turns single into the no_use_multiple_sdk_containers
+      experiment. multi lets generation escape the one-interpreter GIL ceiling (the sheet charts the measured
+      pair); with single one process owns the GPU. A direct launch passes its experiments itself, and the
+      launcher only records the value.'
+    adrs:
+    - '0034'
+  serving.launcher_machine_type:
+    label: Launcher VM
+    group: Fleet
+    purpose: The Flex launcher's machine.
+    up: Faster image pull and table prep.
+    down: Cheaper; risks the 12-min limit.
+    tip: The Flex Template launcher VM, not the workers. It pulls the multi-GB image, reads every table's
+      reference sample and builds the graph inside Google's 12-minute launch limit, so a large model wants
+      a larger one. The Composer DAG launches with it; a direct launch sets launcherMachineType itself, and
+      the launcher only records the value.
   io.ddl_uri:
     label: DDL pin
     group: Sources
@@ -973,23 +1006,6 @@ fixed:
     down: A rule left out diverts rows to the DLQ without ever moving the gate.
     tip: engine_failure is weighted by the lost batch size, not one per envelope.
     why_fixed: 'Code: the rule ids the BLOCKER gate counts.'
-  serving.gpu:
-    label: GPU profile
-    group: Fleet
-    purpose: The Composer DAG's GPU profile (l4 or t4), resolved at deploy time from the {{GPU}} marker.
-    up: 'l4: bfloat16 and larger models fit.'
-    down: 't4: cheaper, float16 only, tighter VRAM.'
-    why_fixed: A Composer DAG parameter that picks the Dataflow machine, not a generator setting.
-  serving.sdk_containers:
-    label: SDK containers per worker
-    group: Fleet
-    purpose: 'SDK-container topology for vLLM launches: single (one Python process per worker) or multi
-      (one per vCPU).'
-    up: 'multi: generation escapes the one-interpreter GIL ceiling; the sheet charts the measured pair.'
-    down: 'single (default): one process owns the GPU; generation is bound by one interpreter.'
-    adrs:
-    - '0034'
-    why_fixed: A Composer DAG parameter that picks the Dataflow machine, not a generator setting.
 derived:
   generation.temperature_ladder:
     label: Free-text temperature ladder

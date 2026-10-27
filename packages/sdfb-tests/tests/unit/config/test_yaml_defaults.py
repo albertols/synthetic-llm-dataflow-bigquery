@@ -165,7 +165,15 @@ def test_the_image_resolves_the_root_link():
 
 
 # 87.5 % of the 749-line baseline: full catalogue text, separators kept.
-_LINE_BUDGET = 656
+_BASE_BUDGET = 656
+# Task 3's additions, exactly: the three serving launch keys (gpu,
+# sdk_containers, launcher_machine_type) at 4 lines each (blank, head, ↑/↓,
+# value; their longer text is the catalogue's tip, shown by the GUI), and
+# vllm_dtype's `# null = derived from gpu` line. The edited build-layer
+# entries keep their line count.
+_SERVING_LAUNCH_KEYS_LINES = 3 * 4
+_VLLM_DTYPE_NULL_LINE = 1
+_LINE_BUDGET = _BASE_BUDGET + _SERVING_LAUNCH_KEYS_LINES + _VLLM_DTYPE_NULL_LINE
 
 
 def test_reference_is_compact():

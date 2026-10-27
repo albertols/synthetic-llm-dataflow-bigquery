@@ -78,9 +78,10 @@ from apache_beam.options.pipeline_options import (
 )
 from google.cloud import bigquery
 from sdfb_core.codegen import derive_bq_load_schema
-from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
+from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig, value_of
 from sdfb_core.config.resolve import (
     PROVENANCE_FILE,
+    PROVENANCE_FLAG,
     ConfigError,
     ConfigResolution,
     missing_required,
@@ -381,7 +382,11 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "because the FILE_LOADS load-job API rejects them "
       "at runtime. Pre-provision the table out-of-band "
       "(e.g. `bq mk`/DDL) if those constraints matter.")
-  p.add_argument("--num_rows", type=int)
+  p.add_argument(
+      "--num_rows",
+      type=int,
+      help="Rows to generate for a root table (default 1000, from "
+      "generator.yaml); a driven child derives its own count (ADR 0036).")
   p.add_argument(
       "--autoscaling",
       choices=list(_AUTOSCALING_MODES),
@@ -442,6 +447,7 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "synthetic_rag.rag_chunks from this run's "
       "reference sample (skipped if the reference_digest "
       "is already present for this embedder id+version). "
+      "Default true: a no-op without --rag_chunks_table. "
       "String-valued so the Flex Template/DAG chain can "
       "pass --build_rag_layer=true.")
   p.add_argument(
@@ -457,7 +463,8 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "pools in their own branch and persist them to "
       "--freetext_pools_table (skipped if this "
       "reference_digest + model_uri is already present). "
-      "Without it pools are inferred inside every worker "
+      "Default true: a no-op without --freetext_pools_table. "
+      "Empty: pools are inferred inside every worker "
       "process's setup().")
   p.add_argument(
       "--freetext_pools_table",
@@ -624,10 +631,12 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
   p.add_argument(
       "--vllm_dtype",
       choices=["auto", "float16", "bfloat16"],
-      help="vLLM --dtype override. auto = checkpoint dtype "
-      "(bf16 for Gemma/Qwen). float16 is REQUIRED on T4 "
-      "for fp16-safe bf16 checkpoints (Qwen); refused for "
-      "gemma-family models (fp16 Gemma emits empty output)")
+      help="vLLM --dtype. Unset (the default) derives it from "
+      "--gpu: t4 -> float16, l4 -> bfloat16; a value given here "
+      "wins. auto = checkpoint dtype (bf16 for Gemma/Qwen). "
+      "float16 is REQUIRED on T4 for fp16-safe bf16 checkpoints "
+      "(Qwen); refused for gemma-family models (fp16 Gemma "
+      "emits empty output)")
   p.add_argument(
       "--vllm_max_model_len",
       help="vLLM --max-model-len cap. Without it vLLM sizes the "
@@ -636,6 +645,24 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "EngineCore at startup). 8192 fits every registry "
       "model/GPU pairing and dwarfs the synthesis prompts. "
       "Empty = no cap (native context).")
+  p.add_argument(
+      "--gpu",
+      choices=["l4", "t4"],
+      help="The workers' GPU profile (default l4). The Composer DAG picks "
+      "the worker machine from it; the launcher derives --vllm_dtype "
+      "from it when that is unset (ADR 0043).")
+  p.add_argument(
+      "--sdk_containers",
+      choices=["multi", "single"],
+      help="Worker SDK-container topology of a vLLM launch (default "
+      "multi, ADR 0034). The Composer DAG turns it into the launch's "
+      "experiments; a direct launch passes Beam's experiments itself, "
+      "and this value is only recorded.")
+  p.add_argument(
+      "--launcher_machine_type",
+      help="Machine type of the Flex Template launcher VM (default "
+      "e2-standard-8). The Composer DAG launches with it; a direct "
+      "launch only records it.")
   p.add_argument(
       "--tables",
       choices=["explicit", "all"],
@@ -718,9 +745,15 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       **namespace_values(resolution),
       config_uri=config_uri,
       config_resolution=resolution)
-  if parse_bool_flag(args.build_rag_layer) and not args.rag_chunks_table:
+  # A build layer's true is a no-op without its table (the default is
+  # true). Only a true typed as a flag is refused without it, as on master:
+  # a config file may be a replayed record, whose values hold every key.
+  provenance = resolution.provenance
+  if (provenance["rag.build_rag_layer"] == PROVENANCE_FLAG and
+      parse_bool_flag(args.build_rag_layer) and not args.rag_chunks_table):
     p.error("--build_rag_layer requires --rag_chunks_table")
-  if parse_bool_flag(args.build_pool_layer) and not args.freetext_pools_table:
+  if (provenance["free_text.build_pool_layer"] == PROVENANCE_FLAG and
+      parse_bool_flag(args.build_pool_layer) and not args.freetext_pools_table):
     p.error("--build_pool_layer requires --freetext_pools_table")
   return args, beam_args
 
@@ -791,6 +824,19 @@ def log_config_resolution(resolution: ConfigResolution) -> None:
   for item in resolution.overridden:
     logger.warning("config_override key=%s typed=%r file=%r (the file wins)",
                    item.key, item.typed, item.file)
+
+
+def log_vllm_dtype(resolution: ConfigResolution) -> None:
+  """The dtype vLLM runs with, the GPU, and why: `derived` from the GPU
+    when serving.vllm_dtype is unset, else where the value came from."""
+  config = resolution.config
+  source = ("derived" if config.serving.vllm_dtype is None else
+            resolution.provenance["serving.vllm_dtype"])
+  log_milestone(
+      "vllm_dtype_resolved",
+      dtype=value_of(config, "serving.vllm_dtype"),
+      gpu=config.serving.gpu,
+      source=source)
 
 
 def warn_unrecorded_evaluation_inputs(resolution: ConfigResolution,
@@ -891,9 +937,14 @@ def prepare_record_base(args: argparse.Namespace,
       resolution=resolution,
       launch_run_id=args.run_id,
       derived={
-          "temperature_ladder": list(escalating_temperatures()),
-          "profiler_version": PROFILER_VERSION,
-          "cache_keys": cache_keys_of(args, reg),
+          "serving.vllm_dtype":
+              value_of(resolution.config, "serving.vllm_dtype"),
+          "temperature_ladder":
+              list(escalating_temperatures()),
+          "profiler_version":
+              PROFILER_VERSION,
+          "cache_keys":
+              cache_keys_of(args, reg),
       },
       thresholds={
           "uri": args.thresholds_uri,
@@ -3211,6 +3262,7 @@ def main(argv: list[str] | None = None) -> int:
   log_build_info("launcher")
   args, beam_argv = parse_args(argv or sys.argv[1:])
   log_config_resolution(args.config_resolution)
+  log_vllm_dtype(args.config_resolution)
   if args.tables == TABLES_ALL:
     # ADR 0045 — every enabled table of one model, batch by batch.
     return _run_model(args, beam_argv)
