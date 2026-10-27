@@ -614,7 +614,7 @@ describe("the BFF in mock mode", { timeout: 60_000 }, () => {
       "serving",
       "evaluation",
     ]);
-    expect(knobs.knobs).toHaveLength(109);
+    expect(knobs.knobs).toHaveLength(110);
     const catalogue = await get("/api/catalogue", catalogueResponseSchema);
     expect(catalogue.metrics).toHaveLength(79);
   });
