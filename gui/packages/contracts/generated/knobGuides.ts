@@ -102,6 +102,7 @@ export type GeneratorKnobId =
   | "prep_workers"
   | "batch_index"
   | "batch_count"
+  | "generator_defaults_digest"
   | "identity_cols"
   | "pk_cols"
   | "fk_parent_landing"
@@ -624,6 +625,11 @@ export const generatorGuides: Readonly<Record<GeneratorKnobId, GeneratedGuide>> 
     "purpose": "How many batches the orchestrator planned. The launcher plans again and stops when its own count differs, because the model or K changed in between.",
     "up": "Must equal the launcher's own plan.",
     "down": "Unset: only together with batch_index unset."
+  },
+  "generator_defaults_digest": {
+    "purpose": "The digest of the generator.yaml the DAG was imported with. The launcher compares it with the image's own and logs generator_defaults_mismatch when they differ.",
+    "up": "A DAG from a newer commit than the image names a different digest, and the launcher says so.",
+    "down": "Unset: nothing is compared, as on a CLI launch."
   },
   "identity_cols": {
     "purpose": "Columns synthesized fresh for every row (PK, UUID), never sampled from the reference.",
