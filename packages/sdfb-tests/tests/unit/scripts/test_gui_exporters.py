@@ -543,8 +543,9 @@ def test_every_generator_knob_has_a_guide(outputs):
       if k["channel"] != "evaluation"
   }
   assert set(outputs["knob_guides.json"]["guides"]) == ids
-  # 97 + serving.launcher_machine_type (gpu and sdk_containers were knobs).
-  assert len(ids) == 98
+  # 97 + serving.launcher_machine_type (gpu and sdk_containers were knobs)
+  # + launch.generator_defaults_digest.
+  assert len(ids) == 99
 
 
 def test_knob_values_are_unchanged(knobs_module, outputs):
