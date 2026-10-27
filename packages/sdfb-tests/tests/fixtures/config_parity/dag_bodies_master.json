@@ -1,0 +1,458 @@
+{
+  "explicit_eval_off": {
+    "bodies": [
+      {
+        "launchParameter": {
+          "containerSpecGcsPath": "gs://sdfb-bucket-dataflow-templates/synthetic/sdfb-0.7.0-template.json",
+          "environment": {
+            "additionalExperiments": [
+              "use_runner_v2",
+              "upload_graph",
+              "enable_secure_boot",
+              "upload_graph",
+              "upload_graph",
+              "upload_graph"
+            ],
+            "additionalUserLabels": {
+              "app": "sdfb",
+              "dag": "synthetic_sdfb_0.7.0_20261026T1200",
+              "env": "prd"
+            },
+            "ipConfiguration": "WORKER_IP_PRIVATE",
+            "launcherMachineType": "e2-standard-8",
+            "machineType": "e2-standard-8",
+            "maxWorkers": 4,
+            "serviceAccountEmail": "sdfb-dataflow@example.com",
+            "stagingLocation": "gs://sdfb-bucket-dataflow-staging/staging",
+            "subnetwork": "regions/europe-west3/subnetworks/sdfb-subnet",
+            "tempLocation": "gs://sdfb-bucket-dataflow-staging/temp/",
+            "workerRegion": "europe-west3"
+          },
+          "jobName": "synthetic-sdfb-v0-7-0-qwen3-4b-instruct-2507",
+          "parameters": {
+            "autoscaling": "auto",
+            "batch_size": "16",
+            "build_pool_layer": "true",
+            "build_rag_layer": "true",
+            "client_type": "fake",
+            "create_if_not_exists": "false",
+            "dlq_table": "sdfb-proj.synthetic_data_quality.dlq",
+            "embedder_uri": "gs://sdfb-bucket/synthetic/models/embedders/bge-small-en-v1.5/v1/",
+            "engine": "b1_rag",
+            "env": "prd",
+            "fk_parent_landing": "",
+            "freetext_expansion": "identifiers",
+            "freetext_pools_table": "sdfb-proj.synthetic_rag.freetext_pools",
+            "generate_fk_relationships": "true",
+            "identity_cols": "",
+            "initial_workers": "",
+            "landing_table": "sdfb-proj.synthetic_data.X_TABLE",
+            "model_uri": "gs://sdfb-bucket/synthetic/models/qwen3/4b-instruct-2507/v1/",
+            "multi_table_mode": "single_job",
+            "num_rows": "1000",
+            "pk_cols": "",
+            "pool_seed_strategy": "centroid",
+            "prompt_constraints": "on",
+            "prompt_debug": "off",
+            "rag_chunks_table": "sdfb-proj.synthetic_rag.rag_chunks",
+            "rag_row_docs_limit": "1024",
+            "reference_rows_limit": "10000",
+            "reference_table": "sdfb-proj.src_ds.X_TABLE",
+            "relationships_uri": "gs://sdfb-bucket/synthetic/relationships/multi_fk.yaml",
+            "run_id": "<DAG_RUN_ID>-<SALT8>",
+            "seed": "",
+            "similarity": "0.7",
+            "source_stats": "sample",
+            "source_stats_table": "sdfb-proj.synthetic_rag.source_table_stats",
+            "uniqueness_mode": "exact",
+            "validation_runs_table": "sdfb-proj.synthetic_data_quality.validation_runs",
+            "vllm_dtype": "float16",
+            "vllm_max_model_len": "8192",
+            "write_disposition": "append"
+          }
+        }
+      }
+    ],
+    "evaluation_body": null,
+    "gcs_reads": [],
+    "task_states": {
+      "run_evaluation_gate": "success",
+      "start_sdfb": "success",
+      "trigger_evaluation": "skipped",
+      "wait_for_evaluation_launch": "skipped",
+      "wait_for_generation": "skipped"
+    }
+  },
+  "explicit_fk_group": {
+    "bodies": [
+      {
+        "launchParameter": {
+          "containerSpecGcsPath": "gs://sdfb-bucket-dataflow-templates/synthetic/sdfb-0.7.0-template.json",
+          "environment": {
+            "additionalExperiments": [
+              "use_runner_v2",
+              "upload_graph",
+              "enable_secure_boot",
+              "worker_accelerator=type:nvidia-l4;count:1;install-nvidia-driver",
+              "automatically_use_created_reservation",
+              "upload_graph"
+            ],
+            "additionalUserLabels": {
+              "app": "sdfb",
+              "dag": "synthetic_sdfb_0.7.0_20261026T1200",
+              "env": "prd"
+            },
+            "ipConfiguration": "WORKER_IP_PRIVATE",
+            "launcherMachineType": "e2-standard-8",
+            "machineType": "g2-standard-8",
+            "maxWorkers": 4,
+            "serviceAccountEmail": "sdfb-dataflow@example.com",
+            "stagingLocation": "gs://sdfb-bucket-dataflow-staging/staging",
+            "subnetwork": "regions/europe-west3/subnetworks/sdfb-subnet",
+            "tempLocation": "gs://sdfb-bucket-dataflow-staging/temp/",
+            "workerRegion": "europe-west3"
+          },
+          "jobName": "synthetic-sdfb-v0-7-0-qwen3-4b-instruct-2507",
+          "parameters": {
+            "autoscaling": "auto",
+            "batch_size": "16",
+            "build_pool_layer": "true",
+            "build_rag_layer": "true",
+            "client_type": "vllm",
+            "create_if_not_exists": "false",
+            "dlq_table": "sdfb-proj.synthetic_data_quality.dlq",
+            "embedder_uri": "gs://sdfb-bucket/synthetic/models/embedders/bge-small-en-v1.5/v1/",
+            "engine": "b1_rag",
+            "env": "prd",
+            "fk_parent_landing": "",
+            "freetext_expansion": "identifiers",
+            "freetext_pools_table": "sdfb-proj.synthetic_rag.freetext_pools",
+            "generate_fk_relationships": "true",
+            "identity_cols": "",
+            "initial_workers": "",
+            "landing_table": "sdfb-proj.synthetic_data.X_TABLE",
+            "model_uri": "gs://sdfb-bucket/synthetic/models/qwen3/4b-instruct-2507/v1/",
+            "multi_table_mode": "single_job",
+            "num_rows": "1000",
+            "pk_cols": "",
+            "pool_seed_strategy": "centroid",
+            "prompt_constraints": "on",
+            "prompt_debug": "off",
+            "rag_chunks_table": "sdfb-proj.synthetic_rag.rag_chunks",
+            "rag_row_docs_limit": "1024",
+            "reference_rows_limit": "10000",
+            "reference_table": "sdfb-proj.src_ds.Y_TABLE",
+            "relationships_uri": "gs://sdfb-bucket/synthetic/relationships/multi_fk.yaml",
+            "run_id": "<DAG_RUN_ID>-<SALT8>",
+            "seed": "",
+            "similarity": "0.7",
+            "source_stats": "sample",
+            "source_stats_table": "sdfb-proj.synthetic_rag.source_table_stats",
+            "uniqueness_mode": "exact",
+            "validation_runs_table": "sdfb-proj.synthetic_data_quality.validation_runs",
+            "vllm_dtype": "float16",
+            "vllm_max_model_len": "8192",
+            "write_disposition": "append"
+          }
+        }
+      }
+    ],
+    "evaluation_body": {
+      "launchParameter": {
+        "containerSpecGcsPath": "gs://sdfb-bucket-dataflow-templates/synthetic/sdfb-0.7.0-template.json",
+        "environment": {
+          "additionalExperiments": [
+            "use_runner_v2",
+            "enable_secure_boot"
+          ],
+          "additionalUserLabels": {
+            "app": "sdfb",
+            "dag": "synthetic_sdfb_0.7.0_20261026T1200",
+            "env": "prd"
+          },
+          "ipConfiguration": "WORKER_IP_PRIVATE",
+          "launcherMachineType": "e2-standard-8",
+          "machineType": "e2-standard-8",
+          "maxWorkers": "8",
+          "serviceAccountEmail": "sdfb-dataflow@example.com",
+          "stagingLocation": "gs://sdfb-bucket-dataflow-staging/staging",
+          "subnetwork": "regions/europe-west3/subnetworks/sdfb-subnet",
+          "tempLocation": "gs://sdfb-bucket-dataflow-staging/temp/",
+          "workerRegion": "europe-west3"
+        },
+        "jobName": "sdfb-evaluation-v0-7-0-<TS_NODASH>",
+        "parameters": {
+          "disk_size_gb": "200",
+          "generation_job_id": "fakejob-start_sdfb",
+          "landing_dataset": "sdfb-proj.synthetic_data",
+          "mode": "",
+          "output_dataset": "synthetic_data_quality",
+          "reference_dataset": "sdfb-proj.src_ds",
+          "reference_rows_limit": "10000",
+          "relationships_uri": "gs://sdfb-bucket/synthetic/relationships/multi_fk.yaml",
+          "scope": "manual",
+          "sdfb_job": "evaluation",
+          "seed_table": "Y_TABLE",
+          "trigger": "chained",
+          "validation_runs_table": "sdfb-proj.synthetic_data_quality.validation_runs"
+        }
+      }
+    },
+    "gcs_reads": [],
+    "task_states": {
+      "run_evaluation_gate": "success",
+      "start_sdfb": "success",
+      "trigger_evaluation": "success",
+      "wait_for_evaluation_launch": "success",
+      "wait_for_generation": "success"
+    }
+  },
+  "explicit_l4": {
+    "bodies": [
+      {
+        "launchParameter": {
+          "containerSpecGcsPath": "gs://sdfb-bucket-dataflow-templates/synthetic/sdfb-0.7.0-template.json",
+          "environment": {
+            "additionalExperiments": [
+              "use_runner_v2",
+              "upload_graph",
+              "enable_secure_boot",
+              "worker_accelerator=type:nvidia-l4;count:1;install-nvidia-driver",
+              "automatically_use_created_reservation",
+              "upload_graph"
+            ],
+            "additionalUserLabels": {
+              "app": "sdfb",
+              "dag": "synthetic_sdfb_0.7.0_20261026T1200",
+              "env": "prd"
+            },
+            "ipConfiguration": "WORKER_IP_PRIVATE",
+            "launcherMachineType": "e2-standard-8",
+            "machineType": "g2-standard-8",
+            "maxWorkers": 4,
+            "serviceAccountEmail": "sdfb-dataflow@example.com",
+            "stagingLocation": "gs://sdfb-bucket-dataflow-staging/staging",
+            "subnetwork": "regions/europe-west3/subnetworks/sdfb-subnet",
+            "tempLocation": "gs://sdfb-bucket-dataflow-staging/temp/",
+            "workerRegion": "europe-west3"
+          },
+          "jobName": "synthetic-sdfb-v0-7-0-qwen3-4b-instruct-2507",
+          "parameters": {
+            "autoscaling": "auto",
+            "batch_size": "16",
+            "build_pool_layer": "true",
+            "build_rag_layer": "true",
+            "client_type": "vllm",
+            "create_if_not_exists": "false",
+            "dlq_table": "sdfb-proj.synthetic_data_quality.dlq",
+            "embedder_uri": "gs://sdfb-bucket/synthetic/models/embedders/bge-small-en-v1.5/v1/",
+            "engine": "b1_rag",
+            "env": "prd",
+            "fk_parent_landing": "",
+            "freetext_expansion": "identifiers",
+            "freetext_pools_table": "sdfb-proj.synthetic_rag.freetext_pools",
+            "generate_fk_relationships": "true",
+            "identity_cols": "",
+            "initial_workers": "",
+            "landing_table": "sdfb-proj.synthetic_data.X_TABLE",
+            "model_uri": "gs://sdfb-bucket/synthetic/models/qwen3/4b-instruct-2507/v1/",
+            "multi_table_mode": "single_job",
+            "num_rows": "2000",
+            "pk_cols": "",
+            "pool_seed_strategy": "centroid",
+            "prompt_constraints": "on",
+            "prompt_debug": "off",
+            "rag_chunks_table": "sdfb-proj.synthetic_rag.rag_chunks",
+            "rag_row_docs_limit": "1024",
+            "reference_rows_limit": "10000",
+            "reference_table": "sdfb-proj.src_ds.X_TABLE",
+            "relationships_uri": "config/relationships",
+            "run_id": "<DAG_RUN_ID>-<SALT8>",
+            "seed": "",
+            "similarity": "0.7",
+            "source_stats": "sample",
+            "source_stats_table": "sdfb-proj.synthetic_rag.source_table_stats",
+            "uniqueness_mode": "exact",
+            "validation_runs_table": "sdfb-proj.synthetic_data_quality.validation_runs",
+            "vllm_dtype": "float16",
+            "vllm_max_model_len": "8192",
+            "write_disposition": "append"
+          }
+        }
+      }
+    ],
+    "evaluation_body": {
+      "launchParameter": {
+        "containerSpecGcsPath": "gs://sdfb-bucket-dataflow-templates/synthetic/sdfb-0.7.0-template.json",
+        "environment": {
+          "additionalExperiments": [
+            "use_runner_v2",
+            "enable_secure_boot"
+          ],
+          "additionalUserLabels": {
+            "app": "sdfb",
+            "dag": "synthetic_sdfb_0.7.0_20261026T1200",
+            "env": "prd"
+          },
+          "ipConfiguration": "WORKER_IP_PRIVATE",
+          "launcherMachineType": "e2-standard-8",
+          "machineType": "e2-standard-8",
+          "maxWorkers": "8",
+          "serviceAccountEmail": "sdfb-dataflow@example.com",
+          "stagingLocation": "gs://sdfb-bucket-dataflow-staging/staging",
+          "subnetwork": "regions/europe-west3/subnetworks/sdfb-subnet",
+          "tempLocation": "gs://sdfb-bucket-dataflow-staging/temp/",
+          "workerRegion": "europe-west3"
+        },
+        "jobName": "sdfb-evaluation-v0-7-0-<TS_NODASH>",
+        "parameters": {
+          "disk_size_gb": "200",
+          "generation_job_id": "fakejob-start_sdfb",
+          "landing_dataset": "sdfb-proj.synthetic_data",
+          "mode": "",
+          "output_dataset": "synthetic_data_quality",
+          "reference_dataset": "sdfb-proj.src_ds",
+          "reference_rows_limit": "10000",
+          "relationships_uri": "config/relationships",
+          "scope": "manual",
+          "sdfb_job": "evaluation",
+          "seed_table": "X_TABLE",
+          "trigger": "chained",
+          "validation_runs_table": "sdfb-proj.synthetic_data_quality.validation_runs"
+        }
+      }
+    },
+    "gcs_reads": [],
+    "task_states": {
+      "run_evaluation_gate": "success",
+      "start_sdfb": "success",
+      "trigger_evaluation": "success",
+      "wait_for_evaluation_launch": "success",
+      "wait_for_generation": "success"
+    }
+  },
+  "explicit_t4": {
+    "bodies": [
+      {
+        "launchParameter": {
+          "containerSpecGcsPath": "gs://sdfb-bucket-dataflow-templates/synthetic/sdfb-0.7.0-template.json",
+          "environment": {
+            "additionalExperiments": [
+              "use_runner_v2",
+              "upload_graph",
+              "enable_secure_boot",
+              "worker_accelerator=type:nvidia-tesla-t4;count:1;install-nvidia-driver:5xx",
+              "automatically_use_created_reservation",
+              "upload_graph"
+            ],
+            "additionalUserLabels": {
+              "app": "sdfb",
+              "dag": "synthetic_sdfb_0.7.0_20261026T1200",
+              "env": "prd"
+            },
+            "ipConfiguration": "WORKER_IP_PRIVATE",
+            "launcherMachineType": "e2-standard-8",
+            "machineType": "n1-standard-8",
+            "maxWorkers": 4,
+            "serviceAccountEmail": "sdfb-dataflow@example.com",
+            "stagingLocation": "gs://sdfb-bucket-dataflow-staging/staging",
+            "subnetwork": "regions/europe-west3/subnetworks/sdfb-subnet",
+            "tempLocation": "gs://sdfb-bucket-dataflow-staging/temp/",
+            "workerRegion": "europe-west3"
+          },
+          "jobName": "synthetic-sdfb-v0-7-0-qwen3-4b-instruct-2507",
+          "parameters": {
+            "autoscaling": "auto",
+            "batch_size": "16",
+            "build_pool_layer": "true",
+            "build_rag_layer": "true",
+            "client_type": "vllm",
+            "create_if_not_exists": "false",
+            "dlq_table": "sdfb-proj.synthetic_data_quality.dlq",
+            "embedder_uri": "gs://sdfb-bucket/synthetic/models/embedders/bge-small-en-v1.5/v1/",
+            "engine": "b1_rag",
+            "env": "prd",
+            "fk_parent_landing": "",
+            "freetext_expansion": "identifiers",
+            "freetext_pools_table": "sdfb-proj.synthetic_rag.freetext_pools",
+            "generate_fk_relationships": "true",
+            "identity_cols": "",
+            "initial_workers": "",
+            "landing_table": "sdfb-proj.synthetic_data.X_TABLE",
+            "model_uri": "gs://sdfb-bucket/synthetic/models/qwen3/4b-instruct-2507/v1/",
+            "multi_table_mode": "single_job",
+            "num_rows": "2000",
+            "pk_cols": "",
+            "pool_seed_strategy": "centroid",
+            "prompt_constraints": "on",
+            "prompt_debug": "off",
+            "rag_chunks_table": "sdfb-proj.synthetic_rag.rag_chunks",
+            "rag_row_docs_limit": "1024",
+            "reference_rows_limit": "10000",
+            "reference_table": "sdfb-proj.src_ds.X_TABLE",
+            "relationships_uri": "config/relationships",
+            "run_id": "<DAG_RUN_ID>-<SALT8>",
+            "seed": "",
+            "similarity": "0.5",
+            "source_stats": "sample",
+            "source_stats_table": "sdfb-proj.synthetic_rag.source_table_stats",
+            "uniqueness_mode": "exact",
+            "validation_runs_table": "sdfb-proj.synthetic_data_quality.validation_runs",
+            "vllm_dtype": "float16",
+            "vllm_max_model_len": "8192",
+            "write_disposition": "append"
+          }
+        }
+      }
+    ],
+    "evaluation_body": {
+      "launchParameter": {
+        "containerSpecGcsPath": "gs://sdfb-bucket-dataflow-templates/synthetic/sdfb-0.7.0-template.json",
+        "environment": {
+          "additionalExperiments": [
+            "use_runner_v2",
+            "enable_secure_boot"
+          ],
+          "additionalUserLabels": {
+            "app": "sdfb",
+            "dag": "synthetic_sdfb_0.7.0_20261026T1200",
+            "env": "prd"
+          },
+          "ipConfiguration": "WORKER_IP_PRIVATE",
+          "launcherMachineType": "e2-standard-8",
+          "machineType": "e2-standard-8",
+          "maxWorkers": "8",
+          "serviceAccountEmail": "sdfb-dataflow@example.com",
+          "stagingLocation": "gs://sdfb-bucket-dataflow-staging/staging",
+          "subnetwork": "regions/europe-west3/subnetworks/sdfb-subnet",
+          "tempLocation": "gs://sdfb-bucket-dataflow-staging/temp/",
+          "workerRegion": "europe-west3"
+        },
+        "jobName": "sdfb-evaluation-v0-7-0-<TS_NODASH>",
+        "parameters": {
+          "disk_size_gb": "200",
+          "generation_job_id": "fakejob-start_sdfb",
+          "landing_dataset": "sdfb-proj.synthetic_data",
+          "mode": "",
+          "output_dataset": "synthetic_data_quality",
+          "reference_dataset": "sdfb-proj.src_ds",
+          "reference_rows_limit": "10000",
+          "relationships_uri": "config/relationships",
+          "scope": "manual",
+          "sdfb_job": "evaluation",
+          "seed_table": "X_TABLE",
+          "trigger": "chained",
+          "validation_runs_table": "sdfb-proj.synthetic_data_quality.validation_runs"
+        }
+      }
+    },
+    "gcs_reads": [],
+    "task_states": {
+      "run_evaluation_gate": "success",
+      "start_sdfb": "success",
+      "trigger_evaluation": "success",
+      "wait_for_evaluation_launch": "success",
+      "wait_for_generation": "success"
+    }
+  }
+}
