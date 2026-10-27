@@ -373,6 +373,20 @@ def test_route_puts_the_files_hardware_over_the_params_before_any_body():
     assert call.lineno > overlay.lineno, ast.unparse(call)
 
 
+def test_a_files_hardware_values_are_the_params_allowed_ones():
+  """Rulings R16, R16b: a file's value is checked against what the DAG's
+  own Param allows (its enum), a machine type against non-empty text."""
+  params = _params()
+  for key, allowed in M.FILE_HARDWARE_KEYS.items():
+    schema = {k.arg for k in params[key].keywords}
+    if allowed is None:
+      assert ast.literal_eval(_kw(params[key], "minLength")) == 1, key
+      assert "enum" not in schema, key
+    else:
+      assert set(ast.literal_eval(_kw(params[key],
+                                      "enum"))) == set(allowed), key
+
+
 class _NotFoundError(Exception):
   """Stands in for google.api_core.exceptions.NotFound."""
 

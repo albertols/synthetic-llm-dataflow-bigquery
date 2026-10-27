@@ -58,11 +58,12 @@ wins over the `tables` param (ADR 0043), so a file saying `all` takes the
 batch branch whatever the trigger says. `route` reads `config_uri` through
 `GCSHook` only when the param is set: an explicit launch without it reads
 nothing from GCS, as master's DAG read nothing (the launcher reads the
-relationship model itself). The file's serving.gpu, serving.sdk_containers
-and serving.launcher_machine_type go over the params before any launch body
-is built (`with_file_hardware`, Ruling R16): the machine, the accelerator,
-the SDK-container experiment and the launcher VM are the Flex launch's own,
-so a file's `gpu: t4` must reach them, not only the launcher. A file or a
+relationship model itself). The file's serving.client_type, serving.gpu,
+serving.sdk_containers and serving.launcher_machine_type go over the params
+before any launch body is built (`with_file_hardware`, Rulings R16, R16b):
+the machine, the accelerator, the SDK-container experiment and the launcher
+VM are the Flex launch's own, so a file's `gpu: t4` or `client_type: fake`
+must reach them, not only the launcher. A file or a
 plan the DAG cannot use (`sdfb_batches.PlanError`: bad YAML, a bad
 `launch:` or `serving:` value, a missing or non-UTF-8 object, a model that
 is no gs:// file, K below one) fails `route` with `AirflowFailException`,
@@ -974,8 +975,9 @@ def route(**context) -> str:
   """Which branch the launch takes, and its launch bodies.
 
   Reads `config_uri` only when it is set, and parses it once; its
-  serving.gpu, sdk_containers and launcher_machine_type go over the params
-  before any body is built (the hardware is the launch's own, Ruling R16).
+  serving.client_type, gpu, sdk_containers and launcher_machine_type go over
+  the params before any body is built (the hardware is the launch's own,
+  Rulings R16, R16b).
   Explicit: pushes `body` and
   returns `start_sdfb`. All: plans the batches and pushes the bodies, the
   base run id, the batch count, the model file, the batches and the banner,

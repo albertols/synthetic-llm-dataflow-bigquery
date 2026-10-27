@@ -582,6 +582,22 @@ def test_a_file_gpu_t4_launches_t4_machines_on_both_branches(layers):
       layers, params, text)
 
 
+def test_a_file_client_type_fake_launches_cpu_machines_on_both_branches(layers):
+  """Ruling R16b: the file's client_type decides the machine too."""
+  params = {**M.param_defaults(layers), "run_id": "r"}
+  assert params["client_type"] == "vllm"
+  launches = _gpu_launches(layers, params, "serving:\n  client_type: fake\n")
+  assert len(launches) == 3
+  for body in launches:
+    launch = body["launchParameter"]
+    environment = launch["environment"]
+    assert environment["machineType"] == "e2-standard-8"
+    experiments = environment["additionalExperiments"]
+    assert not [e for e in experiments if "accelerator" in e], experiments
+    assert "automatically_use_created_reservation" not in experiments
+    assert launch["parameters"]["client_type"] == "fake"
+
+
 @pytest.mark.parametrize("text", [
     None, "", "launch:\n  tables: all\n", "serving:\n", "serving: {}\n",
     "serving:\n  vllm_dtype: auto\n"
@@ -600,6 +616,8 @@ def test_a_file_without_the_keys_leaves_the_params(layers, text):
         ("serving:\n  gpu: null\n", "gpu"),
         ("serving:\n  gpu: on\n", "gpu"),  # YAML 1.1: a boolean
         ("serving:\n  sdk_containers: many\n", "sdk_containers"),
+        ("serving:\n  client_type: mlx\n", "client_type"),
+        ("serving:\n  client_type: ''\n", "client_type"),
         ("serving:\n  launcher_machine_type: ''\n", "launcher_machine_type"),
         ("serving:\n  launcher_machine_type: 8\n", "launcher_machine_type"),
     ])
@@ -626,7 +644,7 @@ def test_yaml_1_1_hardware_values_stay_text(layers):
       isinstance(out[k], str)
       for k in ("gpu", "sdk_containers", "launcher_machine_type"))
   assert set(M.FILE_HARDWARE_KEYS) == {
-      "gpu", "sdk_containers", "launcher_machine_type"
+      "client_type", "gpu", "sdk_containers", "launcher_machine_type"
   }
 
 

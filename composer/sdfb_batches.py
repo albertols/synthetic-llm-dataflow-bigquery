@@ -32,9 +32,9 @@ PyYAML only, what the DAG needs:
                        is no YAML mapping)
     resolve_tables_mode  which branch runs: a config file's launch.tables
                        wins over the param
-    with_file_hardware the file's serving.gpu / sdk_containers /
-                       launcher_machine_type over the params, for the
-                       hardware the DAG itself builds
+    with_file_hardware the file's serving.client_type / gpu /
+                       sdk_containers / launcher_machine_type over the
+                       params, for the hardware the DAG itself builds
     plan_batches       the batches of sdfb_core.launch.batches
                        (first-fit-decreasing over whole components)
     planning_inputs    the model file and K the batch launchers will plan
@@ -339,6 +339,7 @@ def parse_config(config: ConfigInput) -> dict[str, Any]:
 # itself asks for (`launch_environment`): each with the values a launch
 # accepts, None for any non-empty text.
 FILE_HARDWARE_KEYS: dict[str, tuple[str, ...] | None] = {
+    "client_type": ("vllm", "fake"),
     "gpu": ("l4", "t4"),
     "sdk_containers": ("multi", "single"),
     "launcher_machine_type": None,
@@ -347,14 +348,16 @@ FILE_HARDWARE_KEYS: dict[str, tuple[str, ...] | None] = {
 
 def with_file_hardware(params: Mapping[str, Any],
                        config: ConfigInput) -> dict[str, Any]:
-  """`params` with a config file's serving.gpu, serving.sdk_containers and
-  serving.launcher_machine_type over them (Ruling R16).
+  """`params` with a config file's serving.client_type, serving.gpu,
+  serving.sdk_containers and serving.launcher_machine_type over them
+  (Rulings R16, R16b; the values the DAG's Params allow).
 
   The launcher applies the file's keys over the flags (ADR 0043), but the
   machine, accelerator, SDK-container experiments and launcher VM are the
   Flex launch's own, which the DAG builds from these params: without this a
   file's `gpu: t4` would launch an L4 machine while the launcher derives
-  float16 for a T4. A key the file does not set leaves the param as it is;
+  float16 for a T4, and a file's `client_type: fake` would hold GPU
+  workers for a CPU smoke. A key the file does not set leaves the param as it is;
   a value no launch accepts is a PlanError."""
   data = parse_config(config)
   serving = data.get("serving")
