@@ -99,9 +99,10 @@ jobs:
         run: uv run python scripts/doc/render_eval_catalogue.py --check
 
       - name: Generator config reference
-        # config/generator.yaml is rendered from sdfb_core/config (the
-        # model and its catalogue). A model or catalogue change without a
-        # re-render, or a hand edit of the file, fails.
+        # generator.yaml's value lines are the defaults, edited by hand
+        # (ADR 0043); its comments are rendered from the catalogue around
+        # those values. A catalogue change without a re-render (--fix, which
+        # never changes a value), or a hand edit of a comment, fails.
         run: uv run python scripts/doc/render_generator_config.py --check
 
       - name: Design references
