@@ -4,6 +4,7 @@
  * 200-column evaluation; a RUNNING event on both sides of the 24-hour stale
  * rule, with the browser's clock fixed; the degenerate registry states
  * (SKIPPED, FAILED, reference unverified, unknown id, a single id to compare).
+ * the isolated-forest launch at scale (eval-0043: tile grid, N/A keys, model card, filters, windowed lists).
  * Screenshots of the key views when GUI_SHOTS_DIR is set.
  */
 import { AxeBuilder } from "@axe-core/playwright";
@@ -54,9 +55,9 @@ test("filter the list, open a run, open a column drawer, then compare two runs",
 
   await page.goto("/evaluation");
   await expect(page.getByRole("heading", { level: 1, name: "Evaluations" })).toBeVisible();
-  // The first request warms the mock (a few seconds on a busy machine). 42: the storyline's 40
-  // and the two evaluations of the adjusted-keys launch.
-  await expect(page.getByRole("heading", { level: 2, name: "42 evaluations" })).toBeVisible({ timeout: 45_000 });
+  // The first request warms the mock (a few seconds on a busy machine). 43: the storyline's 40,
+  // the two evaluations of the adjusted-keys launch and the isolated-forest launch's one.
+  await expect(page.getByRole("heading", { level: 2, name: "43 evaluations" })).toBeVisible({ timeout: 45_000 });
   await expectNoSeriousViolations(page, "list");
 
   // Filter: engine = b2_library (a multi-select combobox; the filter lives in the URL).
@@ -66,7 +67,7 @@ test("filter the list, open a run, open a column drawer, then compare two runs",
   await page.getByRole("option", { name: /b2_library/ }).click();
   await page.keyboard.press("Escape");
   await expect.poll(async () => (await routeSearch(page)).engine).toEqual(["b2_library"]);
-  await expect(page.getByRole("heading", { level: 2, name: /^\d+ evaluations?$/ })).not.toHaveText("42 evaluations");
+  await expect(page.getByRole("heading", { level: 2, name: /^\d+ evaluations?$/ })).not.toHaveText("43 evaluations");
   await expect(page.getByRole("button", { name: "Remove filter Engine: b2_library" })).toBeVisible();
   await noHorizontalScroll(page);
 
@@ -299,6 +300,21 @@ test("adjusted keys read the generator's verdict next to the evaluator's FAIL", 
   expect(errors).toEqual([]);
 });
 
+test("a run's Parameters tab shows its generation record (ADR 0044)", async ({ page }) => {
+  test.setTimeout(120_000);
+  const errors = watchErrors(page);
+  await page.goto("/evaluation/eval-0001?tab=params");
+  const panel = page.getByRole("region", { name: "Generator" });
+  await expect(panel).toBeVisible({ timeout: 45_000 });
+  await expect(panel.getByText(/^(file|flag|default)$/).first()).toBeVisible();
+  await expect(panel.getByRole("button", { name: "Download as config.yaml" })).toBeEnabled();
+  await expectNoSeriousViolations(page, "generator panel", "section[aria-label='Generator']");
+
+  await page.goto("/evaluation/eval-0041?tab=params");
+  await expect(page.getByText(/No generation record/)).toBeVisible({ timeout: 45_000 });
+  expect(errors).toEqual([]);
+});
+
 test("degenerate registry states render labelled empty states, never a crash", async ({ page }) => {
   test.setTimeout(180_000);
   const errors = watchErrors(page);
@@ -373,4 +389,130 @@ test("screenshots of the evaluation tab (set GUI_SHOTS_DIR to capture)", async (
   await page.waitForTimeout(1500);
   await strip.screenshot({ path: `${dir}/evaluation-adjusted-keys-${width}.png` });
   await page.setViewportSize({ width, height: isMobile(testInfo.project.name) ? 844 : 900 });
+});
+
+// eval-0043 evaluates one whole-model launch of 120 unrelated tables, 112 of them generated in 12
+// batch jobs (packages/mock/src/forest.ts): the isolated-tables views at that scale (ADR 0036, 0042, 0045).
+test("a forest of 112 isolated tables reads as a bounded grid, with N/A keys, a model card and filters", async ({
+  page,
+}) => {
+  test.setTimeout(300_000);
+  const errors = watchErrors(page);
+  await page.goto("/evaluation/eval-0043");
+
+  // The card: what the launch declared. Numbers are asserted on their own <dd>, never by substring.
+  const card = page.getByRole("region", { name: "Model summary" });
+  await expect(card).toBeVisible({ timeout: 45_000 });
+  await expect(card).toContainText("isolated_forest_demo");
+  const stat = (name: string) => card.locator(`[data-stat="${name}"] dd`).first();
+  await expect(stat("Tables")).toHaveText("112");
+  await expect(card.locator('[data-stat="Tables"]')).toContainText("of 120 declared · 8 disabled");
+  await expect(card.locator('[data-stat="Primary key"]')).toContainText("80 declared");
+  await expect(card.locator('[data-stat="Primary key"]')).toContainText("32 none");
+  await expect(stat("Edges")).toHaveText("0");
+  await expect(stat("Isolated")).toHaveText("112");
+  await expect(stat("Source overrides")).toHaveText("6");
+  await expect(stat("Batch jobs")).toHaveText("12");
+  const jobLinks = card.getByRole("list", { name: "Batch jobs" }).getByRole("link");
+  await expect(jobLinks).toHaveCount(12);
+  // The tables=all branch's evaluation is by --run_id: the registry records no generation_region, so each link
+  // takes the region from its batch job's generation record (the snapshot's beam block).
+  await expect(jobLinks.first()).toHaveAttribute("href", /\/dataflow\/jobs\/europe-west3\/[^/?]+\?project=/);
+
+  // The grid: every generated table is a tile, the frame is bounded, nothing scrolls sideways.
+  const grid = page.getByRole("region", { name: "Isolated tables: 112" });
+  const tilesIn = grid.locator('[data-slot="table-tile"]');
+  await expect(tilesIn).toHaveCount(112);
+  const box = (await grid.boundingBox())!;
+  expect(box.height).toBeLessThanOrEqual(738 + 4); // TILE_GRID_MAX_REM = 46.125 rem at 16 px (lib/graph.ts)
+  await expect(page.getByRole("figure", { name: /^Model graph/ }).locator("svg[role='group']")).toHaveCount(0);
+  await expect(grid.locator('[data-table="T_003"]')).toHaveAttribute("data-pk", "none");
+  await expect(grid.locator('[data-table="T_007"]')).toContainText("⇄");
+  await noHorizontalScroll(page);
+  await expectNoSeriousViolations(page, "forest overview");
+
+  // Filters narrow the tiles and the per-table scorecards together, and live in the URL.
+  const search = page.getByRole("searchbox", { name: "Find a table" });
+  await search.fill("T_01");
+  await expect.poll(async () => (await routeSearch(page)).tq).toBe("T_01");
+  await expect(tilesIn).toHaveCount(9);
+  const filters = page.getByRole("group", { name: "Table filters" });
+  await expect(filters.getByText("9 of 112 tables", { exact: true })).toBeVisible();
+  await noHorizontalScroll(page);
+  await expectNoSeriousViolations(page, "filter bar", '[aria-label="Table filters"]');
+  await search.fill("");
+  const pk = page.getByRole("radiogroup", { name: "Primary key" });
+  await pk.getByRole("radio", { name: "No PK" }).click();
+  await expect(tilesIn).toHaveCount(32);
+  await expect(grid.locator('[data-slot="table-tile"]:not([data-pk="none"])')).toHaveCount(0);
+  await pk.getByRole("radio", { name: "Any key" }).click();
+  const status = page.getByRole("radiogroup", { name: "Table status" });
+  const fail = status.getByRole("radio", { name: "Fail" });
+  await fail.scrollIntoViewIfNeeded();
+  await fail.click();
+  await expect(grid.locator('[data-table="T_004"]')).toBeVisible();
+  await expect(grid.locator('[data-table="T_008"]')).toBeVisible();
+  await expect(grid.locator('[data-slot="table-tile"]:not([data-status="fail"])')).toHaveCount(0);
+  await status.getByRole("radio", { name: "All" }).click();
+  await page.getByRole("combobox", { name: "Batch job" }).click();
+  await page.getByRole("option", { name: "b03" }).click();
+  await expect(tilesIn).toHaveCount(10);
+  expect((await tilesIn.evaluateAll((els) => els.map((e) => e.getAttribute("data-table")))).sort()).toEqual([
+    "T_033",
+    "T_034",
+    "T_035",
+    "T_036",
+    "T_037",
+    "T_038",
+    "T_039",
+    "T_040",
+    "T_041",
+    "T_042",
+  ]);
+  await page.getByRole("button", { name: "Clear filters" }).click();
+  await expect(tilesIn).toHaveCount(112);
+
+  // The per-table scorecards are windowed: a few rows in the DOM, every row reachable.
+  const frame = page.getByRole("region", { name: "Per-table scores, Integrity: 112 tables" });
+  const rendered = await frame.getByRole("listitem").count();
+  expect(rendered).toBeGreaterThanOrEqual(12);
+  expect(rendered).toBeLessThan(40);
+  await frame.evaluate((el) => {
+    el.scrollTop = el.scrollHeight;
+  });
+  await expect(frame.locator('li[aria-posinset="112"]')).toBeVisible();
+
+  // A PK-less table: its key checks are not applicable, never a FAIL.
+  await search.fill("T_003");
+  const trigger = page.getByRole("button", { name: /integrity units of T_003:/ });
+  await trigger.click();
+  const units = page.getByRole("dialog", { name: "Integrity units of T_003" });
+  await expect(units).toContainText("Not applicable — no primary key declared");
+  await expect(units).toContainText("Not applicable — no identity columns declared");
+  await expect(units).not.toContainText("Fail");
+  await expectNoSeriousViolations(page, "integrity units", '[role="dialog"]');
+  await page.keyboard.press("Escape");
+  // WCAG 2.2 target-size of the popover trigger (the spec's wcag22aa tag), on both projects.
+  await expectNoSeriousViolations(page, "integrity trigger", '[aria-label*="integrity units of T_003:"]');
+  const target = (await trigger.boundingBox())!;
+  expect(Math.min(target.width, target.height)).toBeGreaterThanOrEqual(24);
+
+  // The Parameters tab: the 112 declared tables sit in a bounded, focusable frame beside the 12 job links.
+  await page.goto("/evaluation/eval-0043?tab=params");
+  const declared = page.getByRole("region", { name: "Declared tables: 112" });
+  await expect(declared).toBeVisible({ timeout: 45_000 });
+  await expect(page.getByText("112 tables · 12 batch jobs", { exact: true })).toBeVisible();
+  expect((await declared.boundingBox())!.height).toBeLessThanOrEqual(384 + 4); // max-h-96 = 24 rem at 16 px
+  await noHorizontalScroll(page);
+  await expectNoSeriousViolations(page, "forest parameters");
+
+  // The Relational tab says why it has nothing to draw.
+  await page.goto("/evaluation/eval-0043?tab=relational");
+  await expect(page.getByRole("heading", { name: "Isolated tables — no relationships declared" })).toBeVisible({
+    timeout: 45_000,
+  });
+  await expect(page.getByText("Integrity is scored per table: columns, row count, keys where declared.")).toBeVisible();
+  await expectNoSeriousViolations(page, "forest relational");
+  await noHorizontalScroll(page);
+  expect(errors).toEqual([]);
 });

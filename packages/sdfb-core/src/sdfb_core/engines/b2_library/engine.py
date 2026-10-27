@@ -112,7 +112,10 @@ class B2LibraryEngine(GenerationEngine):
 
     self._ctx = ctx
     self._record_model = derive_record_model(ctx.table_schema)
-    self._profiles = profile_table(ctx.table_schema, ctx.reference_rows)
+    self._profiles = profile_table(
+        ctx.table_schema,
+        ctx.reference_rows,
+        max_age_years=ctx.generator_config.generation.temporal_max_age_years_b2)
     # FK columns take the parent's landed key TUPLES (ADR 0031),
     # drawn jointly per batch — mirroring B.1. The profile override
     # keeps them off the free-text path; the joint draw below owns

@@ -31,17 +31,20 @@ import {
 
 import { ADJUSTED_EVALUATIONS, buildAdjustedLaunch } from "./adjusted";
 import { edgeMetrics, familyRows, TableEvaluator, tableRollups, type TableContext } from "./evaluate";
+import { buildForestLaunch } from "./forest";
 import {
   baseRunId,
   dataflowJobId,
   isoMicros,
   launchDigest,
+  mockGenerationJobId,
   referenceDigest,
   rowsFor,
   snapshotEra,
   tableRunIds,
 } from "./ids";
 import { buildRagSets, type RagSet } from "./rag";
+import { mockConfigDigest, mockGenerationJobName, mockValues, mockVersions, RELATIONSHIPS_URI } from "./record";
 import { buildRuns } from "./runs";
 import { buildSourceStats } from "./sourceStats";
 import { EMBEDDER_URIS, MODEL_URIS, STORYLINE, type EvalSpec } from "./storyline";
@@ -66,7 +69,6 @@ export const WIDE_SAMPLE_ROWS = 400;
 const EVALUATOR_VERSIONS = ["0.1.0", "0.2.0"];
 /** The catalogue moved 0.9.0 → 1.0.0 after the first ten evaluations (not_comparable across it). */
 export const catalogueVersionOf = (spec: Pick<EvalSpec, "index">) => (spec.index <= 10 ? "0.9.0" : "1.0.0");
-const RELATIONSHIPS_URI = `gs://synthetic-platform-demo/synthetic/relationships/${RELATIONSHIP_MODEL}.yaml`;
 
 /** Every TIMESTAMP (recursively through RECORD / REPEATED) in the canonical wire form. */
 function canonicalize<T extends object>(rows: T[], table: BqTableName): T[] {
@@ -151,7 +153,6 @@ function sampleRowsOf(spec: EvalSpec): number {
 }
 
 function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
-  const jobRng = new Random(seedFrom("generation-job", spec.id));
   const evaluatorVersion = spec.index <= 20 ? EVALUATOR_VERSIONS[0]! : EVALUATOR_VERSIONS[1]!;
   const catalogueVersion = catalogueVersionOf(spec);
   const eval_ = Object.fromEntries(
@@ -166,6 +167,7 @@ function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
   } as EvaluationDataHistoryRow["evaluation_params"];
   const base = baseRunId(spec);
   const tables = spec.relational ? ["users", "orders", "order_items"] : spec.tables;
+  const generationJobId = mockGenerationJobId(spec);
   return {
     evaluation_id: spec.id,
     recorded_at: spec.evaluatedAt,
@@ -185,8 +187,8 @@ function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
         ? dataflowJobId(Date.parse(spec.evaluatedAt), (lo, hi) => rng.int(lo, hi))
         : null,
     image: `europe-west3-docker.pkg.dev/${PROJECT}/sdfb/sdfb-evaluation:${evaluatorVersion}`,
-    generation_job_id: dataflowJobId(Date.parse(spec.evaluatedAt) - 150 * 60_000, (lo, hi) => jobRng.int(lo, hi)),
-    generation_job_name: `synthetic-sdfb-v0-5-3-${spec.llm.replace(/[^a-z0-9]+/g, "-")}`.slice(0, 63),
+    generation_job_id: generationJobId,
+    generation_job_name: mockGenerationJobName(spec),
     generation_region: "europe-west3",
     generation_started_at: minutes(spec.evaluatedAt, -150),
     generation_finished_at: minutes(spec.evaluatedAt, -30),
@@ -254,6 +256,10 @@ function registryBase(spec: EvalSpec, rng: Random): EvaluationDataHistoryRow {
     predicted_shuffle_gb: null,
     warnings: [],
     artifacts_uri: `gs://synthetic-platform-demo/synthetic/evaluations/${spec.id}/`,
+    generator_version: mockVersions(spec).worker,
+    generator_config_digest: mockConfigDigest(mockValues(spec, tables)),
+    // ADR 0045: what the evaluator writes for a single-job evaluation
+    generation_job_ids: [generationJobId],
   };
 }
 
@@ -549,12 +555,21 @@ export function createMockDataset(seed = 20260928): MockDataset {
   profiles.push(...adjusted.profiles);
   flags.push(...adjusted.flags);
 
+  // The isolated-forest launch (ADR 0045) and its one evaluation: 112 unrelated tables in 12
+  // batch jobs, next to the storyline rather than inside it (forest.ts).
+  const forest = buildForestLaunch(seed, registryBase);
+  registry.push(...forest.registry);
+  metrics.push(...forest.metrics);
+  profiles.push(...forest.profiles);
+  flags.push(...forest.flags);
+
   const runs = buildRuns(STORYLINE, seed);
-  const validationRuns = [...runs.validationRuns, ...adjusted.validationRuns];
+  const validationRuns = [...runs.validationRuns, ...adjusted.validationRuns, ...forest.validationRuns];
   const { dlq, fanoutStats } = runs;
   let rag: RagSet[] | null = null;
   return {
-    generatedWith: { seed, evaluations: STORYLINE.length + ADJUSTED_EVALUATIONS.length },
+    // + the isolated-forest launch's one (eval-0043)
+    generatedWith: { seed, evaluations: STORYLINE.length + ADJUSTED_EVALUATIONS.length + 1 },
     registry: canonicalize(registry, "evaluation_data_history"),
     metrics: canonicalize(metrics, "evaluation_metrics"),
     profiles: canonicalize(profiles, "evaluation_profiles"),

@@ -11,7 +11,11 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Contract tests for the SDFB_MILESTONE worker-log line format."""
+"""Contract tests for the SDFB_MILESTONE worker-log line format.
+
+Design: docs/DESIGN.md §7 Validation and the dead-letter queue
+(ADR 0044).
+"""
 
 # Test module: pytest fixtures and white-box access are intentional.
 # pylint: disable=import-outside-toplevel
@@ -86,17 +90,23 @@ def test_warning_level_supported(caplog):
   assert caplog.records[0].levelno == logging.WARNING
 
 
-def test_build_info_stamps_the_baked_commit(caplog, monkeypatch):
+def test_build_info_stamps_the_baked_commit_and_the_version(
+    caplog, monkeypatch):
   # 2026-08-21 four-run cycle: two same-day runs could not be told apart
   # by build — the commit is baked into the image env and stamped from
-  # launcher + workers so the probe mines it from any log surface.
+  # launcher + workers so the probe mines it from any log surface. The
+  # generator version (ADR 0044) rides along.
+  from sdfb_core import version
   from sdfb_core.observability import BUILD_COMMIT_ENV, log_build_info
 
+  monkeypatch.setattr(version, "generator_version",
+                      lambda: "0.6.1-master-abc1234")
   monkeypatch.setenv(BUILD_COMMIT_ENV, "abc1234")
   with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
     line = log_build_info("launcher")
   assert "name=build_info" in line
   assert "commit=abc1234" in line
   assert "component=launcher" in line
+  assert "version=0.6.1-master-abc1234" in line
   monkeypatch.delenv(BUILD_COMMIT_ENV)
   assert "commit=unknown" in log_build_info("worker")

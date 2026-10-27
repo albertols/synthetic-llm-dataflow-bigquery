@@ -173,8 +173,8 @@
     {
       "file": "rag-seed-budget.png",
       "source": "docs/designs/assets/rag-seed-budget.png",
-      "sha256": "6bcded22cd7d5fcd95a49dc28225be27241128197d0a733af8f17f4b15d07efe",
-      "bytes": 100781,
+      "sha256": "331358b7b50e94b9629fc820cacba6513e0eafff5e9a282ef8a2a5a632211db8",
+      "bytes": 101095,
       "generator": "scripts/doc/make_rag_geometry_figures.py",
       "documentedIn": "docs/articles/04-b1-rag-deep-dive.md"
     },

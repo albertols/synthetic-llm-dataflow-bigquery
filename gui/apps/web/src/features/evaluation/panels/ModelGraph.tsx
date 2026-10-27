@@ -5,16 +5,31 @@
  * and a word, never colour alone. Documented edges are dashed and INFO.
  * A table whose declared key the launch adjusted (ADR 0038) carries a
  * "PK adj." chip. Nodes are buttons: click (or Enter) scopes the run view to
- * that table.
+ * that table. Tables with no foreign key are not drawn here but as a bounded
+ * grid of tiles below it (ADR 0036).
  */
 import { useId, useMemo, useState, type KeyboardEvent } from "react";
 
+import { NOT_APPLICABLE_LABEL } from "@contracts/applicability";
+
 import { InfoHint } from "@/components/InfoHint";
 import { Button } from "@/components/ui/button";
-import { formatPercent, MISSING } from "@/lib/format";
+import { cn } from "@/lib/cn";
+import { formatCount, formatPercent, MISSING } from "@/lib/format";
 
 import { fmtMetric, fmtScore } from "../lib/format";
-import { NODE_H, NODE_W, type Graph, type GraphEdge, type GraphNode } from "../lib/graph";
+import {
+  NODE_H,
+  NODE_W,
+  TILE_GAP_REM,
+  TILE_GRID_MAX_REM,
+  TILE_H_REM,
+  TILE_MIN_REM,
+  type Graph,
+  type GraphEdge,
+  type GraphNode,
+} from "../lib/graph";
+import { batchLabel, type KeyState, type TableFacts, type TableView } from "../lib/tables";
 import { VisualFrame } from "../components/VisualFrame";
 
 const STATUS_GLYPH: Record<string, string> = { pass: "✓", warn: "!", fail: "✕", info: "i", not_evaluated: "–" };
@@ -52,6 +67,37 @@ function adjustmentChip(adjustment: NonNullable<GraphNode["adjustment"]>): { tex
           ? "var(--status-warn)"
           : "var(--status-neutral)",
   };
+}
+
+const PK_TEXT: Record<KeyState, string> = { declared: "PK", none: "no PK", unknown: "PK ?" };
+
+/** The per-table facts of a tile, in words (ADR 0036, ADR 0044, ADR 0045). */
+function factsLabel(facts: TableFacts): string {
+  const key =
+    facts.pk === "declared"
+      ? `primary key ${facts.pkColumns.join(", ") || "declared"}`
+      : facts.pk === "none"
+        ? "no primary key declared: its uniqueness check is not applicable"
+        : "primary key not known";
+  const override = facts.sourceOverride ? `, source override ${facts.sourceOverride}` : "";
+  const batch = facts.batch !== null ? `, batch job ${batchLabel(facts.batch)}` : "";
+  return `, ${key}${override}${batch}`;
+}
+
+/**
+ * The accessible name of a table node or tile: score, status, the per-table facts (tiles), the ADR 0038 key
+ * reading and what pressing does.
+ */
+function nodeLabel(node: GraphNode, selected: boolean, facts?: TableFacts): string {
+  const adjusted = node.adjustment
+    ? `, primary key: ${node.adjustment.kind === "disagree" ? "measures disagree" : node.adjustment.label} (ADR 0038)`
+    : "";
+  const shown = facts?.status ?? node.status;
+  const status = shown ? `, ${shown}` : "";
+  const action = selected
+    ? "Showing only this table; press to show all tables."
+    : "Press to scope the views to this table.";
+  return `${node.name}${node.external ? " (external)" : ""}: overall score ${fmtScore(node.score)}${status}${facts ? factsLabel(facts) : ""}${adjusted}. ${action}`;
 }
 
 function seqForScore(score: number | null): string {
@@ -161,15 +207,12 @@ function NodeBox({
   const barWidth = (NODE_W - 20) * Math.max(0, Math.min(1, score ?? 0));
   const glyph = STATUS_GLYPH[node.status ?? ""] ?? "";
   const chip = node.adjustment ? adjustmentChip(node.adjustment) : null;
-  const adjusted = node.adjustment
-    ? `, primary key: ${node.adjustment.kind === "disagree" ? "measures disagree" : node.adjustment.label} (ADR 0038)`
-    : "";
   return (
     <g
       role="button"
       tabIndex={0}
       aria-pressed={selected}
-      aria-label={`${node.name}${node.external ? " (external)" : ""}: overall score ${fmtScore(score)}${node.status ? `, ${node.status}` : ""}${adjusted}. ${selected ? "Showing only this table; press to show all tables." : "Press to scope the views to this table."}`}
+      aria-label={nodeLabel(node, selected)}
       data-table={node.name}
       data-adjustment={node.adjustment?.verdict}
       onClick={() => onSelect(node.name)}
@@ -248,21 +291,170 @@ function NodeBox({
   );
 }
 
+/**
+ * One isolated table: a button that scopes the run view to it, like a node of the layered drawing. It
+ * carries the ADR 0038 reading as a node does: the "PK adj." chip text and the key reading in its label.
+ */
+function Tile({
+  node,
+  facts,
+  selected,
+  onSelect,
+}: {
+  node: GraphNode;
+  facts: TableFacts | undefined;
+  selected: boolean;
+  onSelect: (name: string) => void;
+}) {
+  const status = facts?.status ?? node.status ?? "not_evaluated";
+  const glyph = STATUS_GLYPH[status] ?? "";
+  const pk = facts?.pk ?? "unknown";
+  const chip = node.adjustment ? adjustmentChip(node.adjustment) : null;
+  return (
+    <button
+      type="button"
+      data-slot="table-tile"
+      data-table={node.name}
+      data-status={status}
+      data-pk={pk}
+      data-adjustment={node.adjustment?.verdict}
+      aria-pressed={selected}
+      aria-label={nodeLabel(node, selected, facts)}
+      onClick={() => onSelect(node.name)}
+      className={cn(
+        "flex w-full cursor-pointer flex-col justify-between rounded-md border bg-surface-2 py-1 pr-2 pl-2.5 text-left",
+        "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring",
+        selected ? "border-accent" : "border-border",
+      )}
+      // The left edge is the score colour (sequential, as the node bars); the glyph and number say it too.
+      style={{ height: `${TILE_H_REM}rem`, borderLeftWidth: 4, borderLeftColor: seqForScore(node.score) }}
+    >
+      <span className="flex min-w-0 items-center gap-1">
+        <span className="truncate font-mono text-xs font-semibold text-text-1" title={node.name}>
+          {node.name}
+        </span>
+        {facts?.sourceOverride ? (
+          <span
+            aria-hidden="true"
+            className="ml-auto text-xs text-text-2"
+            title={`source override: ${facts.sourceOverride}`}
+          >
+            ⇄
+          </span>
+        ) : null}
+      </span>
+      <span className="flex items-center gap-1.5 text-[11px] text-text-2 tabular-nums">
+        {facts ? (
+          <span
+            aria-hidden="true"
+            className={pk === "none" ? "text-text-3" : undefined}
+            title={pk === "none" ? NOT_APPLICABLE_LABEL.pk : undefined}
+          >
+            {PK_TEXT[pk]}
+          </span>
+        ) : null}
+        <span aria-hidden="true">{glyph}</span>
+        {fmtScore(node.score)}
+        {chip ? (
+          <span
+            data-slot="pk-adjusted"
+            className="rounded-full border px-1.5 text-[9.5px] leading-4 text-text-1"
+            style={{ borderColor: chip.stroke, borderStyle: node.adjustment?.kind === "question" ? "dashed" : "solid" }}
+          >
+            {chip.text}
+          </span>
+        ) : null}
+        {facts && facts.batch !== null ? (
+          <span aria-hidden="true" className="ml-auto text-text-3">
+            {batchLabel(facts.batch)}
+          </span>
+        ) : null}
+      </span>
+    </button>
+  );
+}
+
+/** The degree-0 tables (ADR 0036): a grid bounded at TILE_ROWS_MAX rows, scrolling inside its frame. */
+function TileGrid({
+  tiles,
+  total,
+  facts,
+  selected,
+  onSelect,
+}: {
+  /** The tiles to draw (a filter may have narrowed them). */
+  tiles: readonly GraphNode[];
+  /** Every isolated table of the run, drawn or not. */
+  total: number;
+  facts?: ReadonlyMap<string, TableFacts>;
+  selected?: string;
+  onSelect: (name: string) => void;
+}) {
+  return (
+    <div className="grid gap-2" data-slot="tile-grid">
+      <p className="flex items-center gap-0.5 text-[11px] font-medium tracking-wide text-text-3 uppercase">
+        Isolated tables ·{" "}
+        {tiles.length === total ? formatCount(total) : `${formatCount(tiles.length)} of ${formatCount(total)}`}
+        <InfoHint concept="eval:isolated-tables" />
+      </p>
+      <div
+        role="region"
+        tabIndex={0}
+        aria-label={`Isolated tables: ${total}`}
+        className="overflow-y-auto rounded-md focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-focus-ring"
+        style={{ maxHeight: `${TILE_GRID_MAX_REM}rem` }}
+      >
+        {tiles.length ? (
+          <ul
+            aria-label={`${tiles.length} tables`}
+            className="m-0 grid list-none p-0"
+            style={{
+              gridTemplateColumns: `repeat(auto-fill, minmax(${TILE_MIN_REM}rem, 1fr))`,
+              gap: `${TILE_GAP_REM}rem`,
+            }}
+          >
+            {tiles.map((node) => (
+              <li key={node.name}>
+                <Tile node={node} facts={facts?.get(node.name)} selected={selected === node.name} onSelect={onSelect} />
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="p-3 text-xs text-text-3">No table matches the filters.</p>
+        )}
+      </div>
+    </div>
+  );
+}
+
 export function ModelGraph({
   graph,
   modelName,
   resolvedFrom,
+  facts,
+  view,
   selected,
   onSelect,
 }: {
   graph: Graph;
   modelName: string | null;
-  resolvedFrom: "model" | "edges";
+  resolvedFrom: Graph["resolvedFrom"];
+  /** Per-table facts (lib/tables.ts) the tiles show; without them a tile shows its score only. */
+  facts?: ReadonlyMap<string, TableFacts>;
+  /** The filter bar's tables and order (lib/tables.ts `tableView`); null: every tile, in graph order. */
+  view?: TableView | null;
   selected?: string;
   onSelect: (table: string | undefined) => void;
 }) {
   const titleId = useId();
-  const nodes = useMemo(() => new Map(graph.nodes.map((n) => [n.name, n])), [graph.nodes]);
+  // The view lists covered tables only, so a filter can never surface a table without facts (ADR 0036).
+  const shownTiles = useMemo(() => {
+    if (!view) return graph.tiles;
+    const byName = new Map(graph.tiles.map((t) => [t.name, t]));
+    return view.order.flatMap((name) => byName.get(name) ?? []);
+  }, [graph.tiles, view]);
+  const layered = useMemo(() => graph.nodes.filter((n) => n.placement === "layer"), [graph.nodes]);
+  const nodes = useMemo(() => new Map(layered.map((n) => [n.name, n])), [layered]);
   const data = useMemo(
     () => [
       ...graph.nodes.map((n) => ({
@@ -271,6 +463,10 @@ export function ModelGraph({
         role: n.role,
         overall_score: n.score,
         status: n.status,
+        placement: n.placement,
+        pk: facts?.get(n.name)?.pk ?? null,
+        batch: facts?.get(n.name)?.batch ?? null,
+        source_override: facts?.get(n.name)?.sourceOverride ?? null,
         pk_adjustment: n.adjustment
           ? n.adjustment.kind === "disagree"
             ? "measures disagree"
@@ -287,7 +483,7 @@ export function ModelGraph({
         status: e.status,
       })),
     ],
-    [graph],
+    [graph, facts],
   );
   const select = (name: string) => onSelect(selected === name ? undefined : name);
   return (
@@ -295,9 +491,13 @@ export function ModelGraph({
       title={`Model graph${modelName ? ` · ${modelName}` : ""}`}
       concept="eval:model-graph"
       description={
-        resolvedFrom === "model"
-          ? "From the relationship model. Node bar = table overall score; arrows point from child to parent."
-          : "Rebuilt from the metric rows' edge labels (the model itself is not readable here)."
+        {
+          model: "From the relationship model. Node bar = table overall score; arrows point from child to parent.",
+          record:
+            "From the launch's generation record (ADR 0044): the relationship model as the launch declared it. Node bar = table overall score; arrows point from child to parent.",
+          edges: "Rebuilt from the metric rows' edge labels (the model itself is not readable here).",
+        }[resolvedFrom] +
+        (graph.tiles.length ? " Tables with no foreign key are tiles: left border colour = overall score." : "")
       }
       data={data}
       actions={
@@ -318,10 +518,16 @@ export function ModelGraph({
             table score, low → high
           </span>
           <span>✓ ok · ! warn · ✕ fail · i documented (INFO)</span>
-          <span className="inline-flex items-center gap-0.5">
-            dashed arrow: documented edge <InfoHint concept="eval:documented-edge" />
-          </span>
-          <span>dashed box: external parent</span>
+          {/* Arrows and external parents are drawn only in the layers: a forest of tiles has neither. */}
+          {layered.length ? (
+            <>
+              <span className="inline-flex items-center gap-0.5">
+                dashed arrow: documented edge <InfoHint concept="eval:documented-edge" />
+              </span>
+              <span>dashed box: external parent</span>
+            </>
+          ) : null}
+          {graph.tiles.length ? <span>tile: a table with no foreign key (isolated)</span> : null}
           {graph.nodes.some((n) => n.adjustment) ? (
             <span className="inline-flex items-center gap-0.5" data-testid="pk-adjusted-legend">
               PK adj.: the launch adjusted the declared key — ≈ faithful · ↓ under · ↑ over · ? not readable
@@ -331,40 +537,45 @@ export function ModelGraph({
         </div>
       }
     >
-      <div className="overflow-x-auto">
-        <svg
-          viewBox={`-8 -56 ${graph.width + 16} ${graph.height + 112}`}
-          width="100%"
-          style={{ minWidth: Math.min(graph.width, 520), maxHeight: 420 }}
-          role="group"
-          aria-labelledby={titleId}
-        >
-          <title id={titleId}>
-            {`Relationship model with ${graph.nodes.length} tables and ${graph.edges.length} foreign keys. ${
-              selected ? `Scoped to ${selected}.` : "No table selected."
-            }`}
-          </title>
-          <defs>
-            <marker
-              id="eval-graph-arrow"
-              viewBox="0 0 10 10"
-              refX="9"
-              refY="5"
-              markerWidth="7"
-              markerHeight="7"
-              orient="auto-start-reverse"
-            >
-              <path d="M0 0 L10 5 L0 10 z" fill="var(--text-2)" />
-            </marker>
-          </defs>
-          {graph.edges.map((edge) => (
-            <EdgePath key={edge.label} edge={edge} nodes={nodes} />
-          ))}
-          {graph.nodes.map((node) => (
-            <NodeBox key={node.name} node={node} selected={selected === node.name} onSelect={select} />
-          ))}
-        </svg>
-      </div>
+      {layered.length ? (
+        <div className="overflow-x-auto">
+          <svg
+            viewBox={`-8 -56 ${graph.width + 16} ${graph.height + 112}`}
+            width="100%"
+            style={{ minWidth: Math.min(graph.width, 520), maxHeight: 420 }}
+            role="group"
+            aria-labelledby={titleId}
+          >
+            <title id={titleId}>
+              {`Relationship model with ${layered.length} tables and ${graph.edges.length} foreign keys. ${
+                selected ? `Scoped to ${selected}.` : "No table selected."
+              }`}
+            </title>
+            <defs>
+              <marker
+                id="eval-graph-arrow"
+                viewBox="0 0 10 10"
+                refX="9"
+                refY="5"
+                markerWidth="7"
+                markerHeight="7"
+                orient="auto-start-reverse"
+              >
+                <path d="M0 0 L10 5 L0 10 z" fill="var(--text-2)" />
+              </marker>
+            </defs>
+            {graph.edges.map((edge) => (
+              <EdgePath key={edge.label} edge={edge} nodes={nodes} />
+            ))}
+            {layered.map((node) => (
+              <NodeBox key={node.name} node={node} selected={selected === node.name} onSelect={select} />
+            ))}
+          </svg>
+        </div>
+      ) : null}
+      {graph.tiles.length ? (
+        <TileGrid tiles={shownTiles} total={graph.tiles.length} facts={facts} selected={selected} onSelect={select} />
+      ) : null}
       {graph.edges.length ? (
         <ul className="mt-3 grid gap-1.5 text-xs text-text-2" aria-label="Foreign keys">
           {graph.edges.map((edge) => (

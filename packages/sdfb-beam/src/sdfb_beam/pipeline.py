@@ -30,9 +30,9 @@ REFs:
   - https://beam.apache.org/documentation/programming-guide/#additional-outputs
 
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
-§6 Throughput; §8 Configuration
-(ADR 0019, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0034, 0035, 0036, 0037,
-0038).
+§6 Throughput; §7 Validation and the dead-letter queue; §8 Configuration
+(ADR 0019, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0034, 0036, 0037, 0038,
+0043, 0044).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -53,14 +53,11 @@ from typing import Any
 import apache_beam as beam
 from apache_beam.metrics import Metrics
 from apache_beam.transforms import combiners
+from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
 from sdfb_core.contracts import TableSchema
-from sdfb_core.contracts.model_adjustment import (
-    REPEAT_SHARE_TOLERANCE,
-    ModelAdjustment,
-)
+from sdfb_core.contracts.model_adjustment import ModelAdjustment
 from sdfb_core.engines import GenerationContext, ModelClient
 from sdfb_core.engines.fanout import FanoutPlan, conditional_edge_id
-from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
 from sdfb_core.observability import log_milestone
 from sdfb_core.rag.chunking import (
     MAX_ROW_DOC_ROWS,
@@ -68,6 +65,8 @@ from sdfb_core.rag.chunking import (
     compute_row_digest,
     distinct_free_text_values,
 )
+from sdfb_core.record import LaunchRecord
+from sdfb_core.version import generator_version
 from sdfb_core.validation import (
     STATUS_FAILED_BLOCKER,
     BlockerThresholdExceeded,
@@ -85,6 +84,7 @@ from sdfb_beam.dofns import (
 from sdfb_beam.dofns.fk_integrity import EnforceFkIntegrityDoFn
 from sdfb_beam.dofns.pools import BuildFreeTextPoolsDoFn
 from sdfb_beam.io.digest import compute_reference_digest
+from sdfb_beam.io.gce_metadata import read_job_id
 from sdfb_beam.rag.population import ChunkReferenceRowsDoFn, EmbedChunksDoFn
 
 
@@ -101,8 +101,8 @@ class PipelineConfig:
   engine_name: str
   model_client: ModelClient
   num_rows: int
-  batch_size: int = 16
-  similarity: float = 0.5
+  batch_size: int = DEFAULT_CONFIG.generation.batch_size
+  similarity: float = DEFAULT_CONFIG.generation.similarity
   seed: int | None = None
   # Per-row-unique columns (PK/UUID) synthesized fresh each row; never
   # sampled from reference data. See engines/identity.py.
@@ -169,17 +169,17 @@ class PipelineConfig:
   # gated separately by the driver passing `freetext_pools_store`.
   freetext_pools_table: str = ""
   # WS5 §3 seeding experiment: centroid | kcenter | kcenter_rotate.
-  pool_seed_strategy: str = "centroid"
+  pool_seed_strategy: str = DEFAULT_CONFIG.free_text.pool_seed_strategy
   # Shape-preserving expander (2026-08-05 spec C3): off | identifiers
   # (default) | all. See GenerationContext.freetext_expansion.
-  freetext_expansion: str = "identifiers"
+  freetext_expansion: str = DEFAULT_CONFIG.free_text.freetext_expansion
   # Attach per-column llm_prompt_constraint (from column-description
   # JSON) to pool prompts (spec C5). See GenerationContext.prompt_constraints.
   prompt_constraints: bool = True
   # off | redacted | full — log each built pool prompt as a
   # freetext_pool_prompt milestone (ADR 0024 §3c). See
   # GenerationContext.prompt_debug.
-  prompt_debug: str = "off"
+  prompt_debug: str = DEFAULT_CONFIG.free_text.prompt_debug
   # Tier-2 exact per-column distinct counts (--source_stats=exact,
   # ADR 0022) — feeds free-text pool sizing. Empty = Tier 1 only.
   source_distinct: dict = field(default_factory=dict)
@@ -206,7 +206,7 @@ class PipelineConfig:
   # WS6 W3: "exact" (default, today) diverts every duplicate to the DLQ
   # behind up to three shuffle barriers; "streaming" lands rows as they
   # are generated and measures the duplicate rate instead.
-  uniqueness_mode: str = "exact"
+  uniqueness_mode: str = DEFAULT_CONFIG.guardrails.uniqueness_mode
   # RAG population embed (ADR 0034 D8, rev. 2026-09-08). The device is
   # the worker GPU on every topology ("auto"); moving it to CPU under
   # multi starved the model pull and the vLLM engine init instead
@@ -223,6 +223,16 @@ class PipelineConfig:
   # None = this table generates from `--num_rows` batch requests as
   # before.
   fanout: dict | None = None
+  # ADR 0043: the launch's resolved generator config, copied into the
+  # worker `GenerationContext`.
+  generator_config: GeneratorConfig = field(
+      default_factory=lambda: DEFAULT_CONFIG)
+  # A1 ruling R14 — the pool store key the launcher computed once.
+  pool_store_key: str = ""
+  # ADR 0044 — this job's generation record as the launcher built it.
+  # None writes exactly master's 21-column summary row (the launcher passes
+  # None when validation_runs lacks the record columns).
+  record: LaunchRecord | None = None
 
 
 def _default_requests(p: beam.Pipeline, config: PipelineConfig,
@@ -315,6 +325,8 @@ def build_pipeline(
       source_distinct=config.source_distinct,
       source_values_table=config.source_values_table,
       fanout=config.fanout,
+      generator_config=config.generator_config,
+      pool_store_key=config.pool_store_key,
   )
 
   if requests is None:
@@ -449,20 +461,37 @@ def build_pipeline(
     summary_rows = (
         p
         | f"{label_prefix}SummarySeed" >> beam.Create([None])
-        | f"{label_prefix}BuildValidationRun" >> beam.Map(
-            _build_validation_run_row,
+        | f"{label_prefix}BuildValidationRun" >> beam.ParDo(
+            _BuildValidationRunDoFn(
+                record=config.record,
+                row_kwargs={
+                    "thresholds":
+                        thresholds,
+                    "run_id":
+                        config.run_id,
+                    "reference_digest":
+                        digest,
+                    "num_rows":
+                        config.num_rows,
+                    "reference_table":
+                        config.reference_table,
+                    "landing_table":
+                        config.landing_table,
+                    "engine":
+                        config.engine_name,
+                    "model_uri":
+                        config.model_uri,
+                    "excluded_blocker_rules":
+                        tuple(config.gate_excluded_rules),
+                    "source_repeat_share":
+                        config.source_repeat_share,
+                    "repeat_share_tolerance":
+                        config.generator_config.guardrails
+                        .repeat_share_tolerance,
+                },
+            ),
             valid_count=beam.pvalue.AsSingleton(valid_count),
             dlq_by_rule=beam.pvalue.AsSingleton(dlq_by_rule),
-            thresholds=thresholds,
-            run_id=config.run_id,
-            reference_digest=digest,
-            num_rows=config.num_rows,
-            reference_table=config.reference_table,
-            landing_table=config.landing_table,
-            engine=config.engine_name,
-            model_uri=config.model_uri,
-            excluded_blocker_rules=tuple(config.gate_excluded_rules),
-            source_repeat_share=config.source_repeat_share,
         ))
     write_result = summary_rows | f"{label_prefix}WriteValidationRun" >> validation_runs_sink
     if config.fail_on_blocker:
@@ -532,13 +561,6 @@ def _generate_pardo(config: PipelineConfig, ctx, fk_side):
   return beam.ParDo(dofn)
 
 
-# In-DAG FK key-pool cap (ADR 0030) — the floor: a child samples from at
-# most this many parent key tuples unless its PK contains the FK, in which
-# case preflight sizes the edge's `key_sample_cap` from num_rows and the
-# sibling PK members (ADR 0035 — the 2026-09-09 C_TABLE collapse).
-_FK_SIDE_SAMPLE_CAP = FK_KEY_SAMPLE_FLOOR
-
-
 @dataclass(frozen=True)
 class FkEdgeSpec:
   """One enforced FK edge resolved INSIDE the job (ADR 0030): the
@@ -557,9 +579,11 @@ class FkEdgeSpec:
   # built PCollection up by.
   parent_table: str = ""
   parent_pk: tuple[str, ...] = ()
-  # Parent key tuples the child sees (ADR 0035): the floor unless the
-  # child's PK contains this edge's columns, then preflight's sizing.
-  key_sample_cap: int = FK_KEY_SAMPLE_FLOOR
+  # Parent key tuples the child sees (ADR 0030, 0035): the floor
+  # (`relational.fk_key_sample_floor`) unless the child's PK contains this
+  # edge's columns, then preflight's sizing from num_rows and the sibling
+  # PK members (the 2026-09-09 C_TABLE collapse).
+  key_sample_cap: int = DEFAULT_CONFIG.relational.fk_key_sample_floor
   # ADR 0036: "side_input" (ADR 0030 key sample), "fanout" (this edge DRIVES
   # the child — its parent's keys are the child's generation input) or
   # "implied" (satisfied by construction through the driving edge; no DAG
@@ -577,7 +601,7 @@ class FkEdgeSpec:
   # every `rest` column is NULLABLE in the landing schema — the engine's
   # NULL policy for a key with no candidate (design §4 ruling B).
   overlap: tuple[str, ...] = ()
-  candidate_cap: int = 64
+  candidate_cap: int = DEFAULT_CONFIG.relational.fk_candidate_cap
   nullable: bool = False
 
   @property
@@ -632,9 +656,7 @@ def _edge_key_pools(parent_valid, edge: FkEdgeSpec, prefix: str):
       _key_pool_payload, cols=list(edge.child_cols), cap=edge.key_sample_cap)
 
 
-def _key_pool_payload(keys,
-                      cols: list[str],
-                      cap: int = _FK_SIDE_SAMPLE_CAP) -> list[dict]:
+def _key_pool_payload(keys, cols: list[str], cap: int) -> list[dict]:
   """One edge's side-input payload. The cap is announced, never
     silent: a child sampling 100k of a larger parent's keys references
     only those, which caps its own FK distinct count."""
@@ -1204,9 +1226,12 @@ def _population_branch(
   distinct_values: dict[str, list[str]] = {}
   if present is None:
     free_text_columns = _rag_free_text_columns(config.table_schema,
-                                               reference_rows)
-    distinct_values = distinct_free_text_values(reference_rows,
-                                                free_text_columns)
+                                               reference_rows,
+                                               config.generator_config)
+    distinct_values = distinct_free_text_values(
+        reference_rows,
+        free_text_columns,
+        cap=config.generator_config.rag.max_free_text_values_per_column)
   row_doc_chunks = (
       p
       | f"{label_prefix}RagReferenceRows" >> beam.Create(prefix)
@@ -1248,7 +1273,12 @@ def _population_branch(
       | f"{label_prefix}RagBatchChunks" >> beam.BatchElements(
           min_batch_size=32, max_batch_size=256)
       | f"{label_prefix}RagEmbedChunks" >> beam.ParDo(
-          EmbedChunksDoFn(config.embedder_uri, device=config.rag_embed_device)))
+          EmbedChunksDoFn(
+              config.embedder_uri,
+              device=config.rag_embed_device,
+              max_length=config.generator_config.rag.bge_max_length,
+              min_free_vram=config.generator_config.rag.embedder_min_free_vram))
+  )
   return chunks
 
 
@@ -1261,13 +1291,15 @@ def _rag_shard_key(chunk, shards: int) -> int:
 
 
 def _rag_free_text_columns(table_schema: TableSchema,
-                           reference_rows: list[dict]) -> list[str]:
+                           reference_rows: list[dict],
+                           generator_config: GeneratorConfig) -> list[str]:
   """Columns that get `free_text_col` chunks — B.1's own FREE_TEXT
     classification, minus identifier-shaped ones (retrieval-worthy prose,
     not per-row IDs)."""
   from sdfb_core.engines.b1_rag.profile import ColumnKind, profile_columns
 
-  profiles = profile_columns(table_schema, reference_rows)
+  profiles = profile_columns(
+      table_schema, reference_rows, config=generator_config)
   return [
       p.name
       for p in profiles.values()
@@ -1357,6 +1389,7 @@ def _build_validation_run_row(
     model_uri: str,
     excluded_blocker_rules: tuple[str, ...] = (),
     source_repeat_share: float | None = None,
+    repeat_share_tolerance: float,
 ) -> dict:
   """Driver of the single validation_runs row (side inputs are singletons).
 
@@ -1379,6 +1412,7 @@ def _build_validation_run_row(
       model_uri=model_uri,
       excluded_blocker_rules=excluded_blocker_rules,
       source_repeat_share=source_repeat_share,
+      repeat_share_tolerance=repeat_share_tolerance,
   )
   if summary.source_repeat_share is not None:
     log_milestone(
@@ -1395,11 +1429,58 @@ def _build_validation_run_row(
                  if summary.landing_repeat_share is not None else ""),
         delta=(round(summary.repeat_share_delta, 4)
                if summary.repeat_share_delta is not None else ""),
-        tolerance=REPEAT_SHARE_TOLERANCE,
+        tolerance=repeat_share_tolerance,
         within_tolerance=summary.repeat_share_within_tolerance,
         excluded_blocker_rules=summary.excluded_blocker_rules,
     )
   return summary.to_bq_row()
+
+
+class _BuildValidationRunDoFn(beam.DoFn):
+  """The table's one `validation_runs` row and, with a launch record, the
+    generation record's fourteen columns (ADR 0044).
+
+    `setup()` runs once per DoFn instance on a worker: it reads the
+    Dataflow job id from the GCE metadata server — only when the launcher
+    ran on Dataflow — and this worker's generator version, and warns once
+    when that version is not the launcher's (the rows are the worker's
+    code's, so the row records the worker's)."""
+
+  def __init__(self, *, record: LaunchRecord | None, row_kwargs: dict[str,
+                                                                      Any]):
+    super().__init__()
+    self._record = record
+    self._row_kwargs = row_kwargs
+    self._worker: dict[str, Any] = {}
+
+  def setup(self):
+    if self._record is None:
+      return
+    job_id, source = (
+        read_job_id() if self._record.read_job_id else (None, "not_dataflow"))
+    worker_version = generator_version()
+    log_milestone(
+        "generation_record_job_id", job_id=job_id or "", source=source)
+    if worker_version != self._record.launcher_version:
+      log_milestone(
+          "generator_version_mismatch",
+          level=logging.WARNING,
+          launcher=self._record.launcher_version,
+          worker=worker_version,
+      )
+    self._worker = {"job_id": job_id, "generator_version": worker_version}
+
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
+  def process(self, unused_seed, valid_count, dlq_by_rule):
+    row = _build_validation_run_row(
+        unused_seed,
+        valid_count=valid_count,
+        dlq_by_rule=dlq_by_rule,
+        **self._row_kwargs)
+    if self._record is not None:
+      row.update(self._record.columns)
+      row.update(self._worker)
+    yield row
 
 
 class _BlockerGateDoFn(beam.DoFn):

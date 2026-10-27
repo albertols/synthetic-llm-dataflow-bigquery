@@ -19,7 +19,9 @@ function Scalar({ value }: { value: Json }) {
     ) : (
       <span className="text-text-1 break-all">"{value}"</span>
     );
-  if (typeof value === "number") return <span className="text-link tabular-nums">{String(value)}</span>;
+  // A long number (max_bytes_billed: 13 digits) wraps like a string, so a nested row never widens the page at 390 px.
+  if (typeof value === "number")
+    return <span className="[overflow-wrap:anywhere] text-link tabular-nums">{String(value)}</span>;
   if (typeof value === "boolean") return <span className="text-accent-text">{String(value)}</span>;
   return null;
 }

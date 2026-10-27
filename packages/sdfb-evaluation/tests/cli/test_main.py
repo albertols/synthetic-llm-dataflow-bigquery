@@ -18,6 +18,9 @@ nothing started), the pipeline options, planning (`plan`), `schemas` and
 DirectRunner run in `test_run.py`.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §7 Validation and the dead-letter queue
+(ADR 0044).
 """
 
 from __future__ import annotations
@@ -120,15 +123,16 @@ def test_run_flags_default_to_the_brief():
   assert knobs == Knobs(evaluation_id="eval-20260914T080000Z-00000001")
   flags = public_run_flags()
   assert {
-      "--project", "--region", "--generation_job_id", "--run_id",
-      "--relationships_uri", "--tables", "--seed_table", "--reference_dataset",
-      "--reference_rows_limit", "--validation_runs_table", "--landing_dataset",
-      "--mode", "--scope", "--allow_contaminated", "--sample_rows",
-      "--privacy_sample_rows", "--detection_sample_rows", "--pair_max_columns",
-      "--row_flags_top_k", "--row_flags_source_keys", "--max_bytes_billed",
-      "--max_shuffle_gb", "--output_dataset", "--temp_dataset", "--sink",
-      "--output_local", "--thresholds_uri", "--fail_on", "--trigger",
-      "--label_key_uri", "--runner"
+      "--project", "--region", "--generation_job_id", "--generation_job_ids",
+      "--run_id", "--relationships_uri", "--tables", "--seed_table",
+      "--reference_dataset", "--reference_rows_limit",
+      "--validation_runs_table", "--landing_dataset", "--mode", "--scope",
+      "--allow_contaminated", "--sample_rows", "--privacy_sample_rows",
+      "--detection_sample_rows", "--pair_max_columns", "--row_flags_top_k",
+      "--row_flags_source_keys", "--max_bytes_billed", "--max_shuffle_gb",
+      "--output_dataset", "--temp_dataset", "--sink", "--output_local",
+      "--thresholds_uri", "--fail_on", "--trigger", "--label_key_uri",
+      "--runner"
   } == set(flags)
   assert "--fixture_dir" not in flags  # hidden
   assert "--evaluation_id" not in flags  # minted, never passed (R88c)
@@ -970,6 +974,320 @@ def test_a_seed_with_an_unreadable_job_is_planned_without_a_window(
   assert row["generation_job_id"] == JOB_ID
   assert row["generation_started_at"] is None and note in row["warnings"]
   check_row("evaluation_data_history", row, ordered=False)
+
+
+# --------------------------------------------------------------------------
+# the seed path evaluates what the generation record says was generated (F1)
+# --------------------------------------------------------------------------
+def _record_row(name: str, i: int, **values) -> dict:
+  snapshot = {
+      "config_version": 1,
+      "values": {
+          "sampling": {
+              "reference_rows_limit": 5000
+          },
+          "generation": {
+              "engine": "b1_rag",
+              "similarity": 0.7,
+              "seed": ""
+          },
+          "relational": {
+              "generate_fk_relationships": "false",
+              "relationships_uri": "config/relationships"
+          },
+          **values,
+      },
+      "launcher": {
+          "version": "0.6.1-master-edcfdcd"
+      },
+  }
+  return {
+      "run_id": f"{BASE}-{i:02d}-{name}" if i >= 0 else BASE,
+      "landing_table": f"{DS}.{name}",
+      "reference_table": f"{SRC}.{name}",
+      "reference_digest": None,
+      "valid_count": 100,
+      "num_rows_requested": 100,
+      "status": "PASSED",
+      "created_at": "2026-09-13T13:45:00Z",
+      "job_id": JOB_ID,
+      "generator_version": "0.6.1-master-edcfdcd",
+      "config_digest": "0123456789ab",
+      "config": json.dumps(snapshot),
+  }
+
+
+def _record_plan(bq,
+                 load_fixture,
+                 tmp_path,
+                 seed="orders",
+                 uri=None,
+                 session=None):
+  """The chained evaluation's argv: the DAG's seed, datasets, model (`uri`,
+    else the thelook model) and 10,000-row limit, plus the job id and
+    validation_runs table."""
+  session = session or JobOnlySession(load_fixture("context/dataflow_job.json"))
+  model = tmp_path / "thelook.yaml"
+  model.write_text(MODEL_YAML)
+  args, _ = parse_args([
+      "run", "--project", PROJECT, "--region", REGION, "--seed_table", seed,
+      "--generation_job_id", JOB_ID, "--landing_dataset", "thelook_synthetic",
+      "--reference_dataset", SRC, "--relationships_uri", uri or str(model),
+      "--reference_rows_limit", "10000", "--validation_runs_table",
+      f"{QDS}.validation_runs", "--scope", "manual", "--trigger", "chained"
+  ])
+  env = make_env(bq, session_factory=lambda project: session)
+  planned, _ = driver.plan(args, env)
+  return planned
+
+
+def _record_notes(planned) -> list[str]:
+  return [w for w in planned.warnings if "generation's record" in w]
+
+
+def test_the_record_names_the_tables_and_inputs_of_the_seed_path(
+    bq, load_fixture, tmp_path):
+  """F1 (ADR 0044): the file generated `users` alone, without
+    relationships, from a 5,000-row sample; the DAG still names `orders`, its
+    model and 10,000. The evaluation follows the record — isolated, as the
+    generation ran, although `--relationships_uri` names a model (Review
+    Focus 4)."""
+  bq.canned.append(("validation_runs", [_record_row("users", -1)]))
+  planned = _record_plan(bq, load_fixture, tmp_path)
+  assert _evaluated(planned) == ["users"]
+  launch = planned.launch
+  assert launch.relationships_uri is None and planned.models == ()
+  assert launch.typed_filters()["reference_rows_limit"] == 5000
+  assert launch.params_source == "validation_runs"
+  notes = _record_notes(planned)
+  assert any("orders" in n and "users" in n for n in notes)
+  assert any("10000" in n and "5000" in n for n in notes)
+  assert any(
+      "no relationship model" in n and "generate_fk_relationships='false'" in n
+      for n in notes)
+  row = planned.registry_seed()
+  assert row["generator_version"] == "0.6.1-master-edcfdcd"
+  assert all(n in row["warnings"] for n in notes)
+  check_row("evaluation_data_history", row, ordered=False)
+
+
+def test_a_seed_path_without_a_record_keeps_the_dags_inputs(
+    bq, load_fixture, tmp_path):
+  """Controller ruling F12: a real 21-column row — master's table has
+    always carried engine, model_uri and env — is no record. The DAG's seed
+    still decides the tables; the row fills only its three columns."""
+  legacy = {
+      k: v
+      for k, v in _record_row("orders", 1).items()
+      if k not in ("job_id", "generator_version", "config_digest", "config")
+  }
+  legacy.update(
+      engine="b1_rag",
+      model_uri="gs://demo-bucket/synthetic/models/example/example-3b/v1/",
+      env="dev")
+  bq.canned.append(("validation_runs", [legacy]))
+  planned = _record_plan(bq, load_fixture, tmp_path)
+  # the seed's component, as `test_a_seed_with_a_job_id_keeps_the_job_and_reads_nothing_else`
+  assert _evaluated(planned) == ["users", "orders", "order_items"]
+  typed = planned.launch.typed_filters()
+  assert typed["reference_rows_limit"] == 10000
+  assert typed["engine"] == "b1_rag" and typed["env"] == "dev"
+  assert planned.launch.params_source == "validation_runs"
+  assert planned.launch.relationships_uri == str(tmp_path / "thelook.yaml")
+  assert not _record_notes(planned)
+  assert not [w for w in planned.warnings if "could not be read" in w]
+
+
+@pytest.mark.parametrize("failure", ["not found", "denied"])
+def test_a_seed_path_whose_record_cannot_be_read_says_so(
+    bq, load_fixture, tmp_path, failure):
+  """Final review M4: a record that could not be READ — here the job, so
+    neither its window nor its rows — is its own note, apart from one that
+    does not exist (no note, the test above): the operator then knows the
+    config file the launch followed was not."""
+  bq.canned.append(("validation_runs", [_record_row("users", -1)]))
+  planned = _record_plan(
+      bq,
+      load_fixture,
+      tmp_path,
+      session=JobOnlySession(None if failure == "not found" else "denied"))
+  assert _evaluated(planned) == ["users", "orders", "order_items"]
+  assert planned.launch.typed_filters()["reference_rows_limit"] == 10000
+  (note,) = [
+      w for w in planned.warnings
+      if w.startswith("the generation record of Dataflow job")
+  ]
+  assert f"job {JOB_ID} could not be read (the job could not be read" in note
+  assert note.endswith(
+      "the seed's tables and the given inputs are evaluated (ADR 0044)")
+
+
+def test_a_seed_path_by_job_name_follows_the_jobs_own_launch(
+    bq, load_fixture, tmp_path):
+  """Final review I2: workers that could not read the job id
+    (`source=none`) leave the job's name, the same for every launch of a
+    Composer model. The previous launch's rows in the window — 10,000 rows,
+    the DAG's — are not this job's record: its own launch's 5,000 is."""
+  name = load_fixture("context/dataflow_job.json")["name"]
+
+  def named(row, base, launched_at, **extra):
+    return dict(
+        row,
+        job_id=None,
+        job_name=name,
+        launch_run_id=base,
+        launched_at=launched_at,
+        **extra)
+
+  previous = named(
+      _record_row("users", -1, sampling={"reference_rows_limit": 10000}),
+      "prev-0913-aaaaaa",
+      "2026-09-13T12:20:00Z",
+      run_id="prev-0913-aaaaaa",
+      created_at="2026-09-13T13:03:00Z")
+  own = named(_record_row("users", -1), BASE, "2026-09-13T13:14:30Z")
+  bq.canned.append(("validation_runs", [previous, own]))
+  planned = _record_plan(bq, load_fixture, tmp_path)
+  assert _evaluated(planned) == ["users"]
+  assert planned.launch.typed_filters()["reference_rows_limit"] == 5000
+  assert any("reference_rows_limit 5000 (given 10000)" in n
+             for n in _record_notes(planned))
+  (ignored,) = [w for w in planned.warnings if "under the job name" in w]
+  assert "prev-0913-aaaaaa" in ignored and BASE in ignored
+
+
+def test_a_record_silent_on_relationships_keeps_the_given_model(
+    bq, load_fixture, tmp_path):
+  """A snapshot that does not state `generate_fk_relationships` says
+    nothing about relationships: the tables follow the record, the model
+    stays the one given (today's behaviour)."""
+  bq.canned.append(
+      ("validation_runs", [_record_row("users", -1, relational={})]))
+  planned = _record_plan(bq, load_fixture, tmp_path)
+  assert _evaluated(planned) == ["users"]
+  assert planned.launch.relationships_uri == str(tmp_path / "thelook.yaml")
+  assert planned.models
+  assert not [n for n in _record_notes(planned) if "relationships_uri" in n]
+
+
+@pytest.mark.parametrize(
+    "generated", [["users", "orders", "order_items"], ["users", "orders"]],
+    ids=["the seed's component", "part of it"])
+def test_the_tables_note_reports_only_a_difference_from_the_seeds_component(
+    bq, load_fixture, tmp_path, generated):
+  """Fix round 1: a relational chained evaluation whose record names the
+    seed's whole component, in the model the launch is planned with, says
+    nothing about its tables (every five-table chained row would otherwise
+    carry a warning that reports no difference); a record that names
+    something else says so, naming the component."""
+  relational = {
+      "generate_fk_relationships": "true",
+      "relationships_uri": str(tmp_path / "thelook.yaml")
+  }
+  bq.canned.append(("validation_runs", [
+      _record_row(name, i, relational=relational)
+      for i, name in enumerate(generated)
+  ]))
+  planned = _record_plan(bq, load_fixture, tmp_path)
+  assert _evaluated(planned) == generated
+  tables = [n for n in _record_notes(planned) if ": tables [" in n]
+  if len(generated) == 3:
+    assert not tables
+  else:
+    (note,) = tables
+    assert str(generated) in note
+    assert "['users', 'orders', 'order_items']" in note
+
+
+@pytest.mark.parametrize("whose", ["recorded", "given"])
+def test_a_model_folder_that_is_not_there_is_evaluated_without_relationships(
+    bq, load_fixture, tmp_path, whose):
+  """A folder that holds no model file where the evaluator runs (the
+    repository's default holds samples only), named by the record ("the
+    recorded relationships_uri") or, the snapshot silent about
+    relationships, only by the DAG ("the given relationships_uri", fix
+    round 1): the record's tables are evaluated without relationships, with
+    a note naming whose URI it was — as the seed alone is today — never a
+    failed evaluation."""
+  empty = tmp_path / "samples"
+  empty.mkdir()
+  (empty / "example_model.yaml").write_text(MODEL_YAML)
+  relational = {
+      "generate_fk_relationships": "true",
+      "relationships_uri": str(empty)
+  } if whose == "recorded" else {}
+  bq.canned.append(
+      ("validation_runs", [_record_row("orders", -1, relational=relational)]))
+  planned = _record_plan(bq, load_fixture, tmp_path, uri=str(empty))
+  assert _evaluated(planned) == ["orders"]
+  assert planned.models == () and planned.launch.relationships_uri is None
+  (note,) = [w for w in planned.warnings if "no model file" in w]
+  assert f"the {whose} relationships_uri {empty} holds no model file" in note
+  assert "without relationships" in note
+
+
+@pytest.mark.parametrize(
+    "orders", [f"{PROJECT}.other_synthetic.orders", f"{DS}.or ders"],
+    ids=["two landing datasets", "not a table name"])
+def test_a_record_the_seed_cannot_name_keeps_the_dags_inputs(
+    bq, load_fixture, tmp_path, orders):
+  """Plan Ruling 10 / controller ruling F26: a record whose tables one
+    `--landing_dataset` cannot name, or that names something that is no
+    table, keeps the seed's tables and datasets — a note, never a failed
+    evaluation. The launch lookup still takes the generation's parameters
+    from the record: its 5,000-row limit is what verifies the privacy panel
+    (fix round 1)."""
+  recorded = tmp_path / "recorded.yaml"  # not the DAG's thelook.yaml
+  recorded.write_text(MODEL_YAML)
+  relational = {
+      "generate_fk_relationships": "true",
+      "relationships_uri": str(recorded)
+  }
+  bq.canned.append(("validation_runs", [
+      _record_row("users", 0, relational=relational),
+      dict(
+          _record_row("orders", 1, relational=relational),
+          landing_table=orders),
+  ]))
+  planned = _record_plan(bq, load_fixture, tmp_path)
+  assert _evaluated(planned) == ["users", "orders", "order_items"]
+  (note,) = _record_notes(planned)
+  assert orders.rsplit(".", 1)[0] in note
+  assert ("the seed's tables and datasets are kept; the launch lookup still "
+          "takes the generation's parameters (reference_rows_limit, a "
+          "relationship model the record states) from the record") in note
+  assert planned.launch.typed_filters()["reference_rows_limit"] == 5000
+  assert planned.launch.relationships_uri == str(recorded)
+
+
+def test_an_isolated_record_the_seed_cannot_name_keeps_the_given_model(
+    bq, load_fixture, tmp_path):
+  """Controller ruling, fix round 2: a record that states relationships off
+    but spans two landing datasets keeps today's behaviour — the seed's
+    tables AND the given `--relationships_uri`, which names them and is
+    loaded; only the FK edges are skipped — and its note says so."""
+  relational = {
+      "generate_fk_relationships": "false",
+      "relationships_uri": "config/relationships"
+  }
+  bq.canned.append(("validation_runs", [
+      _record_row("users", 0, relational=relational),
+      dict(
+          _record_row("orders", 1, relational=relational),
+          landing_table=f"{PROJECT}.other_synthetic.orders"),
+  ]))
+  planned = _record_plan(bq, load_fixture, tmp_path)
+  given = str(tmp_path / "thelook.yaml")
+  assert _evaluated(planned) == ["users", "orders", "order_items"]
+  assert planned.models and planned.launch.relationships_uri == given
+  (note,) = _record_notes(planned)
+  assert ("its relationships off (generate_fk_relationships='false') is not "
+          f"applied to the tables: the given relationships_uri {given} names "
+          "them and is loaded; only the FK edges are skipped") in note
+  skipped = [w for w in planned.warnings if "FK edges were not generated" in w]
+  assert sorted(w.split(":", 1)[0] for w in skipped) == [
+      f"{DS}.order_items", f"{DS}.orders"
+  ]
 
 
 def test_a_run_id_target_reads_validation_runs(bq, capsys):

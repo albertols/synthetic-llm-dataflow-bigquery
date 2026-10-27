@@ -10,6 +10,7 @@ import {
   joinModelAdjustments,
   joinWindow,
   knobs,
+  parseGeneratorVersion,
   profilerStatsSchema,
   snapshotKey,
   type ComparedMetric,
@@ -83,6 +84,9 @@ export function matchesFilter(row: EvaluationSummary, f: EvaluationFilterParsed)
   if (!anyOf(f.evaluator_version, row.evaluator_version)) return false;
   if (!anyOf(f.catalogue_version, row.catalogue_version)) return false;
   if (!anyOf(f.relationship_model, row.relationship_model)) return false;
+  if (!anyOf(f.generator_version, row.generator_version)) return false;
+  if (!anyOf(f.config_digest, row.generator_config_digest)) return false;
+  if (!anyOf(f.generator_branch, parseGeneratorVersion(row.generator_version)?.branch ?? null)) return false;
   if (!withinWindow(row.evaluated_at, f.from, f.to)) return false;
   if (f.q) {
     const q = f.q.toLowerCase();
@@ -91,6 +95,8 @@ export function matchesFilter(row: EvaluationSummary, f: EvaluationFilterParsed)
       row.base_run_id,
       row.generation_job_id,
       row.generation_job_name,
+      // Every batch job of a whole-model launch, not only the first (ADR 0045).
+      ...row.generation_job_ids,
       ...row.run_ids,
     ];
     if (!haystack.some((s) => s?.toLowerCase().includes(q))) return false;
@@ -172,6 +178,9 @@ export function buildFacets(input: FacetInputs): Facets {
     evaluator_versions: sortedDistinct(rows.map((r) => r.evaluator_version)),
     catalogue_versions: sortedDistinct(rows.map((r) => r.catalogue_version)),
     relationship_models: sortedDistinct(rows.map((r) => r.relationship_model)),
+    generator_versions: sortedDistinct(rows.map((r) => r.generator_version)),
+    generator_branches: sortedDistinct(rows.map((r) => parseGeneratorVersion(r.generator_version)?.branch ?? null)),
+    config_digests: sortedDistinct(rows.map((r) => r.generator_config_digest)),
     metric_ids: [...input.metricIds].sort(),
     source_tables: input.sourceTables,
     rag: [...input.rag],
@@ -238,7 +247,30 @@ const PARAM_COLUMNS = [
   "evaluator_version",
   "catalogue_version",
   "relationship_model",
+  "generator_version",
+  "generator_config_digest",
 ] as const;
+
+const isObject = (value: unknown): value is Record<string, unknown> =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+
+/** A record snapshot (ADR 0044): the parameter diff reads only its `values`, by key (`flattenSnapshot`). */
+const isSnapshot = (value: unknown): value is Record<string, unknown> =>
+  isObject(value) && typeof value.config_version === "number" && typeof value.values === "object";
+
+/**
+ * A snapshot's `values` as `generation_params.<key>`: the inner keys are the flat CLI names a pre-record
+ * `generation_params` holds, so a record-backed evaluation and an older one line up key by key. Its other blocks
+ * (provenance, derived, …) stay out; the Config diff card is the provenance-aware view.
+ */
+function flattenSnapshot(snapshot: Record<string, unknown>, out: Map<string, Json>) {
+  const values = snapshot.values;
+  if (!isObject(values)) return;
+  for (const block of Object.values(values)) {
+    if (!isObject(block)) continue;
+    for (const [key, value] of Object.entries(block)) flatten(value, `generation_params.${key}`, out);
+  }
+}
 
 export function buildComparison(
   ids: readonly string[],
@@ -275,7 +307,8 @@ export function buildComparison(
   ordered.forEach((e, i) => {
     const flat = new Map<string, Json>();
     for (const column of PARAM_COLUMNS) flat.set(column, e[column] ?? null);
-    flatten(e.generation_params, "generation_params", flat);
+    if (isSnapshot(e.generation_params)) flattenSnapshot(e.generation_params, flat);
+    else flatten(e.generation_params, "generation_params", flat);
     flatten(e.evaluation_params, "evaluation_params", flat);
     for (const [path, value] of flat) {
       const list = params.get(path) ?? ordered.map(() => null as Json);

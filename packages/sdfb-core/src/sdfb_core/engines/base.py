@@ -23,9 +23,9 @@ REF: https://beam.apache.org/documentation/ml/large-language-modeling/
 REF: https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.base.html
 
 Design: docs/DESIGN.md §3 Serving; §4 Relational generation; §5 Fidelity;
-§8 Configuration
+§7 Validation and the dead-letter queue; §8 Configuration
 (ADR 0011, 0014, 0018, 0021, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0033,
-0036, 0037).
+0036, 0037, 0043, 0044).
 """
 
 from __future__ import annotations
@@ -37,6 +37,8 @@ from typing import NamedTuple, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
+from sdfb_core.config.salt import pool_store_model_key
 from sdfb_core.contracts import GeneratedRecord, TableSchema
 from sdfb_core.engines.fanout import FanoutPlan, KeyDraw, joint_key_draw
 from sdfb_core.observability import log_milestone
@@ -172,8 +174,9 @@ class GenerationConfig(BaseModel):
 
   model_config = ConfigDict(frozen=True)
 
-  similarity: float = Field(default=0.5, ge=0.0, le=1.0)
-  batch_size: int = Field(default=16, ge=1)
+  similarity: float = Field(
+      default=DEFAULT_CONFIG.generation.similarity, ge=0.0, le=1.0)
+  batch_size: int = Field(default=DEFAULT_CONFIG.generation.batch_size, ge=1)
   max_retries: int = Field(default=2, ge=0)
   seed: int | None = None
   engine_specific: dict = Field(default_factory=dict)
@@ -257,13 +260,13 @@ class GenerationContext(BaseModel):
   # Retrieval runs 3x per setup and only picks 8 prompt seeds, so this is
   # the cheapest lever on novel-yield-per-call there is. One build, three
   # arms — the runs differ in exactly one variable.
-  pool_seed_strategy: str = "centroid"
+  pool_seed_strategy: str = DEFAULT_CONFIG.free_text.pool_seed_strategy
   # Shape-preserving expander (2026-08-05 spec C3): "off" draws from the
   # bounded pool only (distinct capped at pool size — the 10M-run
   # diversity ceiling), "identifiers" (default) expands code-like columns
   # from their observed shape mix, "all" also mutates digit runs inside
   # texty pool draws. Never adds an LLM call on any setting.
-  freetext_expansion: str = "identifiers"
+  freetext_expansion: str = DEFAULT_CONFIG.free_text.freetext_expansion
   # Enforced FK edges → the parent's landed key TUPLES (ADR 0031):
   # ``[{"cols": [...], "keys": [[v, …], …]}, …]``. The tuple is the
   # unit of referential integrity, so it is the unit of the draw —
@@ -308,13 +311,13 @@ class GenerationContext(BaseModel):
   # Tier-2 exact stats pass (--source_stats=exact, ADR 0022). The 10k
   # reference sample under-estimates cardinality (five-run verdict:
   # sample distinct 95 vs source 4k starved the pool at 95); these lift
-  # the pool target back toward _FREE_TEXT_POOL_MAX. Empty = Tier 1 only,
+  # the pool target back toward free_text_pool_max. Empty = Tier 1 only,
   # sample-distinct behavior unchanged. Workers stay stats-TABLE-agnostic:
   # the value arrives through this context, never a BQ read.
   source_distinct: dict[str, int] = Field(default_factory=dict)
   # --- RAG layer (WS2 §4b) -------------------------------------------
   # Requested synthetic row count — bounds the free-text pool target
-  # (min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX)). 0 = unknown.
+  # (min(num_rows, column_distinct, free_text_pool_max)). 0 = unknown.
   num_rows: int = 0
   # Pinned vector space for rag_chunks reads. Derived DRIVER-side from
   # the original embedder URI (the worker only sees the localized path).
@@ -332,6 +335,20 @@ class GenerationContext(BaseModel):
   # `sdfb_core.rag.chunking.MAX_ROW_DOC_ROWS` (a literal here keeps this
   # module free of rag imports; a test pins the two together).
   rag_row_docs_limit: int = Field(default=1024, ge=1)
+  # ADR 0043 — the launch's resolved generator config. Engines read their
+  # promoted constants from it; the default is master's values.
+  generator_config: GeneratorConfig = Field(
+      default_factory=lambda: DEFAULT_CONFIG)
+  # A1 ruling R14 / ADR 0044 — the free-text pool store key the LAUNCHER
+  # computed (the same value it used for exists/taint/delete and the one
+  # the record carries as derived.cache_keys.freetext_pools). Empty for a
+  # context built by hand: `pool_key()` then derives it here.
+  pool_store_key: str = ""
+
+  def pool_key(self) -> str:
+    """The pool store key this generation reads and writes under."""
+    return self.pool_store_key or pool_store_model_key(self.model_uri,
+                                                       self.generator_config)
 
 
 class GenerationEngine(ABC):

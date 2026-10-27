@@ -24,12 +24,14 @@ steps:
       - -t=${_TAG}
       - --build-arg=SDFB_SDK_CONTAINER_IMAGE_ARG=${_TAG}
       - --build-arg=GIT_COMMIT_ARG=${_GIT_COMMIT}
+      - --build-arg=SDFB_BUILD_BRANCH_ARG=${_GIT_BRANCH}
       - .
 images:
   - ${_TAG}
 substitutions:
   _TAG: unset
   _GIT_COMMIT: unknown
+  _GIT_BRANCH: unknown
 options:
   logging: CLOUD_LOGGING_ONLY
   machineType: E2_HIGHCPU_32

@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 
 from apache_beam.io.filesystems import FileSystems
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts.relationships import (
     RelationshipError,
     RelationshipRegistry,
@@ -42,7 +43,7 @@ _SUFFIXES = (".yaml", ".yml")
 
 # The packaged location, shipped inside the flex-template image. Absence
 # is only legitimate HERE: anywhere else, somebody pointed on purpose.
-DEFAULT_RELATIONSHIPS_URI = "config/relationships"
+DEFAULT_RELATIONSHIPS_URI = DEFAULT_CONFIG.relational.relationships_uri
 
 
 def _patterns(uri: str) -> list[str]:

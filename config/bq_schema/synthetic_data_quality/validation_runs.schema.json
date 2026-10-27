@@ -1,5 +1,5 @@
 [
-  {"name": "run_id", "type": "STRING", "mode": "REQUIRED", "description": "Pipeline run id; joins to dead_letter.run_id."},
+  {"name": "run_id", "type": "STRING", "mode": "REQUIRED", "description": "Pipeline run id; joins to dlq.run_id."},
   {"name": "reference_digest", "type": "STRING", "mode": "NULLABLE", "description": "SHA-256 of the canonical reference sample (provenance)."},
   {"name": "reference_table", "type": "STRING", "mode": "NULLABLE", "description": "Source table the reference rows were SELECTed from."},
   {"name": "landing_table", "type": "STRING", "mode": "NULLABLE", "description": "Destination table for valid synthetic rows."},
@@ -18,6 +18,20 @@
   {"name": "source_repeat_share", "type": "FLOAT", "mode": "NULLABLE", "description": "ADR 0038 \u2014 share of the SOURCE child's rows repeating a key value (1 - key_values/children over the fan-out histogram)."},
   {"name": "landing_repeat_share", "type": "FLOAT", "mode": "NULLABLE", "description": "ADR 0038 \u2014 pk.duplicate over the rows generated (valid_count + row.duplicate); the landing table's key-repeat share."},
   {"name": "repeat_share_delta", "type": "FLOAT", "mode": "NULLABLE", "description": "ADR 0038 \u2014 landing_repeat_share - source_repeat_share."},
-  {"name": "repeat_share_within_tolerance", "type": "BOOLEAN", "mode": "NULLABLE", "description": "ADR 0038 \u2014 |repeat_share_delta| <= REPEAT_SHARE_TOLERANCE (0.05); NULL when the launch measured no source share for this table."},
-  {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED", "description": "Row write time (UTC); DAY partition key."}
+  {"name": "repeat_share_within_tolerance", "type": "BOOLEAN", "mode": "NULLABLE", "description": "ADR 0038 \u2014 |repeat_share_delta| <= guardrails.repeat_share_tolerance (default 0.05); NULL when the launch measured no source share for this table."},
+  {"name": "created_at", "type": "TIMESTAMP", "mode": "REQUIRED", "description": "Row write time (UTC); DAY partition key."},
+  {"name": "job_id", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 the Dataflow job id, read by a worker from the GCE metadata server; NULL on the DirectRunner or when the attribute is absent (readers then match job_name inside the job's window; a Composer job name is the same for every launch of a model, so the evaluator keeps the launch whose launched_at is the latest at or before the job's end)."},
+  {"name": "job_name", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 the Dataflow job name the launcher resolved (a template launch's jobName, else sdfb-<run_id>); NULL on the DirectRunner."},
+  {"name": "launch_run_id", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 the launch's base run id, shared by every table of the launch (run_id is the base, or <base>-NN-<table>)."},
+  {"name": "generator_version", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 the worker's generator version, <base>-<branch>-<sha7>[-dirty] (sdfb_core.version); the launcher's is config.launcher.version."},
+  {"name": "launched_at", "type": "TIMESTAMP", "mode": "NULLABLE", "description": "ADR 0044 \u2014 launcher clock when the job's graph was built, just before it ran; created_at stays the row write time."},
+  {"name": "embedder_uri", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 rag.embedder_uri; empty means the HashingEmbedder."},
+  {"name": "retrieval_method", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 free_text.pool_seed_strategy for b1_rag; NULL for b2_library."},
+  {"name": "similarity", "type": "FLOAT", "mode": "NULLABLE", "description": "ADR 0044 \u2014 generation.similarity."},
+  {"name": "seed", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 generation.seed; derived when none was given."},
+  {"name": "source_stats", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 sampling.source_stats, the stats tier (off, sample or exact)."},
+  {"name": "relationships_uri", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 relational.relationships_uri as resolved; the model itself is embedded in config."},
+  {"name": "relationships_digest", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 sha12 of every loaded relationship model (the relationships_loaded milestone's sha); NULL when no model was loaded."},
+  {"name": "config_digest", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 sha12 of config.values as canonical JSON, launch identity excluded: same digest, same generator config."},
+  {"name": "config", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 JSON text of the generation snapshot: config_version, values (a valid --config_uri file), provenance, overridden, derived (cache_keys), thresholds, relationships, beam, launcher, batch. PARSE_JSON or JSON_VALUE to query."}
 ]

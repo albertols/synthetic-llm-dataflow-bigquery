@@ -13,8 +13,8 @@
 #  limitations under the License.
 """BigQuerySourceStatsStore + driver stats emission (Task 15).
 
-Design: docs/DESIGN.md §5 Fidelity
-(ADR 0022).
+Design: docs/DESIGN.md §5 Fidelity; §8 Configuration
+(ADR 0022, 0043).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
@@ -25,10 +25,14 @@ import pickle
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+from sdfb_beam.cli import run_pipeline as rp
 from sdfb_beam.cli.preflight import PreflightResult
 from sdfb_beam.cli.run_pipeline import _emit_source_stats
 from sdfb_beam.io.stats_store import BigQuerySourceStatsStore
+from sdfb_core.config.resolve import resolve
 from sdfb_core.contracts import TableSchema
+from sdfb_core.stats.source_stats import (PROFILER_VERSION,
+                                          stats_profiler_version)
 
 
 def test_exists_and_write_rows_use_load_jobs():
@@ -109,6 +113,56 @@ def test_emit_source_stats_writes_json(tmp_path):
   _emit_source_stats(args, _schema(), rows, PreflightResult((), (), None))
   payload = json.loads(out.read_text())
   assert payload["NOTES"]["empty_fraction"] == round(4 / 64, 6)
+
+
+def test_emit_source_stats_threads_the_resolved_config(monkeypatch):
+  """A non-default `sampling` value reaches the profiler, the exact pass
+    and the store's skip key, salted (ADR 0043 D8)."""
+  resolution = resolve({}, {"sampling": {"top_values_top_k": 3}})
+  config = resolution.config
+  seen: dict[str, object] = {}
+  real_profile = rp.profile_source_table
+
+  def spy_profile(*args, **kwargs):
+    seen["profile"] = kwargs.get("config")
+    return real_profile(*args, **kwargs)
+
+  def fake_exact(unused_table, unused_schema, stats, **kwargs):
+    seen["exact"] = kwargs.get("sampling")
+    return {name: {**e, "stats_tier": "exact"} for name, e in stats.items()}
+
+  class FakeStore:
+
+    def __init__(self, table_fqn):
+      seen["store"] = table_fqn
+
+    def exists(self, unused_fqn, unused_digest, **kwargs):
+      seen["exists"] = kwargs
+      return True
+
+    def write_rows(self, unused_rows):
+      raise AssertionError("an existing digest is skipped")
+
+  monkeypatch.setattr(rp, "profile_source_table", spy_profile)
+  monkeypatch.setattr("sdfb_beam.io.exact_stats.compute_exact_stats",
+                      fake_exact)
+  monkeypatch.setattr(rp, "BigQuerySourceStatsStore", FakeStore)
+  args = SimpleNamespace(
+      source_stats="exact",
+      source_stats_json="",
+      source_stats_table="p.d.stats",
+      run_id="r1",
+      reference_table="p.d.t",
+      config_resolution=resolution,
+  )
+  rows = [{"NOTES": f"LONG VALUE NUMBER {i} PADDED OUT WELL"} for i in range(8)]
+  _emit_source_stats(args, _schema(), rows, PreflightResult((), (), None))
+  assert seen["profile"] is config
+  assert seen["exact"] is config.sampling
+  assert seen["store"] == "p.d.stats"
+  version = stats_profiler_version(config)
+  assert version.startswith(PROFILER_VERSION + "+cfg.")
+  assert seen["exists"] == {"profiler_version": version, "stats_tier": "exact"}
 
 
 def test_emit_source_stats_off_is_noop(tmp_path):

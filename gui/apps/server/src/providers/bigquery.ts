@@ -14,6 +14,7 @@
  * parameters, TTL) and never persisted. The runner's ADC stays in this process.
  */
 import {
+  buildGenerationRecord,
   chunkMetaSchema,
   evaluationDataHistoryRowSchema,
   evaluationMetricsRowSchema,
@@ -36,6 +37,7 @@ import {
   type EvaluationSummary,
   type Facets,
   type FreetextPool,
+  type GenerationRecord,
   type MetricRow,
   type Page,
   type ProfileRow,
@@ -328,6 +330,19 @@ export class BigQueryProvider implements DataProvider {
     );
   }
 
+  /** The `validation_runs` rows the evaluation's launch can be joined to (newest first); none without a key. */
+  private candidateRuns(evaluation: EvaluationRecord, ctx: QueryContext): Promise<ValidationRunsRow[]> {
+    const filter = adjustmentRunsFilter(evaluation);
+    return hasAdjustmentKeys(filter)
+      ? this.run(
+          "runs.forEvaluation",
+          { ...filter, limit: ADJUSTMENT_RUNS_LIMIT },
+          z.array(validationRunsRowSchema),
+          ctx,
+        )
+      : Promise.resolve([]);
+  }
+
   /**
    * ADR 0038: the registry row, then (in parallel) the `validation_runs` rows its tables can be
    * joined to and any evaluation that ran as its "generation" job. Read-only, like every query here.
@@ -336,16 +351,8 @@ export class BigQueryProvider implements DataProvider {
     const events = await this.run("evaluations.events", { id }, z.array(evaluationDataHistoryRowSchema), ctx);
     if (!events.length) return null;
     const evaluation = events.at(-1)!;
-    const filter = adjustmentRunsFilter(evaluation);
     const [runs, sameJob] = await Promise.all([
-      hasAdjustmentKeys(filter)
-        ? this.run(
-            "runs.forEvaluation",
-            { ...filter, limit: ADJUSTMENT_RUNS_LIMIT },
-            z.array(validationRunsRowSchema),
-            ctx,
-          )
-        : Promise.resolve([] as ValidationRunsRow[]),
+      this.candidateRuns(evaluation, ctx),
       evaluation.generation_job_id
         ? this.run(
             "evaluations.byJobId",
@@ -356,6 +363,14 @@ export class BigQueryProvider implements DataProvider {
         : Promise.resolve([]),
     ]);
     return buildAdjustments(evaluation, runs, sameJob[0]?.evaluation_id ?? null);
+  }
+
+  /** ADR 0044: the registry row, then the same `validation_runs` rows; the record keeps this launch's. */
+  async evaluationRecord(id: string, ctx = newContext()): Promise<GenerationRecord | null> {
+    const events = await this.run("evaluations.events", { id }, z.array(evaluationDataHistoryRowSchema), ctx);
+    if (!events.length) return null;
+    const evaluation = events.at(-1)!;
+    return buildGenerationRecord(evaluation, await this.candidateRuns(evaluation, ctx));
   }
 
   /** The newest `limit` points (the query orders newest first), returned oldest first. */

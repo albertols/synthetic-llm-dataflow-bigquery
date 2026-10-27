@@ -22,6 +22,9 @@ the test controls (`helpers.FakeJob`); the real graph runs in
 `test_run.py`.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §7 Validation and the dead-letter queue
+(ADR 0044).
 """
 
 from __future__ import annotations
@@ -54,6 +57,7 @@ from sdfb_evaluation.cli import driver, gate, run_evaluation
 from sdfb_evaluation.cli.main import main, parse_args
 from sdfb_evaluation.context.bq import BqApiError
 from sdfb_evaluation.context.gcp import JobNotFoundError
+from sdfb_evaluation.context.launch import RunRecord
 from sdfb_evaluation.context.relationships import RelationshipError
 from sdfb_evaluation.context.plan import (
     Knobs,
@@ -1171,6 +1175,61 @@ def test_run_reads_the_free_text_pools_per_table(bq, pooled, monkeypatch,
   assert sorted(p["reference_digest"] for _, p in reads) == sorted(
       bq.digest(name) for name in ("users", "orders", "order_items"))
   assert {p["model_uri"] for _, p in reads} == {model_uri}
+  capsys.readouterr()
+
+
+def test_pools_are_read_under_the_recorded_key(bq, pooled, monkeypatch, capsys):
+  """A1 ruling R11: under a non-default pool setting the generator stores
+    pools under a salted key; the record carries it and the evaluator binds
+    it (ADR 0044)."""
+  model_uri = pooled.params["model_uri"]
+  salted = f"{model_uri}+cfg.abc123abc123"
+  record = RunRecord(
+      landing_table=pooled.tables_in_order[0],
+      run_id="r-00-users",
+      config={
+          "values": {},
+          "derived": {
+              "cache_keys": {
+                  "freetext_pools": salted
+              }
+          }
+      })
+  launch = dataclasses.replace(pooled, runs=(*pooled.runs, record))
+  monkeypatch.setattr(driver, "resolve_launch", lambda **kwargs: launch)
+  build = tiny_pipeline(fast=True)
+  monkeypatch.setattr(driver, "build_evaluation_pipeline", build)
+  bq.canned.append(("freetext_pools", []))
+  assert main(["run", *TARGET], make_env(bq, submit=write_stand_in)) == 0
+  reads = [p for sql, p in bq.queries if "freetext_pools" in sql]
+  assert reads and {p["model_uri"] for p in reads} == {salted}
+  assert not [w for w in build.built[0][0].warnings if "cache_keys" in w]
+  capsys.readouterr()
+
+
+def test_a_record_without_a_pool_key_reads_under_model_uri_with_a_note(
+    bq, pooled, monkeypatch, capsys):
+  """A record that states no `derived.cache_keys.freetext_pools` (an older
+    or foreign snapshot): the pools are read under `model_uri`, and the
+    plan says so (ADR 0044)."""
+  record = RunRecord(
+      landing_table=pooled.tables_in_order[0],
+      run_id="r-00-users",
+      config={"values": {}})
+  launch = dataclasses.replace(pooled, runs=(*pooled.runs, record))
+  monkeypatch.setattr(driver, "resolve_launch", lambda **kwargs: launch)
+  build = tiny_pipeline(fast=True)
+  monkeypatch.setattr(driver, "build_evaluation_pipeline", build)
+  bq.canned.append(("freetext_pools", []))
+  assert main(["run", *TARGET], make_env(bq, submit=write_stand_in)) == 0
+  reads = [p for sql, p in bq.queries if "freetext_pools" in sql]
+  assert reads and {p["model_uri"] for p in reads
+                   } == {pooled.params["model_uri"]}
+  notes = [w for w in build.built[0][0].warnings if "cache_keys" in w]
+  assert notes == [
+      "the generation record carries no derived.cache_keys.freetext_pools; "
+      "pools are read under model_uri"
+  ]
   capsys.readouterr()
 
 

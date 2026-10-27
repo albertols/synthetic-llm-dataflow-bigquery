@@ -8,7 +8,7 @@
       "error_type": "engine",
       "pipeline_step": "GenerateRecordsDoFn",
       "stage": "pre_write",
-      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:627",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:629",
       "declared": true,
       "severity": "BLOCKER",
       "dimension": "reliability",
@@ -47,7 +47,7 @@
       "error_type": "referential_integrity",
       "pipeline_step": "GenerateRecordsDoFn",
       "stage": "pre_generate",
-      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:476",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:478",
       "declared": false,
       "severity": null,
       "dimension": null,
@@ -238,7 +238,7 @@
     }
   ],
   "exported_from": {
-    "commit": "b1e672da682837318495b58323194e771d6af644",
+    "commit": "993384804302665e6814f3cb29b91882bc22dd54",
     "dirty": []
   }
 }

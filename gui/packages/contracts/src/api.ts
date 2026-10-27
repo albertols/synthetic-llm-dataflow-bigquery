@@ -33,6 +33,7 @@ import {
   validationRunsRowSchema,
 } from "../generated/schemas";
 import { adjustmentJoins, adjustmentVerdicts, type TableModelAdjustment } from "./adjustments";
+import type { GenerationRecord } from "./record";
 import type { RelationshipModel } from "./relational";
 import { profilerStatsSchema } from "./sourceStats";
 import { canonicalBound } from "./timestamps";
@@ -155,6 +156,10 @@ export const evaluationFilterSchema = z.object({
   evaluator_version: csv(z.string()),
   catalogue_version: csv(z.string()),
   relationship_model: csv(z.string()),
+  /** ADR 0044 — the generator version, its branch (parsed from the version) and the config digest. */
+  generator_version: csv(z.string()),
+  generator_branch: csv(z.string()),
+  config_digest: csv(z.string()),
   /** evaluated_at ≥ from (ISO timestamp with offset, or a date = midnight UTC). */
   from: timeBound,
   /** evaluated_at < to. */
@@ -188,6 +193,9 @@ export interface EvaluationFilter {
   evaluator_version?: string[];
   catalogue_version?: string[];
   relationship_model?: string[];
+  generator_version?: string[];
+  generator_branch?: string[];
+  config_digest?: string[];
   /** ISO timestamp with offset (`…Z`, `…+02:00`) or a date: evaluated_at ≥ from. Anything else is a 400. */
   from?: string;
   /** evaluated_at < to. */
@@ -283,6 +291,67 @@ export const evaluationAdjustmentsSchema = z.object({
   generation_job_evaluation_id: z.string().nullable(),
 });
 export type EvaluationAdjustments = z.infer<typeof evaluationAdjustmentsSchema>;
+
+// ----------------------------------------------------------------- record --
+
+/** `validation_runs.config` (ADR 0044) — tolerant: every block optional, unknown keys pass through. */
+export const generatorSnapshotSchema = z.looseObject({
+  config_version: z.number().optional(),
+  values: z.record(z.string(), z.unknown()).optional(),
+  provenance: z.record(z.string(), z.unknown()).optional(),
+  overridden: z.array(z.looseObject({ key: z.string() })).optional(),
+  derived: z.looseObject({}).optional(),
+  thresholds: z.looseObject({}).optional(),
+  relationships: z.looseObject({}).optional(),
+  beam: z.looseObject({}).optional(),
+  launcher: z.looseObject({ version: z.string().optional() }).optional(),
+  batch: z.unknown().optional(),
+});
+
+const declaredTableSchema = z.object({
+  name: z.string(),
+  pk: z.array(z.string()),
+  identity: z.array(z.string()),
+  fk: z.array(
+    z.object({ cols: z.array(z.string()), ref: z.string(), ref_cols: z.array(z.string()), enforced: z.boolean() }),
+  ),
+  enabled: z.boolean().nullable(),
+  source_table: z.string().nullable(),
+  num_rows: z.int().positive().nullable(),
+});
+
+const recordBatchSchema = z.object({
+  index: z.int().nonnegative(),
+  count: z.int().positive(),
+  tables: z.array(z.string()),
+  job_ids: z.array(z.string()),
+  run_ids: z.array(z.string()),
+});
+
+/** `GET /api/evaluations/:id/record` — the generation record (contracts `buildGenerationRecord`). */
+export const generationRecordSchema = z.object({
+  evaluation_id: z.string(),
+  runs: z.array(
+    validationRunsRowSchema.pick({
+      run_id: true,
+      landing_table: true,
+      job_id: true,
+      job_name: true,
+      launch_run_id: true,
+      generator_version: true,
+      launched_at: true,
+      config_digest: true,
+    }),
+  ),
+  snapshot: generatorSnapshotSchema.nullable(),
+  snapshot_run_id: z.string().nullable(),
+  launcher_version: z.string().nullable(),
+  worker_versions: z.array(z.string()),
+  version_mismatch: z.boolean(),
+  config_digests: z.array(z.string()),
+  declared_tables: z.array(declaredTableSchema),
+  batches: z.array(recordBatchSchema),
+});
 
 // ------------------------------------------------------------------ trend --
 
@@ -414,7 +483,10 @@ export type Comparison = z.infer<typeof comparisonSchema>;
 
 export const runFilterSchema = z.object({
   run_ids: csv(z.string()),
-  /** A launch: its per-table rows are `<base>-NN-<table>` (a one-table launch writes `<base>` itself). */
+  /**
+   * A launch: its per-table rows are `<base>-NN-<table>`, or `<base>-bNN-MM-<table>` for a whole-model
+   * launch in batch jobs (ADR 0045); a one-table launch writes `<base>` itself.
+   */
   base_run_id: z.string().optional(),
   landing_table: csv(z.string()),
   engine: csv(z.string()),
@@ -654,6 +726,9 @@ export const facetsSchema = z.object({
   evaluator_versions: z.array(z.string()),
   catalogue_versions: z.array(z.string()),
   relationship_models: z.array(z.string()),
+  generator_versions: z.array(z.string()),
+  generator_branches: z.array(z.string()),
+  config_digests: z.array(z.string()),
   /** Metric ids present in evaluation_metrics. */
   metric_ids: z.array(z.string()),
   source_tables: z.array(
@@ -705,6 +780,8 @@ export const relationshipModelSchema = z.object({
       enabled: z.boolean(),
       note: z.string(),
       fk: z.array(relationEdgeSchema),
+      source_table: z.string().optional(),
+      num_rows: z.int().positive().optional(),
     }),
   ),
 }) satisfies z.ZodType<RelationshipModel>;
@@ -713,7 +790,8 @@ export const relationshipModelSchema = z.object({
  * `GET /api/relationships` — the relationship models a registry row's
  * `relationship_model` can resolve to: the committed sample models
  * (generated/relationships.json, `origin: "committed_example"`) and, in mock mode,
- * the mock's invented `thelook_demo` (`origin: "mock"`). Real models are gitignored
+ * the mock's invented `thelook_demo`, `adjusted_keys_demo` and `isolated_forest_demo`
+ * (`origin: "mock"`). Real models are gitignored
  * or on GCS and never served; when a row's model is not listed, rebuild the graph
  * from the metric rows' `edge` labels (`parseEdge`).
  */
@@ -741,4 +819,5 @@ export const clientTypesMatchSchemas: [
   SameKeys<SourceStatsQuery, z.output<typeof sourceStatsQuerySchema>>,
   SameKeys<RagChunksQuery, z.output<typeof ragChunksQuerySchema>>,
   SameKeys<FreetextPoolsQuery, z.output<typeof freetextPoolsQuerySchema>>,
-] = [true, true, true, true, true, true, true];
+  SameKeys<GenerationRecord, z.output<typeof generationRecordSchema>>,
+] = [true, true, true, true, true, true, true, true];

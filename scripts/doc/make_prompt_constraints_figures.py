@@ -83,7 +83,7 @@ CEILING = {
     "COL_026 (B)": (514, 76_936),
     "COL_018 (B)": (515, 45_708),
 }
-POOL_CAP = 512  # _FREE_TEXT_POOL_MAX, b1_rag/engine.py
+POOL_CAP = 512  # config key free_text.free_text_pool_max (its default)
 
 # --- CONCEPT (seeded, deterministic; parameters chosen to illustrate) -----
 # A COL_001-like mask family: literal 3-char prefix + 21 hex positions —

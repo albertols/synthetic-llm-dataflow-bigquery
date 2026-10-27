@@ -428,9 +428,11 @@ class TestP4FkBoundAndCategoricalMembers:
         fk_parent_rows={"parent": 10_000_000},
         blocker_failure_ratio=0.2,
     )
-    from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
+    from sdfb_core.config.model import DEFAULT_CONFIG
 
-    assert result.fk_key_sample_caps == {("D1",): FK_KEY_SAMPLE_FLOOR}
+    assert result.fk_key_sample_caps == {
+        ("D1",): DEFAULT_CONFIG.relational.fk_key_sample_floor
+    }
 
   def test_categorical_only_pk_stops_on_the_product_rule(self):
     # No gate given: the hard product rule alone (12 tuples < 1 000).

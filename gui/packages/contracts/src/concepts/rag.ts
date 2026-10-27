@@ -519,7 +519,7 @@ export const concepts = defineConcepts([
       "Rows draw a pooled column uniformly with replacement, so each value repeats about rows ÷ pool size times. The tail's source frequencies are not reproduced; the cap trades variety for LLM cost.",
     formula: "\\text{repeats} \\approx \\frac{\\text{rows}}{\\lvert \\text{pool} \\rvert}",
     interpretation: {
-      tip: "The cap is free_text_pool_max (a code constant); see the CONFIG tab for what raising it would cost.",
+      tip: "The cap is free_text_pool_max, set in a config file (--config_uri); see the CONFIG tab for what raising it would cost.",
     },
     links: [ENGINE, ARTICLE],
   },

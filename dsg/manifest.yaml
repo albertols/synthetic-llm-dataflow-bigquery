@@ -64,6 +64,11 @@ include:
   - config/relationships/*_example.yaml
   - config/models.yml
   - config/thresholds.yml
+  # A link to the packaged packages/sdfb-core/src/sdfb_core/config/generator.yaml
+  # (ADR 0043), which ships with sdfb-core. Staging copies through the link,
+  # so the guide carries a real file with the same bytes, never a link.
+  - config/generator.yaml
+  - config/generator.personal.example.yaml
   - docker/**
   # One design document ships. The decision records (docs/adr/) and the
   # per-topic design docs stay in the source repository: links to them are
@@ -84,6 +89,10 @@ include:
   - scripts/derive_landing_schema.py
   - scripts/deployment_prerequisites.py
   - scripts/relationships/card.py
+  - scripts/config/config_digest.py
+  # Checks generator.yaml's comments against the catalogue; the config tests
+  # that ship run it (script_tests below).
+  - scripts/doc/render_generator_config.py
 
 exclude:
   - "**/__pycache__/**"
@@ -99,6 +108,7 @@ exclude:
   # bundles, figure scripts, the personal-GCP layer, the Composer DAG, this
   # sync itself). The sync fails if a shipped test loads an unshipped script.
   - packages/sdfb-tests/tests/unit/scripts/test_b1_rag_walkthrough.py
+  - packages/sdfb-tests/tests/unit/scripts/test_bump_generator_version.py
   - packages/sdfb-tests/tests/unit/scripts/test_build_full_report.py
   - packages/sdfb-tests/tests/unit/scripts/test_dsg_*.py
   - packages/sdfb-tests/tests/unit/scripts/test_e2e_*.py
@@ -109,6 +119,7 @@ exclude:
   - packages/sdfb-tests/tests/unit/scripts/test_make_release_*.py
   - packages/sdfb-tests/tests/unit/scripts/test_redact*.py
   - packages/sdfb-tests/tests/unit/scripts/test_redaction.py
+  - packages/sdfb-tests/tests/unit/scripts/test_run_model.py
   # Renders the evaluator's metric catalogue (which ships) into its design
   # document with scripts/doc/; the document and the script stay here.
   - packages/sdfb-tests/tests/unit/scripts/test_render_eval_catalogue.py
@@ -121,10 +132,13 @@ exclude:
   - packages/sdfb-tests/tests/unit/validation/test_freetext_rules.py
   # Reads composer/ (not shipped); the golden source's CI keeps covering it.
   - packages/sdfb-tests/tests/unit/docker/test_launch_surfaces.py
+  - packages/sdfb-tests/tests/unit/composer/**
 
 # Explicit test -> script pairs the automatic `"scripts" / ...` detection
 # cannot see.
-script_tests: {}
+script_tests:
+  packages/sdfb-tests/tests/unit/config/test_yaml_defaults.py: scripts/doc/render_generator_config.py
+  packages/sdfb-tests/tests/unit/config/test_render.py: scripts/doc/render_generator_config.py
 
 # dsg/<dir> -> DSG-relative destination.
 overlays:
@@ -181,7 +195,7 @@ index_rows:
     text: &deployment |-
       ### Synthetic data generation deployment
 
-      Batch, not streaming: `terraform apply` in `terraform/synthetic-llm-dataflow-bigquery` (US BigQuery, a region with the chosen GPU: `gpu = "l4"` on G2 with `vllm_dtype=auto`, or `gpu = "t4"` on N1 with `vllm_dtype=float16` and `qwen3-4b` only), then from `pipelines/synthetic-llm-dataflow-bigquery` run `scripts/01_build_and_push_container.sh`, `02_stage_models.sh` (Hugging Face, or `MODEL_SOURCE=modelscope`), `03_build_flex_template.sh`, `04_run_dataflow.sh` (or `terraform apply -var launch_job=true`), `05_verify_run.sh RUN_ID` and `06_run_evaluation.sh RUN_ID` (a CPU-only job from the same template that scores the landed tables against their sources into `synthetic_data_quality.evaluation_*`). Workers use private IPs and `synthetic-llm-dataflow-sa`; Cloud Build uses `synthetic-llm-build-sa`. The pipeline is developed at https://github.com/albertols/synthetic-llm-dataflow-bigquery, and its README names the release and commit this copy corresponds to. Report live-cloud verification separately from local tests.
+      Batch, not streaming: `terraform apply` in `terraform/synthetic-llm-dataflow-bigquery` (US BigQuery, a region with the chosen GPU: `gpu = "l4"` on G2, or `gpu = "t4"` on N1 with `qwen3-4b` only; the launch passes `gpu` and the launcher derives `vllm_dtype` from it, `bfloat16` or `float16`), then from `pipelines/synthetic-llm-dataflow-bigquery` run `scripts/01_build_and_push_container.sh`, `02_stage_models.sh` (Hugging Face, or `MODEL_SOURCE=modelscope`), `03_build_flex_template.sh`, `04_run_dataflow.sh` (or `terraform apply -var launch_job=true`), `05_verify_run.sh RUN_ID` and `06_run_evaluation.sh RUN_ID` (a CPU-only job from the same template that scores the landed tables against their sources into `synthetic_data_quality.evaluation_*`). Workers use private IPs and `synthetic-llm-dataflow-sa`; Cloud Build uses `synthetic-llm-build-sa`. The pipeline is developed at https://github.com/albertols/synthetic-llm-dataflow-bigquery, and its README names the release and commit this copy corresponds to. Report live-cloud verification separately from local tests.
   - file: pipelines/AGENTS.md
     anchor: null
     marker: synthetic-llm-dataflow-bigquery

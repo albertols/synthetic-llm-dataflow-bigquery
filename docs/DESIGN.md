@@ -378,6 +378,50 @@ will receive and where each number came from, before the graph is built
 [`contracts/model_adjustment.py`](../packages/sdfb-core/src/sdfb_core/contracts/model_adjustment.py),
 [`contracts/row_projection.py`](../packages/sdfb-core/src/sdfb_core/contracts/row_projection.py).
 
+### 4.5 Whole-model launches
+
+**Claim: one launch generates every enabled table of a model, in batch jobs
+of at most K tables that never split a component.**
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  M[("📄 model<br/>8 tables · 7 enabled")]:::store
+  P["⚙️ plan_batches<br/>K = 4"]:::cpu
+  subgraph B0["b00 · 3 tables"]
+    A1["⚪ T_ACCOUNTS ← T_LOGINS"]:::data
+    A2["⚪ T_RATES"]:::data
+  end
+  subgraph B1["b01 · 4 tables"]
+    O1["⚪ T_ORDERS ← T_ITEMS,<br/>T_SHIPMENTS"]:::data
+    O2["⚪ T_EVENTS_LOG"]:::data
+  end
+  X["∅ T_LEGACY<br/>enabled: false"]:::data
+  M --> P
+  P --> B0
+  P --> B1
+  P -.-> X
+```
+
+*First-fit-decreasing packs whole components: no edge crosses a batch.*
+`launch.tables: all` selects the `enabled: true` tables of one model file; a
+table may name its own `source_table` and `num_rows`. The planner packs whole
+components first-fit-decreasing into batches of at most
+`launch.max_tables_per_job` tables, and every batch's launcher plans again and
+checks the count; the generation DAG's `tables=all` branch and
+`scripts/launch/run_model.py` run the batches, and one evaluation reads every landed batch's
+`validation_runs` rows by the launch's base run id
+([ADR 0045](adr/0045-whole-model-launches.md)). Code:
+[`launch/batches.py::plan_batches`](../packages/sdfb-core/src/sdfb_core/launch/batches.py),
+[`launch/tables.py::source_fqn`](../packages/sdfb-core/src/sdfb_core/launch/tables.py),
+[`cli/run_pipeline.py::_run_model`](../packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py),
+[`composer/sdfb_batches.py`](../composer/sdfb_batches.py).
+
 ## 5. Fidelity, value pools and constraints
 
 **Claim: numeric and temporal values are drawn where the source is dense, not
@@ -464,6 +508,51 @@ on any identical real/synthetic row. Code:
 [`dofns/pandera_batch.py`](../packages/sdfb-beam/src/sdfb_beam/dofns/pandera_batch.py),
 [`validation/summary.py`](../packages/sdfb-core/src/sdfb_core/validation/summary.py).
 
+### 7.1 The generation record
+
+**Claim: a `validation_runs` row says what generated it — job, code version and
+the whole resolved config — and a table without the columns still gets its
+row.**
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  L["⚙️ launcher<br/>ResolvedConfig + version"]:::cpu
+  W["🔀 BuildValidationRun<br/>one row per table"]:::beam
+  V[("🗄️ validation_runs<br/>+ record columns")]:::store
+  E["⚙️ evaluator<br/>fills its context"]:::cpu
+  H[("🗄️ evaluation_data_history<br/>registry")]:::store
+  G["⚙️ GUI<br/>read-only"]:::cpu
+
+  L -->|"twelve columns,<br/>once per job"| W
+  W -->|"+ job_id,<br/>worker version"| V
+  V --> E
+  E --> H
+  H -->|"list"| G
+  V -->|"Generator panel"| G
+```
+
+*The launcher writes the record once per job; the evaluator and the GUI read it
+instead of logs and DAG params.* Fourteen NULLABLE columns follow the summary's
+21: the Dataflow job, the launch's base run id, the worker's generator version
+(`<base>-<branch>-<sha7>[-dirty]`), the launch time, five generation settings,
+the relationship model's URI and digest, the config digest, and `config`, a
+JSON snapshot of the resolved config. The snapshot's `values` is itself a
+`--config_uri` file that resolves to the same config and the same digest. A
+table without the columns, or one whose schema the launcher cannot read, gets
+today's 21-column row and one `generation_record_degraded` WARNING with the
+`bq update` that adds them; nothing fails
+([ADR 0044](adr/0044-generation-record.md)). Code:
+[`sdfb_core/record.py`](../packages/sdfb-core/src/sdfb_core/record.py),
+[`sdfb_core/version.py`](../packages/sdfb-core/src/sdfb_core/version.py),
+[`pipeline.py::_BuildValidationRunDoFn`](../packages/sdfb-beam/src/sdfb_beam/pipeline.py),
+[`cli/run_pipeline.py::prepare_record_base`](../packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py).
+
 ## 8. Configuration
 
 Relational structure is configuration, in
@@ -483,12 +572,113 @@ edge keeps the table and stops drawing keys through that edge.*
 
 | Knob | Where | Read by |
 | :-- | :-- | :-- |
+| Every generator setting (flags + tunable constants) | the value lines of [`config/generator.yaml`](../config/generator.yaml) (a link to the copy packaged in [`sdfb_core/config/`](../packages/sdfb-core/src/sdfb_core/config/), whose `catalogue.yaml` renders its comments); a Composer environment's values in `composer/sdfb_env.yaml` | launcher (`--config_uri`, file wins), workers via `generator_config`, the Composer DAG's param defaults from its own copy ([ADR 0043](adr/0043-generator-config.md)) |
 | Tables, keys, edges, `enabled` / `enforced` / `drives` | `config/relationships/*.yaml` | launcher and workers; one relationship card is logged per run |
-| Model URI, vLLM server flags, licence | [`config/models.yml`](../config/models.yml) | `VLLMModelClient` (§3) |
+| Which tables a launch generates, each table's source and rows | `launch.tables`, `launch.max_tables_per_job` ([`config/generator.yaml`](../config/generator.yaml)); `source_table`, `num_rows` per table (`config/relationships/*.yaml`) | launcher, the generation DAG with `tables=all`, `scripts/launch/run_model.py` (§4.5) |
+| Model URI, vLLM server flags, licence | [`config/models.yml`](../config/models.yml) | nobody at runtime — a reference registry; `serving.model_uri` points at one of its entries |
 | Severity budgets per environment | [`config/thresholds.yml`](../config/thresholds.yml) | thresholds gate (§7) |
 | Column constraints | the table's DDL contract | constraint router (§5) |
 | B.1 row documents, `rag_row_docs_limit` (default 1,024) | launch flag / DAG param | launcher (store check), population branch, `b1_rag` setup (§2) |
-| GPU type, machine family, dtype | the Terraform module's `gpu` variable | launch scripts and the Flex Template job |
+| GPU type, machine family, dtype | `serving.gpu` (`l4` \| `t4`; a null `serving.vllm_dtype` follows it: `bfloat16`, `float16`); the Terraform module's `gpu` variable | the Composer DAG (machine, accelerator), the launcher (dtype), launch scripts and the Flex Template job |
+
+Every generator setting has one default value, its line in
+[`config/generator.yaml`](../config/generator.yaml), one type in
+`sdfb_core/config/model.py` and one explanation in `catalogue.yaml`, rendered
+as the yaml's comments. A launch may pass a sparse file of the keys it pins
+(`--config_uri`, a local path or `gs://`; the `config_uri` param of the Flex
+Template, the generation DAG and the Terraform module).
+
+*A key set in the file wins over the same flag, which wins over the model
+default.* One panel per mode.
+
+*Mode 1 — no `config_uri`.*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  A["⚪ flags / params<br/>as typed"]:::data
+  D["⚪ generator.yaml<br/>defaults"]:::data
+  R["⚙️ flag > default"]:::cpu
+  O["⚪ the namespace<br/>argparse built"]:::data
+  A -->|"1st"| R
+  D -->|"2nd"| R
+  R --> O
+```
+
+*Mode 2 — with `config_uri`.*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  F[("📄 file keys")]:::store
+  A["⚪ flags / params"]:::data
+  D["⚪ model defaults"]:::data
+  R["⚙️ file > flag > default"]:::cpu
+  O["⚪ resolved config<br/>+ provenance"]:::data
+  W["🛡️ config_override<br/>WARNING per<br/>overridden param"]:::cpu
+  F -->|"1st"| R
+  A -->|"2nd"| R
+  D -->|"3rd"| R
+  R --> O
+  R --> W
+```
+
+*Mode 3 — a Composer launch: four layers.*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  Y[("📄 1 generator.yaml<br/>every default")]:::store
+  O[("📄 2 sdfb_env.yaml<br/>workflow 3 fills it")]:::store
+  T["⚪ 3 trigger values<br/>DAG params"]:::data
+  F[("🪣 4 config_uri file<br/>keys it sets")]:::store
+  D["⚙️ DAG<br/>launch_overrides"]:::cpu
+  L["⚙️ launcher<br/>file > flag > default"]:::cpu
+  Y --> D
+  O --> D
+  T --> D
+  D -->|"keys ≠ yaml<br/>+ digest"| L
+  Y -->|"image copy"| L
+  F --> L
+```
+
+*A key takes the value of the highest layer that sets it.* The DAG reads
+`generator.yaml` and the env overlay from its own folder and passes only the
+keys whose value differs from `generator.yaml`, plus the yaml's digest; the
+launcher logs `generator_defaults_mismatch` (WARNING) when that digest is not
+the image's, and `vllm_dtype_resolved` with the dtype and why. A config
+file's `serving.client_type`, `gpu`, `sdk_containers` and
+`launcher_machine_type` also reach the machine the DAG asks for
+([ADR 0043](adr/0043-generator-config.md), revision of 2026-10-26). Code:
+[`config/defaults.py::load_defaults`](../packages/sdfb-core/src/sdfb_core/config/defaults.py),
+[`composer/sdfb_batches.py::launch_overrides`](../composer/sdfb_batches.py).
+
+*Without a file the launcher rebuilds the namespace argparse built on
+`master`, string encodings included (`"true"`, `""`, `"8192"`), but for the
+seven deliberate changes [ADR 0043](adr/0043-generator-config.md) lists. With one, the file decides every key
+it sets, even against a value the Composer DAG passes; the launcher logs `config_resolved` with the count per source and one
+`config_override` WARNING per typed param the file replaced.* A non-default
+value of a constant that shapes a persisted store (`source_table_stats`,
+`freetext_pools`, `rag_chunks`, `fk_fanout_stats`) salts that store's key, so
+a store built under one value is never served under another; at the defaults
+every key is unchanged ([ADR 0043](adr/0043-generator-config.md) D8). Code:
+[`config/resolve.py::resolve`](../packages/sdfb-core/src/sdfb_core/config/resolve.py),
+[`config/salt.py::settings_salt`](../packages/sdfb-core/src/sdfb_core/config/salt.py).
 
 ## 9. ADR reference map
 
@@ -540,6 +730,9 @@ record; the section is where this document summarizes it.
 | 0040 | [§9 ADR reference map](#9-adr-reference-map) | [Publishing this design to the Dataflow Solution Guides](adr/0040-dsg-donation-golden-source-sync.md) |
 | 0041 | [§11 Evaluation (sdfb-evaluation)](#11-evaluation-sdfb-evaluation) | [Evaluation is a standalone package and a separate job](adr/0041-evaluation-standalone-package.md) |
 | 0042 | [§12 Platform GUI](#12-platform-gui) | [A self-hosted GUI; managed dashboards stay out](adr/0042-self-hosted-platform-gui.md) |
+| 0043 | [§8 Configuration](#8-configuration) | [Generator config: a typed model, a catalogue, file wins](adr/0043-generator-config.md) |
+| 0044 | [§7 Validation and the dead-letter queue](#7-validation-and-the-dead-letter-queue) | [The generation record](adr/0044-generation-record.md) |
+| 0045 | [§4 Relational generation](#4-relational-generation) | [Whole-model launches](adr/0045-whole-model-launches.md) |
 <!-- adr-map:end -->
 
 ## 10. Figure provenance
@@ -643,6 +836,11 @@ the reference sample, and no job log). The standalone DAG evaluates an
 already-landed run on its own by the same seed path. Both launches take a
 launcher machine type, because the launch has 12 minutes in all, the image
 pull included. The DAGs stay in the source repository.
+
+Since [ADR 0044](adr/0044-generation-record.md) the evaluator reads the
+generation record first: the snapshot fills the generation parameters, the
+record's job id or name finds the job's own rows, and on the seed path the
+record names the tables it evaluates.
 
 Four tables in `synthetic_data_quality` (`evaluation_data_history`,
 `evaluation_metrics`, `evaluation_profiles`, `evaluation_row_flags`) and two

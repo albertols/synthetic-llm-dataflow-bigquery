@@ -53,6 +53,7 @@ import json
 # quotes what they do, so it must run them rather than paraphrase them.
 # pylint: disable=protected-access
 from sdfb_beam.io.digest import compute_reference_digest
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines.b1_rag import engine as b1
 from sdfb_core.engines.b1_rag.profile import ColumnKind, profile_columns
@@ -526,7 +527,9 @@ def step_prompt_and_gates(seeds: list[str]) -> None:
       prof,
       seeds,
       target=8,
+      n_choices=DEFAULT_CONFIG.free_text.pool_parallel_choices,
       source_values=frozenset(_MERCHANTS),
+      ladder=DEFAULT_CONFIG.free_text,
   )
   first = client.calls[0]
   print("\nrequest 1 sampling:", {
@@ -607,7 +610,9 @@ def step_pes_mode() -> None:
       routed,
       seeds["centroid"],
       target=15,
+      n_choices=DEFAULT_CONFIG.free_text.pool_parallel_choices,
       source_values=frozenset(SQUAD),
+      ladder=DEFAULT_CONFIG.free_text,
   )
   print("gate outcome   : parsed", y.parsed, "| format_rejected",
         y.format_rejected, "| copies", y.copies, "| seed echoes",

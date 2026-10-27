@@ -1,0 +1,20 @@
+{
+  "DAG_VERSION": "0.7.0_20261026T1200",
+  "ENGINE": "b1_rag",
+  "ENV": "prd",
+  "GCS_DATAFLOW_STAGING": "sdfb-bucket-dataflow-staging",
+  "GCS_DATAFLOW_TEMPLATES": "sdfb-bucket-dataflow-templates",
+  "GPU": "l4",
+  "PROJECT_VERSION": "0.7.0",
+  "SDFB_DDL_URI": "",
+  "SDFB_DEFAULT_TABLE_FQN": "sdfb-proj.src_ds.X_TABLE",
+  "SDFB_DLQ_TABLE": "sdfb-proj.synthetic_data_quality.dlq",
+  "SDFB_EMBEDDER_URI": "gs://sdfb-bucket/synthetic/models/embedders/bge-small-en-v1.5/v1/",
+  "SDFB_FREETEXT_POOLS_TABLE": "sdfb-proj.synthetic_rag.freetext_pools",
+  "SDFB_LANDING_TABLE": "sdfb-proj.synthetic_data.X_TABLE",
+  "SDFB_MODEL_URI": "gs://sdfb-bucket/synthetic/models/qwen3/4b-instruct-2507/v1/",
+  "SDFB_RAG_CHUNKS_TABLE": "sdfb-proj.synthetic_rag.rag_chunks",
+  "SDFB_SOURCE_STATS_TABLE": "sdfb-proj.synthetic_rag.source_table_stats",
+  "SDFB_VALIDATION_RUNS_TABLE": "sdfb-proj.synthetic_data_quality.validation_runs",
+  "WRITE_DISPOSITION": "append"
+}

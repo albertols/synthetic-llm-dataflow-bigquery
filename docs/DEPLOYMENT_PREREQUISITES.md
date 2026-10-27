@@ -37,7 +37,7 @@ All sinks are `FILE_LOADS` + `WRITE_APPEND` + `CREATE_NEVER`, so the three desti
 | **Reference / source** | `project.dataset.table` (`--reference_table`) | *pre-existing* | The table you clone. Read `SELECT * … LIMIT N` (`sdfb_beam/io/bq_sources.py`). Read access only. |
 | **Landing** | `project.synthetic_data.<source table>` (defaults to the DDL table name; override with `landing_table`) | **derived from the target DDL** | `sdfb_core/codegen/derive_bq_ddl.py` turns the `_ddl.json` into a BQ `TableSchema` → `bq mk`. **No committed schema file** — it's per-target (the preflight writes `config/bq_schema/synthetic_data/<table>.schema.json`). |
 | **DLQ** | `project.synthetic_data_quality.dlq` | `config/bq_schema/synthetic_data_quality/dlq.schema.json` | DAY-partition on `dlq_inserted_at`. |
-| **validation_runs** | `project.synthetic_data_quality.validation_runs` | `config/bq_schema/synthetic_data_quality/validation_runs.schema.json` | DAY-partition on `created_at`. Optional (empty FQN skips the write) but recommended. **ADR 0038 added five NULLABLE columns** (`excluded_blocker_rules`, `source_repeat_share`, `landing_repeat_share`, `repeat_share_delta`, `repeat_share_within_tolerance`) — an existing table must be widened before the next run or FILE_LOADS rejects the summary row (see below). Fix J dropped a sixth, `repeat_share_note`: both shares now describe the declared PK, so there is no "not comparable" case to explain. A table already widened for it keeps a harmless unused column. |
+| **validation_runs** | `project.synthetic_data_quality.validation_runs` | `config/bq_schema/synthetic_data_quality/validation_runs.schema.json` | DAY-partition on `created_at`. Optional (empty FQN skips the write) but recommended. **ADR 0038 added five NULLABLE columns** (`excluded_blocker_rules`, `source_repeat_share`, `landing_repeat_share`, `repeat_share_delta`, `repeat_share_within_tolerance`) — an existing table must be widened before the next run or FILE_LOADS rejects the summary row (see below). Fix J dropped a sixth, `repeat_share_note`: both shares now describe the declared PK, so there is no "not comparable" case to explain. A table already widened for it keeps a harmless unused column. **ADR 0044 added fourteen NULLABLE generation-record columns** (`job_id` … `config`); unlike the ADR 0038 columns, which are required, these are optional for the generator. Without them it still runs: it writes the 21-column row and logs one `generation_record_degraded` WARNING with the command below, so no generation is recorded and the evaluator and the GUI fall back to what they read today. |
 | **rag_chunks** (WS2) | `project.synthetic_rag.rag_chunks` | `config/bq_schema/synthetic_rag/rag_chunks.schema.json` | DAY-partition on `created_at`. **One shared store for the whole project**: chunks from *every* source `dataset.table` coexist, scoped by `source_fqn` and pinned to a vector space by (`embedder_id`, `embedder_version`) — adding a new source table needs **no** new RAG table. Optional (only needed for `--build_rag_layer` / b1 chunk reuse). |
 | **fk_fanout_stats** (ADR 0036) | `project.synthetic_data_quality.fk_fanout_stats` | `config/bq_schema/synthetic_data_quality/fk_fanout_stats.schema.json` | **OPTIONAL** — no partition. Absent, unreadable or unwritable: the launcher logs `fk_fanout_cache_unavailable` (WARNING) and measures the fan-out every launch instead of caching it. **No column change for ADR 0038 fix J**: the declared PK's source measurement rides inside the existing `payload` JSON (`pk_source`), under the same `(source_table, edge_cols, model_sha)` key. A row written before fix J simply lacks it, and that launch re-scans the PK alone and rewrites the row. |
 
@@ -58,10 +58,11 @@ bq mk --schema config/bq_schema/synthetic_data_quality/fk_fanout_stats.schema.js
       project:synthetic_data_quality.fk_fanout_stats
 ```
 
-An **existing** `validation_runs` predating ADR 0038 needs its six new
-NULLABLE columns before the next launch — adding columns is a
-non-breaking schema relaxation, so the committed file is applied
-directly:
+An **existing** `validation_runs` predating ADR 0038 needs its five ADR 0038
+columns (and, since ADR 0044, the fourteen record columns) before the next
+launch — adding columns is a non-breaking schema relaxation, so the committed
+file is applied directly. The same command appends any column the committed
+file has and the table lacks; it never rewrites rows:
 
 ```bash
 bq update --schema config/bq_schema/synthetic_data_quality/validation_runs.schema.json \
@@ -156,11 +157,82 @@ The same `landing_ddl.json` also documents exactly what the pipeline will write 
 - `bigquery.readSessionUser` — the Storage Read API (`bigquery.readsessions.create`) for the per-column source-domain fetches ([ADR 0034](adr/0034-generation-throughput-single-barrier-shared-engines.md) D4). Without it the worker logs `source_values_arrow_fallback error=PermissionDenied` + `source_values_storage_api_disabled` once and pages the domain via REST (the 2026-08-29 run: 944k values in 5.5 min inside `DoFn.setup()`).
 - `storage.objectViewer` on the models bucket; `storage.objectAdmin` on staging/temp.
 
+### Composer: the generation DAG's folder ([ADR 0043](adr/0043-generator-config.md), [ADR 0045](adr/0045-whole-model-launches.md))
+
+- **Four files in the DAGs folder**, side by side: `composer/synthetic_beam_bigquery.py` (the DAG, no deploy marker), `composer/sdfb_batches.py` (its launch helpers, unchanged), `generator.yaml` (the file `config/generator.yaml` links to, copied byte for byte: the DAG's defaults, and the digest the launcher compares with the image's) and `composer/sdfb_env.yaml` (the env overlay: the import workflow's `sed` fills its 18 markers). One generation DAG launches one table, an FK group or a whole model (`tables=all`); there is no separate model DAG. Recipe: [RUN_PLAYBOOK §0b](RUN_PLAYBOOK.md#0b-workflow-3-for-the-one-generation-dag-untracked-workflows). Rebuild the Flex Template before the import: every launch passes `generator_defaults_digest`, which an older template does not declare.
+- **The Composer environment's service account reads GCS only for a launch with `config_uri` or `tables=all`**: the DAG's `route` task reads the config file and, under `tables=all`, the model file itself (`GCSHook`, the environment's own account). An explicit launch without `config_uri` reads nothing from GCS in Airflow, as before. For the other two, grant that account `roles/storage.objectViewer` (`storage.objects.get`) on the bucket or prefix that holds the files.
+
+### Whole-model launches (optional; [ADR 0045](adr/0045-whole-model-launches.md))
+
+- **Nothing more to import**: the generation DAG above takes `tables=all`.
+- **The Composer environment's service account reads the model file** (above).
+- **The Airflow Variable `SDFB_MAX_PARALLEL_JOBS`** (optional, default `1`): how many batch jobs run at once; each holds up to four GPU workers, so keep it within the regional GPU quota divided by 4.
+- **The Dataflow worker SA reads every source the model names**: a table's `source_table` in another dataset or project needs `bigquery.dataViewer` there too.
+
 ### Evaluator (optional; a separate job after generation)
 
 > [ADR 0041](adr/0041-evaluation-standalone-package.md) · [`packages/sdfb-evaluation/README.md`](../packages/sdfb-evaluation/README.md). **Not yet run on Google Cloud**: the list below is what the code is written to need, taken from the design and BigQuery's documentation, not confirmed by a run. Nothing here is needed to generate, but a run of the generation DAG evaluates by default since 2026-10-14: provision this layer, or trigger with `run_evaluation` false.
 
 - **Tables and views** — create once with `uv run sdfb-eval schemas --project <PROJECT> --apply` (run from `packages/sdfb-evaluation`; it creates the four `evaluation_*` tables in `synthetic_data_quality` that are missing and replaces the views `evaluation_latest` and `evaluation_latest_per_job`; it never alters an existing table). The dataset must already exist. Step 13 of the preflight checks all of this (`--require-evaluation` makes an unprovisioned layer an ACTION).
+
+  An **existing** `evaluation_data_history` predating ADR 0044 and ADR 0045
+  needs their three new columns (`generator_version`, `generator_config_digest`
+  from ADR 0044, `generation_job_ids` from ADR 0045) **before the new
+  evaluator runs** — unlike `validation_runs`, this is required: the
+  evaluator's load jobs carry the committed schema and fail on a table without
+  them. One `bq update` with the committed schema adds all three (the file is
+  a superset of every earlier registry schema). Append them, then refresh the
+  views, **in the same session as the new image and Flex template rebuild**,
+  with no chained or standalone evaluation running in between, and before
+  deploying the new GUI (its evaluation list reads the two ADR 0044 columns,
+  and its contract expects `generation_job_ids` on every registry row): an
+  evaluator image from before these columns cannot write to the migrated
+  registry, because its load jobs carry the old schema and BigQuery rejects a
+  load schema that lacks a column the table has (`Provided Schema does not
+  match Table … Field generator_version is missing in new schema`, or the
+  same naming `generation_job_ids`). Until the new template is up, trigger the
+  generation DAG with `run_evaluation` false. Both commands run from the
+  repository root:
+
+  ```bash
+  bq update --schema packages/sdfb-evaluation/src/sdfb_evaluation/schemas/evaluation_data_history.schema.json \
+        <project>:<evaluation_dataset>.evaluation_data_history
+  uv run --project packages/sdfb-evaluation sdfb-eval schemas \
+        --project <project> --dataset <evaluation_dataset> --apply   # replaces the views
+  ```
+
+  Preflight step 13 flags a registry that lacks them, with this command.
+
+  A **rollback** of the evaluator to an image from before ADR 0044 needs the
+  three columns dropped, `generation_job_ids` with the other two, then the
+  views refreshed from the checkout rolled back to (the values written in the
+  three columns are lost; the new GUI's list then fails too, so it rolls back
+  with them); otherwise the evaluator stays on the new image:
+
+  ```bash
+  bq query --use_legacy_sql=false \
+    'ALTER TABLE `<project>.<evaluation_dataset>.evaluation_data_history`
+       DROP COLUMN generator_version, DROP COLUMN generator_config_digest,
+       DROP COLUMN generation_job_ids'
+  uv run --project packages/sdfb-evaluation sdfb-eval schemas \
+        --project <project> --dataset <evaluation_dataset> --apply   # replaces the views
+  ```
+
+  A rollback to an image from after ADR 0044 but before ADR 0045 drops only
+  `generation_job_ids` (`DROP COLUMN generation_job_ids` alone, then the
+  views): that image writes ADR 0044's two columns, so dropping all three
+  breaks it as well.
+
+  To confirm the rejection on a scratch copy: copy the registry (`bq cp`),
+  migrate the copy, and append one row to it with `bq load --noreplace
+  --source_format=NEWLINE_DELIMITED_JSON --schema=<old schema file>
+  <scratch_dataset>.evaluation_data_history <one_row.jsonl>`, the old schema
+  file being the registry schema of v0.6.1, the last release before ADR 0044
+  (not master's once this lands: it has the three columns); BigQuery rejects
+  it naming a column the file lacks (`generator_version`, …), or accepts it
+  (then an old image can write).
+  [RUN_PLAYBOOK §2d](RUN_PLAYBOOK.md#2d-corp-acceptance-of-the-generation-record-a2)
+  step 1 has the full sequence.
 - **Image and template: nothing of its own.** One image and one template serve generation and evaluation ([ADR 0041, amendment of 2026-10-06](adr/0041-evaluation-standalone-package.md#amendment-2026-10-06-one-image-one-template)). The image built from `docker/Dockerfile` carries the evaluator's source, and the template built from it with `docker/flex_template_metadata.json` launches the evaluator when a launch passes `sdfb_job=evaluation` (and `disk_size_gb=200`: the evaluation job's workers unpack the same multi-GB image, and the evaluator pins no boot disk). The deployment's own build and template steps are therefore all it takes; neither has been run with the evaluator in the image yet. `docker/flex_template_metadata.json` is the one file that declares the template's parameters, the evaluator's among them: the evaluator's own image, template metadata and template build script were removed ([ADR 0041, note of 2026-10-15](adr/0041-evaluation-standalone-package.md#amendment-2026-10-06-one-image-one-template)).
 
 ```mermaid
@@ -177,12 +249,12 @@ flowchart LR
   D["⚪ generation DAG<br/>run_evaluation"]:::data -.-> E
 ```
 
-- **Composer: nothing to import beyond the generation DAG.** With its parameter `run_evaluation` true (the default since 2026-10-14), `composer/synthetic_beam_bigquery.py` waits for its own job (a sensor in reschedule mode; no triggerer needed) and launches the evaluation itself, from the same template, as a CPU job under the generation job's service account. It adds no marker and no Airflow Variable. With `run_evaluation` false the DAG launches generation alone, as it did, and needs nothing of this section. The standalone DAG `composer/evaluation_framework.py` is optional: it evaluates a run that already landed on its own (to re-run an evaluation, or when the generation DAG ran without `run_evaluation`) by the same seed path as the chain, which reads no job log; it can also take a list of job ids, a run id or tables, wait for its job and close the registry row when the job dies. It is a template with markers the import workflow already substitutes for the generation DAG: `{{PROJECT_VERSION}}`, `{{ENV}}`, `{{GCS_DATAFLOW_STAGING}}`, `{{GCS_DATAFLOW_TEMPLATES}}` and the three table markers `{{SDFB_DEFAULT_TABLE_FQN}}`, `{{SDFB_LANDING_TABLE}}`, `{{SDFB_VALIDATION_RUNS_TABLE}}` (the defaults of its seed table, datasets and validation-runs table): run the same substitution on it. Roles by trigger shape: the seed with a job id needs `roles/dataflow.viewer` (the window) and read on the `validation_runs` table; the seed alone needs neither; the full lookup (the job id alone, seed emptied) needs `roles/logging.viewer`, `roles/dataflow.viewer` and `roles/bigquery.resourceViewer`. Both evaluation launches take a launcher machine type (`environment.launcherMachineType`, default `e2-standard-8`): the launcher VM pulls the image and plans within Google's 12-minute launch limit. Neither DAG has been parsed by Airflow.
+- **Composer: for the evaluation, nothing to import beyond the generation DAG's folder** (above). With its parameter `run_evaluation` true (the default since 2026-10-14), `composer/synthetic_beam_bigquery.py` waits for its own job (a sensor in reschedule mode; no triggerer needed) and launches the evaluation itself, from the same template, as a CPU job under the generation job's service account. It adds no marker and no Airflow Variable. With `run_evaluation` false the DAG launches generation alone, as it did, and needs nothing of this section. The standalone DAG `composer/evaluation_framework.py` is optional: it evaluates a run that already landed on its own (to re-run an evaluation, or when the generation DAG ran without `run_evaluation`) by the same seed path as the chain, which reads no job log; it can also take a list of job ids, a run id or tables, wait for its job and close the registry row when the job dies. It is a template with markers the import workflow already substitutes for the generation DAG: `{{PROJECT_VERSION}}`, `{{ENV}}`, `{{GCS_DATAFLOW_STAGING}}`, `{{GCS_DATAFLOW_TEMPLATES}}` and the three table markers `{{SDFB_DEFAULT_TABLE_FQN}}`, `{{SDFB_LANDING_TABLE}}`, `{{SDFB_VALIDATION_RUNS_TABLE}}` (the defaults of its seed table, datasets and validation-runs table): run the same substitution on it. Roles by trigger shape: the seed with a job id needs `roles/dataflow.viewer` (the window) and read on the `validation_runs` table; the seed alone needs neither; the full lookup (the job id alone, seed emptied) needs `roles/logging.viewer`, `roles/dataflow.viewer` and `roles/bigquery.resourceViewer`. Both evaluation launches take a launcher machine type (`environment.launcherMachineType`, default `e2-standard-8`): the launcher VM pulls the image and plans within Google's 12-minute launch limit. Neither DAG has been parsed by Airflow.
 - **IAM for the evaluator's identity** (the principal that runs `sdfb-eval`; for the generation DAG's chained evaluation that is the Dataflow service account the DAG launches both jobs with, `SA_DATAFLOW`, so these roles go to it. Which identity the launcher and the workers each act as is unconfirmed until a launch):
   - `roles/bigquery.jobUser` — run queries and load jobs.
   - `roles/bigquery.dataViewer` on the source and landing datasets.
   - `roles/bigquery.dataEditor` on `synthetic_data_quality` — append to the four tables.
-  - **Only when a launch is named by its job id** (`sdfb-eval … --job_id`, the standalone DAG, `generation_job_id` on the template): `roles/bigquery.resourceViewer` (`INFORMATION_SCHEMA.JOBS_BY_PROJECT`, `jobs.listAll`, to find which rows the generation job wrote), `roles/dataflow.viewer` and `roles/logging.viewer` (read the generation job, its labels and its `launch_config` log). The generation DAG's chained evaluation names its tables from the launched table (`seed_table`) and the relationship model instead, and passes the job id only as the launch's identity: it reads the Dataflow job resource and nothing else about the job, so it needs `roles/dataflow.viewer` (without it: a warning, no generation window on the row, and no `validation_runs` read) and neither `roles/logging.viewer` nor `roles/bigquery.resourceViewer`; it also reads this launch's rows of the generator's `validation_runs` table (one query, matched by landing table and the job's window; the table is the `validation_runs_table` the DAG passes), which verifies the reference sample for the reference-based privacy metrics, so it needs read access on that table too (without it a warning, and those metrics are `not_evaluated` with the reason on the row), and read access on the source and landing datasets; and, because the window pins the source as of the job's create time, the snapshot permissions below.
+  - **Only when a launch is named by its job id** (`sdfb-eval … --job_id`, the standalone DAG, `generation_job_id` on the template): `roles/bigquery.resourceViewer` (`INFORMATION_SCHEMA.JOBS_BY_PROJECT`, `jobs.listAll`, to find which rows the generation job wrote), `roles/dataflow.viewer` and `roles/logging.viewer` (read the generation job, its labels and its `launch_config` log). The generation DAG's chained evaluation names its tables from the launched table (`seed_table`) and the relationship model instead (or, when the generator wrote its record, from that record — [ADR 0044](adr/0044-generation-record.md)), and passes the job id only as the launch's identity: it reads the Dataflow job resource and nothing else about the job, so it needs `roles/dataflow.viewer` (without it: a warning, no generation window on the row, and no `validation_runs` read) and neither `roles/logging.viewer` nor `roles/bigquery.resourceViewer`; it also reads this launch's rows of the generator's `validation_runs` table (matched by landing table or job and the job's window; the table is the `validation_runs_table` the DAG passes), which verifies the reference sample for the reference-based privacy metrics, so it needs read access on that table too (without it a warning, and those metrics are `not_evaluated` with the reason on the row), and read access on the source and landing datasets; and, because the window pins the source as of the job's create time, the snapshot permissions below.
   - **Snapshots** — the source pin and the start snapshot of an append scope are table snapshots in the temporary dataset (`--temp_dataset`, default the output dataset). On the base table: `bigquery.tables.get`, `getData`, `createSnapshot`; on the dataset: `bigquery.datasets.get`; `bigquery.jobs.create`. On the temporary dataset: `bigquery.tables.create`, `updateData`. Setting the snapshot's expiry additionally needs `bigquery.tables.deleteSnapshot` (in `dataOwner`, `admin` and `studioAdmin`, not `dataEditor`). The evaluator is written so that a pin BigQuery refuses (HTTP 400, 403 or 404) degrades to the unpinned source with a warning; any other error fails the run (design §3.3). Not confirmed by a run.
   - `roles/bigquery.readSessionUser` on the project of every table the job reads — **optional**. The pipeline reads the source and synthetic rows through the Storage Read API (`DIRECT_READ`), and opening a read session needs `bigquery.readsessions.create` on the read table's own project: the job's project when the landing dataset and the temporary dataset (where the source pin lives) are in it; the source's project for a read-only parent's source twin and for a source read unpinned. A public project is expected to refuse (the caller holds no role there; not observed). The launch asks once per such project, after the prepare statements and before the graph. The read tables of a project that refuses (a 403) are paged through `tabledata.list` by the BigQuery client instead, which needs `bigquery.tables.get` and `bigquery.tables.getData` on the read table (both in `dataViewer`, above; a custom role with `getData` alone is not enough); the rest keep the fast read. The launch then logs one `WARNING` that starts `the BigQuery Storage Read API refused a read session on project …` and lists what it pages; the registry row carries it in `warnings`. Without the role the cost is speed: BigQuery limits `tabledata.list` to 3.7 GB of row data per minute (7.5 GB in the US and EU multi-regions), a quota of the project that contains the table, shared with every other reader of that project and with `jobs.getQueryResults`: for the job's own tables a large paged evaluation also slows whoever else pages results there, and a source read from another project draws on that project's quota; for tables too large for it, launch with `mode=sampled`. A table that changes while it is paged fails the job (evaluate once nothing writes to the landing tables). Granting the role later, on a project its administrators control, moves the same image to the fast read for that project's tables, with no rebuild ([design §5.2](designs/2026-07-07-evaluation-framework-design.md#52-the-graph), [ADR 0041, note of 2026-10-10](adr/0041-evaluation-standalone-package.md)). The refusal is from a launch of 2026-10-09; the paged read itself is not confirmed by a run.
   - **Label key** — with `--label_key_uri` pointing at a Secret Manager version, the workers need `roles/secretmanager.secretAccessor` on that secret. Without the flag the key is random and lives for one run.
@@ -200,7 +272,7 @@ flowchart LR
 None of this is required for a run; it is what a locked-down project usually layers on top of ①:
 
 - **Worker image** — runtime pulls come from Artifact Registry via the worker SA's IAM ([ADR 0015](adr/0015-worker-image-via-artifact-registry.md)); no registry credentials or Secret Manager entries are needed in the pull path.
-- **Composer Variables** `PROJECT_ID`, `REGION`, `DATAFLOW_SUBNET`, `SA_DATAFLOW`, `SDFB_MODEL_URI` (`composer/synthetic_beam_bigquery.py`) → or pass them as DAG params / env.
+- **Composer Variables** `PROJECT_ID`, `REGION`, `DATAFLOW_SUBNET`, `SA_DATAFLOW` (`composer/synthetic_beam_bigquery.py`); the model URI is the env overlay's `{{SDFB_MODEL_URI}}` marker (`composer/sdfb_env.yaml`), or a `config_uri` file's `serving.model_uri`. Optional, read by every DAG when set: `DATAFLOW_NETWORK_TAGS` (semicolon-separated network tags for the launcher VM and the workers). Optional, the generation DAG's `tables=all` branch only: `SDFB_MAX_PARALLEL_JOBS` (default `1`, ADR 0045).
 - **Network tags, `WORKER_IP_PRIVATE` + Private Google Access, KMS keys, secure-boot** → for private-IP workers; a public-IP default works without them.
 - **L4-in-`europe-west3` capacity / reservation logic** in the DAG (ADR 0004) → make region + accelerator plain params when targeting another region.
 

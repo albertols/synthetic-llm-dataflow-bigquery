@@ -34,9 +34,12 @@ defaults:
     env: dev
     engine: b1_rag
     client_type: vllm
-    vllm_dtype: float16        # T4 requirement for the bf16 qwen3 checkpoint
+    gpu: t4                    # the job's accelerator; the launcher records it and derives float16 from it (ADR 0043)
+    sdk_containers: single     # records job.sdk_containers' topology; a tier that changes one changes both
+    vllm_dtype: float16        # T4 requirement for the bf16 qwen3 checkpoint; gpu: t4 derives the same, kept as a pin
     vllm_max_model_len: "8192" # KV-cache cap — REQUIRED on T4 (RUN_PLAYBOOK)
     seed: ""
+    # config_uri: "gs://{MODELS_BUCKET}/synthetic/config/personal.yaml"  # generator config file (ADR 0043); omitted = none
     model_uri: "gs://{MODELS_BUCKET}/synthetic/models/qwen3/4b-instruct-2507/v1/"
     embedder_uri: "gs://{MODELS_BUCKET}/synthetic/models/embedders/bge-small-en-v1.5/v1/"
     dlq_table: "{PROJECT_ID}.synthetic_data_quality.dlq"
@@ -58,7 +61,9 @@ tables:
 
 tiers:
   S0:      # CPU smoke: fake client, full BQ write path, always run first
-    params: {client_type: fake, vllm_dtype: "", vllm_max_model_len: "", embedder_uri: ""}
+    # No GPU: gpu and sdk_containers are omitted (no accelerator, so no
+    # no_use_multiple_sdk_containers experiment: Dataflow's multi default).
+    params: {client_type: fake, gpu: "", sdk_containers: "", vllm_dtype: "", vllm_max_model_len: "", embedder_uri: ""}
     job: {machine_type: e2-standard-8, accelerator: ""}
   R1p: {}  # b1_rag / qwen3-4b / T4 / fp16 — the workhorse
   R2p: {}  # identical rerun of R1p: anti-replay (fresh salted run_id)
@@ -80,5 +85,5 @@ tiers:
   R7m:     # R7 on Dataflow's default multi-process SDK topology (ADR 0034
            # experiment: 8 Python processes per worker instead of 1; the
            # cross-process vLLM spawn mutex keeps one server per worker)
-    params: {num_rows: "10000000", batch_size: "10000", initial_workers: "4", autoscaling: fixed}
+    params: {num_rows: "10000000", batch_size: "10000", initial_workers: "4", autoscaling: fixed, sdk_containers: multi}
     job: {max_workers: "4", num_workers: "4", sdk_containers: multi}

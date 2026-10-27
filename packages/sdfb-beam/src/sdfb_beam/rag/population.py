@@ -64,6 +64,7 @@ import json
 from datetime import UTC, datetime
 
 import apache_beam as beam
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.rag.chunking import Chunk, chunk_row
 
 
@@ -111,10 +112,19 @@ class EmbedChunksDoFn(beam.DoFn):
     the engine-in-setup rule from `.claude/skills/beam-dofn.md`.
     """
 
-  def __init__(self, embedder_uri: str, device: str = "auto") -> None:
+  def __init__(
+      self,
+      embedder_uri: str,
+      device: str = "auto",
+      *,
+      max_length: int = DEFAULT_CONFIG.rag.bge_max_length,
+      min_free_vram: int = DEFAULT_CONFIG.rag.embedder_min_free_vram,
+  ) -> None:
     super().__init__()
     self.embedder_uri = embedder_uri
     self.device = device
+    self.max_length = max_length
+    self.min_free_vram = min_free_vram
     self._embedder = None
 
   def setup(self):
@@ -134,7 +144,11 @@ class EmbedChunksDoFn(beam.DoFn):
       # "auto" = the worker's GPU when present (2026-07-25 06:18 E2E:
       # both T4s idle while 33,610 chunks embedded on CPU for 25 min).
       # teardown() demotes so vLLM ignition never contends for VRAM.
-      self._embedder = BgeEmbedder(uri, device=self.device)
+      self._embedder = BgeEmbedder(
+          uri,
+          device=self.device,
+          max_length=self.max_length,
+          min_free_vram=self.min_free_vram)
     else:
       from sdfb_core.rag.embedding import HashingEmbedder
 

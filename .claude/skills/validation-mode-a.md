@@ -37,7 +37,7 @@ REF: https://beam.apache.org/documentation/patterns/bigqueryio/
 
 A whylogs profile merge was planned for M1 §11 and never built. `whylogs` left the dependencies with the move to Python 3.14: its compiled backend `whylogs-sketching` has no wheel past CPython 3.12 ([ADR 0040](../../docs/adr/0040-dsg-donation-golden-source-sync.md) A6). Distribution checks live in `source_table_stats` and the `validation_runs` writer instead.
 
-## DLQ table schema (`{project}.synthetic_data_quality.dead_letter`)
+## DLQ table schema (`{project}.synthetic_data_quality.dlq`)
 
 Partitioned by DAY on `dlq_inserted_at`, clustered on `(error_type, rule_id)`.
 

@@ -42,6 +42,7 @@ from sdfb_beam.cli.run_pipeline import (
     resolve_landing_dispositions,
 )
 from sdfb_core.codegen import derive_bq_load_schema
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts import TableSchema
 
 
@@ -269,9 +270,9 @@ def test_configure_options_directrunner_leaves_disk_size_unset():
   assert opts.view_as(WorkerOptions).disk_size_gb is None
 
 
-def test_parse_args_vllm_dtype_defaults_auto():
+def test_parse_args_vllm_dtype_derives_from_the_default_gpu():
   args, _ = parse_args(_common_args())
-  assert args.vllm_dtype == "auto"
+  assert (args.gpu, args.vllm_dtype) == ("l4", "bfloat16")
 
 
 def test_parse_args_vllm_dtype_accepts_float16():
@@ -375,9 +376,9 @@ def test_resolve_engine_strictness(client_type, expected):
   assert resolve_engine_strictness(client_type) is expected
 
 
-def test_parse_args_rag_layer_flags_default_off():
+def test_parse_args_rag_layer_defaults_on_without_a_table():
   args, _ = parse_args(_common_args())
-  assert parse_bool_flag(args.build_rag_layer) is False
+  assert parse_bool_flag(args.build_rag_layer) is True
   assert args.rag_chunks_table == ""
 
 
@@ -594,7 +595,8 @@ def test_warm_pools_trusted_when_clean():
   from sdfb_beam.cli.run_pipeline import warm_pools_trusted
 
   store = _PreflightPoolStore([_preflight_pool("c", ("nov-1", "nov-2"))])
-  assert warm_pools_trusted(store, _PreflightValueStore(), "d", "m") is True
+  assert warm_pools_trusted(
+      store, _PreflightValueStore(), "d", "m", config=DEFAULT_CONFIG) is True
   assert store.deleted == []
 
 
@@ -602,7 +604,8 @@ def test_warm_pools_tainted_deletes_and_rebuilds():
   from sdfb_beam.cli.run_pipeline import warm_pools_trusted
 
   store = _PreflightPoolStore([_preflight_pool("c", ("real-1", "nov-2"))])
-  assert warm_pools_trusted(store, _PreflightValueStore(), "d", "m") is False
+  assert warm_pools_trusted(
+      store, _PreflightValueStore(), "d", "m", config=DEFAULT_CONFIG) is False
   assert store.deleted == [("d", "m")]
 
 
@@ -615,7 +618,8 @@ def test_warm_pools_overlap_check_error_keeps_warm_path():
       raise RuntimeError("bq down")
 
   store = _PreflightPoolStore([_preflight_pool("c", ("real-1",))])
-  assert warm_pools_trusted(store, _BoomValueStore(), "d", "m") is True
+  assert warm_pools_trusted(
+      store, _BoomValueStore(), "d", "m", config=DEFAULT_CONFIG) is True
   assert store.deleted == []
 
 
@@ -630,7 +634,8 @@ def test_warm_pools_delete_failure_keeps_warm_path():
       raise RuntimeError("dml denied")
 
   store = _NoDeleteStore([_preflight_pool("c", ("real-1",))])
-  assert warm_pools_trusted(store, _PreflightValueStore(), "d", "m") is True
+  assert warm_pools_trusted(
+      store, _PreflightValueStore(), "d", "m", config=DEFAULT_CONFIG) is True
 
 
 # --- num_workers: start a scale run at its worker ceiling (ADR 0034) --------

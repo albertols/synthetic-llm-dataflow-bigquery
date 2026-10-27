@@ -26,8 +26,9 @@ without updating the probe and the contract test together.
 This module is pure stdlib (``logging``/``shlex``/``re``) — sdfb-core must
 stay Beam-free. Beam metric counterparts live in ``sdfb_beam``.
 
-Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity
-(ADR 0024, 0030).
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity;
+§7 Validation and the dead-letter queue
+(ADR 0024, 0030, 0044).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -181,7 +182,8 @@ BUILD_COMMIT_ENV = "SDFB_BUILD_COMMIT"
 
 
 def log_build_info(component: str) -> str:
-  """One `build_info` milestone naming the image's git commit.
+  """One `build_info` milestone naming the image's git commit and the
+    generator version (ADR 0044).
 
     The 2026-08-21 four-run cycle could not tell which build each job ran
     (two same-day runs on the "same" label differed only by image content,
@@ -191,10 +193,13 @@ def log_build_info(component: str) -> str:
     """
   import os
 
+  from sdfb_core import version
+
   return log_milestone(
       "build_info",
       commit=os.environ.get(BUILD_COMMIT_ENV, "unknown"),
       component=component,
+      version=version.generator_version(),
   )
 
 

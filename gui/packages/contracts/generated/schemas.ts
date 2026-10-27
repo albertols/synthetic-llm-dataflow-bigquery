@@ -55,8 +55,8 @@ export const evaluationDataHistoryRowSchema = z.object({
   base_run_id: z.string().nullable(),
   /** Every run_id this evaluation covers, one per table in a relational launch. */
   run_ids: z.array(z.string()),
-  /** jobs_labels+logs | logs | dataflow_params | manual */
-  params_source: z.enum(["jobs_labels+logs","logs","dataflow_params","manual"]).nullable(),
+  /** jobs_labels+logs | logs | dataflow_params | validation_runs | manual */
+  params_source: z.enum(["jobs_labels+logs","logs","dataflow_params","validation_runs","manual"]).nullable(),
   /** Name of the relationship model (config/relationships/*.yaml) the generation run applied. */
   relationship_model: z.string().nullable(),
   /** SHA of the relationship model file the generation run applied. */
@@ -186,6 +186,12 @@ export const evaluationDataHistoryRowSchema = z.object({
   warnings: z.array(z.string()),
   /** GCS URI of the HTML/JSON evaluation artifacts for this run. */
   artifacts_uri: z.string().nullable(),
+  /** ADR 0044 — validation_runs.generator_version of the evaluated generation, <base>-<branch>-<sha7>[-dirty]; NULL when the generation wrote no record. */
+  generator_version: z.string().nullable(),
+  /** ADR 0044 — validation_runs.config_digest of the evaluated generation: same digest, same generator config; NULL when the generation wrote no record. */
+  generator_config_digest: z.string().nullable(),
+  /** ADR 0045 — the Dataflow job ids of the generation this evaluation covers: each batch job of a whole-model launch that landed (generation_job_id is the first), else the one generation job; empty when the evaluation names no job, or when the row was written before the column existed (read generation_job_id then). */
+  generation_job_ids: z.array(z.string()),
 });
 export type EvaluationDataHistoryRow = z.infer<typeof evaluationDataHistoryRowSchema>;
 
@@ -343,7 +349,7 @@ export const fkFanoutStatsRowSchema = z.object({
   source_table: z.string(),
   /** Comma-joined driving edge FK columns (child side). */
   edge_cols: z.string(),
-  /** Model/prompt sha the measurement is scoped to (cache key component). */
+  /** Model/prompt sha the measurement is scoped to (cache key component). A non-default fan-out-shaping setting suffixes it with +cfg.<salt> (ADR 0043); recorded as derived.cache_keys.fk_fanout_stats (ADR 0044). */
   model_sha: z.string(),
   /** Measurement write time (UTC). */
   measured_at: z.iso.datetime({ offset: true }),
@@ -354,7 +360,7 @@ export type FkFanoutStatsRow = z.infer<typeof fkFanoutStatsRowSchema>;
 
 /** `synthetic_data_quality.validation_runs` — config/bq_schema/synthetic_data_quality/validation_runs.schema.json */
 export const validationRunsRowSchema = z.object({
-  /** Pipeline run id; joins to dead_letter.run_id. */
+  /** Pipeline run id; joins to dlq.run_id. */
   run_id: z.string(),
   /** SHA-256 of the canonical reference sample (provenance). */
   reference_digest: z.string().nullable(),
@@ -392,10 +398,38 @@ export const validationRunsRowSchema = z.object({
   landing_repeat_share: z.number().nullable(),
   /** ADR 0038 — landing_repeat_share - source_repeat_share. */
   repeat_share_delta: z.number().nullable(),
-  /** ADR 0038 — |repeat_share_delta| <= REPEAT_SHARE_TOLERANCE (0.05); NULL when the launch measured no source share for this table. */
+  /** ADR 0038 — |repeat_share_delta| <= guardrails.repeat_share_tolerance (default 0.05); NULL when the launch measured no source share for this table. */
   repeat_share_within_tolerance: z.boolean().nullable(),
   /** Row write time (UTC); DAY partition key. */
   created_at: z.iso.datetime({ offset: true }),
+  /** ADR 0044 — the Dataflow job id, read by a worker from the GCE metadata server; NULL on the DirectRunner or when the attribute is absent (readers then match job_name inside the job's window; a Composer job name is the same for every launch of a model, so the evaluator keeps the launch whose launched_at is the latest at or before the job's end). */
+  job_id: z.string().nullable(),
+  /** ADR 0044 — the Dataflow job name the launcher resolved (a template launch's jobName, else sdfb-<run_id>); NULL on the DirectRunner. */
+  job_name: z.string().nullable(),
+  /** ADR 0044 — the launch's base run id, shared by every table of the launch (run_id is the base, or <base>-NN-<table>). */
+  launch_run_id: z.string().nullable(),
+  /** ADR 0044 — the worker's generator version, <base>-<branch>-<sha7>[-dirty] (sdfb_core.version); the launcher's is config.launcher.version. */
+  generator_version: z.string().nullable(),
+  /** ADR 0044 — launcher clock when the job's graph was built, just before it ran; created_at stays the row write time. */
+  launched_at: z.iso.datetime({ offset: true }).nullable(),
+  /** ADR 0044 — rag.embedder_uri; empty means the HashingEmbedder. */
+  embedder_uri: z.string().nullable(),
+  /** ADR 0044 — free_text.pool_seed_strategy for b1_rag; NULL for b2_library. */
+  retrieval_method: z.string().nullable(),
+  /** ADR 0044 — generation.similarity. */
+  similarity: z.number().nullable(),
+  /** ADR 0044 — generation.seed; derived when none was given. */
+  seed: z.string().nullable(),
+  /** ADR 0044 — sampling.source_stats, the stats tier (off, sample or exact). */
+  source_stats: z.string().nullable(),
+  /** ADR 0044 — relational.relationships_uri as resolved; the model itself is embedded in config. */
+  relationships_uri: z.string().nullable(),
+  /** ADR 0044 — sha12 of every loaded relationship model (the relationships_loaded milestone's sha); NULL when no model was loaded. */
+  relationships_digest: z.string().nullable(),
+  /** ADR 0044 — sha12 of config.values as canonical JSON, launch identity excluded: same digest, same generator config. */
+  config_digest: z.string().nullable(),
+  /** ADR 0044 — JSON text of the generation snapshot: config_version, values (a valid --config_uri file), provenance, overridden, derived (cache_keys), thresholds, relationships, beam, launcher, batch. PARSE_JSON or JSON_VALUE to query. */
+  config: z.string().nullable(),
 });
 export type ValidationRunsRow = z.infer<typeof validationRunsRowSchema>;
 
@@ -403,11 +437,11 @@ export type ValidationRunsRow = z.infer<typeof validationRunsRowSchema>;
 export const freetextPoolsRowSchema = z.object({
   /** SHA-256 over the whole reference sample (ADR 0005). Together with model_uri this is the pool's identity: a new sample or a different LLM is a different pool. */
   reference_digest: z.string(),
-  /** LLM weights URI that produced these values. NOT an embedder identity — that is what makes this a sibling of rag_chunks rather than a chunk_kind of it (ADR 0020). */
+  /** LLM weights URI that produced these values. NOT an embedder identity — that is what makes this a sibling of rag_chunks rather than a chunk_kind of it (ADR 0020). A non-default pool-shaping setting suffixes it with +cfg.<salt> (ADR 0043); the launch records the effective key in validation_runs.config derived.cache_keys.freetext_pools (ADR 0044). */
   model_uri: z.string(),
   /** Free-text column the pool belongs to. */
   column: z.string(),
-  /** Requested pool size: min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX). */
+  /** Requested pool size: min(num_rows, column_distinct, free_text.free_text_pool_max). */
   target: z.int(),
   /** Deduped generated values in insertion order. REPEATED (not a JSON blob) so pools stay queryable with UNNEST. NOTE: `values` is a BigQuery RESERVED keyword — always backtick it in SQL. */
   values: z.array(z.string()),
@@ -438,7 +472,7 @@ export const ragChunksRowSchema = z.object({
   chunk_text: z.string(),
   /** Embedder family, e.g. 'bge-small-en-v1.5' (MODEL_LAYOUT path segment). */
   embedder_id: z.string(),
-  /** Embedder weight version, e.g. 'v1'. (embedder_id, embedder_version) pins the vector space. */
+  /** Embedder weight version, e.g. 'v1'. (embedder_id, embedder_version) pins the vector space. A non-default chunk-shaping setting suffixes it with +cfg.<salt> (ADR 0043); recorded as derived.cache_keys.rag_chunks (ADR 0044). */
   embedder_version: z.string(),
   /** L2-normalized embedding (dim fixed per embedder; 384 for bge-small-en-v1.5). */
   embedding: z.array(z.number()),
@@ -475,7 +509,7 @@ export const sourceTableStatsRowSchema = z.object({
   sample_rows: z.int().nullable(),
   /** sample = computed from the eager reference sample (distinct is sample-bound); exact = merged with the one-scan full-table aggregate pass (--source_stats=exact). */
   stats_tier: z.string().nullable(),
-  /** profile_source_table version; part of the append-skip key so profiler upgrades re-write stats for an unchanged reference_digest. */
+  /** profile_source_table version; part of the append-skip key so profiler upgrades re-write stats for an unchanged reference_digest. A non-default stats-shaping setting suffixes it with +cfg.<salt> (ADR 0043); recorded as derived.cache_keys.source_stats (ADR 0044). */
   profiler_version: z.string().nullable(),
   computed_at: z.iso.datetime({ offset: true }),
 });
@@ -487,7 +521,7 @@ export const vocabularies = {
   "evaluation_data_history.status": ["RUNNING","SUCCEEDED","SUCCEEDED_WITH_WARNINGS","PARTIAL","SKIPPED","FAILED"],
   "evaluation_data_history.trigger": ["cli","composer","chained","agent"],
   "evaluation_data_history.mode": ["exact","sampled"],
-  "evaluation_data_history.params_source": ["jobs_labels+logs","logs","dataflow_params","manual"],
+  "evaluation_data_history.params_source": ["jobs_labels+logs","logs","dataflow_params","validation_runs","manual"],
   "evaluation_data_history.tables.role": ["root","driven","side_input","isolated","standalone","external"],
   "evaluation_data_history.tables.scope_mode": ["table","as_of","appends","as_of_diff","manual"],
   "evaluation_data_history.tables.scope_status": ["ok","count_mismatch","contaminated","expired","empty","unknown"],
@@ -950,6 +984,21 @@ export const bqTables = {
         "name": "artifacts_uri",
         "type": "STRING",
         "mode": "NULLABLE"
+      },
+      {
+        "name": "generator_version",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "generator_config_digest",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "generation_job_ids",
+        "type": "STRING",
+        "mode": "REPEATED"
       }
     ]
   },
@@ -1436,6 +1485,76 @@ export const bqTables = {
         "name": "created_at",
         "type": "TIMESTAMP",
         "mode": "REQUIRED"
+      },
+      {
+        "name": "job_id",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "job_name",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "launch_run_id",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "generator_version",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "launched_at",
+        "type": "TIMESTAMP",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "embedder_uri",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "retrieval_method",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "similarity",
+        "type": "FLOAT",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "seed",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "source_stats",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "relationships_uri",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "relationships_digest",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "config_digest",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "config",
+        "type": "STRING",
+        "mode": "NULLABLE"
       }
     ]
   },

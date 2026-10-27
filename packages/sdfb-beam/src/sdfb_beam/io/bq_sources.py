@@ -38,6 +38,7 @@ import logging
 from typing import Any
 
 from google.cloud import bigquery
+from sdfb_core.config.model import DEFAULT_CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ logger = logging.getLogger(__name__)
 def load_reference_rows(
     *,
     table: str,
-    limit: int = 10_000,
+    limit: int = DEFAULT_CONFIG.sampling.reference_rows_limit,
     project: str | None = None,
     client: bigquery.Client | None = None,
     extra_filters: str | None = None,
