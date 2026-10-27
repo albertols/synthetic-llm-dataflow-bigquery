@@ -567,10 +567,10 @@ def test_the_batch_callback_is_the_explicit_ones_with_its_own_target():
 
 # -- note 5: never an empty gpu, sdk_containers or launcher machine ---------
 def test_no_launch_forwards_an_empty_gpu_topology_or_launcher_machine(deployed):
-  """The template accepts '' for gpu and sdk_containers (its regexes), which
-  the launcher's argparse refuses, and '' for launcherMachineType overrides
-  Dataflow's own. The trigger form refuses '' for all three; a launch passes
-  gpu and sdk_containers only where they differ from generator.yaml."""
+  """'' for gpu or sdk_containers is refused by the launcher's argparse, and
+  '' for launcherMachineType overrides Dataflow's own. The trigger form and
+  the template's regexes refuse '' for all three; a launch passes gpu and
+  sdk_containers only where they differ from generator.yaml."""
   params = _params()
   for name in ("gpu", "sdk_containers"):
     enum = ast.literal_eval(_kw(params[name], "enum"))
@@ -581,8 +581,8 @@ def test_no_launch_forwards_an_empty_gpu_topology_or_launcher_machine(deployed):
       p["name"]: p
       for p in json.loads(_METADATA.read_text(encoding="utf-8"))["parameters"]
   }
-  for name in ("gpu", "sdk_containers"):
-    assert any(re.fullmatch(r, "") for r in metadata[name]["regexes"]), name
+  for name in ("gpu", "sdk_containers", "launcher_machine_type"):
+    assert not any(re.fullmatch(r, "") for r in metadata[name]["regexes"]), name
   layers = M.load_layers(deployed())
   defaults = {**M.param_defaults(layers), "run_id": "manual__x-0a1b2c3d"}
   body = M.explicit_body(
