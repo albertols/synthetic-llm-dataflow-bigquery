@@ -79,7 +79,7 @@ variable "model_source" {
 }
 
 variable "gpu" {
-  description = "One GPU per worker: l4 (NVIDIA L4 on G2 machines, vLLM dtype auto, both models) or t4 (NVIDIA T4 on N1 machines, vLLM dtype float16, qwen3-4b only)."
+  description = "One GPU per worker, passed to the launch as gpu: l4 (NVIDIA L4 on G2 machines, vLLM dtype bfloat16, both models) or t4 (NVIDIA T4 on N1 machines, vLLM dtype float16, qwen3-4b only). The launcher derives the dtype from it."
   type        = string
   default     = "l4"
   validation {

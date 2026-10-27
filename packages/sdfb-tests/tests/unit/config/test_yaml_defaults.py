@@ -85,10 +85,13 @@ def test_a_changed_yaml_value_changes_the_default(tmp_path):
 
 
 def test_the_root_path_is_the_packaged_file():
+  # A link here; the Dataflow Solution Guides copy carries the same bytes as
+  # a real file (scripts/dsg/sync.py copies through the link, and
+  # test_dsg_overlay pins the link in this repository).
   root = _REPO / "config/generator.yaml"
-  assert root.is_symlink()
-  assert root.resolve() == GENERATOR_YAML.resolve()
   assert root.read_bytes() == GENERATOR_YAML.read_bytes()
+  if root.is_symlink():
+    assert root.resolve() == GENERATOR_YAML.resolve()
 
 
 def test_the_digest_is_the_file_bytes(tmp_path):

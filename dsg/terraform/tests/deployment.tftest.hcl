@@ -63,8 +63,8 @@ run "deployment_contract" {
     error_message = "The products catalog must land in the landing dataset: external FK parents resolve there."
   }
   assert {
-    condition     = local.model_paths[var.model] == "gemma4/e4b-it/v1" && var.model_source == "huggingface" && local.machine_type == "g2-standard-8" && local.launch_parameters.vllm_dtype == "auto"
-    error_message = "Gemma 4 E4B-it from Hugging Face on an L4 (G2, dtype auto) is the default."
+    condition     = local.model_paths[var.model] == "gemma4/e4b-it/v1" && var.model_source == "huggingface" && local.machine_type == "g2-standard-8" && local.launch_parameters.gpu == "l4" && !contains(keys(local.launch_parameters), "vllm_dtype")
+    error_message = "Gemma 4 E4B-it from Hugging Face on an L4 (G2) is the default; the launcher derives the dtype from gpu."
   }
   assert {
     condition     = length(module.buckets) == 0 && length(google_compute_subnetwork_iam_member.dataflow_network_user) == 0 && length(google_dataflow_flex_template_job.generation) == 0
@@ -137,8 +137,8 @@ run "t4_profile" {
   }
 
   assert {
-    condition     = local.machine_type == "n1-standard-8" && strcontains(local.gpu.accelerator, "nvidia-tesla-t4") && local.launch_parameters.vllm_dtype == "float16"
-    error_message = "A T4 runs on N1 and serves Qwen downcast to float16."
+    condition     = local.machine_type == "n1-standard-8" && strcontains(local.gpu.accelerator, "nvidia-tesla-t4") && local.launch_parameters.gpu == "t4"
+    error_message = "A T4 runs on N1 and the launch names it, so the launcher serves Qwen downcast to float16."
   }
 }
 

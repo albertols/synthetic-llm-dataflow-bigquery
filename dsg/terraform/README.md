@@ -194,23 +194,25 @@ Alternatives:
 
 ## GPU, machine type and vLLM dtype
 
-Each worker has one GPU. The `gpu` variable picks the machine family, the
-accelerator and the dtype vLLM serves the model with, and it limits which
-models can run:
+Each worker has one GPU. The `gpu` variable picks the machine family and the
+accelerator, and it limits which models can run. Both launches pass it as the
+`gpu` parameter, and the launcher derives the dtype vLLM serves the model with
+from it (`config/generator.yaml`; a `vllm_dtype` set in a `config_uri` file
+wins):
 
 ```mermaid
 flowchart LR
   gpu{gpu} -->|l4| l4["NVIDIA L4<br/>compute capability 8.9 · 24 GB"]
   gpu -->|t4| t4["NVIDIA T4<br/>compute capability 7.5 · 16 GB"]
-  l4 --> g2["G2 machines<br/>g2-standard-8"] --> auto["vllm_dtype = auto<br/>bf16 checkpoint as shipped"]
+  l4 --> g2["G2 machines<br/>g2-standard-8"] --> bf16["vllm_dtype = bfloat16<br/>bf16 checkpoint as shipped"]
   t4 --> n1["N1 machines<br/>n1-standard-8"] --> fp16["vllm_dtype = float16<br/>explicit downcast"]
-  auto --> ok1["gemma4-e4b-it ✓<br/>qwen3-4b ✓"]
+  bf16 --> ok1["gemma4-e4b-it ✓<br/>qwen3-4b ✓"]
   fp16 --> ok2["qwen3-4b ✓<br/>gemma4-e4b-it ✗"]
 ```
 
-| `gpu` | GPU | Machine family (default) | `worker_accelerator` | Models | `vllm_dtype` |
+| `gpu` | GPU | Machine family (default) | `worker_accelerator` | Models | `vllm_dtype` (derived) |
 | :-- | :-- | :-- | :-- | :-- | :-- |
-| `l4` (default) | NVIDIA L4, compute capability 8.9, 24 GB | G2 only (`g2-standard-8`) | `type:nvidia-l4;count:1;install-nvidia-driver` | `gemma4-e4b-it`, `qwen3-4b` | `auto`: serves the bf16 checkpoint as is |
+| `l4` (default) | NVIDIA L4, compute capability 8.9, 24 GB | G2 only (`g2-standard-8`) | `type:nvidia-l4;count:1;install-nvidia-driver` | `gemma4-e4b-it`, `qwen3-4b` | `bfloat16`: serves the bf16 checkpoint as is |
 | `t4` | NVIDIA T4, compute capability 7.5, 16 GB | N1 only (`n1-standard-8`) | `type:nvidia-tesla-t4;count:1;install-nvidia-driver:5xx` | `qwen3-4b` only | `float16`, required |
 
 Why the dtype depends on the GPU:
@@ -230,8 +232,8 @@ Why the dtype depends on the GPU:
 carry one L4), and Terraform rejects a machine type from the other family.
 The T4 driver pin `:5xx` follows Dataflow's guidance for vLLM. Check that
 `region` offers the GPU and that you have quota for it. Terraform writes
-`GPU`, `MACHINE_TYPE`, `ACCELERATOR` and `VLLM_DTYPE` to
-`scripts/00_set_variables.sh`, and both launches use them.
+`GPU`, `MACHINE_TYPE` and `ACCELERATOR` to `scripts/00_set_variables.sh`,
+and both launches use them.
 
 ## Bill of resources created by this script
 

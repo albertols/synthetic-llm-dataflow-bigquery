@@ -23,6 +23,9 @@
 # The landing, quality and RAG tables already exist (Terraform), so nothing
 # is created at launch. The Terraform launch (launch_job = true) passes the
 # same parameters, from terraform/synthetic-llm-dataflow-bigquery/dataflow.tf.
+# A parameter left out takes its default from config/generator.yaml (ADR 0043):
+# both layers are built (build_rag_layer, build_pool_layer), and the launcher
+# derives vllm_dtype from gpu (l4: bfloat16, t4: float16).
 #
 # Usage: ./scripts/04_run_dataflow.sh [NUM_ROWS]
 # Prints the RUN_ID; pass it to 05_verify_run.sh once the job is done.
@@ -39,7 +42,8 @@ if [[ -n "${SUBNETWORK:-}" ]]; then
 fi
 
 # One SDK process per GPU worker: every process would otherwise start its
-# own vLLM server on the single GPU (ADR 0034).
+# own vLLM server on the single GPU (ADR 0034). sdk_containers=single below
+# records that topology; the yaml default (multi) would misdescribe it.
 EXPERIMENTS="enable_portable_runner,worker_accelerator=${ACCELERATOR},no_use_multiple_sdk_containers"
 
 PARAMS=(
@@ -49,9 +53,7 @@ PARAMS=(
   "validation_runs_table=${PROJECT}.${QUALITY_DATASET}.validation_runs"
   "fk_fanout_stats_table=${PROJECT}.${QUALITY_DATASET}.fk_fanout_stats"
   "rag_chunks_table=${PROJECT}.${RAG_DATASET}.rag_chunks"
-  "build_rag_layer=true"
   "freetext_pools_table=${PROJECT}.${RAG_DATASET}.freetext_pools"
-  "build_pool_layer=true"
   "source_stats_table=${PROJECT}.${RAG_DATASET}.source_table_stats"
   "relationships_uri=${RELATIONSHIPS_URI}"
   "num_rows=${ROWS}"
@@ -60,7 +62,8 @@ PARAMS=(
   "client_type=vllm"
   "model_uri=${MODEL_URI}"
   "embedder_uri=${EMBEDDER_URI}"
-  "vllm_dtype=${VLLM_DTYPE}"
+  "gpu=${GPU}"
+  "sdk_containers=single"
   "vllm_max_model_len=8192"
   "reference_rows_limit=10000"
   "create_if_not_exists=false"
