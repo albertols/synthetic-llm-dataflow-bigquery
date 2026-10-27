@@ -12,6 +12,9 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 """The rendered reference file documents every key and resolves to the defaults.
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0043).
 """
 import importlib.util
 from pathlib import Path

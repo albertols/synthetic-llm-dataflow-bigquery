@@ -30,6 +30,9 @@ self-ignition on first use, and teardown subprocess termination.
 The class is importable here precisely because all heavy imports are
 deferred into method bodies — that property is itself part of the contract
 (`test_import_does_not_require_heavy_deps`).
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0043).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

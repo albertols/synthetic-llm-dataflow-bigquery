@@ -15,8 +15,9 @@
 per launch, one record per Dataflow job, and today's row when the table
 cannot take the record.
 
-Design: docs/DESIGN.md §7 Validation and the dead-letter queue
-(ADR 0044).
+Design: docs/DESIGN.md §7 Validation and the dead-letter queue;
+§8 Configuration
+(ADR 0043, 0044).
 """
 from __future__ import annotations
 
