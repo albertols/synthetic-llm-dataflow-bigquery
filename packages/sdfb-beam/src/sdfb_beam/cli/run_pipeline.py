@@ -322,6 +322,15 @@ def resolve_batch_size(requested: int, num_rows: int) -> int:
   return max(DEFAULT_BATCH_SIZE, num_rows // _TARGET_ELEMENTS)
 
 
+# argparse takes any unambiguous prefix of a long option. Flags added since
+# v0.6.1 (`--landing_*`, `--batch_*`) made these master spellings ambiguous;
+# an exact alias wins over prefix matching, so they keep reaching the same
+# flag (ADR 0043). Pinned by test_flag_abbreviations.
+_LANDING_TABLE_ALIASES = ("--lan", "--land", "--landi", "--landin", "--landing",
+                          "--landing_")
+_BATCH_SIZE_ALIASES = ("--bat", "--batc", "--batch", "--batch_")
+
+
 def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides the CLI surface
     argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
   p = argparse.ArgumentParser(
@@ -356,6 +365,7 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "missing rows when --build_rag_layer is on (ADR 0019).")
   p.add_argument(
       "--landing_table",
+      *_LANDING_TABLE_ALIASES,
       help="BQ table for synthetic rows (project.dataset.table). "
       "Accepts a comma-separated list for multi-table "
       "launches (ADR 0029 scenarios): each table runs "
@@ -410,6 +420,7 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "--num_workers on the launch wins.")
   p.add_argument(
       "--batch_size",
+      *_BATCH_SIZE_ALIASES,
       type=int,
       help="Rows per element. Left at the default, this scales "
       "with --num_rows toward ~1,000 elements (never below "
