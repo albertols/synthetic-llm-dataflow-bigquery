@@ -64,6 +64,7 @@ PARAMS=(
   "embedder_uri=${EMBEDDER_URI}"
   "gpu=${GPU}"
   "sdk_containers=single"
+  "launcher_machine_type=${LAUNCHER_MACHINE_TYPE}"
   "vllm_max_model_len=8192"
   "reference_rows_limit=10000"
   "create_if_not_exists=false"
@@ -86,6 +87,7 @@ gcloud dataflow flex-template run "sdfb-${RUN_ID}" \
   --staging-location="${STAGING_LOCATION}" \
   --disable-public-ips \
   ${SUBNET_OPT[@]+"${SUBNET_OPT[@]}"} \
+  --launcher-machine-type="${LAUNCHER_MACHINE_TYPE}" \
   --worker-machine-type="${MACHINE_TYPE}" \
   --num-workers=1 \
   --max-workers="${MAX_DATAFLOW_WORKERS}" \

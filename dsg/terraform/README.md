@@ -198,7 +198,10 @@ Each worker has one GPU. The `gpu` variable picks the machine family and the
 accelerator, and it limits which models can run. Both launches pass it as the
 `gpu` parameter, and the launcher derives the dtype vLLM serves the model with
 from it (`config/generator.yaml`; a `vllm_dtype` set in a `config_uri` file
-wins):
+wins). A `config_uri` file's `serving.gpu` and `serving.sdk_containers` must
+match the Terraform `gpu` and the launch's experiments (one SDK process per
+worker, `single`): the file wins over the launch's flags in the generation
+record and in the dtype derivation, but not over the machine Terraform set.
 
 ```mermaid
 flowchart LR
@@ -232,7 +235,8 @@ Why the dtype depends on the GPU:
 carry one L4), and Terraform rejects a machine type from the other family.
 The T4 driver pin `:5xx` follows Dataflow's guidance for vLLM. Check that
 `region` offers the GPU and that you have quota for it. Terraform writes
-`GPU`, `MACHINE_TYPE` and `ACCELERATOR` to `scripts/00_set_variables.sh`,
+`GPU`, `MACHINE_TYPE`, `ACCELERATOR` and `LAUNCHER_MACHINE_TYPE`
+(`e2-standard-8`, the Flex launcher VM) to `scripts/00_set_variables.sh`,
 and both launches use them.
 
 ## Bill of resources created by this script
@@ -269,7 +273,7 @@ across locations.
 | `build_service_account_name` | `string` | Optional. Default `synthetic-llm-build-sa`. |
 | `model` | `string` | Optional. `gemma4-e4b-it` (default, needs `gpu = "l4"`) or `qwen3-4b`. |
 | `model_source` | `string` | Optional. `huggingface` (default) or `modelscope`, where `02_stage_models.sh` downloads from. |
-| `gpu` | `string` | Optional. `l4` (default, G2, dtype `auto`) or `t4` (N1, dtype `float16`, `qwen3-4b` only). See [GPU, machine type and vLLM dtype](#gpu-machine-type-and-vllm-dtype). |
+| `gpu` | `string` | Optional. `l4` (default, G2, dtype `bfloat16`) or `t4` (N1, dtype `float16`, `qwen3-4b` only); the launcher derives the dtype from `gpu`. See [GPU, machine type and vLLM dtype](#gpu-machine-type-and-vllm-dtype). |
 | `machine_type` | `string` | Optional. A machine type of the GPU's family. Default `g2-standard-8` for `l4`, `n1-standard-8` for `t4`. |
 | `num_rows` | `number` | Optional. Rows for the root table `users`. Default `1000`. |
 | `launch_job` | `bool` | Optional. Default `false`. `true` launches the generation job from Terraform. |

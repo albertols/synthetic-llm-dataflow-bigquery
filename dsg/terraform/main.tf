@@ -39,6 +39,9 @@ locals {
 
   relationships_uri    = "config/relationships/gcp_public_fk_example.yaml"
   max_dataflow_workers = 1
+  # The generation launch's Flex launcher VM: both launches set it and pass it
+  # as launcher_machine_type, so the generation record names the VM it ran on.
+  launcher_machine_type = "e2-standard-8"
 
   # The GPU fixes the machine family, and the launcher derives the vLLM dtype
   # from it (config/generator.yaml, ADR 0043). bf16 needs compute capability
@@ -211,6 +214,7 @@ export NUM_ROWS=${var.num_rows}
 
 export MAX_DATAFLOW_WORKERS=${local.max_dataflow_workers}
 export GPU=${var.gpu}
+export LAUNCHER_MACHINE_TYPE=${local.launcher_machine_type}
 export MACHINE_TYPE=${local.machine_type}
 export ACCELERATOR="${local.gpu.accelerator}"
 FILE

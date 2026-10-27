@@ -36,6 +36,7 @@ locals {
     embedder_uri          = local.embedder_uri
     gpu                   = var.gpu
     sdk_containers        = "single"
+    launcher_machine_type = local.launcher_machine_type
     vllm_max_model_len    = "8192"
     reference_rows_limit  = "10000"
     create_if_not_exists  = "false"
@@ -72,6 +73,7 @@ resource "google_dataflow_flex_template_job" "generation" {
   subnetwork              = local.subnetwork != "" ? local.subnetwork : null
   ip_configuration        = "WORKER_IP_PRIVATE"
   machine_type            = local.machine_type
+  launcher_machine_type   = local.launcher_machine_type
   num_workers             = 1
   max_workers             = local.max_dataflow_workers
   # One SDK process per GPU worker: every process would otherwise start its

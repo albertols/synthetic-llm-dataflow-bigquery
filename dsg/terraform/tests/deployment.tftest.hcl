@@ -126,6 +126,10 @@ run "terraform_launch" {
     condition     = length(google_dataflow_flex_template_job.generation) == 1 && google_dataflow_flex_template_job.generation[0].ip_configuration == "WORKER_IP_PRIVATE" && google_dataflow_flex_template_job.generation[0].container_spec_gcs_path == local.template_path
     error_message = "launch_job = true must launch the Flex Template on private worker IPs."
   }
+  assert {
+    condition     = google_dataflow_flex_template_job.generation[0].launcher_machine_type == "e2-standard-8" && google_dataflow_flex_template_job.generation[0].parameters["launcher_machine_type"] == google_dataflow_flex_template_job.generation[0].launcher_machine_type
+    error_message = "The launch runs on the launcher VM its launcher_machine_type parameter records."
+  }
 }
 
 run "t4_profile" {
