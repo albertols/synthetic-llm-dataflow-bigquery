@@ -203,6 +203,10 @@ def test_a_launch_on_a_37_row_source_lands_rows(reads, monkeypatch, capsys,
   # crash, and the gate is not tripped. How many LAND is the fake model
   # client's: it draws the key from the 37-value sample, so most batches
   # repeat one and go to the DLQ as schema.batch (not a BLOCKER rule).
+  # This PASSED pins today's gate, which passes a run even when it lands
+  # zero rows (Ruling R11). docs/ROADMAP.md records the follow-up: a run with
+  # valid_count == 0 and num_rows_requested > 0 should read FAILED (or WARN);
+  # change this assertion with that fix.
   assert run["status"] == "PASSED"
   assert run["valid_count"] == len(rows)
   assert run["valid_count"] + run["dlq_count"] == 1000
