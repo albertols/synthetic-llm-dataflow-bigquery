@@ -324,17 +324,19 @@ def resolve_batch_size(requested: int, num_rows: int) -> int:
 
 
 # argparse takes any unambiguous prefix of a long option. Flags added since
-# v0.6.1 (`--landing_*`, `--batch_*`, `--generator_defaults_digest`) made
-# these master spellings ambiguous; an exact entry wins over prefix matching,
-# so they keep reaching the same flag (ADR 0043). They are registered by
-# string only: they never appear in `option_strings`, `--help` or the launch
-# surface. Pinned by test_flag_abbreviations.
+# v0.6.1 (`--tables`, `--landing_*`, `--launcher_machine_type`, `--batch_*`,
+# `--gpu`, `--generator_defaults_digest`) made these master spellings
+# ambiguous; an exact entry wins over prefix matching, so they keep reaching
+# the same flag (ADR 0043). They are registered by string only: they never
+# appear in `option_strings`, `--help` or the launch surface. Pinned by
+# test_flag_abbreviations.
 _FLAG_ALIASES = {
-    "--landing_table":
-        ("--lan", "--land", "--landi", "--landin", "--landing", "--landing_"),
-    "--generate_fk_relationships":
-        ("--gen", "--gene", "--gener", "--genera", "--generat", "--generate"),
-    "--batch_size": ("--bat", "--batc", "--batch", "--batch_"),
+    "--thresholds_uri": ("--t",),
+    "--landing_table": ("--l", "--la", "--lan", "--land", "--landi", "--landin",
+                        "--landing", "--landing_"),
+    "--generate_fk_relationships": ("--g", "--ge", "--gen", "--gene", "--gener",
+                                    "--genera", "--generat", "--generate"),
+    "--batch_size": ("--ba", "--bat", "--batc", "--batch", "--batch_"),
 }
 
 

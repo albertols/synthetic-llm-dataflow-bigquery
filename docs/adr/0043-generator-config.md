@@ -594,11 +594,14 @@ at parse time, as on master (`run_pipeline.py::parse_args`). A file's `true`
 without its table is the no-op too.
 
 Every flag added since `v0.6.1` made some of master's abbreviations
-ambiguous. Hidden aliases keep master's unambiguous prefixes of three or more
-characters on the same flag (`--lan…` → `--landing_table`, `--bat…` →
-`--batch_size`, `--gen…` → `--generate_fk_relationships`); they never appear
-in `--help` or on a launch surface (`run_pipeline.py::_FLAG_ALIASES`, pinned
-by `fixtures/config_parity/abbreviations.json`).
+ambiguous. Hidden aliases keep every prefix master accepted, of any length,
+on the same flag (`--t` → `--thresholds_uri`, `--l…` → `--landing_table`,
+`--ba…` → `--batch_size`, `--g…` → `--generate_fk_relationships`); they never
+appear in `--help` or on a launch surface (`run_pipeline.py::_FLAG_ALIASES`,
+pinned by `fixtures/config_parity/abbreviations.json` for three or more
+characters and by `test_flag_abbreviations.py`'s hand list for the six
+shorter ones). A prefix master already refused as ambiguous (`--b`, `--en`)
+still stops the launch at parse time.
 
 ### Acceptance criteria of the revision
 
@@ -614,9 +617,10 @@ by `fixtures/config_parity/abbreviations.json`).
 10. **AC-A1-10** An explicit `vllm_dtype` wins over the GPU derivation, and the
     launcher logs the dtype and why
     (`test_serving_launch_keys.py::test_explicit_vllm_dtype_wins_over_the_gpu_derivation`).
-11. **AC-A1-11** Every abbreviation of three or more characters that master
-    accepted reaches the same flag
-    (`test_flag_abbreviations.py::test_every_master_abbreviation_reaches_the_same_dest`).
+11. **AC-A1-11** Every abbreviation that master accepted, of any length,
+    reaches the same flag
+    (`test_flag_abbreviations.py::test_every_master_abbreviation_reaches_the_same_dest`,
+    `::test_short_master_spelling_reaches_masters_flag`).
 
 ## Alternatives rejected
 

@@ -543,7 +543,9 @@ flowchart LR
 - **A second, usage-level change** for every launch, at parse time
   (Ruling 25): the new flags make some abbreviations ambiguous, so a launch
   typed with one now stops with argparse's usage error before it does
-  anything. No spelled-out flag changes.
+  anything. No spelled-out flag changes. *(Revised 2026-10-26: hidden aliases
+  put every abbreviation master accepted back on its flag, so no launch that
+  parsed on master stops here; see Ruling 25.)*
 
 ### Rulings
 
@@ -616,10 +618,10 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
     `--batch_size` (`--ba` … `--batch_`) or `--thresholds_uri` (`--t`)
     matched before are now ambiguous with `--landing_dataset`,
     `--batch_index` / `--batch_count` and `--tables`, and stop the launch at
-    parse time. *(Revised 2026-10-26: hidden aliases keep master's prefixes of
-    three or more characters on their flags, `--lan…`, `--bat…` and `--gen…`
-    included ([ADR 0043](0043-generator-config.md) R6); a shorter one, such as
-    `--t`, can still be ambiguous.)*
+    parse time. *(Revised 2026-10-26: hidden aliases keep every prefix master
+    accepted on its flag, `--t`, `--l…`, `--ba…` and `--g…` included
+    ([ADR 0043](0043-generator-config.md) R6); only a prefix master already
+    refused as ambiguous, such as `--b`, still stops the launch.)*
 26. **The Dataflow Solution Guides copy** ships neither `composer/` nor
     `scripts/launch/`; it ships `example_isolated_forest.yaml`, and its form of
     a whole-model launch is the launcher's `--tables=all` (batches in
@@ -692,11 +694,10 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
   batch's margin to the Flex launcher's 12 minutes
   ([Dataflow: troubleshoot Flex Templates](https://cloud.google.com/dataflow/docs/guides/troubleshoot-templates))
   and lowers K where a margin is thin.
-- **Abbreviated flags.** Master's abbreviations of three or more characters
-  reach the same flags (hidden aliases, Ruling 25's revision). One- and
-  two-character ones a new flag shares can be ambiguous (`--t` matches
-  `--tables` and `--thresholds_uri`) and fail at parse time: spell the flag
-  out.
+- **Abbreviated flags.** Every abbreviation master accepted reaches the same
+  flag, `--t` → `--thresholds_uri` included (hidden aliases, Ruling 25's
+  revision). A prefix master already refused as ambiguous (`--b`) still fails
+  at parse time: spell the flag out.
 - **A held Airflow worker slot per running batch**, for the job's duration
   (D6), at most `SDFB_MAX_PARALLEL_JOBS` slots.
 - **A run id ending in `-bNN`**, written without a record and evaluated by a
