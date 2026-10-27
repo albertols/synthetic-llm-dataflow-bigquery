@@ -24,6 +24,7 @@ Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
 """
 from __future__ import annotations
 
+import argparse
 import ast
 import importlib.util
 import json
@@ -194,6 +195,32 @@ tables:
   T_E:
     pk: [E_ID]
 """
+
+
+@pytest.mark.parametrize("tables", ["explicit", "all"])
+def test_the_keys_a_mode_does_not_pass_are_the_ones_the_launcher_warns_about(
+    tables, monkeypatch):
+  """The mirror leaves out exactly the keys `warn_unused_launch_keys` would
+    flag as launch_option_unused in that mode (ADR 0045, Ruling 10): one
+    more and the DAG drops a key the launcher reads, one fewer and every
+    launch of that mode logs a WARNING."""
+  warned = []
+  monkeypatch.setattr(rp, "log_milestone",
+                      lambda name, **fields: warned.append(fields["key"]))
+  every_key = {
+      "reference_table": "p.src.A_TABLE",
+      "landing_table": "p.land.A_TABLE",
+      "ddl_uri": "gs://b/ddl.json",
+      "source_dataset": "p.src",
+      "landing_dataset": "p.land",
+  }
+  rp.warn_unused_launch_keys(argparse.Namespace(tables=tables, **every_key))
+  # The mirror's private sets are what is pinned.
+  under_all = M._UNREAD_UNDER_ALL  # pylint: disable=protected-access
+  under_explicit = M._UNREAD_UNDER_EXPLICIT  # pylint: disable=protected-access
+  unread = under_all if tables == "all" else under_explicit
+  assert {key.removeprefix("io.") for key in warned} == set(unread)
+  assert all(key.startswith("io.") for key in warned)
 
 
 @pytest.mark.parametrize("k", [1, 2, 3, 10])
