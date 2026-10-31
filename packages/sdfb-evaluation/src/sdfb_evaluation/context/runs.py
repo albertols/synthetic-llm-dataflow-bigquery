@@ -31,7 +31,7 @@ the one launch-context source that survives log retention.
 Each row carries the generation record when the generator wrote it
 (ADR 0044): the Dataflow job, the generator version and a JSON snapshot of
 the launch's config. The read is `SELECT *`, so a table created before
-those columns works too — its rows simply have none of them.
+those columns (or `status_reason`) works too — its rows simply have none of them.
 `runs_of_job` finds one Dataflow job's rows without knowing its tables.
 
 A whole-model launch (ADR 0045) runs batch jobs `B-bNN`, their tables
@@ -70,12 +70,14 @@ _RUNS_WINDOW_PAD = timedelta(minutes=10)
 _COLUMNS = ("run_id", "landing_table", "reference_table", "reference_digest",
             "valid_count", "num_rows_requested", "status", "created_at")
 # Read when present: three columns every validation_runs has always had, and
-# the generation record's fourteen (ADR 0044).
+# the generation record's fourteen (ADR 0044), then `status_reason` (why a
+# table was not generated).
 RECORD_READ_COLUMNS = ("engine", "model_uri", "env", "job_id", "job_name",
                        "launch_run_id", "generator_version", "launched_at",
                        "embedder_uri", "retrieval_method", "similarity", "seed",
                        "source_stats", "relationships_uri",
-                       "relationships_digest", "config_digest", "config")
+                       "relationships_digest", "config_digest", "config",
+                       "status_reason")
 
 
 def of_job(row_job_id: str | None, row_job_name: str | None, job_id: str | None,

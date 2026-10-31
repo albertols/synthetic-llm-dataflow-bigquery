@@ -304,6 +304,7 @@ _RECORD = {
     "relationships_uri": "config/relationships",
     "relationships_digest": "abcdefabcdef",
     "config_digest": "0123456789ab",
+    "status_reason": "[preflight P1] p.src.T: the source has no rows",
     "config": json.dumps({
         "config_version": 1,
         "values": {}
@@ -317,7 +318,7 @@ def test_runs_for_selects_star_and_reads_the_record(fake_bq):
       bq, quality_dataset=_QDS, landing_tables=[f"{DS}.users"], window=WINDOW)
   ((sql, _),) = bq.queries
   assert sql.startswith("SELECT *\n")
-  assert len(RECORD_READ_COLUMNS) == 17
+  assert len(RECORD_READ_COLUMNS) == 18
   for column in RECORD_READ_COLUMNS:
     assert row[column] == _RECORD[column], column
 
