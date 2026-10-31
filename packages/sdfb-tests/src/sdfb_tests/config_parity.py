@@ -422,9 +422,14 @@ def _run_single(tmp: Path, engine: str, seed: int) -> dict:
         validation_runs_sink=WriteToJsonLines(str(tmp / "vr"), num_shards=1),
     )
   return {
-      "landing": _normalise(_read_jsonl(tmp / "landing"), ()),
-      "dlq": _normalise(_read_jsonl(tmp / "dlq"), ("dlq_inserted_at",)),
-      "validation_runs": _normalise(_read_jsonl(tmp / "vr"), ("created_at",)),
+      "landing":
+          _normalise(_read_jsonl(tmp / "landing"), ()),
+      "dlq":
+          _normalise(_read_jsonl(tmp / "dlq"), ("dlq_inserted_at",)),
+      # `status_reason` (ADR 0045, revised 2026-10-31) is a column master
+      # never had; a PASSED row's is None, so dropping it compares the rest.
+      "validation_runs":
+          _normalise(_read_jsonl(tmp / "vr"), ("created_at", "status_reason")),
   }
 
 

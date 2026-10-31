@@ -14,8 +14,9 @@
 """The generation record's columns: appended to `validation_runs`, NULLABLE,
 and split between what the launcher knows and what a worker reads.
 
-Design: docs/DESIGN.md §7 Validation and the dead-letter queue
-(ADR 0044).
+Design: docs/DESIGN.md §4 Relational generation;
+§7 Validation and the dead-letter queue
+(ADR 0044, 0045).
 """
 from __future__ import annotations
 
@@ -29,6 +30,8 @@ from sdfb_core.validation.summary import RunSummary
 
 _ROOT = Path(__file__).resolve().parents[4]
 _SCHEMA = _ROOT / SCHEMA_PATH
+# The summary columns written before ADR 0044; `status_reason` joined the
+# schema AFTER the record columns (the 36th column, ADR 0045 revised).
 _N_SUMMARY = 21
 
 
@@ -42,9 +45,10 @@ def _by_name() -> dict[str, dict]:
 
 def test_the_schema_is_the_summary_then_the_record():
   names = [f["name"] for f in _fields()]
-  assert len(RunSummary.model_fields) == _N_SUMMARY
-  assert set(names[:_N_SUMMARY]) == set(RunSummary.model_fields)
-  assert names[_N_SUMMARY:] == list(RECORD_COLUMNS)
+  assert len(RunSummary.model_fields) == _N_SUMMARY + 1
+  assert set(names[:_N_SUMMARY]) | {names[-1]} == set(RunSummary.model_fields)
+  assert names[-1] == "status_reason"
+  assert names[_N_SUMMARY:-1] == list(RECORD_COLUMNS)
 
 
 def test_record_columns_are_nullable_typed_and_documented():

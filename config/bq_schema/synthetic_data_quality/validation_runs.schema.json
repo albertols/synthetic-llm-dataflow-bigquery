@@ -13,7 +13,7 @@
   {"name": "dlq_by_rule", "type": "STRING", "mode": "NULLABLE", "description": "JSON map rule_id -> count (PARSE_JSON to query)."},
   {"name": "blocker_failure_ratio", "type": "FLOAT", "mode": "NULLABLE", "description": "Configured gate for this env (from thresholds.yml)."},
   {"name": "observed_blocker_ratio", "type": "FLOAT", "mode": "NULLABLE", "description": "blocker_count / the rows generated \u2014 valid_count + dlq_count, minus the DLQ counts of any excluded_blocker_rules (ADR 0038: an excluded rule leaves BOTH sides of the ratio)."},
-  {"name": "status", "type": "STRING", "mode": "NULLABLE", "description": "PASSED | FAILED_BLOCKER."},
+  {"name": "status", "type": "STRING", "mode": "NULLABLE", "description": "PASSED | FAILED_BLOCKER | FAILED_PREFLIGHT."},
   {"name": "excluded_blocker_rules", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0038 \u2014 rule_ids left out of blocker_count (comma-separated); pk.duplicate on a table whose declared pk: the source disproved."},
   {"name": "source_repeat_share", "type": "FLOAT", "mode": "NULLABLE", "description": "ADR 0038 \u2014 share of the SOURCE child's rows repeating a key value (1 - key_values/children over the fan-out histogram)."},
   {"name": "landing_repeat_share", "type": "FLOAT", "mode": "NULLABLE", "description": "ADR 0038 \u2014 pk.duplicate over the rows generated (valid_count + row.duplicate); the landing table's key-repeat share."},
@@ -33,5 +33,6 @@
   {"name": "relationships_uri", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 relational.relationships_uri as resolved; the model itself is embedded in config."},
   {"name": "relationships_digest", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 sha12 of every loaded relationship model (the relationships_loaded milestone's sha); NULL when no model was loaded."},
   {"name": "config_digest", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 sha12 of config.values as canonical JSON, launch identity excluded: same digest, same generator config."},
-  {"name": "config", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 JSON text of the generation snapshot: config_version, values (a valid --config_uri file), provenance, overridden, derived (cache_keys), thresholds, relationships, beam, launcher, batch. PARSE_JSON or JSON_VALUE to query."}
+  {"name": "config", "type": "STRING", "mode": "NULLABLE", "description": "ADR 0044 \u2014 JSON text of the generation snapshot: config_version, values (a valid --config_uri file), provenance, overridden, derived (cache_keys), thresholds, relationships, beam, launcher, batch. PARSE_JSON or JSON_VALUE to query."},
+  {"name": "status_reason", "type": "STRING", "mode": "NULLABLE", "description": "Why status is not PASSED: the BLOCKER gate's sentence, or the preflight stop that skipped the table (FAILED_PREFLIGHT). NULL on PASSED rows and on rows written before this column."}
 ]

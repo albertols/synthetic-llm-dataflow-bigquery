@@ -388,8 +388,8 @@ export const validationRunsRowSchema = z.object({
   blocker_failure_ratio: z.number().nullable(),
   /** blocker_count / the rows generated — valid_count + dlq_count, minus the DLQ counts of any excluded_blocker_rules (ADR 0038: an excluded rule leaves BOTH sides of the ratio). */
   observed_blocker_ratio: z.number().nullable(),
-  /** PASSED | FAILED_BLOCKER. */
-  status: z.enum(["PASSED","FAILED_BLOCKER"]).nullable(),
+  /** PASSED | FAILED_BLOCKER | FAILED_PREFLIGHT. */
+  status: z.enum(["PASSED","FAILED_BLOCKER","FAILED_PREFLIGHT"]).nullable(),
   /** ADR 0038 — rule_ids left out of blocker_count (comma-separated); pk.duplicate on a table whose declared pk: the source disproved. */
   excluded_blocker_rules: z.string().nullable(),
   /** ADR 0038 — share of the SOURCE child's rows repeating a key value (1 - key_values/children over the fan-out histogram). */
@@ -430,6 +430,8 @@ export const validationRunsRowSchema = z.object({
   config_digest: z.string().nullable(),
   /** ADR 0044 — JSON text of the generation snapshot: config_version, values (a valid --config_uri file), provenance, overridden, derived (cache_keys), thresholds, relationships, beam, launcher, batch. PARSE_JSON or JSON_VALUE to query. */
   config: z.string().nullable(),
+  /** Why status is not PASSED: the BLOCKER gate's sentence, or the preflight stop that skipped the table (FAILED_PREFLIGHT). NULL on PASSED rows and on rows written before this column. */
+  status_reason: z.string().nullable(),
 });
 export type ValidationRunsRow = z.infer<typeof validationRunsRowSchema>;
 
@@ -538,7 +540,7 @@ export const vocabularies = {
   "evaluation_profiles.side": ["source","synthetic","reference","holdout","both"],
   "evaluation_row_flags.check": ["exact_copy","near_copy","nearest_record","detectable"],
   "evaluation_row_flags.source_set": ["R","E","H","source"],
-  "validation_runs.status": ["PASSED","FAILED_BLOCKER"],
+  "validation_runs.status": ["PASSED","FAILED_BLOCKER","FAILED_PREFLIGHT"],
   "rag_chunks.chunk_kind": ["row_doc","free_text_col"],
 } as const;
 
@@ -1553,6 +1555,11 @@ export const bqTables = {
       },
       {
         "name": "config",
+        "type": "STRING",
+        "mode": "NULLABLE"
+      },
+      {
+        "name": "status_reason",
         "type": "STRING",
         "mode": "NULLABLE"
       }

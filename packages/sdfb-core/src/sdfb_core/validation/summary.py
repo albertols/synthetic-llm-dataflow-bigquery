@@ -17,12 +17,14 @@ The Beam pipeline counts valid rows and DLQ entries (grouped by
 ``rule_id``), then builds a :class:`RunSummary`. If the fraction of
 BLOCKER-severity failures exceeds ``blocker_failure_ratio`` the gate
 raises :class:`BlockerThresholdExceeded`, which fails the Dataflow job
+when the launch is explicit; a whole-model batch records the verdict
+instead (ADR 0045, revised 2026-10-31)
 (skill: validation-mode-a §"Failing the job").
 
 REF: .claude/skills/validation-mode-a.md
 
 Design: docs/DESIGN.md §4 Relational generation
-(ADR 0038).
+(ADR 0038, 0045).
 """
 
 from __future__ import annotations
@@ -60,6 +62,10 @@ BLOCKER_RULE_IDS = frozenset({
 
 STATUS_PASSED = "PASSED"
 STATUS_FAILED_BLOCKER = "FAILED_BLOCKER"
+STATUS_FAILED_PREFLIGHT = "FAILED_PREFLIGHT"
+# Column budget for `status_reason`: a preflight stop can be a long
+# multi-line explanation; the row keeps its first STATUS_REASON_MAX chars.
+STATUS_REASON_MAX = 1000
 
 
 class BlockerThresholdExceeded(  # noqa: N818 — name fixed by validation-mode-a skill
@@ -99,11 +105,20 @@ class RunSummary(BaseModel):
   landing_repeat_share: float | None = None
   repeat_share_delta: float | None = None
   repeat_share_within_tolerance: bool | None = None
+  # Why `status` is not PASSED: the BLOCKER gate's sentence, or the
+  # preflight stop that skipped the table. None on PASSED rows.
+  status_reason: str | None = None
 
-  def to_bq_row(self) -> dict:
+  def to_bq_row(self, *, with_status_reason: bool = True) -> dict:
     """JSON-load-shaped row. ``dlq_by_rule`` is a JSON string so the
-        column can be a plain STRING (robust under FILE_LOADS)."""
+        column can be a plain STRING (robust under FILE_LOADS).
+
+        ``with_status_reason=False`` drops the key: the column may not
+        exist on an un-migrated table and FILE_LOADS rejects unknown
+        fields."""
     row = self.model_dump()
+    if not with_status_reason:
+      del row["status_reason"]
     row["dlq_by_rule"] = json.dumps(
         row["dlq_by_rule"], sort_keys=True, default=str)
     return row
@@ -187,7 +202,7 @@ def build_run_summary(
   status = (
       STATUS_FAILED_BLOCKER
       if observed > thresholds.blocker_failure_ratio else STATUS_PASSED)
-  return RunSummary(
+  summary = RunSummary(
       run_id=run_id,
       reference_digest=reference_digest,
       reference_table=reference_table,
@@ -211,21 +226,67 @@ def build_run_summary(
       repeat_share_delta=delta,
       repeat_share_within_tolerance=within,
   )
+  if status == STATUS_FAILED_BLOCKER:
+    return summary.model_copy(
+        update={"status_reason": blocker_gate_reason(summary)})
+  return summary
+
+
+def preflight_failed_summary(
+    *,
+    run_id: str,
+    reference_table: str,
+    landing_table: str,
+    engine: str,
+    model_uri: str,
+    env: str,
+    num_rows_requested: int,
+    reason: str,
+    created_at: str | None = None,
+) -> RunSummary:
+  """The ``validation_runs`` row of a table a preflight stop skipped.
+
+    Nothing was generated, so every count is zero and there is no
+    reference digest; ``reason`` is cut to :data:`STATUS_REASON_MAX`.
+    """
+  return RunSummary(
+      run_id=run_id,
+      reference_digest="",
+      reference_table=reference_table,
+      landing_table=landing_table,
+      engine=engine,
+      model_uri=model_uri,
+      env=env,
+      num_rows_requested=num_rows_requested,
+      valid_count=0,
+      dlq_count=0,
+      blocker_count=0,
+      dlq_by_rule={},
+      blocker_failure_ratio=0.0,
+      observed_blocker_ratio=0.0,
+      status=STATUS_FAILED_PREFLIGHT,
+      created_at=created_at or datetime.now(tz=UTC).isoformat(),
+      status_reason=reason[:STATUS_REASON_MAX],
+  )
+
+
+def blocker_gate_reason(summary: RunSummary) -> str:
+  """The sentence the BLOCKER gate raises (and a recorded row carries)."""
+  # The same denominator `observed_blocker_ratio` was computed over
+  # — an excluded rule is out of both (`gate_total`), so the
+  # message never prints a ratio the operator cannot reproduce.
+  total = gate_total(
+      summary.valid_count,
+      summary.dlq_by_rule,
+      [r for r in summary.excluded_blocker_rules.split(",") if r],
+  )
+  return (f"BLOCKER failures {summary.blocker_count}/{total} = "
+          f"{summary.observed_blocker_ratio:.4f} exceeds gate "
+          f"{summary.blocker_failure_ratio:.4f} (env={summary.env}, "
+          f"run_id={summary.run_id})")
 
 
 def evaluate_blocker_gate(summary: RunSummary) -> None:
   """Raise :class:`BlockerThresholdExceeded` if the summary failed the gate."""
   if summary.status == STATUS_FAILED_BLOCKER:
-    # The same denominator `observed_blocker_ratio` was computed over
-    # — an excluded rule is out of both (`gate_total`), so the
-    # message never prints a ratio the operator cannot reproduce.
-    total = gate_total(
-        summary.valid_count,
-        summary.dlq_by_rule,
-        [r for r in summary.excluded_blocker_rules.split(",") if r],
-    )
-    raise BlockerThresholdExceeded(
-        f"BLOCKER failures {summary.blocker_count}/{total} = "
-        f"{summary.observed_blocker_ratio:.4f} exceeds gate "
-        f"{summary.blocker_failure_ratio:.4f} (env={summary.env}, "
-        f"run_id={summary.run_id})")
+    raise BlockerThresholdExceeded(blocker_gate_reason(summary))
