@@ -607,7 +607,7 @@ export const generatorGuides: Readonly<Record<GeneratorKnobId, GeneratedGuide>> 
     "tip": "The default is an estimate; read each batch launch's margin to the 12-minute window and adjust."
   },
   "max_parallel_jobs": {
-    "purpose": "How many batch jobs scripts/launch/run_model.py runs at once. The Composer DAG's tables=all branch takes its cap from the Airflow Variable SDFB_MAX_PARALLEL_JOBS instead.",
+    "purpose": "How many batch jobs run at once: scripts/launch/run_model.py reads it, and the Composer DAG's tables=all branch reads it at parse time, overlaid by sdfb_env.yaml; the Airflow Variable SDFB_MAX_PARALLEL_JOBS wins when set.",
     "up": "The batches finish sooner; each job holds its workers' GPUs, so stay inside the GPU quota.",
     "down": "One at a time (the default): never more GPUs than one job asks for."
   },
