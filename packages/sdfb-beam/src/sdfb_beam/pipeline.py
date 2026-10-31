@@ -32,7 +32,7 @@ REFs:
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
 §6 Throughput; §7 Validation and the dead-letter queue; §8 Configuration
 (ADR 0019, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0034, 0036, 0037, 0038,
-0043, 0044).
+0043, 0044, 0045).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -47,6 +47,7 @@ from __future__ import annotations
 import functools
 import hashlib
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -143,6 +144,12 @@ class PipelineConfig:
   landing_table: str = ""
   thresholds: Thresholds | None = None
   fail_on_blocker: bool = True
+  # A whole-model batch records the BLOCKER verdict in validation_runs
+  # instead of failing the job (ADR 0045, revised 2026-10-31).
+  blocker_verdict_only: bool = False
+  # False when the live validation_runs table lacks status_reason, so
+  # FILE_LOADS gets no unknown field.
+  write_status_reason: bool = True
   # RAG layer (WS2 §4b). rag_chunks_table threads the READ path into the
   # worker ctx (self-gating on data); embedder identity pins the vector
   # space and must come from the ORIGINAL embedder URI (driver-side).
@@ -451,7 +458,9 @@ def build_pipeline(
 
   # §12 — run-level summary row + BLOCKER gate. Only wired when a
   # validation_runs sink is supplied; happy-path DirectRunner tests that
-  # don't assert run metadata omit it.
+  # don't assert run metadata omit it. Under `blocker_verdict_only` the
+  # gate logs and yields instead of raising; a `SkippedTable` row rides
+  # the same job (`write_skipped_validation_run`).
   if validation_runs_sink is not None:
     thresholds = config.thresholds or Thresholds(
         env="dev", blocker_failure_ratio=1.0)
@@ -483,6 +492,8 @@ def build_pipeline(
                         config.model_uri,
                     "excluded_blocker_rules":
                         tuple(config.gate_excluded_rules),
+                    "write_status_reason":
+                        config.write_status_reason,
                     "source_repeat_share":
                         config.source_repeat_share,
                     "repeat_share_tolerance":
@@ -494,7 +505,7 @@ def build_pipeline(
             dlq_by_rule=beam.pvalue.AsSingleton(dlq_by_rule),
         ))
     write_result = summary_rows | f"{label_prefix}WriteValidationRun" >> validation_runs_sink
-    if config.fail_on_blocker:
+    if config.fail_on_blocker or config.blocker_verdict_only:
       gate_kwargs = {}
       load_jobs = getattr(write_result, "destination_load_jobid_pairs", None)
       if load_jobs is not None:
@@ -505,7 +516,8 @@ def build_pipeline(
         # expose no WriteResult and keep the sibling wiring.
         gate_kwargs["wait_on_write"] = beam.pvalue.AsIter(load_jobs)
       _ = summary_rows | f"{label_prefix}BlockerGate" >> beam.ParDo(
-          _BlockerGateDoFn(), **gate_kwargs)
+          _BlockerGateDoFn(fail_job=config.fail_on_blocker and
+                           not config.blocker_verdict_only), **gate_kwargs)
     result["validation_run"] = summary_rows
 
   return result
@@ -629,6 +641,16 @@ class TableSpec:
   # DECLARED relationship model. The launcher collects them across
   # every spec and announces the launch's adjustments once.
   adjustments: tuple[ModelAdjustment, ...] = ()
+
+
+@dataclass(frozen=True)
+class SkippedTable:
+  """A table the launcher skipped at preflight: its prebuilt
+    `FAILED_PREFLIGHT` validation_runs row, written by the same job."""
+
+  landing_table: str
+  row: dict
+  validation_runs_sink: beam.PTransform
 
 
 def _edge_key_pools(parent_valid, edge: FkEdgeSpec, prefix: str):
@@ -1162,7 +1184,11 @@ def _route_parent_edges(spec: TableSpec, valid_by_landing: dict[str, Any],
 
 
 def build_relational_pipeline(
-    p: beam.Pipeline, specs: list[TableSpec]) -> dict[str, dict[str, Any]]:
+    p: beam.Pipeline,
+    specs: list[TableSpec],
+    skipped: Sequence[SkippedTable] = (),
+    *,
+    record: LaunchRecord | None = None) -> dict[str, dict[str, Any]]:
   """N tables, ONE pipeline (ADR 0030): each table's full subgraph
     (pools, RAG, generation, validation, DLQ, gate) label-namespaced by
     its landing table name; a child's FK columns take the parent's
@@ -1170,7 +1196,9 @@ def build_relational_pipeline(
     ordering barrier — children never generate before parents. One
     worker fleet, one vLLM ignition, serves every table.
 
-    ``specs`` must arrive parents-first (`plan_launch` order). Returns
+    ``specs`` must arrive parents-first (`plan_launch` order). Each
+    ``skipped`` table gets its prebuilt row written, with ``record``.
+    Returns
     {landing_table: build_pipeline result}."""
   valid_by_landing: dict[str, Any] = {}
   results: dict[str, dict[str, Any]] = {}
@@ -1194,7 +1222,22 @@ def build_relational_pipeline(
     )
     valid_by_landing[spec.config.landing_table] = results[
         spec.config.landing_table]["valid"]
+  for s in skipped:
+    write_skipped_validation_run(p, s, record=record)
   return results
+
+
+def write_skipped_validation_run(p: beam.Pipeline, skipped: SkippedTable, *,
+                                 record: LaunchRecord | None) -> None:
+  """Write a skipped table's prebuilt `FAILED_PREFLIGHT` row, with the
+    launch record's columns and the worker fields when ``record`` is given."""
+  name = skipped.landing_table.rsplit(".", 1)[-1]
+  _ = (
+      p
+      | f"{name}/SkippedSeed" >> beam.Create([None])
+      | f"{name}/BuildSkippedValidationRun" >> beam.ParDo(
+          _BuildValidationRunDoFn(record=record, prebuilt_row=skipped.row))
+      | f"{name}/WriteSkippedValidationRun" >> skipped.validation_runs_sink)
 
 
 def _population_branch(
@@ -1390,6 +1433,7 @@ def _build_validation_run_row(
     excluded_blocker_rules: tuple[str, ...] = (),
     source_repeat_share: float | None = None,
     repeat_share_tolerance: float,
+    write_status_reason: bool = True,
 ) -> dict:
   """Driver of the single validation_runs row (side inputs are singletons).
 
@@ -1433,7 +1477,7 @@ def _build_validation_run_row(
         within_tolerance=summary.repeat_share_within_tolerance,
         excluded_blocker_rules=summary.excluded_blocker_rules,
     )
-  return summary.to_bq_row()
+  return summary.to_bq_row(with_status_reason=write_status_reason)
 
 
 class _BuildValidationRunDoFn(beam.DoFn):
@@ -1446,11 +1490,17 @@ class _BuildValidationRunDoFn(beam.DoFn):
     when that version is not the launcher's (the rows are the worker's
     code's, so the row records the worker's)."""
 
-  def __init__(self, *, record: LaunchRecord | None, row_kwargs: dict[str,
-                                                                      Any]):
+  def __init__(self,
+               *,
+               record: LaunchRecord | None,
+               row_kwargs: dict[str, Any] | None = None,
+               prebuilt_row: dict | None = None):
     super().__init__()
+    if (row_kwargs is None) == (prebuilt_row is None):
+      raise ValueError("give exactly one of row_kwargs and prebuilt_row")
     self._record = record
     self._row_kwargs = row_kwargs
+    self._prebuilt_row = prebuilt_row
     self._worker: dict[str, Any] = {}
 
   def setup(self):
@@ -1471,12 +1521,15 @@ class _BuildValidationRunDoFn(beam.DoFn):
     self._worker = {"job_id": job_id, "generator_version": worker_version}
 
   # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
-  def process(self, unused_seed, valid_count, dlq_by_rule):
-    row = _build_validation_run_row(
-        unused_seed,
-        valid_count=valid_count,
-        dlq_by_rule=dlq_by_rule,
-        **self._row_kwargs)
+  def process(self, unused_seed, valid_count=None, dlq_by_rule=None):
+    if self._prebuilt_row is not None:
+      row = dict(self._prebuilt_row)
+    else:
+      row = _build_validation_run_row(
+          unused_seed,
+          valid_count=valid_count,
+          dlq_by_rule=dlq_by_rule,
+          **self._row_kwargs)
     if self._record is not None:
       row.update(self._record.columns)
       row.update(self._worker)
@@ -1497,9 +1550,23 @@ class _BlockerGateDoFn(beam.DoFn):
     which left zero trace in `synthetic_data_quality.validation_runs`.
     """
 
+  def __init__(self, *, fail_job: bool = True):
+    super().__init__()
+    self._fail_job = fail_job
+
   # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, row: dict, wait_on_write=None):  # pylint: disable=unused-argument
-    if row.get("status") == STATUS_FAILED_BLOCKER:
+    if row.get("status") == STATUS_FAILED_BLOCKER and not self._fail_job:
+      log_milestone(
+          "blocker_gate_recorded",
+          level=logging.ERROR,
+          table=(row.get("landing_table") or "").rsplit(".", 1)[-1],
+          run_id=row.get("run_id"),
+          blocker_count=row.get("blocker_count"),
+          observed=row.get("observed_blocker_ratio"),
+          gate=row.get("blocker_failure_ratio"),
+      )
+    elif row.get("status") == STATUS_FAILED_BLOCKER:
       raise BlockerThresholdExceeded(
           f"run_id={row.get('run_id')} blocker_count={row.get('blocker_count')} "
           f"observed={row.get('observed_blocker_ratio')} > "

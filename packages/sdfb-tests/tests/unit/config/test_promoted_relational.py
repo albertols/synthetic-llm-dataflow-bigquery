@@ -230,7 +230,11 @@ def test_the_launcher_threads_the_config_into_every_consumer():
   reports = _calls(run_pipeline, "report_model_adjustments")
   assert len(reports) == 2
   assert {_kw(c, "config") for c in reports} == {"config_of(args)"}
-  (row,) = _calls(_SRC / "pipeline.py", "_BuildValidationRunDoFn")
+  # The skipped-table writer builds the DoFn too, from a prebuilt row.
+  (row,) = [
+      c for c in _calls(_SRC / "pipeline.py", "_BuildValidationRunDoFn")
+      if any(k.arg == "row_kwargs" for k in c.keywords)
+  ]
   (kwargs,) = [k.value for k in row.keywords if k.arg == "row_kwargs"]
   assert isinstance(kwargs, ast.Dict)
   tolerance = {
