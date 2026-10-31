@@ -836,6 +836,10 @@ def test_verdict_inputs_follow_a_files_landing_dataset(deployed):
   assert m.verdict_inputs(params, {"io": {
       "dlq_table": "p.q.dlq"
   }}, layers)["landing_dataset"] == "sdfb-proj.synthetic_data"
-  for bad in ("", "  ", None, 7, ["p.d"]):
+  # A null is unset, as the launcher reads it (ADR 0043): the params' value.
+  assert m.verdict_inputs(params, {"io": {
+      "landing_dataset": None
+  }}, layers)["landing_dataset"] == "sdfb-proj.synthetic_data"
+  for bad in ("", "  ", 7, ["p.d"]):
     with pytest.raises(m.PlanError, match=r"io\.landing_dataset"):
       m.verdict_inputs(params, {"io": {"landing_dataset": bad}}, layers)

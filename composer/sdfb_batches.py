@@ -1118,20 +1118,21 @@ def verdict_inputs(params: Mapping[str, Any], config: ConfigInput,
   config file's io.landing_dataset, which must then be a non-empty
   `project.dataset`; else the one `whole_model_params` resolves) and the
   client type (`params` after `with_file_hardware`). A file's keys win, as
-  in the launcher (ADR 0043). Plain JSON, for an XCom."""
+  in the launcher (ADR 0043), and a null is unset: it leaves the key to the
+  params and the overlay, as the launcher leaves it to the flag. Plain JSON,
+  for an XCom."""
   io = parse_config(config).get("io") or {}
   if not isinstance(io, Mapping):
     raise PlanError("config_uri: section 'io' must be a mapping")
   table = io.get("validation_runs_table")
   if table is None:
     table = _overlaid(layers)["validation_runs_table"]
-  if "landing_dataset" in io:
-    landing = io["landing_dataset"]
-    if not isinstance(landing, str) or not landing.strip():
-      raise PlanError(f"config_uri's io.landing_dataset must be a non-empty "
-                      f"project.dataset, got {landing!r}")
-  else:
+  landing = io.get("landing_dataset")
+  if landing is None:
     landing = cli_text(whole_model_params(params, layers)["landing_dataset"])
+  elif not isinstance(landing, str) or not landing.strip():
+    raise PlanError(f"config_uri's io.landing_dataset must be a non-empty "
+                    f"project.dataset, got {landing!r}")
   return {
       "validation_runs_table": cli_text(table).strip(),
       "landing_dataset": landing.strip(),
