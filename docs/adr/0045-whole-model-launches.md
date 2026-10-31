@@ -341,7 +341,8 @@ regional GPU quota. Ruling 13 says where each cap lives:
   when Composer parses the file into the mapped task's
   `max_active_tis_per_dag`: Airflow fixes a mapped task's concurrency at parse
   time ([Airflow: dynamic task mapping](https://airflow.apache.org/docs/apache-airflow/stable/authoring-and-scheduling/dynamic-task-mapping.html)).
-  A change to either applies at the next parse, without a re-import. A value
+  The Variable applies at the next parse, without a re-import; an overlay
+  change takes the next import (it is a DAGs-folder file). A value
   that is no integer fails the DAG's import with a `ValueError` naming where
   it came from. The overlay key has no marker: an environment that wants a
   cap above 1 writes `config: launch: {max_parallel_jobs: "2"}` into its
@@ -628,7 +629,8 @@ flowchart LR
   fake client's gate never failed a job. `FAILED_PREFLIGHT` and NO ROW fail
   on every client.
 - **Timing**: `validation_runs` rows land by FILE_LOADS before a job reaches
-  DONE (the gate's `wait_on_write` edge orders the load first), so
+  DONE, because a job is DONE only after its load stage finished
+  (`wait_on_write` orders the raising gate after the load), so
   `all_done` after `start_batch` sees every DONE job's rows. A job that
   failed wrote none, or some: the leaf reports what it finds.
 - **The evaluator** leaves a `FAILED_PREFLIGHT` table out of the
@@ -641,7 +643,8 @@ flowchart LR
   and the rows carry them.
 - **The CLI**: `--tables=all` without `--batch_index` exits 1 after every
   batch ran, naming each skipped table ("N table(s) skipped at preflight; the
-  others ran"); a BLOCKER verdict does not change the exit.
+  others ran"); a BLOCKER verdict does not change the exit (a Flex launcher
+  exits 0: the job is its own record, and the rows carry the skips).
   `scripts/launch/run_model.py` prints, after its per-batch lines,
   `Per-table verdicts (a DONE batch may hold a failed table, ADR 0045):` and
   the `bq query` that lists the launch's tables that did not pass (or

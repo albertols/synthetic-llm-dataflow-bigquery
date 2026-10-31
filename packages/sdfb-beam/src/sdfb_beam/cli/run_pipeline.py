@@ -2533,7 +2533,8 @@ def _run_model(args: argparse.Namespace, beam_argv: list[str]) -> int:
     # (the Composer DAG, scripts/launch/run_model.py) returns its rc: the
     # milestones and FAILED_PREFLIGHT rows carry the skips, and a non-zero
     # exit would read as a failed launch.
-    if rc == 0 and skipped and args.batch_index is None:
+    # A Flex launcher exits 0 too: the job is its own record.
+    if rc == 0 and skipped and args.batch_index is None and not on_flex():
       raise SystemExit(_skipped_tables_text(skipped))
     return rc
   failures: list[str] = []
@@ -4363,7 +4364,9 @@ def _prep_relational_specs(
       } if read_ahead is not None else {})
       # Collect-then-fail (2026-08-22 launch lesson): one table's
       # preflight stop must not HIDE the remaining tables' constraint
-      # reports and blockers — prep everything, abort once with all.
+      # reports and blockers — prep everything, abort once with all (the
+      # explicit path's rule; under a whole-model batch a failed component's
+      # later members are not prepped, see the block header above).
       try:
         specs.append(
             _prepare_table_spec(

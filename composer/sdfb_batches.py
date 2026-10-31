@@ -977,9 +977,9 @@ def parallel_cap(layers: Layers, variables: Mapping[str, str]) -> int:
   when its text is non-empty, else launch.max_parallel_jobs of generator.yaml
   overlaid by sdfb_env.yaml; never below 1. A non-integer raises ValueError
   naming where it came from."""
-  text = variables.get(_PARALLEL_VARIABLE)
+  text = str(variables.get(_PARALLEL_VARIABLE) or "").strip()
   source = _PARALLEL_VARIABLE
-  if text is None or text == "":
+  if text == "":
     text = cli_text(_overlaid(layers)["max_parallel_jobs"])
     source = _PARALLEL_KEY
   try:

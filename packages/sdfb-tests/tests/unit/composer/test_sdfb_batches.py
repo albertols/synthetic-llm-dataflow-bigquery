@@ -769,6 +769,8 @@ def test_parallel_cap_reads_the_variable_then_the_overlaid_yaml(deployed):
   assert m.parallel_cap(layers, {}) == 2
   assert m.parallel_cap(layers, {"SDFB_MAX_PARALLEL_JOBS": "3"}) == 3  # wins
   assert m.parallel_cap(layers, {"SDFB_MAX_PARALLEL_JOBS": ""}) == 2  # unset
+  assert m.parallel_cap(layers, {"SDFB_MAX_PARALLEL_JOBS": "  "}) == 2  # blank
+  assert m.parallel_cap(layers, {"SDFB_MAX_PARALLEL_JOBS": " 3 "}) == 3
   assert m.parallel_cap(layers, {"SDFB_MAX_PARALLEL_JOBS": "0"}) == 1  # floor
   with pytest.raises(ValueError, match="SDFB_MAX_PARALLEL_JOBS"):
     m.parallel_cap(layers, {"SDFB_MAX_PARALLEL_JOBS": "two"})

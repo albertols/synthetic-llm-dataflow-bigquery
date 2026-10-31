@@ -542,6 +542,16 @@ def test_a_one_batch_plan_without_an_index_exits_one_after_a_skip(
   assert _only_row(direct, "T_EVENTS_LOG")["status"] == "FAILED_PREFLIGHT"
 
 
+def test_a_flex_one_batch_launch_exits_zero_after_a_skip(
+    model_uri, direct, monkeypatch, capsys):
+  monkeypatch.setenv(_FAIL_TABLE, "T_EVENTS_LOG")
+  monkeypatch.setenv(rp._FLEX_ENTRY_ENV, "x")  # pylint: disable=protected-access
+  assert _main(model_uri, "--client_type=fake", "--runner=DirectRunner",
+               "--validation_runs_table=p.q.validation_runs") == 0
+  assert _only_row(direct, "T_EVENTS_LOG")["status"] == "FAILED_PREFLIGHT"
+  assert _milestones(capsys.readouterr().err, "model_batch_partial")
+
+
 def test_a_component_fails_together_and_its_child_names_the_parent(
     tmp_path, direct, monkeypatch):
   model = tmp_path / "chain.yaml"

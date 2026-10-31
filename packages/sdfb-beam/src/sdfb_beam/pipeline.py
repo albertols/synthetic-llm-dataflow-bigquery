@@ -1539,6 +1539,9 @@ class _BuildValidationRunDoFn(beam.DoFn):
 class _BlockerGateDoFn(beam.DoFn):
   """Fails the Dataflow job when the run summary tripped the BLOCKER gate.
 
+    With ``fail_job=False`` (a whole-model batch) it logs
+    ``blocker_gate_recorded`` and yields instead.
+
     ``wait_on_write`` is an optional ``AsIter`` side input over the
     upstream sink's FILE_LOADS ``destination_load_jobid_pairs`` (see
     `build_pipeline`). It is never read in the body — its only purpose is
