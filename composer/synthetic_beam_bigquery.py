@@ -33,10 +33,12 @@ sdfb_env.yaml < the trigger's values < a `config_uri` file.
 Runtime infra comes from Composer Variables, read at parse time:
 PROJECT_ID, REGION, DATAFLOW_SUBNET, SA_DATAFLOW, the optional
 DATAFLOW_NETWORK_TAGS (semicolon-separated VPC network tags for the launcher
-VM and the workers) and SDFB_MAX_PARALLEL_JOBS (how many batch jobs of a
-`tables=all` launch run at once, default 1: Airflow fixes a mapped task's
-concurrency when it parses the file, so a change takes effect at the next
-parse, without a re-import).
+VM and the workers) and the optional SDFB_MAX_PARALLEL_JOBS (how many
+batch jobs of a `tables=all` launch run at once: the Variable when it is
+set, else launch.max_parallel_jobs of generator.yaml overlaid by
+sdfb_env.yaml, 1 by default; never below 1, `sdfb_batches.parallel_cap`).
+Airflow fixes a mapped task's concurrency when it parses the file, so a
+change to either takes effect at the next parse, without a re-import.
 
 The two branches::
 
@@ -48,11 +50,14 @@ The two branches::
            └─► batch_bodies ─► start_batch[b00 … bNN] ─┬─► collect_landed
                (all: the       mapped: one Flex launch │   (all_done)
                 planned         per batch, at most     │       │
-                bodies)         SDFB_MAX_PARALLEL_JOBS │       ▼
-                                at once, each waiting  │  trigger_evaluation_batches
+                bodies)         max_parallel_jobs at   │       ▼
+                                once, each waiting     │  trigger_evaluation_batches
                                 for its own job        │       ▼
                                                        │  wait_for_batch_evaluation_launch
-                                                       └─► fail_if_a_batch_failed
+                                                       ├─► fail_if_a_batch_failed
+                                                       └─► fail_if_a_table_failed
+                                                           (all_done: the launch's
+                                                            validation_runs rows)
 
 `route` (a `@task.branch`) resolves the launch's shape with
 `sdfb_batches.resolve_tables_mode`: a `config_uri` file's `launch.tables`
@@ -78,10 +83,10 @@ reads the model file (`planning_inputs`: a config file's
 relational.relationships_uri and launch.max_tables_per_job win over the
 params), plans with `sdfb_batches.launch_plan` (the plan each batch's
 launcher recomputes and checks against `batch_count`), pushes the bodies, the
-base run id, the batch count, the model file, the batches and the banner, and
-returns `batch_bodies`. That task only returns the bodies: Airflow maps a
-task only over another task's return value, and a branch's return value is
-the branch it takes.
+base run id, the batch count, the model file, the batches, the banner and the
+verdict inputs (`sdfb_batches.verdict_inputs`), and returns `batch_bodies`.
+That task only returns the bodies: Airflow maps a task only over another
+task's return value, and a branch's return value is the branch it takes.
 
 A launch passes only the keys whose value differs from generator.yaml, the
 launch identity and the yaml's digest (`launch_overrides`): a key it does not
@@ -117,6 +122,19 @@ those jobs' rows of `validation_runs` by the base run id, so every table is
 compared with the source its row names. With `run_evaluation` off, or no
 batch landed, the evaluation is skipped.
 
+A batch job ends DONE whatever its tables' gates found: each table's
+verdict is its `validation_runs` row (PASSED, FAILED_BLOCKER or
+FAILED_PREFLIGHT, with a `status_reason`). So `fail_if_a_table_failed`, once
+every batch has ended, reads the launch's rows by the base run id
+(`sdfb_batches.verdicts_query`, through `BigQueryHook`) and fails the run
+with `sdfb_batches.verdict_banner`, naming each planned table whose newest
+row is not PASSED or that has no row (its batch did not reach DONE). Under
+`client_type=fake` a FAILED_BLOCKER is informational. A `validation_runs`
+table without the `status_reason` column is read without it. With no
+`validation_runs_table` (the overlay's, or a config file's io key) nothing
+is recorded: the leaf skips with a warning, and the run's outcome is the
+batch jobs' alone. The evaluation of the DONE batches runs either way.
+
 Trigger rules, and why::
 
     task                              rule          why
@@ -146,6 +164,15 @@ Trigger rules, and why::
                                                     the explicit branch ran,
                                                     or `route` failed (which
                                                     fails the run itself)
+    fail_if_a_table_failed            all_done      fails when a planned
+                                                    table's newest
+                                                    validation_runs row is not
+                                                    PASSED, or has no row;
+                                                    skips when `route` planned
+                                                    no batch or the record is
+                                                    off; a FAILED_BLOCKER is
+                                                    informational with
+                                                    client_type=fake
 
 Run slot: a run stays running until the generation job ends (the first
 sensor waits for it, hours) and then until the evaluation's launch is over
@@ -321,9 +348,10 @@ row of a job that dies on the workers.
 
 What has run, and what has not. `scripts/composer/check_dags.py` imports
 this folder into a real Airflow 2.10.5 with the Google provider 12.0.0 and
-runs nine triggers through `dag.test()`, every Google call patched: the
-branch, the trigger rules, the mapped batches, the XComs and the launch
-bodies are Airflow's own. Not run against Google: the provider's sensor
+runs twelve triggers through `dag.test()`, every Google call patched (the
+`BigQueryHook` read of `fail_if_a_table_failed` is served the scenario's
+rows): the branch, the trigger rules, the mapped batches, the XComs and the
+launch bodies are Airflow's own. Not run against Google: the provider's sensor
 raising when the job it watches ends in a state it was not told to expect
 (JOB_STATE_FAILED for a dead launcher; read in its source; if an installed
 provider only poked on, the sensor would fail at its one-hour timeout and
@@ -334,8 +362,11 @@ page names the state a launch that timed out ends in: if it is not one of
 the four the callback closes, the sensor ends on its timeout and the
 callback writes nothing, and the playbook has the one-line check); the
 environment's retries; a sensor in reschedule mode getting its
-`on_failure_callback` called as written; and the callbacks' two hook calls
-(the standalone DAG's own).
+`on_failure_callback` called as written; the callbacks' two hook calls
+(the standalone DAG's own); and the leaf's read of `validation_runs`
+(`insert_job` and `result()`, as the callbacks call them; BigQuery's text
+for a missing column is the one `sdfb_batches.MISSING_REASON_COLUMN`
+matches, from BigQuery's error messages, not from a run).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -382,17 +413,19 @@ service_account = Variable.get("SA_DATAFLOW")
 # Optional: semicolon-separated VPC network tags for the launcher VM and the
 # workers (firewall/egress rules keyed on tags). Empty ⇒ no tag experiments.
 network_tags = Variable.get("DATAFLOW_NETWORK_TAGS", default_var="").strip()
+# Optional: empty takes the overlaid yaml's launch.max_parallel_jobs.
+max_parallel_jobs = Variable.get("SDFB_MAX_PARALLEL_JOBS", default_var="")
 VARIABLES = {
     "PROJECT_ID": project_id,
     "REGION": region,
     "DATAFLOW_SUBNET": subnetwork,
     "SA_DATAFLOW": service_account,
     "DATAFLOW_NETWORK_TAGS": network_tags,
+    "SDFB_MAX_PARALLEL_JOBS": max_parallel_jobs,
 }
 # ADR 0045: at most this many batch jobs at once. Each holds its workers'
 # GPUs, so the regional GPU quota bounds it. Parse-time (see the header).
-MAX_PARALLEL_JOBS = max(
-    1, int(Variable.get("SDFB_MAX_PARALLEL_JOBS", default_var="1")))
+MAX_PARALLEL_JOBS = sdfb_batches.parallel_cap(LAYERS, VARIABLES)
 
 # The DAG's id, template, buckets, labels and job names (the overlay's
 # `dag:` and `infra:`, and the Variables above), and every param's default.
@@ -982,8 +1015,9 @@ def route(**context) -> str:
   Rulings R16, R16b).
   Explicit: pushes `body` and
   returns `start_sdfb`. All: plans the batches and pushes the bodies, the
-  base run id, the batch count, the model file, the batches and the banner,
-  and returns `batch_bodies`. Pushes `mode` (the resolved branch) either
+  base run id, the batch count, the model file, the batches, the banner and
+  `verdict_inputs` (what `fail_if_a_table_failed` reads with), and returns
+  `batch_bodies`. Pushes `mode` (the resolved branch) either
   way, once everything else is pushed. A PlanError fails the task without a
   retry: the same inputs fail the same way every time.
   """
@@ -1029,6 +1063,8 @@ def route(**context) -> str:
           key: plan[key] for key in ("bodies", "base_run_id", "batch_count",
                                     "relationships_uri", "batches", "banner")
       }
+      pushed["verdict_inputs"] = sdfb_batches.verdict_inputs(
+          params, config, LAYERS)
       branch = "batch_bodies"
   except sdfb_batches.PlanError as error:
     raise AirflowFailException(str(error)) from error
@@ -1100,6 +1136,88 @@ def fail_if_a_batch_failed(**context) -> None:
   raise AirflowFailException(
       "a start_batch instance failed: its batch job did not reach "
       "JOB_STATE_DONE; the batches that landed were evaluated")
+
+
+def _verdict_rows(table: str, base: str) -> tuple[list[dict], bool]:
+  """(the launch's `validation_runs` rows, whether they carry
+  `status_reason`).
+
+  A table created before the `status_reason` column refuses the query that
+  names it: it is read again without the column. Any other error is raised
+  as it is, so the environment's retries apply.
+  """
+  from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
+
+  def read(with_reason: bool) -> list[dict]:
+    job = BigQueryHook().insert_job(
+        project_id=project_id,
+        configuration={
+            "query": {
+                "query":
+                    sdfb_batches.verdicts_query(table, with_reason=with_reason),
+                "useLegacySql":
+                    False,
+                "queryParameters": [{
+                    "name": "base",
+                    "parameterType": {
+                        "type": "STRING"
+                    },
+                    "parameterValue": {
+                        "value": base
+                    },
+                }],
+            }
+        },
+    )
+    return [dict(row) for row in job.result()]
+
+  try:
+    return read(with_reason=True), True
+  except Exception as error:  # pylint: disable=broad-exception-caught  # re-raised unless it is the missing column
+    if not sdfb_batches.is_missing_reason_column(str(error)):
+      raise
+  return read(with_reason=False), False
+
+
+@task(task_id="fail_if_a_table_failed", trigger_rule=TriggerRule.ALL_DONE)
+def fail_if_a_table_failed(**context) -> None:
+  """A leaf that fails the run when a planned table did not pass.
+
+  all_done, so it judges the rows once every batch has ended, a failed one
+  too: a planned table with no row fails (its batch did not reach DONE). It
+  never reads a batch job's state, which is `fail_if_a_batch_failed`'s job.
+  Skips when `route` planned no batch (an explicit launch, a failed route),
+  and with a warning when the launch records no `validation_runs`.
+  """
+  import logging
+
+  ti = context["ti"]
+  base_run_id = ti.xcom_pull(task_ids="route", key="base_run_id")
+  if not base_run_id:
+    raise AirflowSkipException("route planned no batch: no table verdicts")
+  inputs = ti.xcom_pull(task_ids="route", key="verdict_inputs")
+  runs_table = inputs["validation_runs_table"]
+  if not runs_table:
+    logging.warning("per-table verdicts are not recorded: no "
+                    "validation_runs_table; the run's outcome is the batch "
+                    "jobs' alone")
+    raise AirflowSkipException("no validation_runs_table: no table verdicts")
+  batches = ti.xcom_pull(task_ids="route", key="batches")
+  landing_dataset = inputs["landing_dataset"]
+  tables = [f"{landing_dataset}.{t}" for b in batches for t in b["tables"]]
+  rows, reason_column = _verdict_rows(runs_table, base_run_id)
+  verdicts = sdfb_batches.table_verdicts(tables, rows)
+  # A fake client's blocker is no model's: informational.
+  fail_on_blocker = inputs["client_type"] != "fake"
+  banner = sdfb_batches.verdict_banner(
+      verdicts,
+      batches=batches,
+      landing_dataset=landing_dataset,
+      fail_on_blocker=fail_on_blocker,
+      reason_column=reason_column)
+  logging.info("%s", banner)
+  if sdfb_batches.failed_tables(verdicts, fail_on_blocker=fail_on_blocker):
+    raise AirflowFailException(banner)
 
 
 def _run_evaluation_gate(params, ti, ts_nodash, **_):
@@ -1520,8 +1638,10 @@ with models.DAG(
       on_failure_callback=_close_batch_running_row,
   )
   failed = fail_if_a_batch_failed()
+  table_failed = fail_if_a_table_failed()
 
   routed >> planned  # pylint: disable=pointless-statement  # Airflow dependency operator
   start_batch >> landed  # pylint: disable=pointless-statement  # Airflow dependency operator
   trigger_evaluation_batches >> wait_for_batch_evaluation_launch  # pylint: disable=pointless-statement  # Airflow dependency operator
   start_batch >> failed  # pylint: disable=pointless-statement  # Airflow dependency operator
+  start_batch >> table_failed  # pylint: disable=pointless-statement  # Airflow dependency operator

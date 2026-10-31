@@ -20,7 +20,7 @@ Airflow is not a laptop dependency, so the file is read with `ast`; what it
 computes is `composer/sdfb_batches.py`'s, run here on a deployed folder
 (conftest.py's `deployed`). The real-Airflow run of the same file is
 `scripts/composer/check_dags.py`: with `SDFB_DAG_BODIES` naming its output
-(all nine scenarios, on a folder of `composer/*.py`, `generator.yaml` and
+(all twelve scenarios, on a folder of `composer/*.py`, `generator.yaml` and
 `sdfb_env.yaml`), `test_the_harness_run_is_the_plans` checks every scenario
 against the plan's expectations, and test_launch_helpers.py compares its
 explicit launches with master's.
@@ -59,11 +59,11 @@ _EXPLICIT_CHAIN = ("start_sdfb", "run_evaluation_gate", "wait_for_generation",
 # The `all` branch's tasks.
 _ALL_TASKS = ("batch_bodies", "start_batch", "collect_landed",
               "trigger_evaluation_batches", "wait_for_batch_evaluation_launch",
-              "fail_if_a_batch_failed")
+              "fail_if_a_batch_failed", "fail_if_a_table_failed")
 # What `route` pushes; every pull of a `route` key names one of them.
 _ROUTE_KEYS = {
     "body", "bodies", "base_run_id", "batch_count", "relationships_uri",
-    "batches", "banner", "mode"
+    "batches", "banner", "verdict_inputs", "mode"
 }
 _ROUTE_PULL = re.compile(r"task_ids=['\"]route['\"], key=['\"](\w+)['\"]")
 
@@ -290,8 +290,15 @@ def test_the_house_variables_and_one_of_its_own():
   assert isinstance(variables, ast.Dict)
   assert {k.value for k in variables.keys if isinstance(k, ast.Constant)} == {
       "PROJECT_ID", "REGION", "DATAFLOW_SUBNET", "SA_DATAFLOW",
-      "DATAFLOW_NETWORK_TAGS"
+      "DATAFLOW_NETWORK_TAGS", "SDFB_MAX_PARALLEL_JOBS"
   }
+  # Empty unless set: the cap then comes from the overlaid yaml.
+  (cap,) = [
+      call for call in _calls(DAG, "get")
+      if isinstance(call.func, ast.Attribute) and _name(call.func.value) ==
+      "Variable" and ast.literal_eval(call.args[0]) == "SDFB_MAX_PARALLEL_JOBS"
+  ]
+  assert ast.literal_eval(_kw(cap, "default_var")) == ""
 
 
 @pytest.mark.parametrize("version", ["0.7.0", "0.7.0_20261026T1200"])
@@ -483,8 +490,8 @@ def test_batches_are_one_mapped_launch_capped_by_the_variable():
   assert ast.literal_eval(_kw(start, "retries")) == 0
   assert ast.unparse(_kw(start,
                          "max_active_tis_per_dag")) == ("MAX_PARALLEL_JOBS")
-  assert ("Variable.get('SDFB_MAX_PARALLEL_JOBS', default_var='1')"
-          in ast.unparse(_assignments()["MAX_PARALLEL_JOBS"]))
+  assert ast.unparse(_assignments()["MAX_PARALLEL_JOBS"]) == (
+      "sdfb_batches.parallel_cap(LAYERS, VARIABLES)")
   (expand,) = _calls(DAG, "expand")
   # A task's plain return value: Airflow refuses to map over a custom key.
   assert ast.unparse(_kw(expand, "body")) == "planned"
@@ -642,7 +649,8 @@ def test_the_all_branch_runs_on_what_the_dag_declares(deployed):
       constants=M.dag_constants(layers, HARNESS.AIRFLOW_VARIABLES),
       layers=layers)
   assert (k, plan["batch_count"]) == (10, 2)
-  assert set(plan) == (_ROUTE_KEYS - {"body", "mode"}) | {"bodies"}
+  assert set(plan) == (_ROUTE_KEYS -
+                       {"body", "mode", "verdict_inputs"}) | {"bodies"}
   json.dumps(plan)  # XComs: plain JSON
   first = plan["bodies"][0]["launchParameter"]["parameters"]
   # The datasets the launcher requires under tables=all, from the overlay.
@@ -650,12 +658,33 @@ def test_the_all_branch_runs_on_what_the_dag_declares(deployed):
   assert first["landing_dataset"] == "sdfb-proj.synthetic_data"
 
 
+def test_a_failed_table_fails_the_run_from_the_rows():
+  leaf = _task("fail_if_a_table_failed")
+  assert "TriggerRule.ALL_DONE" in ast.unparse(leaf.decorator_list[0])
+  text = ast.unparse(leaf)
+  assert ("sdfb_batches.table_verdicts" in text and
+          "sdfb_batches.failed_tables" in text)
+  assert ("sdfb_batches.verdict_banner" in text and
+          "AirflowFailException" in text)
+  assert "xcom_pull(task_ids='route', key='verdict_inputs')" in text
+  assert ("start_batch", "table_failed") in _edges()
+  assert _variable_of("fail_if_a_table_failed") == "table_failed"
+
+
+def test_the_verdict_read_retries_only_without_the_reason_column():
+  helper = _functions()["_verdict_rows"]
+  text = ast.unparse(helper)
+  assert "sdfb_batches.is_missing_reason_column" in text
+  # anything else re-raises
+  assert "with_reason=False" in text and text.count("raise") >= 1
+
+
 # -- the real-Airflow run ----------------------------------------------------
 def _harness_output() -> dict:
   path = os.environ.get(HARNESS_OUTPUT_ENV)
   if not path:
     pytest.skip(f"set {HARNESS_OUTPUT_ENV} to a check_dags.py output of all "
-                f"nine scenarios")
+                f"twelve scenarios")
   return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
@@ -710,12 +739,37 @@ def test_the_harness_run_is_the_plans():
   assert fails["task_states"]["start_batch[1]"] == "failed"
   assert fails["evaluation_body"]["launchParameter"]["parameters"][
       "generation_job_ids"] == "fakejob-start_batch-0"
+  # The table verdicts: the rows decide, after every DONE batch was
+  # evaluated.
+  table_fails = output["all_table_fails"]["task_states"]
+  assert table_fails["fail_if_a_table_failed"] == "failed"
+  assert table_fails["fail_if_a_batch_failed"] == "skipped"
+  assert table_fails["trigger_evaluation_batches"] == "success"
+  assert output["all_table_fails"]["evaluation_body"]["launchParameter"][
+      "parameters"]["generation_job_ids"] == (
+          "fakejob-start_batch-0,fakejob-start_batch-1")
+  assert fails["task_states"]["fail_if_a_table_failed"] == "failed"
+  assert output["all_old_validation_runs"]["task_states"][
+      "fail_if_a_table_failed"] == "failed"
+  for name in ("all_one_batch", "all_two_batches", "all_from_overlay",
+               "explicit_param_file_says_all"):
+    assert output[name]["task_states"]["fail_if_a_table_failed"] == (
+        "success"), name
+  # The overlay's model, with no trigger value and no file.
+  overlay = output["all_from_overlay"]
+  assert overlay["gcs_reads"] == [
+      "gs://sdfb-bucket/synthetic/relationships/model.yaml"
+  ]
+  for body in overlay["bodies"]:
+    assert body["launchParameter"]["parameters"]["relationships_uri"] == (
+        MARKERS["SDFB_RELATIONSHIPS_URI"])
   plan_fails = output["all_plan_fails"]
   assert plan_fails["task_states"]["route"] == "failed"
   assert plan_fails["bodies"] == [] and plan_fails["evaluation_body"] is None
   assert not [s for s in plan_fails["task_states"].values() if s == "success"]
   for name in ("all_one_batch", "all_two_batches", "all_batch_fails",
-               "explicit_param_file_says_all"):
+               "explicit_param_file_says_all", "all_from_overlay",
+               "all_table_fails", "all_old_validation_runs"):
     result = output[name]
     assert _states(result, "start_sdfb") == {"start_sdfb": "skipped"}, name
     for body in result["bodies"]:

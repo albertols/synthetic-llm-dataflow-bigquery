@@ -41,6 +41,12 @@ The patches:
   launch whose `jobName` ends with one of the scenario's `fail_job_suffixes`
   raises instead (a batch job that fails).
 - `DataflowJobStatusSensor.poke`: returns True (the job reached the state).
+- `BigQueryHook.__init__` / `BigQueryHook.insert_job`: no connection; each
+  query is recorded (its text and parameters) and answered with the
+  scenario's `verdict_rows` (the launch's `validation_runs` rows). A
+  scenario without them makes any query raise. With `reason_column_missing`
+  a query naming `status_reason` raises BigQuery's missing-column error (a
+  table created before the column), and the query without it is answered.
 
 Output (`--out`), one entry per scenario, keys `OUTPUT_KEYS`:
 
@@ -80,7 +86,11 @@ Airflow's own Jinja (`{{ params.x }}`) is not a marker and is left alone.
 
 Scenarios (`SCENARIOS`): the first four (`MASTER_SCENARIOS`) are the ones
 master's generation DAG can run; the rest need the single DAG with
-`tables` (`explicit` | `all`) and `config_uri`.
+`tables` (`explicit` | `all`) and `config_uri`. The last three judge a
+`tables=all` launch by its tables' rows: the overlay's relationship model
+with no trigger value (`all_from_overlay`), a table whose gate failed while
+every batch job reached DONE (`all_table_fails`), and a `validation_runs`
+table without the `status_reason` column (`all_old_validation_runs`).
 
 Venv recipe (macOS 12 x86_64; this is what ran on 2026-10-27). Python 3.11:
 3.12 and 3.14 with the latest providers fail, there is no `google-re2`
@@ -111,7 +121,7 @@ generator.yaml copied, not linked:
       --markers packages/sdfb-tests/tests/fixtures/config_parity/dag_markers.json \\
       --out $S/dag_bodies.json
 
-Without `--scenario` all nine run. `SDFB_DAG_BODIES=$S/dag_bodies.json`
+Without `--scenario` all twelve run. `SDFB_DAG_BODIES=$S/dag_bodies.json`
 then lets `packages/sdfb-tests/tests/unit/composer/test_generation_dag.py`
 and `test_launch_helpers.py` check that output against the plan and master.
 
@@ -154,7 +164,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from collections.abc import Iterable, Mapping
+import types
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from unittest import mock
@@ -167,8 +178,9 @@ MARKER = re.compile(r"\{\{([A-Z_]+)\}\}")
 EXIT_FORBIDDEN_GCS = 3
 GET_CONN_READ = "<GCSHook.get_conn>"
 _FILLED_SUFFIXES = (".py", ".yaml", ".yml", ".json")
-# The Airflow Variables the DAGs read (anonymised; DATAFLOW_NETWORK_TAGS and
-# SDFB_MAX_PARALLEL_JOBS keep their in-DAG defaults).
+# The Airflow Variables the DAGs read (anonymised; DATAFLOW_NETWORK_TAGS
+# keeps its in-DAG default, and SDFB_MAX_PARALLEL_JOBS unset leaves the cap
+# to the overlaid yaml).
 AIRFLOW_VARIABLES = {
     "PROJECT_ID": "sdfb-proj",
     "REGION": "europe-west3",
@@ -188,20 +200,59 @@ _CONFIG_SAYS_ALL = ("launch:\n"
                     "  tables: all\n"
                     "relational:\n"
                     f"  relationships_uri: {_MODEL_URI}\n")
+# The landing dataset the overlay's landing table names.
+_LANDING = "sdfb-proj.synthetic_data"
+_BLOCKER_REASON = ("BLOCKER failures 9/10 = 0.9000 exceeds gate 0.0500 "
+                   "(env=prd, run_id=manual-b00-00-X_TABLE)")
 
 
-def _scenario(
-    run_conf: Mapping[str, Any],
-    *,
-    markers: Mapping[str, str] | None = None,
-    gcs_objects: Mapping[str, str] | None = None,
-    fail_job_suffixes: Iterable[str] = ()
-) -> dict[str, Any]:
+def _row(table: str,
+         run_id: str,
+         status: str = "PASSED",
+         reason: str | None = None,
+         *,
+         with_reason: bool = True) -> dict[str, Any]:
+  """One `validation_runs` row of a launch's table, as the leaf reads it."""
+  row: dict[str, Any] = {
+      "landing_table": f"{_LANDING}.{table}",
+      "run_id": run_id,
+      "status": status,
+      "created_at": "2026-10-31T10:00:00+00:00",
+  }
+  if with_reason:
+    row["status_reason"] = reason
+  return row
+
+
+# Both tables passed: in one batch, and in two.
+_ONE_BATCH_PASSED = (_row("X_TABLE", "manual-b00-00-X_TABLE"),
+                     _row("Y_TABLE", "manual-b00-01-Y_TABLE"))
+_TWO_BATCHES_PASSED = (_row("X_TABLE", "manual-b00-00-X_TABLE"),
+                       _row("Y_TABLE", "manual-b01-00-Y_TABLE"))
+# X_TABLE's gate failed; Y_TABLE passed.
+_TABLE_FAILS_ROWS = (_row("X_TABLE", "manual-b00-00-X_TABLE", "FAILED_BLOCKER",
+                          _BLOCKER_REASON), _TWO_BATCHES_PASSED[1])
+# A table without the status_reason column: X_TABLE stopped in preflight.
+_OLD_TABLE_ROWS = (_row(
+    "X_TABLE", "manual-b00-00-X_TABLE", "FAILED_PREFLIGHT", with_reason=False),
+                   _row("Y_TABLE", "manual-b01-00-Y_TABLE", with_reason=False))
+
+
+def _scenario(run_conf: Mapping[str, Any],
+              *,
+              markers: Mapping[str, str] | None = None,
+              gcs_objects: Mapping[str, str] | None = None,
+              fail_job_suffixes: Iterable[str] = (),
+              verdict_rows: Sequence[Mapping[str, Any]] | None = None,
+              reason_column_missing: bool = False) -> dict[str, Any]:
   return {
       "run_conf": dict(run_conf),
       "markers": dict(markers or {}),
       "gcs_objects": dict(gcs_objects or {}),
       "fail_job_suffixes": tuple(fail_job_suffixes),
+      "verdict_rows": (None if verdict_rows is None else tuple(
+          dict(r) for r in verdict_rows)),
+      "reason_column_missing": reason_column_missing,
   }
 
 
@@ -255,7 +306,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
                   gcs_objects={
                       _CONFIG_URI: _CONFIG_SAYS_ALL,
                       _MODEL_URI: _MODEL_TEXT
-                  }),
+                  },
+                  verdict_rows=_ONE_BATCH_PASSED),
     "all_one_batch":
         _scenario(
             {
@@ -263,7 +315,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
                 "relationships_uri": _MODEL_URI,
                 "max_tables_per_job": "10"
             },
-            gcs_objects={_MODEL_URI: _MODEL_TEXT}),
+            gcs_objects={_MODEL_URI: _MODEL_TEXT},
+            verdict_rows=_ONE_BATCH_PASSED),
     "all_two_batches":
         _scenario(
             {
@@ -271,8 +324,10 @@ SCENARIOS: dict[str, dict[str, Any]] = {
                 "relationships_uri": _MODEL_URI,
                 "max_tables_per_job": "1"
             },
-            gcs_objects={_MODEL_URI: _MODEL_TEXT}),
-    # The second batch's job fails; the first is still evaluated.
+            gcs_objects={_MODEL_URI: _MODEL_TEXT},
+            verdict_rows=_TWO_BATCHES_PASSED),
+    # The second batch's job fails; the first is still evaluated. Its table
+    # has no row, so the table verdicts fail too.
     "all_batch_fails":
         _scenario(
             {
@@ -281,7 +336,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
                 "max_tables_per_job": "1"
             },
             gcs_objects={_MODEL_URI: _MODEL_TEXT},
-            fail_job_suffixes=("-b01",)),
+            fail_job_suffixes=("-b01",),
+            verdict_rows=_TWO_BATCHES_PASSED[:1]),
     # K = 0 is refused by the planner: nothing launches.
     "all_plan_fails":
         _scenario(
@@ -291,6 +347,35 @@ SCENARIOS: dict[str, dict[str, Any]] = {
                 "max_tables_per_job": "0"
             },
             gcs_objects={_MODEL_URI: _MODEL_TEXT}),
+    # No trigger value and no file: the overlay's relationship model (the
+    # fixture marker names the object below).
+    "all_from_overlay":
+        _scenario({"tables": "all"},
+                  gcs_objects={_MODEL_URI: _MODEL_TEXT},
+                  verdict_rows=_ONE_BATCH_PASSED),
+    # Every batch job reaches DONE, but X_TABLE's gate failed: the rows fail
+    # the run, and both batches are evaluated.
+    "all_table_fails":
+        _scenario(
+            {
+                "tables": "all",
+                "relationships_uri": _MODEL_URI,
+                "max_tables_per_job": "1"
+            },
+            gcs_objects={_MODEL_URI: _MODEL_TEXT},
+            verdict_rows=_TABLE_FAILS_ROWS),
+    # A validation_runs table created before the status_reason column: the
+    # read without it still fails the run on X_TABLE's preflight stop.
+    "all_old_validation_runs":
+        _scenario(
+            {
+                "tables": "all",
+                "relationships_uri": _MODEL_URI,
+                "max_tables_per_job": "1"
+            },
+            gcs_objects={_MODEL_URI: _MODEL_TEXT},
+            verdict_rows=_OLD_TABLE_ROWS,
+            reason_column_missing=True),
 }
 MASTER_SCENARIOS = ("explicit_l4", "explicit_t4", "explicit_fk_group",
                     "explicit_eval_off")
@@ -368,6 +453,7 @@ class Recorder:
     self.scenario = scenario
     self.launches: list[tuple[str, int, dict[str, Any]]] = []
     self.gcs_reads: list[str] = []
+    self.bq_queries: list[tuple[str, list]] = []
 
   def download(self, bucket_name: str, object_name: str, *_: Any,
                **__: Any) -> bytes:
@@ -385,6 +471,24 @@ class Recorder:
     self.gcs_reads.append(GET_CONN_READ)
     raise RuntimeError("check_dags: the DAG used a GCS client "
                        "(GCSHook.get_conn); only download is served")
+
+  def insert_job(self,
+                 configuration: Mapping[str, Any],
+                 project_id: str | None = None,
+                 **_: Any) -> Any:
+    """A BigQuery query job whose `result()` is the scenario's rows."""
+    del project_id  # the query is answered whatever the project
+    query = configuration["query"]
+    self.bq_queries.append(
+        (query["query"], list(query.get("queryParameters", []))))
+    rows = self.scenario["verdict_rows"]
+    if rows is None:
+      raise RuntimeError("check_dags: this scenario reads no validation_runs")
+    if self.scenario["reason_column_missing"] and ("status_reason"
+                                                   in query["query"]):
+      raise Exception(  # pylint: disable=broad-exception-raised  # BigQuery's error, as the client raises it
+          "400 Unrecognized name: status_reason at [1:35]")
+    return types.SimpleNamespace(result=lambda: iter([dict(r) for r in rows]))
 
   def execute(self, task: Any, context: Mapping[str, Any]) -> dict[str, Any]:
     ti = context["ti"]
@@ -445,6 +549,8 @@ def run_scenario(dag: Any, name: str) -> dict[str, Any]:
   scenario = SCENARIOS[name]
   recorder = Recorder(scenario)
   gcs = _airflow("airflow.providers.google.cloud.hooks.gcs").GCSHook
+  bigquery = _airflow(
+      "airflow.providers.google.cloud.hooks.bigquery").BigQueryHook
   operators = _airflow("airflow.providers.google.cloud.operators.dataflow")
   sensors = _airflow("airflow.providers.google.cloud.sensors.dataflow")
 
@@ -456,6 +562,9 @@ def run_scenario(dag: Any, name: str) -> dict[str, Any]:
   def download(*args: Any, **kwargs: Any) -> bytes:  # args[0]: the hook
     return recorder.download(*args[1:], **kwargs)
 
+  def insert_job(*args: Any, **kwargs: Any) -> Any:  # args[0]: the hook
+    return recorder.insert_job(*args[1:], **kwargs)
+
   when = logical_date(name)
   with mock.patch.object(gcs, "__init__", lambda *_, **__: None), \
       mock.patch.object(gcs, "download", download), \
@@ -463,7 +572,9 @@ def run_scenario(dag: Any, name: str) -> dict[str, Any]:
       mock.patch.object(operators.DataflowStartFlexTemplateOperator,
                         "execute", execute), \
       mock.patch.object(sensors.DataflowJobStatusSensor, "poke",
-                        lambda *_, **__: True):
+                        lambda *_, **__: True), \
+      mock.patch.object(bigquery, "__init__", lambda *_, **__: None), \
+      mock.patch.object(bigquery, "insert_job", insert_job):
     dag_run = dag.test(
         execution_date=when, run_conf=copy.deepcopy(scenario["run_conf"]))
   states = {}

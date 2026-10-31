@@ -1108,3 +1108,26 @@ def verdict_banner(verdicts: Mapping[str, Any], *,
     lines.append(f"  {table} | UNPLANNED | a row of a table the plan does not "
                  f"name")
   return "\n".join(lines)
+
+
+def verdict_inputs(params: Mapping[str, Any], config: ConfigInput,
+                   layers: Layers) -> dict[str, str]:
+  """What `fail_if_a_table_failed` judges a `tables=all` launch with:
+  the validation_runs table (a config file's io.validation_runs_table when
+  it sets one, empty included, ADR 0043; else the overlay's), the landing
+  dataset `whole_model_params` resolves, and the client type (`params`
+  after `with_file_hardware`). Plain JSON, for an XCom."""
+  io = parse_config(config).get("io") or {}
+  if not isinstance(io, Mapping):
+    raise PlanError("config_uri: section 'io' must be a mapping")
+  table = io.get("validation_runs_table")
+  if table is None:
+    table = _overlaid(layers)["validation_runs_table"]
+  return {
+      "validation_runs_table":
+          cli_text(table).strip(),
+      "landing_dataset":
+          cli_text(whole_model_params(params, layers)["landing_dataset"]),
+      "client_type":
+          cli_text(params.get("client_type")),
+  }

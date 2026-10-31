@@ -778,3 +778,42 @@ def test_parallel_cap_reads_the_variable_then_the_overlaid_yaml(deployed):
       encoding="utf-8")
   with pytest.raises(ValueError, match=r"launch\.max_parallel_jobs"):
     m.parallel_cap(m.load_layers(folder), {})
+
+
+def test_verdict_inputs_read_the_overlay_then_the_file(deployed):
+  m = _load()
+  layers = m.load_layers(deployed())
+  params = {**m.param_defaults(layers), "client_type": "fake"}
+  assert m.verdict_inputs(params, {}, layers) == {
+      "validation_runs_table":
+          "sdfb-proj.synthetic_data_quality.validation_runs",
+      "landing_dataset":
+          "sdfb-proj.synthetic_data",
+      "client_type":
+          "fake"
+  }
+  # A config file's io.validation_runs_table wins (ADR 0043), empty too.
+  for value in ("p.q.runs", ""):
+    file = {"io": {"validation_runs_table": value}}
+    assert m.verdict_inputs(params, file,
+                            layers)["validation_runs_table"] == value
+  # A file that leaves it unset, or null, keeps the overlay's.
+  for file in ({
+      "io": {
+          "dlq_table": "p.q.dlq"
+      }
+  }, {
+      "io": {
+          "validation_runs_table": None
+      }
+  }, {
+      "io": None
+  }):
+    assert m.verdict_inputs(params, file, layers)["validation_runs_table"] == (
+        "sdfb-proj.synthetic_data_quality.validation_runs")
+  # A trigger's landing_dataset is kept.
+  assert m.verdict_inputs({
+      **params, "landing_dataset": "p.land"
+  }, {}, layers)["landing_dataset"] == "p.land"
+  with pytest.raises(m.PlanError, match="io"):
+    m.verdict_inputs(params, {"io": "p.q.runs"}, layers)

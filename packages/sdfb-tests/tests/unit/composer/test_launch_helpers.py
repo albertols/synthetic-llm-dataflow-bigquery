@@ -496,7 +496,15 @@ def test_the_harness_evaluation_body_is_masters(scenario):
   if not path:
     pytest.skip(f"set {_HARNESS_OUTPUT_ENV} to a check_dags.py output")
   output = json.loads(Path(path).read_text(encoding="utf-8"))[scenario]
-  assert output["evaluation_body"] == _GOLDEN[scenario]["evaluation_body"]
+  body = output["evaluation_body"]
+  master = json.loads(json.dumps(_GOLDEN[scenario]["evaluation_body"]))
+  # As in test_explicit_evaluation_body_is_masters: the overlay's model
+  # reaches the evaluator; master passed generator.yaml's folder.
+  for key, marker in _overlay_set(scenario).items():
+    name = key.split(".", 1)[1]
+    assert body["launchParameter"]["parameters"].pop(name) == _MARKERS[marker]
+    master["launchParameter"]["parameters"].pop(name)
+  assert body == master
 
 
 @pytest.mark.parametrize(

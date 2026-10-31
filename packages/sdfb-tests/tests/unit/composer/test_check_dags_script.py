@@ -43,7 +43,8 @@ _BODY_KEY_PARAM = {"reference_table": "table_fqn"}
 _PLAN_SCENARIOS = [
     "explicit_l4", "explicit_t4", "explicit_fk_group", "explicit_eval_off",
     "explicit_param_file_says_all", "all_one_batch", "all_two_batches",
-    "all_batch_fails", "all_plan_fails"
+    "all_batch_fails", "all_plan_fails", "all_from_overlay", "all_table_fails",
+    "all_old_validation_runs"
 ]
 _EXPLICIT_TASKS = {
     "start_sdfb", "run_evaluation_gate", "wait_for_generation",
@@ -82,6 +83,17 @@ def test_scenarios_are_the_plans_list():
   assert M.SCENARIOS["explicit_param_file_says_all"]["run_conf"][
       "tables"] == "explicit"
   assert M.SCENARIOS["all_batch_fails"]["fail_job_suffixes"] == ("-b01",)
+  # The overlay's relationship model: no trigger value, no file.
+  assert M.SCENARIOS["all_from_overlay"]["run_conf"] == {"tables": "all"}
+  assert M.SCENARIOS["all_old_validation_runs"]["reason_column_missing"] is True
+  # Every launch that plans batches reads its validation_runs rows; the
+  # explicit ones and the refused plan read none.
+  with_rows = {n for n, s in M.SCENARIOS.items() if s["verdict_rows"]}
+  assert with_rows == {
+      n for n in M.SCENARIOS
+      if n.startswith("all_") or n == "explicit_param_file_says_all"
+  } - {"all_plan_fails"}
+  assert M.SCENARIOS["all_plan_fails"]["verdict_rows"] is None
 
 
 def test_output_schema_keys():
