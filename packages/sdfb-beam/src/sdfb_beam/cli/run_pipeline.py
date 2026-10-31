@@ -155,7 +155,11 @@ from sdfb_core.stats.source_stats import (
     PROFILER_VERSION,
     stats_profiler_version,
 )
-from sdfb_core.validation import Thresholds
+from sdfb_core.validation import (
+    STATUS_REASON_MAX,
+    Thresholds,
+    preflight_failed_summary,
+)
 from sdfb_core.version import generator_version
 
 from sdfb_beam.cli.preflight import (
@@ -193,6 +197,7 @@ from sdfb_beam.io.stats_store import BigQuerySourceStatsStore
 from sdfb_beam.pipeline import (
     FkEdgeSpec,
     PipelineConfig,
+    SkippedTable,
     TableSpec,
     build_pipeline,
     build_relational_pipeline,
@@ -949,6 +954,35 @@ def record_supported(table_fqn: str, resolution: ConfigResolution) -> bool:
                                       "validation_runs lacks the columns")
     return False
   return True
+
+
+def status_reason_supported(table_fqn: str) -> bool:
+  """Whether this launch's validation_runs rows can carry `status_reason`.
+
+    A table without the column, or one whose schema cannot be read, gets
+    rows without it, as before the column existed: FILE_LOADS would reject
+    an unknown field at the end of the job. One WARNING says why. Never
+    raises."""
+  reason = None
+  if not table_fqn:
+    reason = "no_table"
+  else:
+    try:
+      live = read_table_columns(table_fqn)
+    except Exception:  # pylint: disable=broad-exception-caught  # the column is optional: no failure here may stop a launch
+      reason = "schema_unreadable"
+    else:
+      if "status_reason" not in live:
+        reason = "missing_column"
+  if reason is None:
+    return True
+  log_milestone(
+      "status_reason_unsupported",
+      level=logging.WARNING,
+      table=table_fqn,
+      reason=reason,
+      note="validation_runs rows are written without status_reason")
+  return False
 
 
 @dataclass(frozen=True)
@@ -1918,6 +1952,24 @@ def plan_launch(
   return LaunchPlan(scenario=scenario, runs=runs, warnings=tuple(warnings))
 
 
+def batch_components(
+    plan: LaunchPlan,
+    registry: RelationshipRegistry) -> dict[str, frozenset[str]]:
+  """Each planned table's connected component within the plan, as landing
+    FQNs, itself included: a whole-model batch's unit of failure. A table
+    in no model is a component of its own."""
+  by_bare = {
+      r.landing_table.rsplit(".", 1)[-1]: r.landing_table for r in plan.runs
+  }
+  return {
+      run.landing_table:
+          frozenset({run.landing_table} | {
+              by_bare[name] for name in registry.component(
+                  run.landing_table.rsplit(".", 1)[-1]) if name in by_bare
+          }) for run in plan.runs
+  }
+
+
 def log_relationship_model(
     table_fqn: str,
     registry: RelationshipRegistry,
@@ -2470,9 +2522,16 @@ def _run_model(args: argparse.Namespace, beam_argv: list[str]) -> int:
   # ADR 0045: the dataset each table's (and a driving parent's) source is
   # read from, unless the model names another.
   args._source_dataset = args.source_dataset  # pylint: disable=protected-access
+  # `<bNN>: <table>` per table a batch skipped at preflight: each batch's
+  # namespace copies this list, so its appends land here.
+  args._skipped_tables = []  # pylint: disable=protected-access
+  skipped = args._skipped_tables  # pylint: disable=protected-access
   chosen = chosen_batches(args, launch)
   if len(chosen) == 1:
-    return _run_batch(args, beam_argv, registry, launch, chosen[0])
+    rc = _run_batch(args, beam_argv, registry, launch, chosen[0])
+    if rc == 0 and skipped:
+      raise SystemExit(_skipped_tables_text(skipped))
+    return rc
   failures: list[str] = []
   for index in chosen:
     label = launch.batches[index].label
@@ -2489,8 +2548,19 @@ def _run_model(args: argparse.Namespace, beam_argv: list[str]) -> int:
       failures.append(f"{label}: rc={rc}")
   if failures:
     raise SystemExit(f"{len(failures)} of {len(chosen)} batches failed; the "
-                     f"others ran:\n" + "\n".join(f"- {f}" for f in failures))
+                     f"others ran:\n" + "\n".join(f"- {f}" for f in failures) +
+                     ("\nskipped at preflight:\n" +
+                      "\n".join(f"- {s}" for s in skipped) if skipped else ""))
+  if skipped:
+    raise SystemExit(_skipped_tables_text(skipped))
   return 0
+
+
+def _skipped_tables_text(skipped: Sequence[str]) -> str:
+  """The exit message of a whole-model launch that skipped tables at
+    preflight and ran the rest."""
+  return (f"{len(skipped)} table(s) skipped at preflight; the others ran:\n" +
+          "\n".join(f"- {s}" for s in skipped))
 
 
 def _run_batch(args: argparse.Namespace, beam_argv: list[str],
@@ -2518,6 +2588,9 @@ def _run_batch(args: argparse.Namespace, beam_argv: list[str],
   batch_args.landing_table = ",".join(targets)
   # A pin describes one table; a model launch extracts every schema live.
   batch_args.ddl_uri = ""
+  # The connected component is the unit of failure: a component that fails
+  # preflight is skipped, and the BLOCKER gate records instead of raising.
+  batch_args._blocker_verdict_only = True  # pylint: disable=protected-access
   batch_args._record_batch = {  # pylint: disable=protected-access
       "index": index,
       "count": len(launch.batches),
@@ -3742,6 +3815,19 @@ def resolve_launch_row_docs_limit(args, reference_rows: list[dict]) -> int:
   return limit
 
 
+def validation_runs_sink_for(args) -> beam.PTransform | None:
+  """The validation_runs sink, or None when no table is named: a built
+    table's and a skipped table's rows go through the same one."""
+  if not args.validation_runs_table:
+    return None
+  return WriteToBigQuery(
+      table=args.validation_runs_table,
+      method=WriteToBigQuery.Method.FILE_LOADS,
+      write_disposition=BigQueryDisposition.WRITE_APPEND,
+      create_disposition=BigQueryDisposition.CREATE_NEVER,
+  )
+
+
 def _prepare_table_spec(
     args,
     model_client,
@@ -3902,6 +3988,9 @@ def _prepare_table_spec(
       # on the BLOCKER gate is meaningless — keep it informational (the
       # validation_runs row still records the status). Real engines gate.
       fail_on_blocker=resolve_engine_strictness(args.client_type),
+      # A whole-model batch records the gate's verdict instead of raising.
+      blocker_verdict_only=getattr(args, "_blocker_verdict_only", False),
+      write_status_reason=getattr(args, "_write_status_reason", True),
       rag_chunks_table=args.rag_chunks_table,
       embedder_id=embedder_id,
       embedder_version=embedder_version,
@@ -3971,14 +4060,7 @@ def _prepare_table_spec(
       write_disposition=BigQueryDisposition.WRITE_APPEND,
       create_disposition=BigQueryDisposition.CREATE_NEVER,
   )
-  validation_runs_sink = None
-  if args.validation_runs_table:
-    validation_runs_sink = WriteToBigQuery(
-        table=args.validation_runs_table,
-        method=WriteToBigQuery.Method.FILE_LOADS,
-        write_disposition=BigQueryDisposition.WRITE_APPEND,
-        create_disposition=BigQueryDisposition.CREATE_NEVER,
-    )
+  validation_runs_sink = validation_runs_sink_for(args)
 
   # In-set enforced edges: parents live in THIS job's spec list — no BQ
   # pool load; the composer wires the parent's landed keys as a side
@@ -4061,6 +4143,9 @@ def _run_one_table(
       vllm_max_model_len=args.vllm_max_model_len,
       cross_process=cross_process,
   )
+  # pylint: disable-next=protected-access
+  args._write_status_reason = status_reason_supported(
+      args.validation_runs_table)
   spec = _prepare_table_spec(args, model_client, registry=registry)
   report_model_adjustments([spec],
                            registry or RelationshipRegistry(),
@@ -4110,11 +4195,17 @@ def _run_one_table(
 
 
 def _relational_table_args(
-    plan, args, rows_by_landing: dict[str, int],
-    distinct_keys_by_landing: dict[str, int]) -> list[argparse.Namespace]:
+    plan,
+    args,
+    rows_by_landing: dict[str, int],
+    distinct_keys_by_landing: dict[str, int],
+    *,
+    write_status_reason: bool,
+) -> list[argparse.Namespace]:
   """Each planned table's namespace for the single job, built before any
     table is prepared so its reads can run ahead (ADR 0045). The two dicts
-    are shared, filled by `_run_relational_job` in plan order."""
+    are shared, filled by `_run_relational_job` in plan order;
+    `write_status_reason` is the job's one `status_reason_supported`."""
   # The --ddl_uri pin describes the USER'S target table(s) — closure
   # siblings extract live only (2026-08-22 launch: the first PLANNED
   # table, a parent, wrongly inherited the target's pin and logged
@@ -4136,10 +4227,168 @@ def _relational_table_args(
     table_args._rows_by_landing = rows_by_landing
     # pylint: disable-next=protected-access
     table_args._distinct_keys_by_landing = distinct_keys_by_landing
+    # pylint: disable-next=protected-access
+    table_args._write_status_reason = write_status_reason
     if run.landing_table not in pin_owners:
       table_args.ddl_uri = ""  # pin describes the target only
     table_args_list.append(table_args)
   return table_args_list
+
+
+# A run a whole-model batch skips at preflight, its namespace, and why.
+_SkippedRun = tuple[TableRun, argparse.Namespace, str]
+
+
+def _skipped_runs(
+    plan,
+    table_args_list: Sequence[argparse.Namespace],
+    failed_by: Mapping[str, tuple[str, str]],
+) -> list[_SkippedRun]:
+  """The runs of failed components, in plan order, each with its reason
+    (its own preflight stop, or the member's that failed first), each
+    logged as `table_skipped`."""
+  out = []
+  for run, table_args in zip(plan.runs, table_args_list, strict=True):
+    if run.landing_table not in failed_by:
+      continue
+    bare = run.landing_table.rsplit(".", 1)[-1]
+    first, why = failed_by[run.landing_table]
+    reason = (
+        why if first == bare else
+        f"component member {first} failed preflight: {why}")
+    log_milestone(
+        "table_skipped", level=logging.ERROR, table=bare, reason=reason)
+    out.append((run, table_args, reason))
+  return out
+
+
+def _skipped_tables(
+    plan,
+    args,
+    skipped_runs: Sequence[_SkippedRun],
+    *,
+    write_status_reason: bool,
+) -> list[SkippedTable]:
+  """The `FAILED_PREFLIGHT` rows of a batch that launches without some
+    tables: one `model_batch_partial` WARNING, each table added to the
+    launch's `_skipped_tables`, and its row through the sink a built
+    table's would take (no sink, no row: the milestones carry it)."""
+  if not skipped_runs:
+    return []
+  bares = [run.landing_table.rsplit(".", 1)[-1] for run, _, _ in skipped_runs]
+  log_milestone(
+      "model_batch_partial",
+      level=logging.WARNING,
+      tables=len(plan.runs),
+      skipped=len(skipped_runs),
+      skipped_tables=",".join(bares))
+  label = batch_label(args._record_batch["index"])  # pylint: disable=protected-access
+  args._skipped_tables.extend(f"{label}: {b}" for b in bares)  # pylint: disable=protected-access
+  env = resolve_thresholds(args.thresholds_uri, args.env).env
+  out = []
+  for run, table_args, reason in skipped_runs:
+    sink = validation_runs_sink_for(table_args)
+    if sink is None:
+      continue
+    row = preflight_failed_summary(
+        run_id=run.run_id,
+        reference_table=run.source_table,
+        landing_table=run.landing_table,
+        engine=args.engine,
+        model_uri=args.model_uri,
+        env=env,
+        num_rows_requested=run.num_rows or int(args.num_rows),
+        reason=reason).to_bq_row(with_status_reason=write_status_reason)
+    out.append(
+        SkippedTable(
+            landing_table=run.landing_table, row=row,
+            validation_runs_sink=sink))
+  return out
+
+
+def _prep_relational_specs(
+    plan,
+    args,
+    table_args_list: Sequence[argparse.Namespace],
+    model_client,
+    registry: RelationshipRegistry | None,
+    rows_by_landing: dict[str, int],
+    distinct_keys_by_landing: dict[str, int],
+) -> tuple[list[TableSpec], list[tuple[str, str]], list[_SkippedRun]]:
+  """Every planned table's spec, in plan order: the specs to build, the
+    preflight stops that stop the job (`landing, reason`), and the runs a
+    whole-model batch skips (`_skipped_runs`)."""
+  in_set = frozenset(r.landing_table for r in plan.runs)
+  specs = []
+  prep_failures: list[tuple[str, str]] = []
+  # A whole-model batch: a component that fails preflight is skipped and
+  # the rest of the batch launches. Otherwise any stop stops the job.
+  verdict_only = getattr(args, "_blocker_verdict_only", False)
+  components = (
+      batch_components(plan, registry or RelationshipRegistry())
+      if verdict_only else {})
+  caught = (SystemExit, Exception) if verdict_only else (SystemExit,)
+  # Each member of a failed component → (its first failed table, why).
+  failed_by: dict[str, tuple[str, str]] = {}
+  # ADR 0045 — the reads run ahead on prep_workers threads; everything
+  # cross-table below still runs table by table, in plan order. One worker
+  # (or a hand-built namespace) is the sequence of before: no thread.
+  workers = int(getattr(args, "prep_workers", 1) or 1)
+  read_ahead = (
+      PrepReadAhead(table_args_list, registry or RelationshipRegistry(),
+                    workers)
+      if workers > 1 and len(table_args_list) > 1 else None)
+  try:
+    for index, (run, table_args) in enumerate(
+        zip(plan.runs, table_args_list, strict=True)):
+      if run.landing_table in failed_by:
+        continue  # a member of a failed component is not prepped
+      prep_kwargs = ({
+          "prep": functools.partial(read_ahead.prep, index)
+      } if read_ahead is not None else {})
+      # Collect-then-fail (2026-08-22 launch lesson): one table's
+      # preflight stop must not HIDE the remaining tables' constraint
+      # reports and blockers — prep everything, abort once with all.
+      try:
+        specs.append(
+            _prepare_table_spec(
+                table_args,
+                model_client,
+                in_set_landing=in_set,
+                registry=registry,
+                **prep_kwargs,
+            ))
+        rows_by_landing[specs[-1].config.landing_table] = (
+            specs[-1].config.num_rows)
+        distinct_keys_by_landing[specs[-1].config.landing_table] = (
+            distinct_keys_landed(specs[-1].config.num_rows,
+                                 specs[-1].adjustments))
+      except caught as exc:  # SystemExit, and any Exception under verdict_only
+        logger.error(
+            "prep failed for %s: %s",
+            run.landing_table,
+            exc,
+            exc_info=not isinstance(exc, SystemExit))
+        if not verdict_only:
+          prep_failures.append((run.landing_table, str(exc)))
+          continue
+        bare = run.landing_table.rsplit(".", 1)[-1]
+        for member in components[run.landing_table]:
+          failed_by.setdefault(member, (bare, str(exc)[:STATUS_REASON_MAX]))
+  finally:
+    if read_ahead is not None:
+      read_ahead.close()
+  skipped_runs = _skipped_runs(plan, table_args_list, failed_by)
+  if skipped_runs:
+    specs = [s for s in specs if s.config.landing_table not in failed_by]
+    for run, _, _ in skipped_runs:
+      rows_by_landing.pop(run.landing_table, None)
+      distinct_keys_by_landing.pop(run.landing_table, None)
+    if not specs:
+      prep_failures = [
+          (run.landing_table, reason) for run, _, reason in skipped_runs
+      ]
+  return specs, prep_failures, skipped_runs
 
 
 def _run_relational_job(
@@ -4181,9 +4430,6 @@ def _run_relational_job(
       vllm_max_model_len=args.vllm_max_model_len,
       cross_process=cross_process,
   )
-  in_set = frozenset(r.landing_table for r in plan.runs)
-  specs = []
-  prep_failures: list[tuple[str, str]] = []
   # ADR 0036: a grandchild's derived row count depends on its parent's
   # RESOLVED count (itself possibly derived), not the launch's flat
   # --num_rows — plan order is parents-first, so filling this as each
@@ -4193,50 +4439,24 @@ def _run_relational_job(
   # what its children fan out over — the same number as its rows unless
   # its `pk:` was adjusted away.
   distinct_keys_by_landing: dict[str, int] = {}
-  table_args_list = _relational_table_args(plan, args, rows_by_landing,
-                                           distinct_keys_by_landing)
-  # ADR 0045 — the reads run ahead on prep_workers threads; everything
-  # cross-table below still runs table by table, in plan order. One worker
-  # (or a hand-built namespace) is the sequence of before: no thread.
-  workers = int(getattr(args, "prep_workers", 1) or 1)
-  read_ahead = (
-      PrepReadAhead(table_args_list, registry or RelationshipRegistry(),
-                    workers)
-      if workers > 1 and len(table_args_list) > 1 else None)
-  try:
-    for index, (run, table_args) in enumerate(
-        zip(plan.runs, table_args_list, strict=True)):
-      prep_kwargs = ({
-          "prep": functools.partial(read_ahead.prep, index)
-      } if read_ahead is not None else {})
-      # Collect-then-fail (2026-08-22 launch lesson): one table's
-      # preflight stop must not HIDE the remaining tables' constraint
-      # reports and blockers — prep everything, abort once with all.
-      try:
-        specs.append(
-            _prepare_table_spec(
-                table_args,
-                model_client,
-                in_set_landing=in_set,
-                registry=registry,
-                **prep_kwargs,
-            ))
-        rows_by_landing[specs[-1].config.landing_table] = (
-            specs[-1].config.num_rows)
-        distinct_keys_by_landing[specs[-1].config.landing_table] = (
-            distinct_keys_landed(specs[-1].config.num_rows,
-                                 specs[-1].adjustments))
-      except SystemExit as exc:
-        logger.error("prep failed for %s: %s", run.landing_table, exc)
-        prep_failures.append((run.landing_table, str(exc)))
-  finally:
-    if read_ahead is not None:
-      read_ahead.close()
+  # One schema check per job: every table's row has the same columns.
+  write_status_reason = status_reason_supported(args.validation_runs_table)
+  table_args_list = _relational_table_args(
+      plan,
+      args,
+      rows_by_landing,
+      distinct_keys_by_landing,
+      write_status_reason=write_status_reason)
+  specs, prep_failures, skipped_runs = _prep_relational_specs(
+      plan, args, table_args_list, model_client, registry, rows_by_landing,
+      distinct_keys_by_landing)
   if prep_failures:
     summary = "\n".join(f"- {t}: {e}" for t, e in prep_failures)
     raise SystemExit(f"{len(prep_failures)} of {len(plan.runs)} planned tables "
                      f"failed driver-side preflight — nothing was launched:\n"
                      f"{summary}")
+  skipped = _skipped_tables(
+      plan, args, skipped_runs, write_status_reason=write_status_reason)
   # Patch each edge's parent_pk from the sibling spec so the composer
   # can skip the Distinct shuffle when ref tuple == parent PK.
   pk_by_landing = {
@@ -4302,16 +4522,21 @@ def _run_relational_job(
         "config/relationships to change it.",
     )
   record_base = getattr(args, "_record_base", None)
+  record = None
   if record_base is not None:
-    specs = attach_record(
-        specs,
-        finish_record(
-            record_base,
-            options,
-            runner=runner,
-            batch=getattr(args, "_record_batch", None)))
+    record = finish_record(
+        record_base,
+        options,
+        runner=runner,
+        batch=getattr(args, "_record_batch", None))
+    specs = attach_record(specs, record)
+  # A skipped table's row carries the record its batch's rows carry.
+  skipped_kwargs: dict[str, Any] = ({
+      "skipped": skipped,
+      "record": record
+  } if skipped else {})
   with beam.Pipeline(options=options) as p:
-    results = build_relational_pipeline(p, specs)
+    results = build_relational_pipeline(p, specs, **skipped_kwargs)
     logger.info(
         "Relational pipeline launched: %d tables, run_id=%s",
         len(results),

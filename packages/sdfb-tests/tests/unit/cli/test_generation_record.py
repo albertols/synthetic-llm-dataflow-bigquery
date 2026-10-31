@@ -320,7 +320,9 @@ def test_every_table_of_a_single_job_launch_carries_one_record(
   assert len({id(r) for r in records}) == 1
   assert len({r.columns["config_digest"] for r in records}) == 1
   assert {r.columns["launch_run_id"] for r in records} == {"r1"}
-  assert launcher["reads"] == [_VR]
+  # One read for the launch's record, one for the job's `status_reason`
+  # column: never one per table.
+  assert launcher["reads"] == [_VR, _VR]
 
 
 _L4 = "type:nvidia-l4;count:1;install-nvidia-driver"

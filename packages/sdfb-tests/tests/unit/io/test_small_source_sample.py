@@ -233,3 +233,16 @@ def test_explicit_and_all_launches_agree_on_a_small_source(reads, tmp_path):
   assert (run_a["valid_count"], run_a["dlq_count"]) == (run_b["valid_count"],
                                                         run_b["dlq_count"])
   assert len(first) == len(second)
+
+
+def test_the_verdict_flags_reach_the_config_in_each_mode(reads, tmp_path):
+  # A named validation_runs table: `status_reason_supported` reads its
+  # columns (`_ALL_COLUMNS` has `status_reason`).
+  table = "--validation_runs_table=proj.q.validation_runs"
+  assert _launch(*_EXPLICIT, table) == 0
+  assert _launch(*_all(tmp_path), table) == 0
+  explicit, whole = reads.specs
+  assert (explicit.config.blocker_verdict_only,
+          whole.config.blocker_verdict_only) == (False, True)
+  assert explicit.config.write_status_reason is True
+  assert whole.config.write_status_reason is True

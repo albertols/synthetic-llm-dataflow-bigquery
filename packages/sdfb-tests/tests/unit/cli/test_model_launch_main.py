@@ -21,6 +21,8 @@ Design: docs/DESIGN.md §4 Relational generation
 from __future__ import annotations
 
 import json
+import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -364,6 +366,10 @@ def test_a_launch_that_is_no_batch_keeps_its_job_name(job_name_of, run_id,
 # -- the record each batch writes (DirectRunner) ---------------------------
 _ALL_COLUMNS = frozenset(
     f["name"] for f in json.loads((_ROOT / SCHEMA_PATH).read_text()))
+# Every namespace the `direct` fixture's spec was built from, in order.
+SEEN_ARGS: list = []
+# A landing table that ENDS WITH this value fails its preflight in `direct`.
+_FAIL_TABLE = "SDFB_TEST_FAIL_TABLE"
 
 
 @pytest.fixture(name="direct")
@@ -372,10 +378,16 @@ def fixture_direct(tmp_path, monkeypatch):
     its namespace (`_prepare_table_spec` reads BigQuery), the rest is real —
     A2's record included. Mirrors `test_generation_record.py`'s
     `fixture_launcher`, except that the spec takes each table's own
-    `args.num_rows` (the model's num_rows reaches it there)."""
+    `args.num_rows` (the model's num_rows reaches it there). A table whose
+    name ends with `$SDFB_TEST_FAIL_TABLE` stops at preflight."""
+  SEEN_ARGS.clear()
 
   def spec(args, client, **kwargs):
     del client, kwargs
+    SEEN_ARGS.append(args)
+    if args.landing_table.endswith(os.environ.get(_FAIL_TABLE, "<none>")):
+      raise SystemExit(
+          f"[preflight P1] {args.landing_table}: the source has no rows")
     reference = load_reference("customers")
     config = PipelineConfig(
         table_schema=load_ddl("customers"),
@@ -389,7 +401,9 @@ def fixture_direct(tmp_path, monkeypatch):
         landing_table=args.landing_table,
         identity_columns=("customer_id",),
         thresholds=Thresholds(env="dev", blocker_failure_ratio=0.2),
-        fail_on_blocker=False)
+        fail_on_blocker=False,
+        blocker_verdict_only=getattr(args, "_blocker_verdict_only", False),
+        write_status_reason=getattr(args, "_write_status_reason", True))
     stem = args.landing_table.rsplit(".", 1)[-1]
     return TableSpec(
         config=config,
@@ -409,6 +423,14 @@ def fixture_direct(tmp_path, monkeypatch):
 
   monkeypatch.setattr(rp, "read_table_columns", lambda fqn: _ALL_COLUMNS)
   monkeypatch.setattr(rp, "_prepare_table_spec", spec)
+
+  # A skipped table's row goes where its spec's row would have gone.
+  def validation_runs_sink(args):
+    stem = args.landing_table.rsplit(".", 1)[-1]
+    return WriteToJsonLines(str(tmp_path / f"vr_{stem}"), num_shards=1)
+
+  monkeypatch.setattr(rp, "validation_runs_sink_for", validation_runs_sink)
+  monkeypatch.setattr(rp, "status_reason_supported", lambda fqn: True)
   monkeypatch.setattr(rp, "configure_pipeline_options",
                       configure_without_main_session)
   # Both reports have their own tests and read nothing this test checks.
@@ -463,3 +485,159 @@ def test_every_batch_records_its_tables_sources_rows_and_one_digest(
   assert snapshot["relationships"]["tables"]["T_RATES"]["num_rows"] == 7
   # b01's record declares b01's tables only, never b00's.
   assert set(snapshot["relationships"]["tables"]) == {"T_RATES"}
+
+
+# -- a component that fails preflight (whole-model batch) ------------------
+def test_a_table_that_fails_preflight_is_skipped_and_the_rest_land(
+    model_uri, direct, monkeypatch, capsys):
+  monkeypatch.setenv(_FAIL_TABLE, "T_EVENTS_LOG")
+  # Skipped tables: exit 1, the message names them.
+  with pytest.raises(SystemExit) as exc:
+    _main(model_uri, "--max_tables_per_job=2", "--client_type=fake",
+          "--runner=DirectRunner",
+          "--validation_runs_table=p.q.validation_runs")
+  assert "1 table(s) skipped at preflight; the others ran" in str(exc.value)
+  assert "b00: T_EVENTS_LOG" in str(exc.value)
+  err = capsys.readouterr().err
+  assert _only_row(direct, "T_ACCOUNTS")["status"] == "PASSED"
+  skipped = _only_row(direct, "T_EVENTS_LOG")
+  assert skipped["status"] == "FAILED_PREFLIGHT"
+  assert skipped["status_reason"] == (
+      "[preflight P1] p.land.T_EVENTS_LOG: the source has no rows")
+  assert (skipped["launch_run_id"],
+          skipped["run_id"]) == ("r1", "r1-b00-01-T_EVENTS_LOG")
+  assert skipped["valid_count"] == 0
+  assert json.loads(skipped["config"])["batch"]["index"] == 0
+  [skip] = _milestones(err, "table_skipped")
+  assert "table=T_EVENTS_LOG" in skip and "[ERROR]" in skip
+  # A value with spaces is quoted in a milestone line.
+  assert ("reason='[preflight P1] p.land.T_EVENTS_LOG: the source has no rows'"
+          in " ".join(skip))
+  [partial] = _milestones(err, "model_batch_partial")
+  assert "skipped=1" in partial and "skipped_tables=T_EVENTS_LOG" in partial
+
+
+def test_a_component_fails_together_and_its_child_names_the_parent(
+    tmp_path, direct, monkeypatch):
+  model = tmp_path / "chain.yaml"
+  model.write_text(
+      "model: chain\ntables:\n  T_P: {pk: [ID]}\n"
+      "  T_C: {fk: [{cols: [P_ID], ref: T_P, ref_cols: [ID]}]}\n  T_X: {}\n",
+      encoding="utf-8")
+  monkeypatch.setenv(_FAIL_TABLE, "T_P")
+  with pytest.raises(SystemExit, match="2 table\\(s\\) skipped at preflight"):
+    _main(
+        str(model), "--client_type=fake", "--runner=DirectRunner",
+        "--validation_runs_table=p.q.validation_runs")
+  assert _only_row(direct, "T_X")["status"] == "PASSED"
+  assert _only_row(direct, "T_P")["status"] == "FAILED_PREFLIGHT"
+  child = _only_row(direct, "T_C")
+  assert child["status"] == "FAILED_PREFLIGHT"
+  assert child["status_reason"].startswith(
+      "component member T_P failed preflight: [preflight P1]")
+  # The child is never prepped.
+  assert [
+      a.landing_table for a in SEEN_ARGS if a.landing_table.endswith("T_C")
+  ] == []
+
+
+def test_a_parent_already_prepped_is_skipped_with_its_failed_child(
+    tmp_path, direct, monkeypatch):
+  model = tmp_path / "chain.yaml"
+  model.write_text(
+      "model: chain\ntables:\n  T_P: {pk: [ID]}\n"
+      "  T_C: {fk: [{cols: [P_ID], ref: T_P, ref_cols: [ID]}]}\n  T_X: {}\n",
+      encoding="utf-8")
+  monkeypatch.setenv(_FAIL_TABLE, "T_C")
+  with pytest.raises(SystemExit, match="2 table\\(s\\) skipped at preflight"):
+    _main(
+        str(model), "--client_type=fake", "--runner=DirectRunner",
+        "--validation_runs_table=p.q.validation_runs")
+  parent = _only_row(direct, "T_P")
+  assert parent["status"] == "FAILED_PREFLIGHT"
+  assert parent["status_reason"].startswith(
+      "component member T_C failed preflight: [preflight P1]")
+  assert not list(direct.glob("land_T_P*"))  # prepped, never generated
+  assert _only_row(direct, "T_X")["status"] == "PASSED"
+
+
+def test_an_error_in_a_tables_prep_skips_its_component_too(
+    model_uri, direct, monkeypatch):
+  fake_spec = rp._prepare_table_spec  # pylint: disable=protected-access
+
+  def spec(args, client, **kwargs):
+    if args.landing_table.endswith("T_EVENTS_LOG"):
+      raise RuntimeError("the read ahead failed")
+    return fake_spec(args, client, **kwargs)
+
+  monkeypatch.setattr(rp, "_prepare_table_spec", spec)
+  with pytest.raises(SystemExit, match="1 table\\(s\\) skipped"):
+    _main(model_uri, "--max_tables_per_job=2", "--client_type=fake",
+          "--runner=DirectRunner",
+          "--validation_runs_table=p.q.validation_runs")
+  row = _only_row(direct, "T_EVENTS_LOG")
+  assert (row["status"], row["status_reason"]) == ("FAILED_PREFLIGHT",
+                                                   "the read ahead failed")
+  assert _only_row(direct, "T_ACCOUNTS")["status"] == "PASSED"
+
+
+def test_a_batch_whose_every_table_fails_preflight_launches_nothing(
+    tmp_path, direct, monkeypatch):
+  model = tmp_path / "one.yaml"
+  model.write_text(
+      "model: one\ntables:\n  T_A_EMPTY: {}\n  T_B_EMPTY: {}\n",
+      encoding="utf-8")
+  monkeypatch.setenv(_FAIL_TABLE, "_EMPTY")  # both
+  with pytest.raises(SystemExit) as exc:
+    _main(str(model), "--client_type=fake", "--runner=DirectRunner")
+  assert "2 of 2 planned tables failed driver-side preflight" in str(exc.value)
+  assert "nothing was launched" in str(exc.value)
+  assert not list(direct.glob("vr_*"))
+
+
+def test_an_explicit_launch_keeps_collect_then_fail(direct, monkeypatch):
+  monkeypatch.setenv(_FAIL_TABLE, "T_B")
+  with restoring_root_handlers(), pytest.raises(
+      SystemExit, match="failed driver-side preflight") as exc:
+    rp.main([
+        "--reference_table=p.src.T_A", "--landing_table=p.land.T_A,p.land.T_B",
+        "--dlq_table=p.q.dlq", "--num_rows=10", "--run_id=r1",
+        "--model_uri=gs://b/synthetic/models/m/v1/", "--client_type=fake",
+        "--runner=DirectRunner", "--validation_runs_table=p.q.validation_runs"
+    ])
+  assert "1 of 2 planned tables" in str(exc.value)
+  assert "nothing was launched" in str(exc.value)
+  assert not list(direct.glob("vr_*"))
+  assert not any(getattr(a, "_blocker_verdict_only", False) for a in SEEN_ARGS)
+
+
+@pytest.mark.usefixtures("direct")
+def test_every_table_of_a_whole_model_batch_records_verdicts_only(model_uri):
+  assert _main(model_uri, "--client_type=fake", "--runner=DirectRunner") == 0
+  assert SEEN_ARGS
+  assert all(getattr(a, "_blocker_verdict_only", False) for a in SEEN_ARGS)
+
+
+@pytest.mark.parametrize("table, columns, reason", [
+    ("", _ALL_COLUMNS, "no_table"),
+    ("p.q.validation_runs", None, "schema_unreadable"),
+    ("p.q.validation_runs", _ALL_COLUMNS - {"status_reason"}, "missing_column"),
+])
+def test_status_reason_is_written_only_where_the_column_exists(
+    monkeypatch, caplog, table, columns, reason):
+
+  def read(fqn):
+    if columns is None:
+      raise RuntimeError(f"cannot read {fqn}")
+    return columns
+
+  monkeypatch.setattr(rp, "read_table_columns", read)
+  assert rp.status_reason_supported(table) is False
+  [record] = [
+      r for r in caplog.records
+      if "name=status_reason_unsupported" in r.getMessage().split()
+  ]
+  assert record.levelno == logging.WARNING
+  assert f"reason={reason}" in record.getMessage().split()
+  monkeypatch.setattr(rp, "read_table_columns", lambda fqn: _ALL_COLUMNS)
+  assert rp.status_reason_supported("p.q.validation_runs") is True
