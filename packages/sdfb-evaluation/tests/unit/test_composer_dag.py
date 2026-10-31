@@ -131,6 +131,8 @@ _MARKER_VALUES = {
         "gs://demo-bucket/synthetic/models/qwen3/4b/v1/",
     "SDFB_RAG_CHUNKS_TABLE":
         "demo-project.synthetic_rag.rag_chunks",
+    "SDFB_RELATIONSHIPS_URI":
+        "gs://demo-bucket/synthetic/relationships/model.yaml",
     "SDFB_SOURCE_STATS_TABLE":
         "demo-project.synthetic_rag.source_table_stats",
     "SDFB_VALIDATION_RUNS_TABLE":
@@ -1147,8 +1149,8 @@ _GENERATION_MARKERS = {
     "GCS_DATAFLOW_TEMPLATES", "GPU", "PROJECT_VERSION", "SDFB_DDL_URI",
     "SDFB_DEFAULT_TABLE_FQN", "SDFB_DLQ_TABLE", "SDFB_EMBEDDER_URI",
     "SDFB_FREETEXT_POOLS_TABLE", "SDFB_LANDING_TABLE", "SDFB_MODEL_URI",
-    "SDFB_RAG_CHUNKS_TABLE", "SDFB_SOURCE_STATS_TABLE",
-    "SDFB_VALIDATION_RUNS_TABLE", "WRITE_DISPOSITION"
+    "SDFB_RAG_CHUNKS_TABLE", "SDFB_RELATIONSHIPS_URI",
+    "SDFB_SOURCE_STATS_TABLE", "SDFB_VALIDATION_RUNS_TABLE", "WRITE_DISPOSITION"
 }
 _HOUSE_VARIABLES = {
     "PROJECT_ID", "REGION", "DATAFLOW_SUBNET", "SA_DATAFLOW",
@@ -1380,8 +1382,11 @@ def test_trigger_evaluation_parameters_select_the_evaluator_for_this_job():
   assert values["seed_table"] == table.rsplit(".", 1)[-1]
   assert _chained_evaluation(
       table_fqn="p.ds.OTHER")["parameters"]["seed_table"] == "OTHER"
-  # an isolated generation is evaluated as one table: no model
-  assert values["relationships_uri"] == "config/relationships"
+  # the relationship model the overlay sets (ADR 0045, revised 2026-10-31)
+  # reaches the evaluator as it reaches the generation launch; an isolated
+  # generation is evaluated as one table: no model
+  assert values["relationships_uri"] == (
+      _MARKER_VALUES["SDFB_RELATIONSHIPS_URI"])
   assert _chained_evaluation(generate_fk_relationships="false"
                             )["parameters"]["relationships_uri"] == ""
   assert values["landing_dataset"] == (
