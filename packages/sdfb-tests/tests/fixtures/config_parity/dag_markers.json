@@ -14,6 +14,7 @@
   "SDFB_LANDING_TABLE": "sdfb-proj.synthetic_data.X_TABLE",
   "SDFB_MODEL_URI": "gs://sdfb-bucket/synthetic/models/qwen3/4b-instruct-2507/v1/",
   "SDFB_RAG_CHUNKS_TABLE": "sdfb-proj.synthetic_rag.rag_chunks",
+  "SDFB_RELATIONSHIPS_URI": "gs://sdfb-bucket/synthetic/relationships/model.yaml",
   "SDFB_SOURCE_STATS_TABLE": "sdfb-proj.synthetic_rag.source_table_stats",
   "SDFB_VALIDATION_RUNS_TABLE": "sdfb-proj.synthetic_data_quality.validation_runs",
   "WRITE_DISPOSITION": "append"

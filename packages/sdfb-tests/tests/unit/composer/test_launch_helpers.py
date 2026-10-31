@@ -42,7 +42,7 @@ from sdfb_core.config.defaults import defaults_digest, load_defaults
 from sdfb_core.config.model import (ALL_KEYS, DEFAULT_CONFIG, FLAG_KEYS,
                                     SECTION_TYPES, value_of)
 from sdfb_core.config.resolve import ConfigError, parse_config_text, resolve
-from sdfb_tests.config_parity import DELIBERATE_CHANGES
+from sdfb_tests.config_parity import DELIBERATE_CHANGES, OVERLAY_SET_KEYS
 
 _REPO = Path(__file__).resolve().parents[5]
 _COMPOSER = _REPO / "composer"
@@ -115,6 +115,17 @@ def _normalised(scenario: str, value):
       value, run_id=_dag_run_id(scenario), when=H.logical_date(scenario))
 
 
+def _overlay_set(scenario: str) -> dict[str, str]:
+  """OVERLAY_SET_KEYS a master scenario's trigger leaves to the overlay (a
+  trigger value overrides the overlay's, and still matches master's)."""
+  run_conf = H.SCENARIOS[scenario]["run_conf"]
+  return {
+      key: marker
+      for key, marker in OVERLAY_SET_KEYS.items()
+      if key.split(".", 1)[1] not in run_conf
+  }
+
+
 def _config(parameters: dict):
   args, beam_args = rp.parse_args([f"--{k}={v}" for k, v in parameters.items()])
   assert beam_args == []
@@ -143,11 +154,18 @@ def _config(parameters: dict):
         "007"
     ])
 def test_overlay_values_survive_yaml_after_substitution(deployed, value):
-  layers = M.load_layers(deployed(**{name: value for name in _MARKERS}))
+  filled = {name: value for name in _MARKERS}
+  if value == "":
+    # load_layers refuses an empty relationships_uri (relationships OFF).
+    filled["SDFB_RELATIONSHIPS_URI"] = _MARKERS["SDFB_RELATIONSHIPS_URI"]
+  layers = M.load_layers(deployed(**filled))
   leaves = [*layers.overlay["dag"].values(), *layers.overlay["infra"].values()]
   for section in layers.overlay["config"].values():
     leaves.extend(section.values())
   assert len(leaves) == len(_MARKERS)
+  if value == "":
+    leaves.remove(_MARKERS["SDFB_RELATIONSHIPS_URI"])
+    assert len(leaves) == len(_MARKERS) - 1
   assert all(isinstance(leaf, str) and leaf == value for leaf in leaves), leaves
 
 
@@ -163,7 +181,9 @@ def test_the_overlay_names_every_marker_the_dags_used():
   overlay = _OVERLAY.read_text(encoding="utf-8")
   named = _MARKER.findall(overlay)
   assert len(named) == len(set(named)), "a marker named twice"
-  assert set(named) == used
+  # The one marker no master DAG had: the default relationship model
+  # (ADR 0045, revised 2026-10-31).
+  assert set(named) == used | {"SDFB_RELATIONSHIPS_URI"}
   # The harness fills the same names (Task 7's committed values).
   assert set(named) == set(_MARKERS)
   # One per line, quoted.
@@ -184,6 +204,39 @@ def test_an_overlay_key_generator_yaml_lacks_is_refused(deployed):
       text.replace("    gpu:", "    gpus:"), encoding="utf-8")
   with pytest.raises(ValueError, match=r"serving\.gpus"):
     M.load_layers(str(folder))
+
+
+def test_an_empty_relationships_uri_in_the_overlay_is_refused(deployed):
+  with pytest.raises(ValueError, match="relationships OFF"):
+    M.load_layers(deployed(SDFB_RELATIONSHIPS_URI=""))
+
+
+def test_a_missing_relationships_uri_keeps_generator_yamls_default(deployed):
+  folder = Path(deployed())
+  text = (folder / "sdfb_env.yaml").read_text(encoding="utf-8")
+  line = f'    relationships_uri: "{_MARKERS["SDFB_RELATIONSHIPS_URI"]}"\n'
+  assert line in text
+  (folder / "sdfb_env.yaml").write_text(
+      text.replace(line, ""), encoding="utf-8")
+  layers = M.load_layers(str(folder))
+  assert M.param_defaults(layers)["relationships_uri"] == "config/relationships"
+
+
+def test_the_overlay_sets_the_default_model_file(layers):
+  assert M.param_defaults(
+      layers)["relationships_uri"] == _MARKERS["SDFB_RELATIONSHIPS_URI"]
+  passed = M.launch_overrides({
+      **M.param_defaults(layers), "run_id": "r"
+  }, layers)
+  assert passed["relationships_uri"] == _MARKERS["SDFB_RELATIONSHIPS_URI"]
+
+
+def test_a_folder_default_is_refused_for_a_whole_model_launch(deployed):
+  layers = M.load_layers(
+      deployed(
+          SDFB_RELATIONSHIPS_URI="gs://sdfb-bucket/synthetic/relationships"))
+  with pytest.raises(M.PlanError, match="ONE model file"):
+    M.planning_inputs({**M.param_defaults(layers), "tables": "all"}, None)
 
 
 def test_digest_matches_sdfb_core(layers):
@@ -267,13 +320,17 @@ def test_param_defaults_are_the_yaml_overlaid(layers):
 def test_param_defaults_are_masters_but_the_deliberate_changes(
     deployed, scenario):
   """Every param master's DAG declared keeps master's default, except
-  vllm_dtype (null now, derived from gpu: DELIBERATE_CHANGES)."""
+  vllm_dtype (null now, derived from gpu: DELIBERATE_CHANGES) and the keys
+  the overlay sets (OVERLAY_SET_KEYS)."""
   layers = M.load_layers(deployed(**H.SCENARIOS[scenario]["markers"]))
   ours, master = M.param_defaults(layers), _MASTER_DEFAULTS[scenario]
   assert set(master) <= set(ours)
   differing = {name for name in master if ours[name] != master[name]}
-  assert differing == {"vllm_dtype"}
+  assert differing == {"vllm_dtype"} | {
+      dotted.split(".", 1)[1] for dotted in OVERLAY_SET_KEYS
+  }
   assert "serving.vllm_dtype" in DELIBERATE_CHANGES
+  assert ours["relationships_uri"] == _MARKERS["SDFB_RELATIONSHIPS_URI"]
 
 
 # -- what a launch passes ----------------------------------------------------
@@ -295,7 +352,8 @@ def test_launch_passes_only_keys_that_differ(layers):
   assert set(passed) == {
       "reference_table", "landing_table", "dlq_table", "model_uri", "run_id",
       "generator_defaults_digest", "validation_runs_table", "rag_chunks_table",
-      "freetext_pools_table", "source_stats_table", "embedder_uri", "env"
+      "freetext_pools_table", "source_stats_table", "embedder_uri", "env",
+      "relationships_uri"
   }
   assert passed["generator_defaults_digest"] == layers.digest
   assert passed["reference_table"] == _MARKERS["SDFB_DEFAULT_TABLE_FQN"]
@@ -405,8 +463,10 @@ def test_explicit_launch_resolves_like_master(deployed, scenario, source):
   assert body["jobName"] == master["jobName"]
   assert body["parameters"]["run_id"] == master["parameters"]["run_id"]
   theirs, ours = _config(master["parameters"]), _config(body["parameters"])
+  overlay_set = _overlay_set(scenario)
   compared = [
-      k for k in ALL_KEYS if k not in DELIBERATE_CHANGES and k != _DIGEST_KEY
+      k for k in ALL_KEYS if k not in DELIBERATE_CHANGES and
+      k not in overlay_set and k != _DIGEST_KEY
   ]
   differing = {
       k: (value_of(theirs, k), value_of(ours, k))
@@ -414,6 +474,8 @@ def test_explicit_launch_resolves_like_master(deployed, scenario, source):
       if value_of(theirs, k) != value_of(ours, k)
   }
   assert not differing
+  for key, marker in overlay_set.items():
+    assert value_of(ours, key) == _MARKERS[marker], key
   assert value_of(ours, _DIGEST_KEY) == layers.digest
   # The deliberate keys hold the overlay's GPU; a T4 launch keeps master's
   # float16 through the derivation.
@@ -450,7 +512,15 @@ def test_explicit_evaluation_body_is_masters(deployed, scenario):
       generation_job_ids=["fakejob-start_sdfb"],
       variables=H.AIRFLOW_VARIABLES,
       ts_nodash=when.strftime("%Y%m%dT%H%M%S"))
-  assert _normalised(scenario, body) == _GOLDEN[scenario]["evaluation_body"]
+  body, master = _normalised(scenario, body), json.loads(
+      json.dumps(_GOLDEN[scenario]["evaluation_body"]))
+  # The relationship model the overlay sets reaches the evaluator as it
+  # reaches the generation launch; master passed generator.yaml's folder.
+  for key, marker in _overlay_set(scenario).items():
+    name = key.split(".", 1)[1]
+    assert body["launchParameter"]["parameters"].pop(name) == _MARKERS[marker]
+    master["launchParameter"]["parameters"].pop(name)
+  assert body == master
 
 
 def test_the_evaluation_of_an_all_launch_names_the_landed_jobs(layers):

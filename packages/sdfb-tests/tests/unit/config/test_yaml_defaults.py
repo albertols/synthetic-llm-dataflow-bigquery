@@ -14,8 +14,8 @@
 """`generator.yaml` holds the defaults; the model keeps the types only
 (ADR 0043).
 
-Design: docs/DESIGN.md §8 Configuration
-(ADR 0043).
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
+(ADR 0043, 0045).
 """
 from __future__ import annotations
 
@@ -181,9 +181,12 @@ _VLLM_DTYPE_NULL_LINE = 1
 # sized for short serving entries and R4 forbids clipping catalogue text, so
 # this identity key's full text costs 8.
 _DEFAULTS_DIGEST_KEY_LINES = 8
+# launch.max_parallel_jobs' purpose names both of its readers and the
+# Variable over them (ADR 0045, revised 2026-10-31): one line more.
+_MAX_PARALLEL_JOBS_PURPOSE_LINE = 1
 _LINE_BUDGET = (
     _BASE_BUDGET + _SERVING_LAUNCH_KEYS_LINES + _VLLM_DTYPE_NULL_LINE +
-    _DEFAULTS_DIGEST_KEY_LINES)
+    _DEFAULTS_DIGEST_KEY_LINES + _MAX_PARALLEL_JOBS_PURPOSE_LINE)
 
 
 def test_reference_is_compact():

@@ -43,6 +43,13 @@ PyYAML only, what the DAG needs:
     whole_model_params the `all` branch's params: an empty source or
                        landing dataset from the overlay's default tables
     launch_plan        the `all` branch's batch launch bodies
+    parallel_cap       how many batch jobs run at once: the Variable
+                       SDFB_MAX_PARALLEL_JOBS when set, else the yaml's
+                       launch.max_parallel_jobs overlaid
+    verdicts_query     the launch's validation_runs rows, by its base run id
+    table_verdicts     each planned table's newest row: its status and reason
+    failed_tables      the tables that fail the run
+    verdict_banner     one line per table that did not pass
 
 Precedence: generator.yaml < sdfb_env.yaml < the trigger's values < a
 config_uri file. A key the launch does not pass takes the image's
@@ -83,13 +90,17 @@ import yaml
 
 __all__ = [
     "DEFAULT_MAX_TABLES_PER_JOB", "FILE_HARDWARE_KEYS", "L4_ACCELERATOR",
-    "T4_ACCELERATOR", "ConfigInput", "Layers", "PlanError", "TablesMode",
-    "batch_job_name", "batch_parameters", "cli_text", "common_parameters",
-    "dag_constants", "decode_object", "evaluation_body", "explicit_body",
-    "landed_job_ids", "launch_environment", "launch_overrides", "launch_plan",
-    "load_layers", "model_slug", "param_defaults", "parse_config",
-    "plan_banner", "plan_batches", "planning_inputs", "resolve_tables_mode",
-    "whole_model_params", "with_file_hardware"
+    "MISSING_REASON_COLUMN", "T4_ACCELERATOR", "VERDICT_FAILED_BLOCKER",
+    "VERDICT_FAILED_PREFLIGHT", "VERDICT_NO_ROW", "VERDICT_PASSED",
+    "ConfigInput", "Layers", "PlanError", "TablesMode", "batch_job_name",
+    "batch_parameters", "cli_text", "common_parameters", "dag_constants",
+    "decode_object", "evaluation_body", "explicit_body", "failed_tables",
+    "is_missing_reason_column", "landed_job_ids", "launch_environment",
+    "launch_overrides", "launch_plan", "load_layers", "model_slug",
+    "parallel_cap", "param_defaults", "parse_config", "plan_banner",
+    "plan_batches", "planning_inputs", "resolve_tables_mode", "table_verdicts",
+    "verdict_banner", "verdicts_query", "whole_model_params",
+    "with_file_hardware"
 ]
 
 DEFAULT_MAX_TABLES_PER_JOB = 10
@@ -219,6 +230,14 @@ def load_layers(folder: str) -> Layers:
       raise ValueError(f"{ENV_OVERLAY}: {names} is no "
                        f"{GENERATOR_YAML} key")
     config[section] = keys
+  relational = config.get("relational", {})
+  if ("relationships_uri" in relational and
+      cli_text(relational["relationships_uri"]) == ""):
+    raise ValueError(
+        f"{ENV_OVERLAY}: config.relational.relationships_uri is empty — the "
+        f"launcher reads '' as relationships OFF for every launch; fill the "
+        f"SDFB_RELATIONSHIPS_URI marker, or remove the key to keep "
+        f"{GENERATOR_YAML}'s default")
   overlay["config"] = config
   return Layers(
       defaults=defaults,
@@ -936,3 +955,156 @@ def landed_job_ids(launched: Iterable[Any] | None) -> list[str]:
     if isinstance(value, str) and value and value not in ids:
       ids.append(value)
   return ids
+
+
+# -- the launch's table verdicts (ADR 0045) -----------------------------------
+# A validation_runs row's status (sdfb_core's run status), and the banner's
+# word for a planned table no row names.
+VERDICT_PASSED = "PASSED"
+VERDICT_FAILED_BLOCKER = "FAILED_BLOCKER"
+VERDICT_FAILED_PREFLIGHT = "FAILED_PREFLIGHT"
+VERDICT_NO_ROW = "NO_ROW"
+# BigQuery's error for a SELECT naming status_reason on a validation_runs
+# table created before that column: the caller queries again without it.
+MISSING_REASON_COLUMN = "Unrecognized name: status_reason"
+_PARALLEL_VARIABLE = "SDFB_MAX_PARALLEL_JOBS"
+_PARALLEL_KEY = "launch.max_parallel_jobs"
+_TABLE_NAME = re.compile(r"^[A-Za-z0-9_-]+[.:][A-Za-z0-9_]+\.[A-Za-z0-9_$-]+$")
+
+
+def parallel_cap(layers: Layers, variables: Mapping[str, str]) -> int:
+  """How many batch jobs run at once: the Variable SDFB_MAX_PARALLEL_JOBS
+  when its text is non-empty, else launch.max_parallel_jobs of generator.yaml
+  overlaid by sdfb_env.yaml; never below 1. A non-integer raises ValueError
+  naming where it came from."""
+  text = variables.get(_PARALLEL_VARIABLE)
+  source = _PARALLEL_VARIABLE
+  if text is None or text == "":
+    text = cli_text(_overlaid(layers)["max_parallel_jobs"])
+    source = _PARALLEL_KEY
+  try:
+    return max(1, int(text))
+  except ValueError as err:
+    raise ValueError(f"{source} must be an integer, got {text!r}") from err
+
+
+def _dotted(fqn: str) -> str:
+  """`project:dataset.table` as `project.dataset.table`."""
+  return fqn.replace(":", ".", 1)
+
+
+def verdicts_query(table_fqn: str, *, with_reason: bool) -> str:
+  """The SELECT of a launch's validation_runs rows, its base run id the
+  query parameter @base: a row whose launch_run_id is the base, or whose
+  run id is one of its batch runs' (`<base>-bNN-…`). The table name is
+  checked before it reaches the SQL."""
+  if not _TABLE_NAME.fullmatch(table_fqn):
+    raise ValueError(f"validation_runs_table must be project.dataset.table, "
+                     f"got {table_fqn!r}")
+  reason = ", status_reason" if with_reason else ""
+  return (f"SELECT landing_table, run_id, status, created_at{reason} "
+          f"FROM `{_dotted(table_fqn)}` "
+          f"WHERE launch_run_id = @base OR "
+          f"STARTS_WITH(run_id, CONCAT(@base, '-b'))")
+
+
+def is_missing_reason_column(error_text: str) -> bool:
+  """Whether a query error is the table lacking the status_reason column."""
+  return MISSING_REASON_COLUMN in error_text
+
+
+def table_verdicts(planned: Sequence[str],
+                   rows: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
+  """Each planned landing table's verdict from the launch's rows: the row
+  with the greatest (created_at, run_id) per table. `missing` names the
+  planned tables no row names, `unplanned` the tables of rows the plan does
+  not name. Plain JSON, for an XCom."""
+  newest: dict[str, tuple[tuple[str, str], Mapping[str, Any]]] = {}
+  for row in rows:
+    table = _dotted(str(row["landing_table"]))
+    order = (str(row.get("created_at")), str(row.get("run_id")))
+    if table not in newest or order > newest[table][0]:
+      newest[table] = (order, row)
+  wanted = {_dotted(t): None for t in planned}
+  verdicts: dict[str, Any] = {}
+  for table in wanted:
+    if table in newest:
+      row = newest[table][1]
+      reason = row.get("status_reason")
+      verdicts[table] = {
+          "status": str(row.get("status")),
+          "reason": None if reason is None else str(reason),
+          "run_id": str(row.get("run_id")),
+      }
+  return {
+      "verdicts": verdicts,
+      "missing": sorted(t for t in wanted if t not in newest),
+      "unplanned": sorted(t for t in newest if t not in wanted),
+  }
+
+
+def _fails(status: str, fail_on_blocker: bool) -> bool:
+  """A status other than the three known ones fails: a future status never
+  passes silently."""
+  if status == VERDICT_PASSED:
+    return False
+  return fail_on_blocker or status != VERDICT_FAILED_BLOCKER
+
+
+def failed_tables(verdicts: Mapping[str, Any], *,
+                  fail_on_blocker: bool) -> list[str]:
+  """The tables that fail the run, sorted: every status but PASSED (a
+  FAILED_BLOCKER only when `fail_on_blocker`: a fake client's blocker is
+  informational), and every planned table with no row."""
+  failed = {
+      table for table, verdict in verdicts["verdicts"].items()
+      if _fails(verdict["status"], fail_on_blocker)
+  }
+  return sorted(failed | set(verdicts["missing"]))
+
+
+def _batch_label(table: str, batches: Sequence[Mapping[str, Any]],
+                 landing_dataset: str) -> str:
+  prefix = _dotted(landing_dataset) + "."
+  bare = (
+      table[len(prefix):]
+      if table.startswith(prefix) else table.rsplit(".", 1)[-1])
+  for batch in batches:
+    if bare in batch["tables"]:
+      return str(batch["label"])
+  return "?"
+
+
+def verdict_banner(verdicts: Mapping[str, Any], *,
+                   batches: Sequence[Mapping[str, Any]], landing_dataset: str,
+                   fail_on_blocker: bool, reason_column: bool) -> str:
+  """The launch's table verdicts for the task log: a count line, then one
+  line per planned table that did not pass (in name order), per planned
+  table with no row (naming its batch), and per unplanned row's table."""
+  rows = verdicts["verdicts"]
+  missing, unplanned = verdicts["missing"], verdicts["unplanned"]
+  passed = sum(1 for v in rows.values() if v["status"] == VERDICT_PASSED)
+  failed = sum(1 for v in rows.values() if _fails(v["status"], fail_on_blocker))
+  lines = [
+      f"TABLE VERDICTS | {len(rows) + len(missing)} planned · {passed} passed "
+      f"· {failed} failed · {len(missing)} no row"
+  ]
+  no_reason = ("no reason recorded" if reason_column else
+               "no reason recorded (the table has no status_reason column)")
+  for table in sorted(rows):
+    status = rows[table]["status"]
+    if status == VERDICT_PASSED:
+      continue
+    if status == VERDICT_FAILED_BLOCKER and not fail_on_blocker:
+      status = f"{status} (informational: client_type=fake)"
+    reason = rows[table]["reason"] or no_reason
+    reason = " ".join(reason.splitlines())
+    lines.append(f"  {table} | {status} | {reason}")
+  for table in missing:
+    label = _batch_label(table, batches, landing_dataset)
+    lines.append(f"  {table} | NO ROW | batch {label} did not reach DONE, "
+                 f"or the record is off")
+  for table in unplanned:
+    lines.append(f"  {table} | UNPLANNED | a row of a table the plan does not "
+                 f"name")
+  return "\n".join(lines)

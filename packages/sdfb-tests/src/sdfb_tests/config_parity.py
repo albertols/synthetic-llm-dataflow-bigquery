@@ -73,6 +73,15 @@ DELIBERATE_CHANGES: dict[str, tuple[object, object]] = {
     "serving.launcher_machine_type": (ABSENT, "e2-standard-8"),
 }
 
+# The keys the committed fixture overlay sets, and no yaml default change:
+# generator.yaml keeps `config/relationships`, and sdfb_env.yaml sets the
+# default relationship model from its marker (ADR 0045, revised 2026-10-31).
+# dotted key -> the marker whose value the overlay sets. Master comparisons
+# leave them out and assert the marker's value instead.
+OVERLAY_SET_KEYS: dict[str, str] = {
+    "relational.relationships_uri": "SDFB_RELATIONSHIPS_URI",
+}
+
 ARGV_BASE = [
     "--reference_table=p.src.t",
     "--landing_table=p.land.t",

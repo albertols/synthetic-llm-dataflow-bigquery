@@ -147,9 +147,10 @@ launch:
   # image pull and the vLLM ignition again.
   max_tables_per_job: 10
 
-  # Parallel batch jobs — How many batch jobs scripts/launch/run_model.py
-  # runs at once. The Composer DAG's tables=all branch takes its cap from the
-  # Airflow Variable SDFB_MAX_PARALLEL_JOBS instead. [--max_parallel_jobs ·
+  # Parallel batch jobs — How many batch jobs run at once:
+  # scripts/launch/run_model.py reads it, and the Composer DAG's tables=all
+  # branch reads it at parse time, overlaid by sdfb_env.yaml; the Airflow
+  # Variable SDFB_MAX_PARALLEL_JOBS wins when set. [--max_parallel_jobs ·
   # ADR 0045]
   # ↑ The batches finish sooner; each job holds its workers' GPUs, so stay
   # inside the GPU quota. · ↓ One at a time (the default): never more GPUs

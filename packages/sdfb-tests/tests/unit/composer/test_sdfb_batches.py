@@ -546,3 +546,235 @@ def test_the_module_needs_only_the_standard_library_and_yaml():
   }
   # A DAGs-folder file naming the scheduler and "dag" is parsed as a DAG.
   assert "airflow" not in _MIRROR.read_text(encoding="utf-8").lower()
+
+
+# -- the launch's table verdicts (ADR 0045) -----------------------------------
+def _row(**over):
+  return {
+      "landing_table": "p.land.T_A",
+      "run_id": "r1-b00-00-T_A",
+      "status": "PASSED",
+      "created_at": "2026-10-31T10:00:00+00:00",
+      "status_reason": None,
+      **over
+  }
+
+
+_BATCHES = [{
+    "index": 0,
+    "label": "b00",
+    "tables": ["T_A", "T_B"],
+    "oversized": False
+}, {
+    "index": 1,
+    "label": "b01",
+    "tables": ["T_C"],
+    "oversized": False
+}]
+_PLANNED = ["p.land.T_A", "p.land.T_B", "p.land.T_C"]
+
+
+def test_table_verdicts_names_passed_failed_missing_and_unplanned():
+  m = _load()
+  rows = [
+      _row(),
+      _row(
+          landing_table="p.land.T_B",
+          run_id="r1-b00-01-T_B",
+          status="FAILED_BLOCKER",
+          status_reason=("BLOCKER failures 9/10 = 0.9000 exceeds gate 0.0500 "
+                         "(env=prd, run_id=r1-b00-01-T_B)")),
+      _row(landing_table="p.land.T_Z", run_id="r1-b01-00-T_Z")
+  ]
+  out = m.table_verdicts(_PLANNED, rows)
+  assert out["verdicts"]["p.land.T_B"]["status"] == "FAILED_BLOCKER"
+  assert out["verdicts"]["p.land.T_A"] == {
+      "status": "PASSED",
+      "reason": None,
+      "run_id": "r1-b00-00-T_A"
+  }
+  assert out["missing"] == ["p.land.T_C"] and out["unplanned"] == ["p.land.T_Z"]
+  json.dumps(out)
+
+
+def test_a_colon_qualified_landing_table_matches_its_plan():
+  m = _load()
+  out = m.table_verdicts(["p.land.T_A"], [_row(landing_table="p:land.T_A")])
+  assert out["verdicts"]["p.land.T_A"]["status"] == "PASSED"
+  assert out["missing"] == [] and out["unplanned"] == []
+
+
+def test_the_newest_row_of_a_table_wins():
+  m = _load()
+  rows = [
+      _row(
+          status="FAILED_BLOCKER",
+          created_at="2026-10-31T10:00:00+00:00",
+          run_id="r1-b00-00-T_A"),
+      _row(
+          status="PASSED",
+          created_at="2026-10-31T11:00:00+00:00",
+          run_id="r1-b00-00-T_A")
+  ]
+  assert m.table_verdicts(["p.land.T_A"],
+                          rows)["verdicts"]["p.land.T_A"]["status"] == "PASSED"
+  assert m.table_verdicts(
+      ["p.land.T_A"],
+      rows[::-1])["verdicts"]["p.land.T_A"]["status"] == "PASSED"
+
+
+def test_failed_tables_follow_the_client():
+  m = _load()
+  out = m.table_verdicts(_PLANNED, [
+      _row(status="FAILED_BLOCKER"),
+      _row(landing_table="p.land.T_B", status="FAILED_PREFLIGHT")
+  ])
+  assert m.failed_tables(out, fail_on_blocker=True) == _PLANNED
+  assert m.failed_tables(
+      out, fail_on_blocker=False) == ["p.land.T_B", "p.land.T_C"]
+
+
+def test_an_unknown_status_fails_rather_than_passing_silently():
+  m = _load()
+  out = m.table_verdicts(["p.land.T_A"], [_row(status="SOMETHING_NEW")])
+  assert m.failed_tables(out, fail_on_blocker=False) == ["p.land.T_A"]
+
+
+def test_the_banner_is_one_line_per_table():
+  m = _load()
+  out = m.table_verdicts(_PLANNED, [
+      _row(status="PASSED"),
+      _row(
+          landing_table="p.land.T_B",
+          status="FAILED_PREFLIGHT",
+          status_reason="[preflight P5] p.land.T_B: the declared\nPK is not a key"
+      )
+  ])
+  banner = m.verdict_banner(
+      out,
+      batches=_BATCHES,
+      landing_dataset="p.land",
+      fail_on_blocker=True,
+      reason_column=True)
+  lines = banner.splitlines()
+  assert lines[
+      0] == "TABLE VERDICTS | 3 planned · 1 passed · 1 failed · 1 no row"
+  assert lines[1] == ("  p.land.T_B | FAILED_PREFLIGHT | [preflight P5] "
+                      "p.land.T_B: the declared PK is not a key")
+  assert lines[2] == (
+      "  p.land.T_C | NO ROW | batch b01 did not reach DONE, or the record is off"
+  )
+  assert len(lines) == 3
+
+
+def test_missing_tables_are_named_by_their_batch():
+  m = _load()
+  out = m.table_verdicts(_PLANNED,
+                         [_row(landing_table="p.land.T_C", run_id="r1-b01-00")])
+  lines = m.verdict_banner(
+      out,
+      batches=_BATCHES,
+      landing_dataset="p.land",
+      fail_on_blocker=True,
+      reason_column=True).splitlines()
+  assert lines == [
+      "TABLE VERDICTS | 3 planned · 1 passed · 0 failed · 2 no row",
+      "  p.land.T_A | NO ROW | batch b00 did not reach DONE, or the record is off",
+      "  p.land.T_B | NO ROW | batch b00 did not reach DONE, or the record is off",
+  ]
+
+
+def test_a_table_in_no_batch_and_an_unplanned_row_are_named():
+  m = _load()
+  out = m.table_verdicts(["p.land.T_Q"], [_row(landing_table="p.land.T_Z")])
+  lines = m.verdict_banner(
+      out,
+      batches=_BATCHES,
+      landing_dataset="p.land",
+      fail_on_blocker=True,
+      reason_column=True).splitlines()
+  assert lines == [
+      "TABLE VERDICTS | 1 planned · 0 passed · 0 failed · 1 no row",
+      "  p.land.T_Q | NO ROW | batch ? did not reach DONE, or the record is off",
+      "  p.land.T_Z | UNPLANNED | a row of a table the plan does not name",
+  ]
+
+
+def test_the_banner_marks_a_fake_clients_blocker_informational_and_a_missing_reason_column(
+):
+  m = _load()
+  out = m.table_verdicts(_PLANNED[:2], [
+      _row(status="FAILED_BLOCKER"),
+      _row(landing_table="p.land.T_B", status="FAILED_PREFLIGHT")
+  ])
+  lines = m.verdict_banner(
+      out,
+      batches=_BATCHES,
+      landing_dataset="p.land",
+      fail_on_blocker=False,
+      reason_column=False).splitlines()
+  assert lines == [
+      "TABLE VERDICTS | 2 planned · 0 passed · 1 failed · 0 no row",
+      "  p.land.T_A | FAILED_BLOCKER (informational: client_type=fake) | "
+      "no reason recorded (the table has no status_reason column)",
+      "  p.land.T_B | FAILED_PREFLIGHT | "
+      "no reason recorded (the table has no status_reason column)",
+  ]
+  with_column = m.verdict_banner(
+      out,
+      batches=_BATCHES,
+      landing_dataset="p.land",
+      fail_on_blocker=True,
+      reason_column=True).splitlines()
+  assert with_column[0] == (
+      "TABLE VERDICTS | 2 planned · 0 passed · 2 failed · 0 no row")
+  assert with_column[1] == (
+      "  p.land.T_A | FAILED_BLOCKER | no reason recorded")
+
+
+def test_verdicts_query_names_the_launch_two_ways_and_refuses_a_bad_table():
+  m = _load()
+  sql = m.verdicts_query(
+      "sdfb-proj:synthetic_data_quality.validation_runs", with_reason=True)
+  assert "FROM `sdfb-proj.synthetic_data_quality.validation_runs`" in sql
+  assert ("launch_run_id = @base OR STARTS_WITH(run_id, CONCAT(@base, '-b'))"
+          in sql)
+  assert sql.startswith(
+      "SELECT landing_table, run_id, status, created_at, status_reason")
+  assert "status_reason" not in m.verdicts_query("p.d.t", with_reason=False)
+  with pytest.raises(ValueError):
+    m.verdicts_query("p.d.t; DROP TABLE x", with_reason=True)
+  with pytest.raises(ValueError):
+    m.verdicts_query("p.d.t`", with_reason=True)
+
+
+def test_only_the_missing_reason_column_error_triggers_the_retry():
+  m = _load()
+  assert m.is_missing_reason_column(
+      "400 Unrecognized name: status_reason at [1:35]")
+  assert not m.is_missing_reason_column("403 Access Denied: Table p:d.t")
+
+
+def test_parallel_cap_reads_the_variable_then_the_overlaid_yaml(deployed):
+  m = _load()
+  folder = deployed()
+  yaml_only = m.load_layers(folder)
+  assert m.parallel_cap(yaml_only, {}) == 1  # generator.yaml's 1
+  overlay = Path(folder) / "sdfb_env.yaml"
+  overlay.write_text(
+      overlay.read_text(encoding="utf-8") +
+      '  launch:\n    max_parallel_jobs: "2"\n',
+      encoding="utf-8")  # under config:
+  layers = m.load_layers(folder)
+  assert m.parallel_cap(layers, {}) == 2
+  assert m.parallel_cap(layers, {"SDFB_MAX_PARALLEL_JOBS": "3"}) == 3  # wins
+  assert m.parallel_cap(layers, {"SDFB_MAX_PARALLEL_JOBS": ""}) == 2  # unset
+  assert m.parallel_cap(layers, {"SDFB_MAX_PARALLEL_JOBS": "0"}) == 1  # floor
+  with pytest.raises(ValueError, match="SDFB_MAX_PARALLEL_JOBS"):
+    m.parallel_cap(layers, {"SDFB_MAX_PARALLEL_JOBS": "two"})
+  overlay.write_text(
+      overlay.read_text(encoding="utf-8").replace('max_parallel_jobs: "2"',
+                                                  'max_parallel_jobs: "two"'),
+      encoding="utf-8")
+  with pytest.raises(ValueError, match=r"launch\.max_parallel_jobs"):
+    m.parallel_cap(m.load_layers(folder), {})

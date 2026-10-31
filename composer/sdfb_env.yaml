@@ -58,3 +58,9 @@ config:
   serving:
     model_uri: "{{SDFB_MODEL_URI}}"
     gpu: "{{GPU}}"
+  # The default relationship model: ONE model file on GCS for tables=all
+  # (gs://<bucket>/synthetic/relationships/<model>.yaml); a folder serves
+  # explicit launches only. A trigger's relationships_uri overrides it per
+  # launch. Never empty: '' would turn relationships OFF (load_layers refuses).
+  relational:
+    relationships_uri: "{{SDFB_RELATIONSHIPS_URI}}"
