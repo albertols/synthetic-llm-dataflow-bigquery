@@ -961,19 +961,19 @@ def status_reason_supported(table_fqn: str) -> bool:
 
     A table without the column, or one whose schema cannot be read, gets
     rows without it, as before the column existed: FILE_LOADS would reject
-    an unknown field at the end of the job. One WARNING says why. Never
-    raises."""
-  reason = None
+    an unknown field at the end of the job. One WARNING says why. No
+    table, no row: False, silently (`record_supported` names the missing
+    flag). Never raises."""
   if not table_fqn:
-    reason = "no_table"
+    return False
+  reason = None
+  try:
+    live = read_table_columns(table_fqn)
+  except Exception:  # pylint: disable=broad-exception-caught  # the column is optional: no failure here may stop a launch
+    reason = "schema_unreadable"
   else:
-    try:
-      live = read_table_columns(table_fqn)
-    except Exception:  # pylint: disable=broad-exception-caught  # the column is optional: no failure here may stop a launch
-      reason = "schema_unreadable"
-    else:
-      if "status_reason" not in live:
-        reason = "missing_column"
+    if "status_reason" not in live:
+      reason = "missing_column"
   if reason is None:
     return True
   log_milestone(

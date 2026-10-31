@@ -618,13 +618,19 @@ def test_every_table_of_a_whole_model_batch_records_verdicts_only(model_uri):
   assert all(getattr(a, "_blocker_verdict_only", False) for a in SEEN_ARGS)
 
 
-@pytest.mark.parametrize("table, columns, reason", [
-    ("", _ALL_COLUMNS, "no_table"),
-    ("p.q.validation_runs", None, "schema_unreadable"),
-    ("p.q.validation_runs", _ALL_COLUMNS - {"status_reason"}, "missing_column"),
+def _status_reason_warnings(caplog) -> list:
+  return [
+      r for r in caplog.records
+      if "name=status_reason_unsupported" in r.getMessage().split()
+  ]
+
+
+@pytest.mark.parametrize("columns, reason", [
+    (None, "schema_unreadable"),
+    (_ALL_COLUMNS - {"status_reason"}, "missing_column"),
 ])
 def test_status_reason_is_written_only_where_the_column_exists(
-    monkeypatch, caplog, table, columns, reason):
+    monkeypatch, caplog, columns, reason):
 
   def read(fqn):
     if columns is None:
@@ -632,12 +638,18 @@ def test_status_reason_is_written_only_where_the_column_exists(
     return columns
 
   monkeypatch.setattr(rp, "read_table_columns", read)
-  assert rp.status_reason_supported(table) is False
-  [record] = [
-      r for r in caplog.records
-      if "name=status_reason_unsupported" in r.getMessage().split()
-  ]
+  assert rp.status_reason_supported("p.q.validation_runs") is False
+  [record] = _status_reason_warnings(caplog)
   assert record.levelno == logging.WARNING
   assert f"reason={reason}" in record.getMessage().split()
   monkeypatch.setattr(rp, "read_table_columns", lambda fqn: _ALL_COLUMNS)
   assert rp.status_reason_supported("p.q.validation_runs") is True
+
+
+def test_no_validation_runs_table_writes_no_row_and_warns_nothing(
+    monkeypatch, caplog):
+  reads: list[str] = []
+  monkeypatch.setattr(rp, "read_table_columns", lambda fqn:
+                      (reads.append(fqn) or _ALL_COLUMNS))
+  assert rp.status_reason_supported("") is False
+  assert not _status_reason_warnings(caplog) and not reads
