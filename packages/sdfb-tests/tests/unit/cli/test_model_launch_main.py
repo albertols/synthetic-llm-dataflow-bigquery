@@ -562,23 +562,34 @@ def test_a_parent_already_prepped_is_skipped_with_its_failed_child(
 
 
 def test_an_error_in_a_tables_prep_skips_its_component_too(
-    model_uri, direct, monkeypatch):
+    tmp_path, direct, monkeypatch):
+  model = tmp_path / "chain.yaml"
+  model.write_text(
+      "model: chain\ntables:\n  T_P: {pk: [ID]}\n"
+      "  T_C: {fk: [{cols: [P_ID], ref: T_P, ref_cols: [ID]}]}\n  T_X: {}\n",
+      encoding="utf-8")
   fake_spec = rp._prepare_table_spec  # pylint: disable=protected-access
 
   def spec(args, client, **kwargs):
-    if args.landing_table.endswith("T_EVENTS_LOG"):
-      raise RuntimeError("the read ahead failed")
+    if args.landing_table.endswith("T_P"):
+      raise RuntimeError("Bad int64 value: COL_VALUE_001")
     return fake_spec(args, client, **kwargs)
 
   monkeypatch.setattr(rp, "_prepare_table_spec", spec)
-  with pytest.raises(SystemExit, match="1 table\\(s\\) skipped"):
-    _main(model_uri, "--max_tables_per_job=2", "--client_type=fake",
-          "--runner=DirectRunner",
-          "--validation_runs_table=p.q.validation_runs")
-  row = _only_row(direct, "T_EVENTS_LOG")
-  assert (row["status"], row["status_reason"]) == ("FAILED_PREFLIGHT",
-                                                   "the read ahead failed")
-  assert _only_row(direct, "T_ACCOUNTS")["status"] == "PASSED"
+  with pytest.raises(SystemExit, match="2 table\\(s\\) skipped"):
+    _main(
+        str(model), "--client_type=fake", "--runner=DirectRunner",
+        "--validation_runs_table=p.q.validation_runs")
+  # Not a preflight stop: the row names the type, never the error's text,
+  # which may quote a source cell.
+  why = ("RuntimeError during driver-side preflight (traceback in the "
+         "launcher log)")
+  row = _only_row(direct, "T_P")
+  assert (row["status"], row["status_reason"]) == ("FAILED_PREFLIGHT", why)
+  child = _only_row(direct, "T_C")
+  assert child[
+      "status_reason"] == f"component member T_P failed preflight: {why}"
+  assert _only_row(direct, "T_X")["status"] == "PASSED"
 
 
 def test_a_batch_whose_every_table_fails_preflight_launches_nothing(

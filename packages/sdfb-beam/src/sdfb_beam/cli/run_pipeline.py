@@ -4306,6 +4306,17 @@ def _skipped_tables(
   return out
 
 
+def _skip_reason(exc: BaseException) -> str:
+  """What a skipped table's `status_reason` says. A `[preflight …]` stop's
+    text is written to say counts and names, never a reference value; any
+    other exception's text may quote a cell (a BigQuery or library error),
+    so the row names only its type and the log keeps the rest."""
+  if isinstance(exc, SystemExit):
+    return str(exc)[:STATUS_REASON_MAX]
+  return (f"{type(exc).__name__} during driver-side preflight (traceback in "
+          f"the launcher log)")
+
+
 def _prep_relational_specs(
     plan,
     args,
@@ -4374,7 +4385,7 @@ def _prep_relational_specs(
           continue
         bare = run.landing_table.rsplit(".", 1)[-1]
         for member in components[run.landing_table]:
-          failed_by.setdefault(member, (bare, str(exc)[:STATUS_REASON_MAX]))
+          failed_by.setdefault(member, (bare, _skip_reason(exc)))
   finally:
     if read_ahead is not None:
       read_ahead.close()
