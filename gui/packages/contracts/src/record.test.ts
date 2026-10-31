@@ -13,9 +13,9 @@ import {
 } from "./record";
 
 describe("record columns", () => {
-  it("are the last fourteen columns of validation_runs, in order", () => {
+  it("are the fourteen columns before status_reason of validation_runs, in order", () => {
     const names = bqTables.validation_runs.fields.map((f) => f.name);
-    expect(names.slice(-RECORD_COLUMNS.length)).toEqual([...RECORD_COLUMNS]);
+    expect(names.slice(-RECORD_COLUMNS.length - 1, -1)).toEqual([...RECORD_COLUMNS]);
   });
   it("empty means every one null", () => {
     expect(Object.values(EMPTY_RECORD_COLUMNS).every((v) => v === null)).toBe(true);
@@ -48,6 +48,7 @@ function row(over: Partial<ValidationRunsRow>): ValidationRunsRow {
     blocker_failure_ratio: null,
     observed_blocker_ratio: null,
     status: null,
+    status_reason: null,
     excluded_blocker_rules: null,
     source_repeat_share: null,
     landing_repeat_share: null,

@@ -544,7 +544,7 @@ const configConcepts: Concept[] = [
       P.pydantic,
       P.pandera,
       P.beamDlq,
-      code("sdfb_beam/pipeline.py", "packages/sdfb-beam/src/sdfb_beam/pipeline.py", 387),
+      code("sdfb_beam/pipeline.py", "packages/sdfb-beam/src/sdfb_beam/pipeline.py", 394),
     ],
   },
   {
@@ -573,7 +573,7 @@ const configConcepts: Concept[] = [
       tip: "An ADR 0038 adjusted table excludes pk.duplicate from both sides of the ratio.",
     },
     links: [
-      code("sdfb_core/validation/summary.py", "packages/sdfb-core/src/sdfb_core/validation/summary.py", 186),
+      code("sdfb_core/validation/summary.py", "packages/sdfb-core/src/sdfb_core/validation/summary.py", 201),
       adr("0038"),
     ],
   },

@@ -9,10 +9,10 @@ export type Citation = { source: string; excerpt: string };
 const PIPELINE = "packages/sdfb-beam/src/sdfb_beam/pipeline.py";
 
 export const CITES = {
-  fkIntegrityLine: { source: `${PIPELINE}:387`, excerpt: "# Line 4 of defense (ADR 0031)" },
-  panderaBatch: { source: `${PIPELINE}:407`, excerpt: "beam.BatchElements(" },
-  uniquenessLine: { source: `${PIPELINE}:415`, excerpt: "# Line 3 of defense" },
-  gateAfterLoad: { source: `${PIPELINE}:501`, excerpt: "# Order the gate AFTER the FILE_LOADS load jobs commit" },
+  fkIntegrityLine: { source: `${PIPELINE}:394`, excerpt: "# Line 4 of defense (ADR 0031)" },
+  panderaBatch: { source: `${PIPELINE}:414`, excerpt: "beam.BatchElements(" },
+  uniquenessLine: { source: `${PIPELINE}:422`, excerpt: "# Line 3 of defense" },
+  gateAfterLoad: { source: `${PIPELINE}:512`, excerpt: "# Order the gate AFTER the FILE_LOADS load jobs commit" },
   loadSafety: {
     source: "packages/sdfb-beam/src/sdfb_beam/dofns/validate_record.py:50",
     excerpt: "# Load-safety bound",
@@ -24,7 +24,7 @@ export const CITES = {
   skillLineThree: { source: ".claude/skills/validation-mode-a.md:28", excerpt: "## Line 3 — BigQueryIO `FailedRows`" },
   readmeUniqueness: { source: "README.md:204", excerpt: "3. **Uniqueness**" },
   gateRatio: {
-    source: "packages/sdfb-core/src/sdfb_core/validation/summary.py:186",
+    source: "packages/sdfb-core/src/sdfb_core/validation/summary.py:201",
     excerpt: "observed = (blocker_count / total)",
   },
   adr0033D2: {

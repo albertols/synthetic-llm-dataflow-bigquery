@@ -35,6 +35,7 @@ function run(table: string, overrides: Partial<ValidationRun> = {}): ValidationR
     blocker_failure_ratio: 0.2,
     observed_blocker_ratio: 0,
     status: "PASSED",
+    status_reason: null,
     excluded_blocker_rules: "",
     source_repeat_share: null,
     landing_repeat_share: null,

@@ -365,6 +365,7 @@ function validationRuns(base: string, runIds: Map<string, string>, finishedAt: s
       blocker_failure_ratio: gate,
       observed_blocker_ratio: observed,
       status: observed > gate ? "FAILED_BLOCKER" : "PASSED",
+      status_reason: null,
       // The generator writes "" on a table it did not adjust, never NULL.
       excluded_blocker_rules: excluded.join(","),
       source_repeat_share: source,

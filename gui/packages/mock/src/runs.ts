@@ -243,6 +243,7 @@ export function buildRuns(storyline: readonly EvalSpec[], seed: number) {
         blocker_failure_ratio: ratio,
         observed_blocker_ratio: observed,
         status: observed > ratio ? "FAILED_BLOCKER" : "PASSED",
+        status_reason: null,
         excluded_blocker_rules: null,
         source_repeat_share: repeatSource,
         landing_repeat_share: repeatLanding,

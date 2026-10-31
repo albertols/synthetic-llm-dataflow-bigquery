@@ -3874,9 +3874,7 @@ export const knobs: KnobsFile = {
     }
   ],
   "exported_from": {
-    "commit": "867870f5c1a35f7805894ceaee791d52a653075e",
-    "dirty": [
-      "packages/sdfb-core/src/sdfb_core/config/model.py"
-    ]
+    "commit": "c4452ed6c8b8d2689dc82e918d68b2735085821f",
+    "dirty": []
   }
 };

@@ -276,6 +276,7 @@ function forestRuns(
         blocker_failure_ratio: gate,
         observed_blocker_ratio: observed,
         status: observed > gate ? "FAILED_BLOCKER" : "PASSED",
+        status_reason: null,
         excluded_blocker_rules: "",
         source_repeat_share: null,
         landing_repeat_share: null,
