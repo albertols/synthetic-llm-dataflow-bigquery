@@ -128,9 +128,13 @@ FAILED_PREFLIGHT, with a `status_reason`). So `fail_if_a_table_failed`, once
 every batch has ended, reads the launch's rows by the base run id
 (`sdfb_batches.verdicts_query`, through `BigQueryHook`) and fails the run
 with `sdfb_batches.verdict_banner`, naming each planned table whose newest
-row is not PASSED or that has no row (its batch did not reach DONE). Under
+row is not PASSED or that has no row (its batch did not reach DONE). A
+planned table is named in the landing dataset the launchers write to: a
+config file's io.landing_dataset when it sets one. Under
 `client_type=fake` a FAILED_BLOCKER is informational. A `validation_runs`
-table without the `status_reason` column is read without it. With no
+table without the `status_reason` column is read without it; a
+`validation_runs_table` that is no `project.dataset.table` fails the leaf
+without a retry, and any other read error is retried. With no
 `validation_runs_table` (the overlay's, or a config file's io key) nothing
 is recorded: the leaf skips with a warning, and the run's outcome is the
 batch jobs' alone. The evaluation of the DONE batches runs either way.
@@ -1142,19 +1146,27 @@ def _verdict_rows(table: str, base: str) -> tuple[list[dict], bool]:
   """(the launch's `validation_runs` rows, whether they carry
   `status_reason`).
 
+  A table name `verdicts_query` refuses fails the task without a retry: the
+  same name fails the same way every time (as `route` treats a PlanError).
   A table created before the `status_reason` column refuses the query that
   names it: it is read again without the column. Any other error is raised
   as it is, so the environment's retries apply.
   """
   from airflow.providers.google.cloud.hooks.bigquery import BigQueryHook
 
-  def read(with_reason: bool) -> list[dict]:
+  try:
+    with_reason = sdfb_batches.verdicts_query(table, with_reason=True)
+    without_reason = sdfb_batches.verdicts_query(table, with_reason=False)
+  except ValueError as error:
+    raise AirflowFailException(str(error)) from error
+
+  def read(query: str) -> list[dict]:
     job = BigQueryHook().insert_job(
         project_id=project_id,
         configuration={
             "query": {
                 "query":
-                    sdfb_batches.verdicts_query(table, with_reason=with_reason),
+                    query,
                 "useLegacySql":
                     False,
                 "queryParameters": [{
@@ -1172,11 +1184,11 @@ def _verdict_rows(table: str, base: str) -> tuple[list[dict], bool]:
     return [dict(row) for row in job.result()]
 
   try:
-    return read(with_reason=True), True
+    return read(with_reason), True
   except Exception as error:  # pylint: disable=broad-exception-caught  # re-raised unless it is the missing column
     if not sdfb_batches.is_missing_reason_column(str(error)):
       raise
-  return read(with_reason=False), False
+  return read(without_reason), False
 
 
 @task(task_id="fail_if_a_table_failed", trigger_rule=TriggerRule.ALL_DONE)

@@ -817,3 +817,25 @@ def test_verdict_inputs_read_the_overlay_then_the_file(deployed):
   }, {}, layers)["landing_dataset"] == "p.land"
   with pytest.raises(m.PlanError, match="io"):
     m.verdict_inputs(params, {"io": "p.q.runs"}, layers)
+
+
+def test_verdict_inputs_follow_a_files_landing_dataset(deployed):
+  """The launcher lands the tables in a config file's io.landing_dataset
+  (ADR 0043), so the verdicts look there too."""
+  m = _load()
+  layers = m.load_layers(deployed())
+  params = m.param_defaults(layers)
+  file = {"io": {"landing_dataset": "sdfb-proj.other_land"}}
+  assert m.verdict_inputs(params, file,
+                          layers)["landing_dataset"] == "sdfb-proj.other_land"
+  # A trigger's value, too, gives way to the file's.
+  assert m.verdict_inputs({
+      **params, "landing_dataset": "p.land"
+  }, file, layers)["landing_dataset"] == "sdfb-proj.other_land"
+  # Without the key: whole_model_params' value.
+  assert m.verdict_inputs(params, {"io": {
+      "dlq_table": "p.q.dlq"
+  }}, layers)["landing_dataset"] == "sdfb-proj.synthetic_data"
+  for bad in ("", "  ", None, 7, ["p.d"]):
+    with pytest.raises(m.PlanError, match=r"io\.landing_dataset"):
+      m.verdict_inputs(params, {"io": {"landing_dataset": bad}}, layers)

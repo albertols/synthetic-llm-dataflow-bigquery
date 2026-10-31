@@ -1112,22 +1112,28 @@ def verdict_banner(verdicts: Mapping[str, Any], *,
 
 def verdict_inputs(params: Mapping[str, Any], config: ConfigInput,
                    layers: Layers) -> dict[str, str]:
-  """What `fail_if_a_table_failed` judges a `tables=all` launch with:
-  the validation_runs table (a config file's io.validation_runs_table when
-  it sets one, empty included, ADR 0043; else the overlay's), the landing
-  dataset `whole_model_params` resolves, and the client type (`params`
-  after `with_file_hardware`). Plain JSON, for an XCom."""
+  """What `fail_if_a_table_failed` judges a `tables=all` launch with: the
+  validation_runs table (a config file's io.validation_runs_table when it
+  sets one, empty included; else the overlay's), the landing dataset (a
+  config file's io.landing_dataset, which must then be a non-empty
+  `project.dataset`; else the one `whole_model_params` resolves) and the
+  client type (`params` after `with_file_hardware`). A file's keys win, as
+  in the launcher (ADR 0043). Plain JSON, for an XCom."""
   io = parse_config(config).get("io") or {}
   if not isinstance(io, Mapping):
     raise PlanError("config_uri: section 'io' must be a mapping")
   table = io.get("validation_runs_table")
   if table is None:
     table = _overlaid(layers)["validation_runs_table"]
+  if "landing_dataset" in io:
+    landing = io["landing_dataset"]
+    if not isinstance(landing, str) or not landing.strip():
+      raise PlanError(f"config_uri's io.landing_dataset must be a non-empty "
+                      f"project.dataset, got {landing!r}")
+  else:
+    landing = cli_text(whole_model_params(params, layers)["landing_dataset"])
   return {
-      "validation_runs_table":
-          cli_text(table).strip(),
-      "landing_dataset":
-          cli_text(whole_model_params(params, layers)["landing_dataset"]),
-      "client_type":
-          cli_text(params.get("client_type")),
+      "validation_runs_table": cli_text(table).strip(),
+      "landing_dataset": landing.strip(),
+      "client_type": cli_text(params.get("client_type")),
   }

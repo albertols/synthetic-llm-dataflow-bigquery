@@ -677,6 +677,26 @@ def test_the_verdict_read_retries_only_without_the_reason_column():
   assert "sdfb_batches.is_missing_reason_column" in text
   # anything else re-raises
   assert "with_reason=False" in text and text.count("raise") >= 1
+  # A malformed table name fails the same way on every retry: the task
+  # fails once, as route does on a PlanError. Only the name check is in the
+  # try; the BigQuery read's own errors are retried.
+  (handler,) = [
+      h for n in ast.walk(helper) if isinstance(n, ast.Try) for h in n.handlers
+      if ast.unparse(h.type) == "ValueError"
+  ]
+  assert "raise AirflowFailException(str(error)) from error" in ast.unparse(
+      handler)
+  (guarded,) = [
+      n for n in ast.walk(helper)
+      if isinstance(n, ast.Try) and handler in n.handlers
+  ]
+  calls = {
+      ast.unparse(c.func)
+      for stmt in guarded.body
+      for c in ast.walk(stmt)
+      if isinstance(c, ast.Call)
+  }
+  assert calls == {"sdfb_batches.verdicts_query"}
 
 
 # -- the real-Airflow run ----------------------------------------------------
