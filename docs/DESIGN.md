@@ -422,6 +422,46 @@ checks the count; the generation DAG's `tables=all` branch and
 [`cli/run_pipeline.py::_run_model`](../packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py),
 [`composer/sdfb_batches.py`](../composer/sdfb_batches.py).
 
+**Claim: under a whole-model launch a table's failure is its own.**
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  subgraph B["🔀 batch job bNN · ends DONE"]
+    T1["✅ T_ACCOUNTS<br/>PASSED"]:::data
+    T2["⛔ T_EVENTS_LOG<br/>FAILED_PREFLIGHT<br/>skipped"]:::data
+    T3["⛔ T_RATES<br/>FAILED_BLOCKER<br/>landed"]:::data
+    subgraph C["one component"]
+      T4["⛔ T_ORDERS<br/>FAILED_PREFLIGHT"]:::data
+      T5["⛔ T_ITEMS<br/>FAILED_PREFLIGHT<br/>its parent failed"]:::data
+    end
+  end
+  V[("🗄️ validation_runs<br/>one row per table")]:::store
+  L["🛡️ fail_if_a_table_failed<br/>TABLE VERDICTS"]:::cpu
+  T4 -.->|"parent → child"| T5
+  B --> V --> L
+```
+
+*A failed table fails itself; a component's members fail together; the job
+ends DONE.* Under `launch.tables: all` a table whose driver-side preflight
+fails is skipped with the rest of its connected component inside the batch,
+and the other tables launch; a tripped BLOCKER gate records its verdict
+instead of failing the job. Every table's verdict lives in `validation_runs`:
+`PASSED`, `FAILED_BLOCKER` or `FAILED_PREFLIGHT`, with the reason in
+`status_reason`. The generation DAG's `fail_if_a_table_failed` reads those
+rows once every batch has ended and fails the run naming each table that did
+not pass or has no row; the evaluation still covers every batch that reached
+DONE. An explicit launch keeps failing its job
+([ADR 0045](adr/0045-whole-model-launches.md#the-table-is-the-unit-of-failure-2026-10-31) D6). Code:
+[`cli/run_pipeline.py::_prep_relational_specs`](../packages/sdfb-beam/src/sdfb_beam/cli/run_pipeline.py),
+[`pipeline.py::_BlockerGateDoFn`](../packages/sdfb-beam/src/sdfb_beam/pipeline.py),
+[`composer/sdfb_batches.py::verdict_banner`](../composer/sdfb_batches.py).
+
 ## 5. Fidelity, value pools and constraints
 
 **Claim: numeric and temporal values are drawn where the source is dense, not
@@ -572,7 +612,7 @@ edge keeps the table and stops drawing keys through that edge.*
 
 | Knob | Where | Read by |
 | :-- | :-- | :-- |
-| Every generator setting (flags + tunable constants) | the value lines of [`config/generator.yaml`](../config/generator.yaml) (a link to the copy packaged in [`sdfb_core/config/`](../packages/sdfb-core/src/sdfb_core/config/), whose `catalogue.yaml` renders its comments); a Composer environment's values in `composer/sdfb_env.yaml` | launcher (`--config_uri`, file wins), workers via `generator_config`, the Composer DAG's param defaults from its own copy ([ADR 0043](adr/0043-generator-config.md)) |
+| Every generator setting (flags + tunable constants) | the value lines of [`config/generator.yaml`](../config/generator.yaml) (a link to the copy packaged in [`sdfb_core/config/`](../packages/sdfb-core/src/sdfb_core/config/), whose `catalogue.yaml` renders its comments); a Composer environment's values in `composer/sdfb_env.yaml`, `relational.relationships_uri` among them (the model every launch reads by default, its 19th marker) | launcher (`--config_uri`, file wins), workers via `generator_config`, the Composer DAG's param defaults from its own copy ([ADR 0043](adr/0043-generator-config.md)); the DAG's parallel cap at parse time, `launch.max_parallel_jobs` (`generator.yaml` < `sdfb_env.yaml` < the Airflow Variable `SDFB_MAX_PARALLEL_JOBS`; [ADR 0045](adr/0045-whole-model-launches.md) D5) |
 | Tables, keys, edges, `enabled` / `enforced` / `drives` | `config/relationships/*.yaml` | launcher and workers; one relationship card is logged per run |
 | Which tables a launch generates, each table's source and rows | `launch.tables`, `launch.max_tables_per_job` ([`config/generator.yaml`](../config/generator.yaml)); `source_table`, `num_rows` per table (`config/relationships/*.yaml`) | launcher, the generation DAG with `tables=all`, `scripts/launch/run_model.py` (§4.5) |
 | Model URI, vLLM server flags, licence | [`config/models.yml`](../config/models.yml) | nobody at runtime — a reference registry; `serving.model_uri` points at one of its entries |

@@ -99,9 +99,12 @@ The generation DAG `composer/synthetic_beam_bigquery.py` launches every
 shape, one table, an FK group or a whole model (`tables=all`), and carries
 no deploy marker ([ADR 0043](adr/0043-generator-config.md#revision-2026-10-26-the-yaml-holds-the-values),
 [ADR 0045](adr/0045-whole-model-launches.md#d6--one-generation-dag-two-branches)
-D6). Its 18 markers, the same 18 master's DAG carried, live in the env
-overlay `composer/sdfb_env.yaml`, so the workflow's `sed -e` list is
-unchanged; only its target file changes. At parse time the DAG reads
+D6). Its 19 markers live in the env overlay `composer/sdfb_env.yaml`: the
+18 master's DAG carried, so the workflow's existing `sed -e` list runs
+unchanged on its new target file, and one more,
+`{{SDFB_RELATIONSHIPS_URI}}` (`config.relational.relationships_uri`, the
+model file every launch reads by default; ADR 0045's revision of
+2026-10-31), which takes one more `-e`. At parse time the DAG reads
 `generator.yaml` and `sdfb_env.yaml` from its own folder
 (`sdfb_batches.load_layers`): every param default, its DAG id, its Flex
 Template, its buckets and its job names come from the two files. The
@@ -121,8 +124,8 @@ flowchart LR
 
   D[("📄 synthetic_beam_bigquery.py<br/>sdfb_batches.py")]:::store
   Y[("📄 config/generator.yaml<br/>dereferenced")]:::store
-  O[("📄 sdfb_env.yaml<br/>18 markers")]:::store
-  S["⚙️ sed -e …<br/>the existing list"]:::cpu
+  O[("📄 sdfb_env.yaml<br/>19 markers")]:::store
+  S["⚙️ sed -e …<br/>the list + one"]:::cpu
   C["🛡️ marker check<br/>+ load check"]:::cpu
   F[("🪣 Composer<br/>DAGs folder")]:::store
   O --> S --> C --> F
@@ -135,12 +138,13 @@ flowchart LR
 | `synthetic_beam_bigquery.py` | `composer/synthetic_beam_bigquery.py` | imported unchanged: **no `sed` on the DAG** |
 | `sdfb_batches.py` | `composer/sdfb_batches.py` | imported unchanged (the launch helpers; Composer cannot import sdfb-core) |
 | `generator.yaml` | `config/generator.yaml`, a symlink to `packages/sdfb-core/src/sdfb_core/config/generator.yaml`: copy the file it names (`cp -L`), not the link | imported byte for byte: its sha12 is the `generator_defaults_digest` every launch passes, which the launcher compares with the image's copy |
-| `sdfb_env.yaml` | `composer/sdfb_env.yaml` | the one `sed`, then the marker check and the load check |
+| `sdfb_env.yaml` | `composer/sdfb_env.yaml` | the one `sed`, then the marker check, the empty-value check and the load check |
 
 | Workflow | Step | Edit |
 |---|---|---|
 | `3_import_dag.yaml` | "Substitute build-time placeholders" | run the existing `sed -i -e …` list on `sdfb_env.yaml` instead of the DAG. Every marker sits inside double quotes, so a value stays a string (`prd`, `append`, `l4`, a version, `''`) and must not itself contain `"` |
-| `3_import_dag.yaml` | "Substitute build-time placeholders" — the marker check | run the `grep -nE '\{\{[A-Z_]+\}\}'` check on `sdfb_env.yaml` (it must print nothing), then the load check below |
+| `3_import_dag.yaml` | the `-e` list | add `-e 's\|{{SDFB_RELATIONSHIPS_URI}}\|${SDFB_RELATIONSHIPS_URI}\|'` (the step below spells it out) and the GitHub variable `SDFB_RELATIONSHIPS_URI` = `gs://<bucket>/synthetic/relationships/<model>.yaml` (one model FILE: a `tables=all` launch needs a file; a folder serves explicit launches only). The other 18 lines are unchanged. The value must not be empty: `load_layers` refuses `relationships_uri: ""` (the launcher would read it as relationships OFF), and the empty-value check below stops the import first |
+| `3_import_dag.yaml` | "Substitute build-time placeholders" — the marker check | run the `grep -nE '\{\{[A-Z_]+\}\}'` check on `sdfb_env.yaml` (it must print nothing), the empty-value check, then the load check below |
 | `3_import_dag.yaml` | "Substitute build-time placeholders" — the resolved-values check | unchanged: the same variables, now substituted into the overlay |
 | `3_import_dag.yaml` | "Import DAG into Composer" | four `gcloud composer environments storage dags import` calls, the same flags as the existing one, one per file of the table above: `sdfb_batches.py`, `generator.yaml` and `sdfb_env.yaml` first, the DAG last |
 | `3_import_dag.yaml` | once, if a build of this branch from before 2026-10-26 imported it | `gcloud composer environments storage dags delete synthetic_model_launch.py` (same `--environment` and `--location`) |
@@ -160,9 +164,11 @@ check needs PyYAML on the runner):
 OUT=dags_out && mkdir -p "$OUT"
 cp composer/synthetic_beam_bigquery.py composer/sdfb_batches.py composer/sdfb_env.yaml "$OUT/"
 cp -L config/generator.yaml "$OUT/generator.yaml"      # the file, not the symlink
+# <the -e list> ends with: -e 's|{{SDFB_RELATIONSHIPS_URI}}|${SDFB_RELATIONSHIPS_URI}|'
 sed -i <the -e list> "$OUT/sdfb_env.yaml"              # the ONE sed of the generation DAG
 if grep -nE '\{\{[A-Z_]+\}\}' "$OUT/sdfb_env.yaml"; then echo "unfilled marker"; exit 1; fi
-python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import sdfb_batches as b; d = b.param_defaults(b.load_layers(sys.argv[1])); print(d["table_fqn"], d["gpu"], d["engine"], d["write_disposition"])' "$OUT"
+if grep -nE 'relationships_uri: ""' "$OUT/sdfb_env.yaml"; then echo "empty SDFB_RELATIONSHIPS_URI"; exit 1; fi
+python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import sdfb_batches as b; d = b.param_defaults(b.load_layers(sys.argv[1])); print(d["table_fqn"], d["gpu"], d["engine"], d["write_disposition"], d["relationships_uri"])' "$OUT"
 for f in sdfb_batches.py generator.yaml sdfb_env.yaml synthetic_beam_bigquery.py; do  # the DAG last
   gcloud composer environments storage dags import \
     --environment="$COMPOSER_ENV" --location="$REGION" --source="$OUT/$f"
@@ -173,29 +179,39 @@ The DAG is imported last because the scheduler parses it as soon as it lands:
 imported before its helpers and YAML files, it would parse against the
 previous import's (or none, a broken DAG) until they arrive.
 
-The load check prints the default table, GPU, engine and write disposition
-the DAG will show, and fails on an overlay key `generator.yaml` does not have
-or on YAML the `sed` broke. Rebuild the Flex Template (workflow 2) before
+The load check prints the default table, GPU, engine, write disposition and
+relationship model the DAG will show, and fails on an overlay key
+`generator.yaml` does not have, on YAML the `sed` broke, or on an empty
+`relationships_uri`. Rebuild the Flex Template (workflow 2) before
 this import: every launch passes `generator_defaults_digest`, and `gpu`,
 `sdk_containers` or `launcher_machine_type` when they differ from
 `generator.yaml`, which an older template does not declare. Workflows 1 and
 2 need no edit for this: the image carries `generator.yaml` inside sdfb-core,
 and the template file declares the parameters.
 
-Once per Composer environment, set the Airflow Variable
-`SDFB_MAX_PARALLEL_JOBS` (default `1` when unset): how many batch jobs of a
-`tables=all` launch run at once. Each holds its workers' GPUs (up to
-`maxWorkers` 4 workers of one GPU each), so keep it within the regional GPU
-quota divided by 4. It is read when Composer parses the file; a change
-applies at the next parse, without a re-import. Each running batch also
-holds one Airflow worker slot until its job ends.
+The parallel cap, how many batch jobs of a `tables=all` launch run at once,
+has three layers (`sdfb_batches.parallel_cap`): `launch.max_parallel_jobs`
+of `generator.yaml` (`1`), overlaid by the same key in `sdfb_env.yaml` when
+the environment writes it there by hand (`config: launch:
+{max_parallel_jobs: "2"}`, a quoted string; it has no marker), and the
+Airflow Variable `SDFB_MAX_PARALLEL_JOBS`, which wins when it is set and not
+empty. Each batch job holds its workers' GPUs (up to `maxWorkers` 4 workers
+of one GPU each), so keep the cap within the regional GPU quota divided by
+4. It is read when Composer parses the file; a change to the Variable
+applies at the next parse, without a re-import, and a change to the overlay
+with the next import. A value that is no integer fails the DAG's import.
+Each running batch also holds one Airflow worker slot until its job ends.
 
 The DAG's `route` task reads from GCS, as the Composer environment's own
 service account, only the config file of a launch with `config_uri` and the
 model file of a `tables=all` launch. An explicit launch without `config_uri`
 reads nothing from GCS, as master's DAG read nothing. For the other two,
 grant that account `storage.objects.get` on the bucket or prefix that holds
-the files (`roles/storage.objectViewer`).
+the files (`roles/storage.objectViewer`). Its `fail_if_a_table_failed` task
+reads a `tables=all` launch's `validation_runs` rows, as the same account:
+grant it `roles/bigquery.dataViewer` on the quality dataset
+(`roles/bigquery.jobUser`, which the registry callbacks need, it already
+has).
 
 ---
 
@@ -653,7 +669,7 @@ flowchart LR
          --evaluation-dataset <project>.<evaluation_dataset>
    ```
 
-   Expect step 4d `BQ table · validation_runs` OK with `35 cols`, step 13c
+   Expect step 4d `BQ table · validation_runs` OK with `36 cols`, step 13c
    `Evaluation table · evaluation_data_history` OK, and the two views (13g,
    13h) OK.
 
@@ -977,7 +993,7 @@ flowchart LR
   B["⚙️ 2–4 workflows, image,<br/>template, DAG"]:::cpu
   S[("📄 5 five-table<br/>model copy")]:::store
   D["🔀 6–11 the DAG, tables=all<br/>two batches"]:::beam
-  F["🛡️ 12 a failed<br/>batch"]:::cpu
+  F["🛡️ 12, 12b a failed<br/>table"]:::cpu
   C["⚙️ 13 run_model.py"]:::cpu
   W["🔀 14 the whole<br/>model"]:::beam
   P["⚙️ 15 probe"]:::cpu
@@ -986,11 +1002,14 @@ flowchart LR
 ```
 
 The laptop has already run the DAG under Airflow 2.10.5's `dag.test()`
-with GCS and Dataflow stubbed (`scripts/composer/check_dags.py`): four
-explicit launches, an explicit trigger whose config file says `all`, one
-batch, two batches, a failed batch and a failing `route`; every final state
-matched ADR 0045 D6. What only Composer can show (mapped tasks on Composer 2,
-the provider's job-name suffix, `on_kill`) is steps 8, 9 and 12.
+with GCS, Dataflow and BigQuery stubbed (`scripts/composer/check_dags.py`):
+four explicit launches, an explicit trigger whose config file says `all`, one
+batch, two batches, a failed batch, a failing `route`, a trigger with only
+`tables=all` (the overlay's model), a table whose gate failed while both
+batch jobs reached DONE, and a `validation_runs` table without
+`status_reason`; every final state matched ADR 0045 D6. What only Composer
+can show (mapped tasks on Composer 2, the provider's job-name suffix,
+`on_kill`, the leaf's BigQuery read) is steps 8, 9, 12 and 12b.
 
 1. **The registry.** §2d step 1's registry `bq update` uses the committed
    schema, which appends ADR 0045's `generation_job_ids` (REPEATED) after
@@ -1005,11 +1024,18 @@ the provider's job-name suffix, `on_kill`) is steps 8, 9 and 12.
    ADR 0045 drops only `generation_job_ids` (§2d step 1).
 
 2. **Apply the workflow 3 edits of [§0b](#0b-workflow-3-for-the-one-generation-dag-untracked-workflows)**
-   (§2d already did, if it ran from this build),
-   set the Airflow Variable `SDFB_MAX_PARALLEL_JOBS` to `2`, and grant the
-   Composer environment's service account read on the bucket that will hold
-   the model file (§0b: a `tables=all` launch reads it in `route`). The job's service account must be able to read every
-   source the model names, a `source_table` in another dataset included.
+   (§2d already did, if it ran from this build; the 19th marker,
+   `{{SDFB_RELATIONSHIPS_URI}}`, is new since 2026-10-31: set its GitHub
+   variable to the model file the corp launches by default), set the
+   parallel cap to `2` (the Airflow Variable `SDFB_MAX_PARALLEL_JOBS` = `2`,
+   or `config: launch: {max_parallel_jobs: "2"}` in the overlay before
+   step 4's import; the Variable wins when set), and grant the Composer
+   environment's service account read on the bucket that will hold the model
+   file (§0b: a `tables=all` launch reads it in `route`) and
+   `roles/bigquery.dataViewer` on `<quality_dataset>` (§0b:
+   `fail_if_a_table_failed` reads `validation_runs`). The job's service
+   account must be able to read every source the model names, a
+   `source_table` in another dataset included.
 
 3. **Rebuild the image** (workflow 1) and **the Flex template** (workflow 2)
    on it: the template now declares `tables`, `source_dataset`,
@@ -1090,7 +1116,9 @@ the provider's job-name suffix, `on_kill`) is steps 8, 9 and 12.
    `<project>.<scratch_landing_dataset>` (left empty, it takes the
    `project.dataset` of the overlay's landing table, the real landing
    dataset: set it; an empty `source_dataset` likewise takes the default
-   source table's), `write_disposition` = `overwrite` (on the scratch
+   source table's; a `relationships_uri` left unset would read the
+   overlay's model file instead), `write_disposition` = `overwrite` (on the
+   scratch
    dataset only), `num_rows` = `1000`, `max_tables_per_job` = `3`,
    `run_evaluation` true (the default) and `create_if_not_exists` false (the
    default: step 5 created the tables).
@@ -1099,12 +1127,13 @@ the provider's job-name suffix, `on_kill`) is steps 8, 9 and 12.
    tables` banner with `b00` and `b01`, the same tables as the dry run. Its
    XComs: the return value `batch_bodies` (the branch it took) and the keys
    `bodies` (two launch bodies), `base_run_id` (note it: `<base>`),
-   `batch_count` (`2`), `relationships_uri`, `batches`, `banner` and `mode`
-   (`all`). `batch_bodies` returns the two bodies; `start_sdfb` and the rest
+   `batch_count` (`2`), `relationships_uri`, `batches`, `banner`,
+   `verdict_inputs` (the `validation_runs_table`, the `landing_dataset` and
+   the `client_type` the leaf judges with) and `mode` (`all`). `batch_bodies` returns the two bodies; `start_sdfb` and the rest
    of the explicit chain are skipped.
 
-8. **Each `start_batch` instance** (two, running together with the Variable
-   at 2). In each Flex launcher's log (the job's launcher log in the Dataflow
+8. **Each `start_batch` instance** (two, running together with the cap at
+   2). In each Flex launcher's log (the job's launcher log in the Dataflow
    console), expect:
 
    ```text
@@ -1137,7 +1166,9 @@ the provider's job-name suffix, `on_kill`) is steps 8, 9 and 12.
    whose `generation_job_ids` parameter is `<b00's job id>,<b01's job id>` in
    batch order; `trigger_evaluation_batches` and
    `wait_for_batch_evaluation_launch` succeed; `fail_if_a_batch_failed` is
-   skipped; the run ends success.
+   skipped; `fail_if_a_table_failed` succeeds and its log carries
+   `TABLE VERDICTS | 5 planned · 5 passed · 0 failed · 0 no row`; the run
+   ends success.
 
 10. **`validation_runs`** — the launch's rows (the table is DAY-partitioned
     on `created_at`, so keep the date filter):
@@ -1145,7 +1176,8 @@ the provider's job-name suffix, `on_kill`) is steps 8, 9 and 12.
     ```sql
     SELECT run_id, job_id, launch_run_id, reference_table, num_rows_requested,
            config_digest, relationships_digest,
-           JSON_QUERY(config, '$.batch') AS batch, launched_at
+           JSON_QUERY(config, '$.batch') AS batch, launched_at,
+           status, status_reason
     FROM `<project>.<quality_dataset>.validation_runs`
     WHERE launch_run_id = '<base>'
       AND created_at >= TIMESTAMP('<launch day>')
@@ -1159,7 +1191,9 @@ the provider's job-name suffix, `on_kill`) is steps 8, 9 and 12.
     `{"count":2,"index":0,"tables":[…]}` or `"index":1`, the tables of that
     batch; the overridden table's `reference_table` = its `source_table`
     qualified with `<project>` and its `num_rows_requested` = its `num_rows`,
-    every other table's `1000`.
+    every other table's `1000`; `status` `PASSED` and `status_reason` NULL on
+    every row (a table without the 36th column fails the query: run §2d step
+    1's `validation_runs` `bq update`).
 
 11. **The registry** — one chained evaluation for the launch:
 
@@ -1182,23 +1216,65 @@ the provider's job-name suffix, `on_kill`) is steps 8, 9 and 12.
     `scope count_mismatch` there means a table held rows of another launch
     (an `append` run, or a landing dataset that is not the scratch one).
 
-12. **The failure path** (on a second copy of the model, the same five
-    tables): make one batch fail — give one table of b00 a `pk:` on a
-    low-cardinality column (its values repeat on more than half of the
-    reference sample's rows, and it has fewer distinct values than
-    `num_rows`), so preflight P5 stops it (`[preflight P5] … the declared PK …
-    is not a key of this data`). Upload it beside the first copy,
+12. **A table that fails preflight** (on a second copy of the model, the
+    same five tables): give one table of b00 a `pk:` on a low-cardinality
+    column (its values repeat on more than half of the reference sample's
+    rows, and it has fewer distinct values than `num_rows`), so preflight P5
+    stops it (`[preflight P5] … the declared PK … is not a key of this
+    data`). Upload it beside the first copy,
     `gs://<bucket>/synthetic/relationships/acceptance/<model>-failure.yaml`,
     and trigger again with step 6's params (`landing_dataset` the scratch
-    one, `write_disposition` `overwrite`) and this file. Expect: b00's
-    `start_batch` instance fails, b01 lands (its scratch tables overwritten),
-    `fail_if_a_batch_failed` fails and with it the run; the evaluation covers
-    b01's tables only (`generation_job_ids` = b01's job id) and its warnings
-    name nothing of b00 (no row of b00 was written; b00's scratch tables keep
-    step 6's rows, which this evaluation does not read). To run b00 again,
-    fix the cause and clear its `start_batch` instance with its downstream
-    tasks (the instances have no retries: a retry would launch the batch
-    again under the same base).
+    one, `write_disposition` `overwrite`) and this file. Under `tables=all`
+    the table is the unit of failure
+    ([ADR 0045](adr/0045-whole-model-launches.md#the-table-is-the-unit-of-failure-2026-10-31)
+    D6). Expect:
+
+    - both `start_batch` instances succeed: b00's job ends DONE;
+    - b00's launcher log carries `table_skipped reason='[preflight P5] …'
+      table=<the table>` (ERROR) and `model_batch_partial skipped=1
+      skipped_tables=<the table> tables=3` (WARNING);
+    - the table's `validation_runs` row (step 10's query) has `status`
+      `FAILED_PREFLIGHT`, `valid_count` 0 and `status_reason` the P5
+      sentence; b00's two other tables and b01's land (their scratch tables
+      overwritten), each `PASSED`;
+    - `fail_if_a_batch_failed` is skipped, and `fail_if_a_table_failed`
+      fails the run, its log the banner:
+
+      ```text
+      TABLE VERDICTS | 5 planned · 4 passed · 1 failed · 0 no row
+        <project>.<scratch_landing_dataset>.<the table> | FAILED_PREFLIGHT | [preflight P5] …
+      ```
+
+    - the evaluation covers both batches (`generation_job_ids` = both job
+      ids in batch order) and its warnings carry one
+      `<project>.<scratch_landing_dataset>.<the table>: not generated by the
+      launch (FAILED_PREFLIGHT: [preflight P5] …)`; that table's scratch copy
+      keeps step 6's rows, which this evaluation does not read.
+
+    **12b. A source that does not exist** (a third copy of the model, the same
+    five tables): give one table of b01 a `source_table` naming a table that
+    is not there (`<source_dataset>.NO_SUCH_TABLE`), upload it as
+    `…/acceptance/<model>-missing.yaml` and trigger as in step 12. The read
+    raises (the BigQuery client's `NotFound`, from the live schema read of
+    `ddl/extractor.py`), which is no `[preflight …]` stop: its text may
+    quote a value, so the row's `status_reason` is value-free,
+    `NotFound during driver-side preflight (traceback in the launcher log)`,
+    and b01's launcher log keeps the traceback (`prep failed for …`).
+    Expect the same path as step 12 with that reason: b01 DONE, its other
+    table landed, the banner naming the table, the evaluation's one
+    `not generated by the launch` warning.
+
+    **Re-running the failed tables.** The banner names them; the DAG has no
+    option that re-runs only those. Fix the cause, then either trigger a
+    copy of the model with every other table `enabled: false` (step 6's
+    params, `tables` = `all`), or launch each fixed table explicitly
+    (`tables` = `explicit`, its source as `table_fqn`, and a `config_uri`
+    file whose `io.landing_table` names its scratch landing table). Clearing
+    a DONE batch's `start_batch` instance launches its whole batch again.
+    A batch job that failed (a NO ROW in the banner) is still re-run by
+    clearing its `start_batch` instance with its downstream tasks (the
+    instances have no retries: a retry would launch the batch again under
+    the same base).
 
 13. **The CLI path**, from a checkout on a machine with GCP credentials (not
     inside the image: the image sets `FLEX_TEMPLATE_PYTHON_PY_FILE`, so a
@@ -1286,6 +1362,12 @@ the provider's job-name suffix, `on_kill`) is steps 8, 9 and 12.
 | `[model launch] … a Flex launch runs one Dataflow job` | a Flex launch of `tables=all` that plans several batches without `batch_index` (the template launched by hand; the DAG gives every batch its index) | the DAG with `tables=all`, `run_model.py`, or `max_tables_per_job` ≥ the enabled tables |
 | `launch_option_unused key=…` (launcher, WARNING) | a key the launch's `tables` mode does not read was given | drop it |
 | `collect_landed` skipped, no evaluation | `run_evaluation` is off, or no batch job reached DONE | the failed batches first |
+| a run failed with every batch job DONE | a table did not pass: read `fail_if_a_table_failed`'s log, whose `TABLE VERDICTS` banner names each table, its status and its reason | fix the table the reason names, then step 12's re-run recipe |
+| `fail_if_a_table_failed` lists a table as `NO ROW` | its batch job did not reach DONE (`fail_if_a_batch_failed` failed too; a one-table batch whose table stopped at preflight is one), or the record is off | the batch's launcher log first |
+| `fail_if_a_table_failed` skipped, `per-table verdicts are not recorded` (WARNING) | no `validation_runs_table` (the overlay's, or a config file's `io` key): the run's outcome is the batch jobs' alone | set the overlay's `SDFB_VALIDATION_RUNS_TABLE` |
+| `fail_if_a_table_failed` fails reading `validation_runs` (`Access Denied`, retried) | the Composer environment's service account cannot read the table | step 2's `roles/bigquery.dataViewer` |
+| every reason reads `no reason recorded (the table has no status_reason column)` | `validation_runs` lacks the 36th column; the launcher logs `status_reason_unsupported reason=missing_column` | §2d step 1's `validation_runs` `bq update` |
+| workflow 3 stops with `empty SDFB_RELATIONSHIPS_URI` | the GitHub variable is unset or empty: the launcher would read `''` as relationships off | set it to the model file (§0b) |
 | the evaluation finds no row for `<base>` | `evaluation_output_dataset` is not the dataset of `validation_runs` | its default |
 | `status` `PARTIAL` with `scope count_mismatch … likely rows other launches wrote to the same table` | a landing table held rows of an earlier launch: an `append` run, or a landing dataset other than the scratch one | `landing_dataset` = the scratch dataset and `write_disposition` = `overwrite` (steps 6, 12, 13, 14) |
 | a launch that names the folder `gs://<bucket>/synthetic/relationships` stops with `declared in 2 models or more` | a model copy sits directly in the folder | move it under `acceptance/` (step 5) |
@@ -1294,7 +1376,8 @@ the provider's job-name suffix, `on_kill`) is steps 8, 9 and 12.
 | the CLI batches' workers fail with `ModuleNotFoundError: No module named 'sdfb_core'` | a checkout launch without `--sdk_container_image` (the launcher WARNs) | the image of step 3 |
 
 Record the outcome (the base run id, the job ids, the margins, the step 10
-and step 11 query output) under `runs/<base>/` as usual, and report it back
+and step 11 query output, the `TABLE VERDICTS` banners of steps 9, 12 and
+12b) under `runs/<base>/` as usual, and report it back
 on the branch.
 
 ### 2f. Corp acceptance of the isolated-tables views (C)
@@ -1921,7 +2004,7 @@ flowchart LR
 | The standalone DAG `sdfb_evaluation_framework` (optional import) | trigger it with the defaults the import filled (`seed_table`, `landing_dataset`, `source_dataset`, `validation_runs_table`) and, when known, `generation_job_id` (its identity: the Dataflow job's window, no log); `seed_table` alone when the job id is unknown; `generation_job_id` alone with `seed_table` emptied for the full lookup (needs the roles that read a job's log); `run_id` or `tables` as before (a typed one beats the default seed); `generation_job_ids` for several jobs (one run and one Dataflow job per id, one after another; the seed is not handed to them, each is the full lookup of its own job) | the run already landed and you want it evaluated on its own (to re-run it, or the generation DAG ran without `run_evaluation`), or you want the launch to wait for the job and close the registry row if the job dies. It evaluates by the same seed path as the chain, reads no job log, and takes `launcher_machine_type` for the launcher VM |
 | The template, by hand | `gcloud dataflow flex-template run … --template-file-gcs-location gs://<templates>/synthetic/sdfb-<VERSION>-template.json --parameters sdfb_job=evaluation,generation_job_id=<JOB_ID>,disk_size_gb=200 --worker-machine-type e2-standard-8` | no Composer at hand |
 
-The launch has 12 minutes in all, the image pull included ("By default, the Flex Template launch process has a timeout of 12 mins", Google's troubleshooting page, "Polling timeout errors"); the pull of the multi-GB image took almost eight on a cold launcher, and planning runs on the launcher before the job exists. Both evaluation launches therefore take a launcher machine type (`evaluation_launcher_machine_type` in the generation DAG, `launcher_machine_type` in the standalone one, default `e2-standard-8`; REST field `environment.launcherMachineType`); a larger one pulls faster, but whether it is enough is known only from a launch (the planning lines in the console log show where the time goes). The public REST description has no field for the limit itself, so it cannot be set from a DAG. With `run_evaluation` true the generation DAG's run stays running until the generation job ends and then until the evaluation's launch is over (the task `wait_for_evaluation_launch`; how long that can take is in "A RUNNING row that never closes", below), and the DAG has `max_active_runs=1`: launches of that DAG then run one generation at a time, and every later trigger queues behind the waiting run. `max_active_runs` is the knob; raising it lets several generation jobs run at once (GPU quota). A chained evaluation does not look the launch up: it is given the generation job's id as the launch's identity (the evaluator reads the Dataflow job resource for its window, never its log or BigQuery job labels, plus this launch's rows of the generator's `validation_runs` table), the launched table (`seed_table`, the last part of `table_fqn`), the generation's landing dataset and `source_dataset`, and evaluates what the launch generated. When those rows carry the generation record ([ADR 0044](adr/0044-generation-record.md), §2c), the record names it: the launch's tables in run order, their landing and source datasets, the relationship model (none when the launch generated without one) and `reference_rows_limit`, each value that differs from the DAG's a warning on the evaluation; a record whose tables span several datasets keeps the DAG's tables and datasets, with a warning. Without a record (a table without the columns, or a job the evaluator cannot read) it evaluates the table's enabled component in the model at `relationships_uri`, parents first, or the table alone when no model names it, the folder holds no model file (it says so in the plan's warnings), or `generate_fk_relationships` is false. It reads each landing table whole (`scope=manual`): with the DAG's `write_disposition` overwrite that is exactly this launch's rows, with append it includes the rows of earlier launches (the row count then differs from what this launch wrote, so the run reads `PARTIAL`; the metrics are still computed). It passes the generation's `reference_rows_limit` (10000; the record's value wins when there is one) and `validation_runs_table` (the nearest-neighbour metrics also need the source table to hold at least twice `reference_rows_limit` rows, since the sample and its holdout must be the same size): the evaluator rebuilds the generator's reference sample and verifies it against the digest on this launch's `validation_runs` row, which is what lets the nearest-neighbour metrics (`row.dcr_train_holdout_share`, `row.dcr_p5_ratio`, `row.nndr_p5_ratio`, `row.density`, `row.coverage`) and the panel-based match rates and lifts (`row.memorization_lift` and `row.exposure_lift` among them) be evaluated. Without the table, or when the job's window cannot be read, those metrics are `not_evaluated` with the reason on the row; every other metric is unaffected. A table it cannot read is skipped by planning with a warning while the others are evaluated; only a target with no readable table fails. A landing table named differently from its source is not found: the evaluation looks for the source's name in the landing dataset. Its registry row carries the generation job's id and window, so a chained run is listed in `evaluation_latest_per_job`; that read needs `roles/dataflow.viewer` (without it: a warning and no window). The window also pins the source as of the job's create time, within the source's time-travel window, like any evaluation by job id. What stays lost: the launch's log, so a model the launch adjusted (ADR 0038) is not seen; and, without a generation record, the table list is the seed's, not the launch's own. The service account needs read on the `validation_runs` table. For an evaluation by `--job_id` the evaluator follows the launch's relationships, three outcomes for the URI the job's record names: a model on record (`relationships_loaded` in the generation launcher log) and no readable files raises; no model on record (log read) and only sample models there evaluates without relationships and says so in the plan's warnings; the log unread does the same and the warning says it is unknown whether a model was loaded. An explicit `--relationships_uri` that resolves to nothing always raises. If you expect a model, check that log line first.
+The launch has 12 minutes in all, the image pull included ("By default, the Flex Template launch process has a timeout of 12 mins", Google's troubleshooting page, "Polling timeout errors"); the pull of the multi-GB image took almost eight on a cold launcher, and planning runs on the launcher before the job exists. Both evaluation launches therefore take a launcher machine type (`evaluation_launcher_machine_type` in the generation DAG, `launcher_machine_type` in the standalone one, default `e2-standard-8`; REST field `environment.launcherMachineType`); a larger one pulls faster, but whether it is enough is known only from a launch (the planning lines in the console log show where the time goes). The public REST description has no field for the limit itself, so it cannot be set from a DAG. With `run_evaluation` true the generation DAG's run stays running until the generation job ends and then until the evaluation's launch is over (the task `wait_for_evaluation_launch`; how long that can take is in "A RUNNING row that never closes", below), and the DAG has `max_active_runs=1`: launches of that DAG then run one generation at a time, and every later trigger queues behind the waiting run. `max_active_runs` is the knob; raising it lets several generation jobs run at once (GPU quota). A `tables=all` run that failed with every batch job DONE failed on a table, not a job: read `fail_if_a_table_failed`'s log, whose `TABLE VERDICTS` banner names the table, its status and its reason (§9d). A chained evaluation does not look the launch up: it is given the generation job's id as the launch's identity (the evaluator reads the Dataflow job resource for its window, never its log or BigQuery job labels, plus this launch's rows of the generator's `validation_runs` table), the launched table (`seed_table`, the last part of `table_fqn`), the generation's landing dataset and `source_dataset`, and evaluates what the launch generated. When those rows carry the generation record ([ADR 0044](adr/0044-generation-record.md), §2c), the record names it: the launch's tables in run order, their landing and source datasets, the relationship model (none when the launch generated without one) and `reference_rows_limit`, each value that differs from the DAG's a warning on the evaluation; a record whose tables span several datasets keeps the DAG's tables and datasets, with a warning. Without a record (a table without the columns, or a job the evaluator cannot read) it evaluates the table's enabled component in the model at `relationships_uri`, parents first, or the table alone when no model names it, the folder holds no model file (it says so in the plan's warnings), or `generate_fk_relationships` is false. It reads each landing table whole (`scope=manual`): with the DAG's `write_disposition` overwrite that is exactly this launch's rows, with append it includes the rows of earlier launches (the row count then differs from what this launch wrote, so the run reads `PARTIAL`; the metrics are still computed). It passes the generation's `reference_rows_limit` (10000; the record's value wins when there is one) and `validation_runs_table` (the nearest-neighbour metrics also need the source table to hold at least twice `reference_rows_limit` rows, since the sample and its holdout must be the same size): the evaluator rebuilds the generator's reference sample and verifies it against the digest on this launch's `validation_runs` row, which is what lets the nearest-neighbour metrics (`row.dcr_train_holdout_share`, `row.dcr_p5_ratio`, `row.nndr_p5_ratio`, `row.density`, `row.coverage`) and the panel-based match rates and lifts (`row.memorization_lift` and `row.exposure_lift` among them) be evaluated. Without the table, or when the job's window cannot be read, those metrics are `not_evaluated` with the reason on the row; every other metric is unaffected. A table it cannot read is skipped by planning with a warning while the others are evaluated; only a target with no readable table fails. A landing table named differently from its source is not found: the evaluation looks for the source's name in the landing dataset. Its registry row carries the generation job's id and window, so a chained run is listed in `evaluation_latest_per_job`; that read needs `roles/dataflow.viewer` (without it: a warning and no window). The window also pins the source as of the job's create time, within the source's time-travel window, like any evaluation by job id. What stays lost: the launch's log, so a model the launch adjusted (ADR 0038) is not seen; and, without a generation record, the table list is the seed's, not the launch's own. The service account needs read on the `validation_runs` table. For an evaluation by `--job_id` the evaluator follows the launch's relationships, three outcomes for the URI the job's record names: a model on record (`relationships_loaded` in the generation launcher log) and no readable files raises; no model on record (log read) and only sample models there evaluates without relationships and says so in the plan's warnings; the log unread does the same and the warning says it is unknown whether a model was loaded. An explicit `--relationships_uri` that resolves to nothing always raises. If you expect a model, check that log line first.
 
 **How the job reads, and what the launch log says about it.** The launch prints one timed line per step (`evaluation <id>: <step> <seconds>s`): the target check, the launch lookup, the relationship models, the planner's own lines, the `RUNNING` row, the prepare statements, the read path, then the four steps of the submission (`free text pools`, `pipeline options`, `graph`, `pipeline run`) and their sum, `submission`; while the pipeline is handed over, Beam's own `Starting GCS upload` / `Completed GCS upload … in N seconds` lines are relayed after `pipeline run:`. Planning scans the tables at once, up to eight: the per-table lines (`planning statistics`, `scope verification`, `reference panel`) keep their shape and their seconds now overlap, so they no longer add up; `planning <id> (all tables): scans <s>s` is the wall time of the whole phase. On Dataflow the reference panel is not in the job graph: the launch writes it as objects under `<temp_location>/sdfb-evaluation/<evaluation_id>/panel/` while it builds the graph, and `evaluation <id>: panel staging: <n> objects, <size>, <s>s (<w>s in the writes)` says what it wrote: `<s>` is everything staging took (pickling, hashing, writing), `<w>` the part spent writing to Cloud Storage, both inside `graph`'s seconds; nothing has to be set. The temp location is the one Beam settles on: `--temp_location`, or the staging location when none or an invalid one (a bucket with no path) is given. The `read path` step asks BigQuery for one read session per project of the tables the job will read. Where a project refuses, the job pages that project's tables instead of using the Storage Read API and the launch says so in one `WARNING` (§7's milestone dictionary has its row); nothing has to be set. Paging is slower and bounded by a per-project quota, so for large tables trigger the launch with `mode` = `sampled`.
 
@@ -2337,6 +2420,10 @@ Whole-model launches ([ADR 0045](adr/0045-whole-model-launches.md), §9d):
 | `launch_option_unused key= reason= value=` (launcher, **WARNING**) | a key the launch's `tables` mode does not read was set: under `all`, `io.reference_table`, `io.landing_table` or `io.ddl_uri`; under `explicit`, `io.source_dataset` or `io.landing_dataset`. Drop it |
 | `launch_prep_parallel tables= workers=` (launcher, once per single-job launch of several tables when `prep_workers` > 1) | every table's schema, sample and stats reads were submitted to `workers` threads; their log lines interleave, while the cross-table steps (fan-out, P4, stores) keep the plan's order. `prep_workers: 1` restores the old sequence |
 | `relational_closure_no_enforced_edges note= tables=` (launcher, **WARNING**) | a job of several tables in which no enforced FK edge resolved. Expected for a whole-model batch of unrelated tables; otherwise read the `relationship_model` card (`..>` edges, `[DISABLED]` tables) |
+| `table_skipped reason= table=` (launcher, **ERROR**, one per skipped table) | a whole-model batch skipped this table before generation: its own preflight stop (`[preflight …]`), a value-free `<ExceptionType> during driver-side preflight (traceback in the launcher log)` for any other error, or `component member <X> failed preflight: …` when another table of its component failed. Its `validation_runs` row reads `FAILED_PREFLIGHT` with the same reason; the batch runs on (ADR 0045 D6) |
+| `model_batch_partial skipped= skipped_tables= tables=` (launcher, **WARNING**, once per batch that skipped tables) | the batch launches `tables` minus `skipped` tables; `skipped_tables` names them. `launch_config` still lists them: it was logged before any table was prepared |
+| `blocker_gate_recorded blocker_count= gate= observed= run_id= table=` (worker, **ERROR**) | a whole-model batch's table tripped the BLOCKER gate: its row reads `FAILED_BLOCKER` with the gate's sentence in `status_reason`, and the job runs on to DONE instead of failing. The Composer run fails from the row (`fail_if_a_table_failed`) |
+| `status_reason_unsupported note= reason= table=` (launcher, **WARNING**) | the `validation_runs` table has no `status_reason` column (`reason=missing_column`) or its schema could not be read (`reason=schema_unreadable`): the rows are written without a reason, which stays in the launcher log. §2d step 1's `bq update` adds the column. Silent when no `validation_runs_table` is named |
 
 ---
 
@@ -2829,8 +2916,8 @@ a variant of it goes under a sub-prefix, e.g.
 `gs://<bucket>/synthetic/relationships/whole-model/<model>.yaml`.
 
 *The generation DAG with `tables=all` plans once, launches one Flex job per
-batch, at most `SDFB_MAX_PARALLEL_JOBS` at a time, and evaluates the batches
-that landed once:*
+batch, at most the parallel cap at a time, evaluates the batches that landed
+once, and judges every table by its `validation_runs` row:*
 
 ```mermaid
 flowchart LR
@@ -2845,7 +2932,9 @@ flowchart LR
   J["🔀 one Flex job<br/>per batch"]:::beam
   V[("🗄️ validation_runs<br/>launch_run_id = base")]:::store
   E["⚙️ one evaluation<br/>landed batches"]:::cpu
+  T["🛡️ fail_if_a_table_failed<br/>TABLE VERDICTS"]:::cpu
   M --> P --> J --> V --> E
+  V --> T
 ```
 
 **1. Plan it** (no GCP needed for a local model file):
@@ -2875,16 +2964,39 @@ table), `num_rows`, and optionally `max_tables_per_job`, `prep_workers`,
 explicit chain, and one that says `all` runs the batches even when the
 trigger says `explicit`) and the usual generation params. The Composer
 environment's service account reads the model file and the config file
-(§0b). At most
-`SDFB_MAX_PARALLEL_JOBS` batches run at once (§0b; a config file's
-`launch.max_parallel_jobs` does nothing here), and the DAG runs one launch
-at a time. With `run_evaluation` on, one evaluation covers the batches that
-landed. A failed batch fails its own `start_batch` instance and, through
-`fail_if_a_batch_failed`, the run; the other batches run on. The instances
-have no retries: to run a failed batch again, fix the cause and clear its
-`start_batch` instance with its downstream tasks. Killing a running instance
-(a Composer worker restart, marking it failed) cancels that batch's
-Dataflow job.
+(§0b). A trigger that sets only `tables` = `all` plans the overlay's
+model file (its 19th marker). At most the parallel cap's batches run at
+once (§0b: the Variable `SDFB_MAX_PARALLEL_JOBS` when set, else
+`launch.max_parallel_jobs` of `generator.yaml` overlaid by `sdfb_env.yaml`;
+a config file's `launch.max_parallel_jobs` does nothing here), and the DAG
+runs one launch at a time. With `run_evaluation` on, one evaluation covers
+the batches that landed. A failed batch fails its own `start_batch`
+instance and, through `fail_if_a_batch_failed`, the run; the other batches
+run on. A failed table fails the run through `fail_if_a_table_failed` while
+its batch ends DONE: under `tables=all` a table that stops at preflight is
+skipped with the rest of its component and gets a `FAILED_PREFLIGHT` row,
+and a tripped BLOCKER gate records `FAILED_BLOCKER` instead of failing the
+job ([ADR 0045](adr/0045-whole-model-launches.md#the-table-is-the-unit-of-failure-2026-10-31)
+D6). Once every batch has ended, `fail_if_a_table_failed` reads the
+launch's `validation_runs` rows and logs the banner:
+
+```text
+TABLE VERDICTS | <N> planned · <P> passed · <F> failed · <M> no row
+  <project>.<landing_dataset>.<table> | FAILED_BLOCKER | <the gate's sentence>
+  <project>.<landing_dataset>.<table> | NO ROW | batch bNN did not reach DONE, or the record is off
+```
+
+one line per table that did not pass, per planned table with no row, and per
+row of a table the plan does not name (`UNPLANNED`, never fatal). It fails
+the run when any planned table is not `PASSED` or has no row; under
+`client_type=fake` a blocked table reads
+`FAILED_BLOCKER (informational: client_type=fake)` and fails nothing. With no `validation_runs_table` it
+skips with a WARNING, and the run's outcome is the batch jobs' alone. The
+instances have no retries: to run a failed batch again, fix the cause and
+clear its `start_batch` instance with its downstream tasks; to run failed
+tables of a DONE batch again, follow §2e step 12's re-run recipe. Killing a
+running instance (a Composer worker restart, marking it failed) cancels that
+batch's Dataflow job.
 
 **2b. Launch from a checkout** (GCP credentials; from a checkout, not inside
 the image: the image sets `FLEX_TEMPLATE_PYTHON_PY_FILE` for every process,
@@ -2968,7 +3080,11 @@ DAG's `tables=all` branch does, for records that name no model; its `--region` i
 launch's), and under it the line
 `# append --sdk_container_image=<image> --disk_size_gb=200 and the worker options: RUN_PLAYBOOK §9d`.
 A batch that finished OK but logged no job id marks the command
-`# PARTIAL`. Exit 0: every batch finished; 1: at least one failed, the
+`# PARTIAL`. Last, `Per-table verdicts (a DONE batch may hold a failed
+table, ADR 0045):` and the `bq query` that lists the launch's tables whose
+`validation_runs` row is not `PASSED`, with their `status_reason` (or
+`# no validation_runs_table: verdicts are not recorded`): a batch that
+finished OK may hold a table skipped at preflight or blocked at the gate. Exit 0: every batch finished; 1: at least one failed, the
 others ran; 2: a usage error, nothing launched. On Ctrl-C or SIGTERM it
 stops the launchers and prints every Dataflow job they had already created,
 with `gcloud dataflow jobs cancel <id> --region=<region>`: stopping a

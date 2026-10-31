@@ -497,8 +497,10 @@ uv run --no-sync python3 scripts/launch/run_model.py --dry_run \
 checkout with `--tables=all` and the same options, plus a run id of its own
 and Beam's: it logs the same plan (`model_launch_plan`, the `MODEL LAUNCH`
 block) before it reads any table, then runs the batches one after another,
-in sequence, and a failed batch does not stop the next. There is no dry run:
-this launches.
+in sequence, and a failed batch does not stop the next. A table that fails
+preflight is skipped with its component and the rest of its batch runs
+(below); the launch then exits 1 naming every skipped table. There is no
+dry run: this launches.
 
 ```bash
 uv run --no-sync python3 -m sdfb_beam.cli.run_pipeline --tables=all \
@@ -511,6 +513,26 @@ uv run --no-sync python3 -m sdfb_beam.cli.run_pipeline --tables=all \
 
 A Flex Template launch runs one Dataflow job, so it takes a plan of one
 batch, or one `batch_index` with its `batch_count`, and refuses more.
+
+### When a table fails
+
+Under `tables: all` the table is the unit of failure, not the batch job
+(ADR 0045 D6, revised 2026-10-31): a table that fails preflight is skipped
+with the other tables of its connected component inside the batch, a table
+whose gate trips fails alone, and the job ends DONE. Every table's verdict
+is its `validation_runs` row:
+
+| The row | What happened | The batch job |
+|---|---|---|
+| `FAILED_PREFLIGHT` | skipped before generation: its preflight stopped it (or a read failed, or another table of its component did); `valid_count` 0, the reason in `status_reason` | runs on: the batch's other tables land |
+| `FAILED_BLOCKER` | generated and landed, then the BLOCKER gate tripped; the gate's sentence in `status_reason` | ends DONE: the verdict is recorded, not raised |
+| no row | nothing recorded for the table: its batch job failed (every table of the batch skipped, a one-table batch whose table stopped at preflight, or an infrastructure failure), or no `validation_runs_table` was named | failed, or the record is off |
+
+In the source repository the Composer generation DAG fails a `tables=all`
+run from those rows (`fail_if_a_table_failed`, naming each table, its status
+and its reason) while it evaluates every batch that reached DONE. Explicit
+launches keep today's behaviour: one table's preflight stop stops the
+launch, and a tripped gate fails its Dataflow job.
 
 ## `pk:` must actually BE a key
 
