@@ -20,7 +20,8 @@ flags and config file through `run_pipeline.parse_args`), runs one launcher
 per batch — `--tables=all --batch_index=i --batch_count=N` — at most
 `launch.max_parallel_jobs` at a time, waits for each, and prints every
 Dataflow job id each batch logged and the evaluation command that covers the
-batches that landed.
+batches that landed, then the `bq query` that lists the tables whose verdict
+is not PASSED (a batch job that ends OK may still hold one).
 
     uv run --no-sync python3 scripts/launch/run_model.py --dry_run <launcher flags>
     uv run --no-sync python3 scripts/launch/run_model.py <launcher flags> \\
@@ -262,6 +263,19 @@ def evaluation_command(args: argparse.Namespace, beam_argv: list[str],
           f"--temp_location=gs://<BUCKET>/temp")
 
 
+def verdicts_command(args: argparse.Namespace) -> str | None:
+  """The `bq query` for the launch's failed tables (ADR 0045): a batch job
+  that ends OK may still hold tables whose `validation_runs` verdict is not
+  PASSED. None when the launch records no verdicts."""
+  if not args.validation_runs_table:
+    return None
+  table = args.validation_runs_table.replace(":", ".", 1)
+  run_id = args.run_id
+  return ("bq query --use_legacy_sql=false 'SELECT landing_table, status, "
+          f"status_reason FROM `{table}` WHERE (launch_run_id = \"{run_id}\" "
+          f"OR STARTS_WITH(run_id, \"{run_id}-b\")) AND status != \"PASSED\"'")
+
+
 def _report_started_jobs(beam_argv: list[str], log_dir: Path,
                          count: int) -> None:
   """After an interrupt or an error: the jobs the launchers had already
@@ -349,6 +363,10 @@ def main(argv: list[str] | None = None) -> int:
           "but logged no job id (see its log)")
   else:
     print("[run_model] no evaluation command: no batch landed")
+  print("Per-table verdicts (a DONE batch may hold a failed table, ADR 0045):")
+  verdicts = verdicts_command(args)
+  print("  " +
+        (verdicts or "# no validation_runs_table: verdicts are not recorded"))
   if failed:
     names = ", ".join(batch_run_id(args.run_id, r.index) for r in failed)
     print(f"[run_model] {len(failed)} batch(es) failed: {names}")

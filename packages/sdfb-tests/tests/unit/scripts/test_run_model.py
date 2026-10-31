@@ -329,6 +329,33 @@ def test_no_evaluation_command_when_no_batch_landed(argv, monkeypatch, capsys):
   assert "no evaluation command" in out
 
 
+def test_the_verdict_query_names_the_launch_two_ways(argv, monkeypatch, capsys):
+  """A DONE batch may hold a failed table: the printed query reads the
+  launch's `validation_runs` rows by base id and by batch id (ADR 0045)."""
+  argv = [a for a in argv if not a.startswith("--validation_runs_table=")]
+  argv.append("--validation_runs_table=p:q.validation_runs")
+  monkeypatch.setattr(RM.subprocess, "Popen", _Launchers())
+  assert RM.main([*argv, "--max_tables_per_job=2"]) == 0
+  out = capsys.readouterr().out
+  assert "Per-table verdicts (a DONE batch may hold a failed table, ADR 0045):" \
+      in out
+  assert (
+      "  bq query --use_legacy_sql=false 'SELECT landing_table, status, "
+      "status_reason FROM `p.q.validation_runs` WHERE (launch_run_id = "
+      '"r1" OR STARTS_WITH(run_id, "r1-b")) AND status != "PASSED"\'') in out
+
+
+def test_no_verdict_query_without_a_validation_runs_table(
+    argv, monkeypatch, capsys):
+  argv = [a for a in argv if not a.startswith("--validation_runs_table=")]
+  argv.append("--validation_runs_table=")
+  monkeypatch.setattr(RM.subprocess, "Popen", _Launchers())
+  assert RM.main([*argv, "--max_tables_per_job=2"]) == 0
+  out = capsys.readouterr().out
+  assert "  # no validation_runs_table: verdicts are not recorded" in out
+  assert "bq query" not in out
+
+
 def test_the_failed_batches_are_named_in_the_closing_line(
     argv, monkeypatch, capsys):
   monkeypatch.setattr(RM.subprocess, "Popen", _Launchers(codes={0: 1, 2: 3}))
