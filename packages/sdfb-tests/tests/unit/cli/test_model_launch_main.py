@@ -517,6 +517,31 @@ def test_a_table_that_fails_preflight_is_skipped_and_the_rest_land(
   assert "skipped=1" in partial and "skipped_tables=T_EVENTS_LOG" in partial
 
 
+def test_a_batch_launched_by_its_index_exits_zero_after_a_skip(
+    model_uri, direct, monkeypatch, capsys):
+  """The Composer DAG and run_model.py launch each batch by its index: a
+    partial skip is not a failed launch, the rows and milestones say it."""
+  monkeypatch.setenv(_FAIL_TABLE, "T_EVENTS_LOG")
+  assert _main(model_uri, "--max_tables_per_job=2", "--batch_index=0",
+               "--batch_count=2", "--client_type=fake", "--runner=DirectRunner",
+               "--validation_runs_table=p.q.validation_runs") == 0
+  assert _only_row(direct, "T_EVENTS_LOG")["status"] == "FAILED_PREFLIGHT"
+  assert _only_row(direct, "T_ACCOUNTS")["status"] == "PASSED"
+  [partial] = _milestones(capsys.readouterr().err, "model_batch_partial")
+  assert "skipped_tables=T_EVENTS_LOG" in partial
+
+
+def test_a_one_batch_plan_without_an_index_exits_one_after_a_skip(
+    model_uri, direct, monkeypatch):
+  monkeypatch.setenv(_FAIL_TABLE, "T_EVENTS_LOG")
+  with pytest.raises(SystemExit) as exc:
+    _main(model_uri, "--client_type=fake", "--runner=DirectRunner",
+          "--validation_runs_table=p.q.validation_runs")
+  assert "1 table(s) skipped at preflight; the others ran" in str(exc.value)
+  assert "- b00: T_EVENTS_LOG" in str(exc.value)
+  assert _only_row(direct, "T_EVENTS_LOG")["status"] == "FAILED_PREFLIGHT"
+
+
 def test_a_component_fails_together_and_its_child_names_the_parent(
     tmp_path, direct, monkeypatch):
   model = tmp_path / "chain.yaml"

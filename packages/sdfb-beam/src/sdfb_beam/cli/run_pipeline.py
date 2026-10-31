@@ -2529,7 +2529,11 @@ def _run_model(args: argparse.Namespace, beam_argv: list[str]) -> int:
   chosen = chosen_batches(args, launch)
   if len(chosen) == 1:
     rc = _run_batch(args, beam_argv, registry, launch, chosen[0])
-    if rc == 0 and skipped:
+    # Only the bare CLI exits 1 on a skip. A batch launched by its index
+    # (the Composer DAG, scripts/launch/run_model.py) returns its rc: the
+    # milestones and FAILED_PREFLIGHT rows carry the skips, and a non-zero
+    # exit would read as a failed launch.
+    if rc == 0 and skipped and args.batch_index is None:
       raise SystemExit(_skipped_tables_text(skipped))
     return rc
   failures: list[str] = []
