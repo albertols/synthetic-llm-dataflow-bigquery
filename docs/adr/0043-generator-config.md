@@ -356,12 +356,17 @@ provenance names are unchanged: a key the DAG passed is `flag`, a key the
 file set is `file`, every other key is `default`.
 
 - **The overlay.** [`composer/sdfb_env.yaml`](../../composer/sdfb_env.yaml)
-  holds the generation DAG's 18 deploy markers, the same 18 master's DAG
-  carried, under three sections: `dag:` (`project_version`, `dag_version`),
+  holds the generation DAG's deploy markers, the 18 master's DAG carried
+  (19 since 2026-10-31, below), under three sections: `dag:` (`project_version`, `dag_version`),
   `infra:` (the staging and templates buckets) and `config:` (section → key
   over `generator.yaml`: the default source, landing, DLQ, DDL-pin,
   validation-runs and three store tables, `engine`, `embedder_uri`, `env`,
-  `write_disposition`, `model_uri` and `gpu`). Every value is a quoted
+  `write_disposition`, `model_uri` and `gpu`). *(Revised 2026-10-31: 19
+  markers. The 19th, `{{SDFB_RELATIONSHIPS_URI}}`, is
+  `config.relational.relationships_uri`, the model file every launch reads
+  by default; `load_layers` refuses an empty value
+  ([ADR 0045](0045-whole-model-launches.md), revised 2026-10-31, D1 note and
+  Ruling 36).)* Every value is a quoted
   string, so a substituted `prd`, `append`, `l4`, `0.7.0_20261026T1200` or
   `''` stays that string. `composer/sdfb_batches.py::load_layers` reads both
   files from the DAG's own folder at parse time and refuses an overlay key
