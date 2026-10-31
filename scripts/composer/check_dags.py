@@ -46,7 +46,10 @@ The patches:
   scenario's `verdict_rows` (the launch's `validation_runs` rows). A
   scenario without them makes any query raise. With `reason_column_missing`
   a query naming `status_reason` raises BigQuery's missing-column error (a
-  table created before the column), and the query without it is answered.
+  table created before the column), and the query without it is answered;
+  such a scenario that issued no query, or no query without the column, is
+  a harness failure (exit 1): the leaf's "failed" alone cannot tell the
+  fallback from a crash.
 
 Output (`--out`), one entry per scenario, keys `OUTPUT_KEYS`:
 
@@ -490,6 +493,19 @@ class Recorder:
           "400 Unrecognized name: status_reason at [1:35]")
     return types.SimpleNamespace(result=lambda: iter([dict(r) for r in rows]))
 
+  def check_fallback(self, name: str) -> None:
+    """For a scenario without the status_reason column: HarnessError unless
+    the DAG read it and issued the query that does not name the column. A
+    leaf that crashed on the missing-column error is "failed" too, so its
+    state alone cannot tell the fallback from a crash."""
+    if not self.scenario["reason_column_missing"]:
+      return
+    if not self.bq_queries:
+      raise HarnessError(f"{name}: the leaf received no query at all")
+    if all("status_reason" in text for text, _ in self.bq_queries):
+      raise HarnessError(f"{name}: the leaf never issued the "
+                         f"status_reason-free fallback query")
+
   def execute(self, task: Any, context: Mapping[str, Any]) -> dict[str, Any]:
     ti = context["ti"]
     map_index = int(getattr(ti, "map_index", -1))
@@ -584,6 +600,7 @@ def run_scenario(dag: Any, name: str) -> dict[str, Any]:
         ti.state.value if hasattr(ti.state, "value") else ti.state)
   if not states:
     raise HarnessError(f"{name}: the DAG run created no task instance")
+  recorder.check_fallback(name)
   bodies, evaluation = recorder.split()
   result = {
       "task_states": dict(sorted(states.items())),

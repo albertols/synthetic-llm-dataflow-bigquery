@@ -211,6 +211,31 @@ def test_recorder_records_and_refuses_reads_it_cannot_serve():
                                [uri, M.GET_CONN_READ]) == [M.GET_CONN_READ]
 
 
+def test_the_old_table_scenario_must_see_the_fallback_query():
+  """A crash on the missing-column error also leaves the leaf "failed": the
+  harness proves the status_reason-free query was issued."""
+  name = "all_old_validation_runs"
+
+  def query(text):
+    return {"query": {"query": text, "queryParameters": []}}
+
+  with_reason = "SELECT landing_table, status_reason FROM t"
+  recorder = M.Recorder(M.SCENARIOS[name])
+  with pytest.raises(M.HarnessError, match="received no query"):
+    recorder.check_fallback(name)
+  with pytest.raises(Exception, match="Unrecognized name: status_reason"):
+    recorder.insert_job(query(with_reason))
+  with pytest.raises(M.HarnessError, match="never issued the status_reason"):
+    recorder.check_fallback(name)
+  rows = list(
+      recorder.insert_job(query("SELECT landing_table FROM t")).result())
+  assert [r["status"] for r in rows] == ["FAILED_PREFLIGHT", "PASSED"]
+  assert len(recorder.bq_queries) == 2
+  recorder.check_fallback(name)  # the reason-free query was recorded
+  # A scenario with the column checks nothing.
+  M.Recorder(M.SCENARIOS["all_two_batches"]).check_fallback("all_two_batches")
+
+
 def test_split_refuses_two_evaluation_launches():
   recorder = M.Recorder(M.SCENARIOS["all_two_batches"])
 
