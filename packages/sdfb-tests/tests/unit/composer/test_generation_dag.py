@@ -20,7 +20,7 @@ Airflow is not a laptop dependency, so the file is read with `ast`; what it
 computes is `composer/sdfb_batches.py`'s, run here on a deployed folder
 (conftest.py's `deployed`). The real-Airflow run of the same file is
 `scripts/composer/check_dags.py`: with `SDFB_DAG_BODIES` naming its output
-(all twelve scenarios, on a folder of `composer/*.py`, `generator.yaml` and
+(all fourteen scenarios, on a folder of `composer/*.py`, `generator.yaml` and
 `sdfb_env.yaml`), `test_the_harness_run_is_the_plans` checks every scenario
 against the plan's expectations, and test_launch_helpers.py compares its
 explicit launches with master's.
@@ -480,18 +480,55 @@ def test_the_launches_take_their_bodies_from_xcom():
   assert _keywords(gate) == {"task_id", "python_callable"}
 
 
-def test_batches_are_one_mapped_launch_capped_by_the_variable():
+def _class(name: str) -> ast.ClassDef:
+  (found,) = [
+      n for n in DAG.body if isinstance(n, ast.ClassDef) and n.name == name
+  ]
+  return found
+
+
+def test_batches_are_one_mapped_launch_capped_by_the_gate():
   start = _task("start_batch")
   assert _name(start.func) == "partial"
-  assert _name(start.func.value) == "DataflowStartFlexTemplateOperator"
+  assert _name(start.func.value) == "_GatedFlexTemplateOperator"
   assert ast.literal_eval(_kw(start, "wait_until_finished")) is True
   # No retries: a relaunch replays the same base run id, and after a BLOCKER
   # an append launch would land the rows twice.
   assert ast.literal_eval(_kw(start, "retries")) == 0
-  assert ast.unparse(_kw(start,
-                         "max_active_tis_per_dag")) == ("MAX_PARALLEL_JOBS")
+  assert ast.unparse(_kw(start, "cap")) == "MAX_PARALLEL_JOBS"
   assert ast.unparse(_assignments()["MAX_PARALLEL_JOBS"]) == (
       "sdfb_batches.parallel_cap(LAYERS, VARIABLES)")
+  assert ast.literal_eval(_assignments()["GATE_POKE_SECONDS"]) == 60
+  gated = _class("_GatedFlexTemplateOperator")
+  assert [ast.unparse(b) for b in gated.bases
+         ] == ["DataflowStartFlexTemplateOperator"]
+  methods = {n.name: n for n in gated.body if isinstance(n, ast.FunctionDef)}
+  # The wait is before the launch, and never overrides execute (Airflow's
+  # execute guard would log each nested call).
+  assert set(methods) == {"__init__", "pre_execute"}
+  pre = ast.unparse(methods["pre_execute"])
+  assert "super().pre_execute(context)" in pre
+  assert "sdfb_batches.wait_for_launch_slot(" in pre
+  assert "sdfb_batches.ti_states(dag_run.get_task_instances()" in pre
+  assert "poke_seconds=self.gate_poke_seconds" in pre
+
+
+def test_no_task_sets_a_task_level_concurrency_limit():
+  """ADR 0045 D5: one task-level limit anywhere makes the scheduler fail
+  every SCHEDULED instance of the DAG while a stale-DAG sweep has removed
+  it from serialized_dag (the 2026-11-02 launch lost 13 of 14 batches)."""
+  for call in (n for n in ast.walk(DAG) if isinstance(n, ast.Call)):
+    assert not _keywords(call) & {
+        "max_active_tis_per_dag", "max_active_tis_per_dagrun",
+        "task_concurrency"
+    }, ast.unparse(call)[:80]
+  assert "default_args" not in _keywords(_calls(DAG, "DAG")[0])
+
+
+def test_a_batch_that_never_started_is_named():
+  watcher = ast.unparse(_task("fail_if_a_batch_failed"))
+  assert ("sdfb_batches.batch_failure_message("
+          "context['dag_run'].get_task_instances(), 'start_batch')") in watcher
   (expand,) = _calls(DAG, "expand")
   # A task's plain return value: Airflow refuses to map over a custom key.
   assert ast.unparse(_kw(expand, "body")) == "planned"
@@ -704,7 +741,7 @@ def _harness_output() -> dict:
   path = os.environ.get(HARNESS_OUTPUT_ENV)
   if not path:
     pytest.skip(f"set {HARNESS_OUTPUT_ENV} to a check_dags.py output of all "
-                f"twelve scenarios")
+                f"fourteen scenarios")
   return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
@@ -798,3 +835,26 @@ def test_the_harness_run_is_the_plans():
       assert parameters["landing_dataset"] == "sdfb-proj.synthetic_data", name
   # The marker values the harness filled reached the bodies as text.
   assert MARKERS["DAG_VERSION"] in json.dumps(output)
+
+
+def test_the_harness_runs_the_launch_gate():
+  """ADR 0045 D5: the launch gate at the cap of 1. dag.test starts the
+  instances in any order; the harness fails the run unless they launched in
+  the gate's order, one job at a time."""
+  output = _harness_output()
+  fourteen = output["all_14_batches_cap_1"]
+  assert len(fourteen["bodies"]) == 14
+  assert _states(fourteen, "start_batch[") == {
+      f"start_batch[{i}]": "success" for i in range(14)
+  }
+  assert fourteen["task_states"]["fail_if_a_batch_failed"] == "skipped"
+  assert fourteen["task_states"]["fail_if_a_table_failed"] == "success"
+  middle = output["all_middle_batch_fails"]
+  assert _states(middle, "start_batch[") == {
+      "start_batch[0]": "success",
+      "start_batch[1]": "failed",
+      "start_batch[2]": "success"  # a failed sibling has ended
+  }
+  assert middle["task_states"]["fail_if_a_batch_failed"] == "failed"
+  assert middle["evaluation_body"]["launchParameter"]["parameters"][
+      "generation_job_ids"] == ("fakejob-start_batch-0,fakejob-start_batch-2")

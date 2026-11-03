@@ -1171,6 +1171,20 @@ can show (mapped tasks on Composer 2, the provider's job-name suffix,
    `TABLE VERDICTS | 5 planned · 5 passed · 0 failed · 0 no row`; the run
    ends success.
 
+   **The launch gate** ([ADR 0045 D5](adr/0045-whole-model-launches.md#the-launch-gate-2026-11-03)).
+   Every `start_batch` instance is RUNNING within a minute of
+   `batch_bodies`, whatever the cap; at most `max_parallel_jobs` Dataflow
+   jobs run at once; a waiting instance's log reads
+   `b0N waits for b0M to end (cap C)` (one line each time the batch it waits
+   for changes), then the launch. The scheduler's stale-DAG sweep
+   (`Found (N) stales dags not parsed after …`, naming this DAG) must fail no
+   instance: no `not found in serialized_dag table` line for the DAG, and no
+   `start_batch` instance failed with no start date. If the environment
+   shows the sweep (the DAG file's "Last Run" in the DAG processor's parse
+   statistics more than 600 s apart), raise
+   `[scheduler] dag_stale_not_seen_duration` (DEPLOYMENT_PREREQUISITES,
+   Composer); the run must succeed either way.
+
 10. **`validation_runs`** — the launch's rows (the table is DAY-partitioned
     on `created_at`, so keep the date filter):
 

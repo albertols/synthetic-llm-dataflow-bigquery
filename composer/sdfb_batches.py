@@ -46,6 +46,13 @@ PyYAML only, what the DAG needs:
     parallel_cap       how many batch jobs run at once: the Variable
                        SDFB_MAX_PARALLEL_JOBS when set, else the yaml's
                        launch.max_parallel_jobs overlaid
+    may_launch         whether a batch instance may launch its job: every
+                       sibling `cap` or more indexes below it has ended
+    wait_for_launch_slot  a batch instance's wait, RUNNING, for may_launch
+                       (ti_states reads the siblings' states)
+    never_started      the batch instances the scheduler failed before they
+                       ran
+    batch_failure_message  the failed batches, for fail_if_a_batch_failed
     verdicts_query     the launch's validation_runs rows, by its base run id
     table_verdicts     each planned table's newest row: its status and reason
     failed_tables      the tables that fail the run
@@ -82,7 +89,7 @@ Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
 import hashlib
 import os
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -90,17 +97,18 @@ import yaml
 
 __all__ = [
     "DEFAULT_MAX_TABLES_PER_JOB", "FILE_HARDWARE_KEYS", "L4_ACCELERATOR",
-    "MISSING_REASON_COLUMN", "T4_ACCELERATOR", "VERDICT_FAILED_BLOCKER",
-    "VERDICT_FAILED_PREFLIGHT", "VERDICT_NO_ROW", "VERDICT_PASSED",
-    "ConfigInput", "Layers", "PlanError", "TablesMode", "batch_job_name",
-    "batch_parameters", "cli_text", "common_parameters", "dag_constants",
-    "decode_object", "evaluation_body", "explicit_body", "failed_tables",
-    "is_missing_reason_column", "landed_job_ids", "launch_environment",
-    "launch_overrides", "launch_plan", "load_layers", "model_slug",
-    "parallel_cap", "param_defaults", "parse_config", "plan_banner",
-    "plan_batches", "planning_inputs", "resolve_tables_mode", "table_verdicts",
-    "verdict_banner", "verdicts_query", "whole_model_params",
-    "with_file_hardware"
+    "MISSING_REASON_COLUMN", "T4_ACCELERATOR", "TERMINAL_TI_STATES",
+    "VERDICT_FAILED_BLOCKER", "VERDICT_FAILED_PREFLIGHT", "VERDICT_NO_ROW",
+    "VERDICT_PASSED", "ConfigInput", "Layers", "PlanError", "TablesMode",
+    "batch_job_name", "batch_parameters", "cli_text", "common_parameters",
+    "dag_constants", "decode_object", "evaluation_body", "explicit_body",
+    "failed_tables", "is_missing_reason_column", "landed_job_ids",
+    "launch_environment", "launch_overrides", "launch_plan", "load_layers",
+    "may_launch", "model_slug", "never_started", "parallel_cap",
+    "param_defaults", "parse_config", "plan_banner", "plan_batches",
+    "planning_inputs", "resolve_tables_mode", "table_verdicts", "ti_states",
+    "verdict_banner", "verdicts_query", "wait_for_launch_slot",
+    "whole_model_params", "with_file_hardware"
 ]
 
 DEFAULT_MAX_TABLES_PER_JOB = 10
@@ -986,6 +994,96 @@ def parallel_cap(layers: Layers, variables: Mapping[str, str]) -> int:
     return max(1, int(text))
   except ValueError as err:
     raise ValueError(f"{source} must be an integer, got {text!r}") from err
+
+
+# -- the launch gate (ADR 0045 D5) -------------------------------------------
+# The states that end a task instance (TaskInstanceState's values):
+# a batch instance in one of them holds no running batch job.
+TERMINAL_TI_STATES = frozenset(
+    {"success", "failed", "skipped", "upstream_failed", "removed"})
+
+
+def _first_unfinished(map_index: int, cap: int,
+                      states: Mapping[int, str | None]) -> int | None:
+  for j in range(map_index - cap + 1):
+    if states.get(j) not in TERMINAL_TI_STATES:
+      return j
+  return None
+
+
+def may_launch(map_index: int, cap: int, states: Mapping[int,
+                                                         str | None]) -> bool:
+  """Whether batch instance `map_index` may launch its job: every sibling
+  at index `map_index - cap` or below has ended (a missing index has not).
+
+  The instances past the gate and not ended are then a subset of the `cap`
+  indices up to the highest of them, so at most `cap` jobs run at once; and
+  an instance waits only on lower indices, so no two wait on each other."""
+  return _first_unfinished(map_index, cap, states) is None
+
+
+def ti_states(task_instances: Iterable[Any],
+              task_id: str) -> dict[int, str | None]:
+  """Each mapped instance of `task_id` by map index: its state as plain
+  text (a TaskInstanceState is a str Enum; its value is that text)."""
+  states: dict[int, str | None] = {}
+  for ti in task_instances:
+    if ti.task_id == task_id:
+      state = ti.state
+      states[int(ti.map_index)] = (None if state is None else str(
+          getattr(state, "value", state)))
+  return states
+
+
+def wait_for_launch_slot(map_index: int, cap: int,
+                         read_states: Callable[[], Mapping[int, str | None]], *,
+                         sleep: Callable[[float], None], poke_seconds: float,
+                         log: Callable[[str], None]) -> None:
+  """Return once `may_launch` holds, reading the states afresh each poke
+  and sleeping `poke_seconds` between pokes. Logs one line each time the
+  batch it waits for changes."""
+  logged = None
+  while True:
+    blocking = _first_unfinished(map_index, cap, read_states())
+    if blocking is None:
+      return
+    if blocking != logged:
+      log(f"b{map_index:02d} waits for b{blocking:02d} to end (cap {cap})")
+      logged = blocking
+    sleep(poke_seconds)
+
+
+def never_started(task_instances: Iterable[Any], task_id: str) -> list[int]:
+  """The map indexes of `task_id`'s instances that failed with neither a
+  start nor an end date: the scheduler set their state alone, they never
+  ran (one that ran and failed has its end date)."""
+  return sorted(
+      int(ti.map_index)
+      for ti in task_instances
+      if ti.task_id == task_id and ti.start_date is None and ti.end_date is None
+      and str(getattr(ti.state, "value", ti.state)) == "failed")
+
+
+def batch_failure_message(task_instances: Sequence[Any], task_id: str) -> str:
+  """Why the run fails when a batch instance did: the failed batches, and
+  the ones among them that never started (to clear)."""
+  failed = [
+      i for i, state in sorted(ti_states(task_instances, task_id).items())
+      if state == "failed"
+  ]
+  labels = ", ".join(f"b{i:02d}" for i in failed) or "?"
+  message = (f"{task_id} failed for {labels}: those batch jobs did not reach "
+             f"JOB_STATE_DONE; the batches that landed were evaluated")
+  unstarted = never_started(task_instances, task_id)
+  if unstarted:
+    names = ", ".join(f"b{i:02d}" for i in unstarted)
+    message += (
+        f". {len(unstarted)} instance(s) failed without starting ({names}): "
+        f"the scheduler failed them, which it does to a DAG with a "
+        f"task-level concurrency limit while the DAG is missing from "
+        f"serialized_dag (stale-DAG sweep, [scheduler] "
+        f"dag_stale_not_seen_duration); clear them to launch those batches")
+  return message
 
 
 def _dotted(fqn: str) -> str:

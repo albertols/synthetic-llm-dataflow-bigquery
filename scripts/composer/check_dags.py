@@ -41,6 +41,14 @@ The patches:
   launch whose `jobName` ends with one of the scenario's `fail_job_suffixes`
   raises instead (a batch job that fails).
 - `DataflowJobStatusSensor.poke`: returns True (the job reached the state).
+- `sdfb_batches.wait_for_launch_slot` (the batch launch gate, ADR 0045 D5):
+  the real gate, reading the real task instances' states, with every read
+  recorded. `dag.test` runs one task instance at a time, in no fixed order,
+  so where the gate would sleep the instance is rescheduled instead and
+  pokes again in a later pass. After the run every `start_batch` launch
+  must have passed the gate, in an order the gate allows (each batch only
+  once every batch `cap` or more below it had ended), with never more than
+  `cap` jobs open at once, or it is a harness failure (exit 1).
 - `BigQueryHook.__init__` / `BigQueryHook.insert_job`: no connection; each
   query is recorded (its text and parameters) and answered with the
   scenario's `verdict_rows` (the launch's `validation_runs` rows). A
@@ -89,11 +97,15 @@ Airflow's own Jinja (`{{ params.x }}`) is not a marker and is left alone.
 
 Scenarios (`SCENARIOS`): the first four (`MASTER_SCENARIOS`) are the ones
 master's generation DAG can run; the rest need the single DAG with
-`tables` (`explicit` | `all`) and `config_uri`. The last three judge a
+`tables` (`explicit` | `all`) and `config_uri`. Three judge a
 `tables=all` launch by its tables' rows: the overlay's relationship model
 with no trigger value (`all_from_overlay`), a table whose gate failed while
 every batch job reached DONE (`all_table_fails`), and a `validation_runs`
-table without the `status_reason` column (`all_old_validation_runs`).
+table without the `status_reason` column (`all_old_validation_runs`). The
+last two run the launch gate at the cap of 1: fourteen batches, the size of
+the 2026-11-02 launch that lost 13 of them (`all_14_batches_cap_1`), and
+three whose middle one fails, after which the third still launches
+(`all_middle_batch_fails`).
 
 Venv recipe (macOS 12 x86_64; this is what ran on 2026-10-27). Python 3.11:
 3.12 and 3.14 with the latest providers fail, there is no `google-re2`
@@ -124,7 +136,7 @@ generator.yaml copied, not linked:
       --markers packages/sdfb-tests/tests/fixtures/config_parity/dag_markers.json \\
       --out $S/dag_bodies.json
 
-Without `--scenario` all twelve run. `SDFB_DAG_BODIES=$S/dag_bodies.json`
+Without `--scenario` all fourteen run. `SDFB_DAG_BODIES=$S/dag_bodies.json`
 then lets `packages/sdfb-tests/tests/unit/composer/test_generation_dag.py`
 and `test_launch_helpers.py` check that output against the plan and master.
 
@@ -203,6 +215,14 @@ _CONFIG_SAYS_ALL = ("launch:\n"
                     "  tables: all\n"
                     "relational:\n"
                     f"  relationships_uri: {_MODEL_URI}\n")
+# Fourteen and three isolated tables: one batch each at K = 1.
+_FOURTEEN = tuple(f"T{i:02d}_TABLE" for i in range(14))
+_FOURTEEN_MODEL_TEXT = ("model: sdfb_harness_forest\n"
+                        "tables:\n" +
+                        "".join(f"  {t}: {{}}\n" for t in _FOURTEEN))
+_THREE_MODEL_TEXT = ("model: sdfb_harness_forest\n"
+                     "tables:\n" +
+                     "".join(f"  {t}: {{}}\n" for t in _FOURTEEN[:3]))
 # The landing dataset the overlay's landing table names.
 _LANDING = "sdfb-proj.synthetic_data"
 _BLOCKER_REASON = ("BLOCKER failures 9/10 = 0.9000 exceeds gate 0.0500 "
@@ -235,6 +255,11 @@ _TWO_BATCHES_PASSED = (_row("X_TABLE", "manual-b00-00-X_TABLE"),
 # X_TABLE's gate failed; Y_TABLE passed.
 _TABLE_FAILS_ROWS = (_row("X_TABLE", "manual-b00-00-X_TABLE", "FAILED_BLOCKER",
                           _BLOCKER_REASON), _TWO_BATCHES_PASSED[1])
+# Every one of the fourteen passed; of the three, the middle batch's table
+# has no row (its job failed).
+_FOURTEEN_PASSED = tuple(
+    _row(t, f"manual-b{i:02d}-00-{t}") for i, t in enumerate(_FOURTEEN))
+_MIDDLE_FAILS_ROWS = (_FOURTEEN_PASSED[0], _FOURTEEN_PASSED[2])
 # A table without the status_reason column: X_TABLE stopped in preflight.
 _OLD_TABLE_ROWS = (_row(
     "X_TABLE", "manual-b00-00-X_TABLE", "FAILED_PREFLIGHT", with_reason=False),
@@ -379,6 +404,30 @@ SCENARIOS: dict[str, dict[str, Any]] = {
             gcs_objects={_MODEL_URI: _MODEL_TEXT},
             verdict_rows=_OLD_TABLE_ROWS,
             reason_column_missing=True),
+    # The launch gate at the cap of 1 (generator.yaml's
+    # launch.max_parallel_jobs; the harness sets no SDFB_MAX_PARALLEL_JOBS):
+    # fourteen batches, each launched after the one below it ended.
+    "all_14_batches_cap_1":
+        _scenario(
+            {
+                "tables": "all",
+                "relationships_uri": _MODEL_URI,
+                "max_tables_per_job": "1"
+            },
+            gcs_objects={_MODEL_URI: _FOURTEEN_MODEL_TEXT},
+            verdict_rows=_FOURTEEN_PASSED),
+    # The middle of three batches fails: the third still launches (a failed
+    # sibling has ended), and the run fails on the batch.
+    "all_middle_batch_fails":
+        _scenario(
+            {
+                "tables": "all",
+                "relationships_uri": _MODEL_URI,
+                "max_tables_per_job": "1"
+            },
+            gcs_objects={_MODEL_URI: _THREE_MODEL_TEXT},
+            fail_job_suffixes=("-b01",),
+            verdict_rows=_MIDDLE_FAILS_ROWS),
 }
 MASTER_SCENARIOS = ("explicit_l4", "explicit_t4", "explicit_fk_group",
                     "explicit_eval_off")
@@ -457,6 +506,11 @@ class Recorder:
     self.launches: list[tuple[str, int, dict[str, Any]]] = []
     self.gcs_reads: list[str] = []
     self.bq_queries: list[tuple[str, list]] = []
+    # The launch gate: (map index, cap, the states it read), each read;
+    # the jobs open now, and the most ever open at once.
+    self.gate_reads: list[tuple[int, int, dict[int, str | None]]] = []
+    self.open_jobs: set[tuple[str, int]] = set()
+    self.max_open = 0
 
   def download(self, bucket_name: str, object_name: str, *_: Any,
                **__: Any) -> bytes:
@@ -511,11 +565,63 @@ class Recorder:
     map_index = int(getattr(ti, "map_index", -1))
     body = json.loads(json.dumps(task.body, default=str))
     self.launches.append((task.task_id, map_index, body))
-    job_name = str(body.get("launchParameter", {}).get("jobName", ""))
-    if any(job_name.endswith(s) for s in self.scenario["fail_job_suffixes"]):
-      raise RuntimeError(f"check_dags: job {job_name} fails (scenario)")
-    suffix = f"-{map_index}" if map_index >= 0 else ""
-    return {"id": f"fakejob-{task.task_id}{suffix}", "name": job_name}
+    job = (task.task_id, map_index)
+    self.open_jobs.add(job)
+    self.max_open = max(self.max_open, len(self.open_jobs))
+    try:
+      job_name = str(body.get("launchParameter", {}).get("jobName", ""))
+      if any(job_name.endswith(s) for s in self.scenario["fail_job_suffixes"]):
+        raise RuntimeError(f"check_dags: job {job_name} fails (scenario)")
+      suffix = f"-{map_index}" if map_index >= 0 else ""
+      return {"id": f"fakejob-{task.task_id}{suffix}", "name": job_name}
+    finally:  # a batch launch waits for its job: it ends here
+      self.open_jobs.discard(job)
+
+  def gate(self, real_gate: Any) -> Any:
+    """The launch gate, recording each read. Where it would sleep it hands
+    the instance back to `dag.test` as rescheduled instead: `dag.test` runs
+    one instance at a time, so the siblings it waits for run in later passes
+    and the instance pokes again then (a poke a minute later, in Composer).
+    Each launch's order is then the gate's, whatever order `dag.test` picks."""
+    exceptions = _airflow("airflow.exceptions")
+    timezone = _airflow("airflow.utils.timezone")
+
+    def gate(map_index: int, cap: int, read_states: Any, **kwargs: Any) -> None:
+
+      def read() -> dict[int, str | None]:
+        states = dict(read_states())
+        self.gate_reads.append((map_index, cap, states))
+        return states
+
+      def sleep(_: float) -> None:
+        raise exceptions.AirflowRescheduleException(timezone.utcnow())
+
+      real_gate(
+          map_index, cap, read, sleep=sleep, poke_seconds=0, log=kwargs["log"])
+
+    return gate
+
+  def check_gate(self, name: str) -> None:
+    """HarnessError unless every batch launch passed the gate, in an order
+    it allows, and no more than its cap of jobs was ever open at once."""
+    order = [i for task_id, i, _ in self.launches if task_id == "start_batch"]
+    if not order:
+      return
+    caps = {cap for _, cap, _ in self.gate_reads}
+    if len(caps) != 1:
+      raise HarnessError(f"{name}: gate caps {sorted(caps)}")
+    (cap,) = caps
+    for position, index in enumerate(order):
+      # Launches end before the next starts here: a batch may launch once
+      # every batch `cap` or more below it has launched (and so ended).
+      if not set(range(index - cap + 1)) <= set(order[:position]):
+        raise HarnessError(f"{name}: b{index:02d} launched before the gate "
+                           f"allowed it (launch order {order}, cap {cap})")
+    if set(order) - {i for i, _, _ in self.gate_reads}:
+      raise HarnessError(f"{name}: a batch launched without the gate")
+    if self.max_open > cap:
+      raise HarnessError(f"{name}: {self.max_open} jobs open at once, cap "
+                         f"{cap}")
 
   def split(self) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """(generation bodies, the evaluation body or None)."""
@@ -581,8 +687,11 @@ def run_scenario(dag: Any, name: str) -> dict[str, Any]:
   def insert_job(*args: Any, **kwargs: Any) -> Any:  # args[0]: the hook
     return recorder.insert_job(*args[1:], **kwargs)
 
+  batches = sys.modules["sdfb_batches"]  # the DAG imported it
   when = logical_date(name)
-  with mock.patch.object(gcs, "__init__", lambda *_, **__: None), \
+  with mock.patch.object(batches, "wait_for_launch_slot",
+                         recorder.gate(batches.wait_for_launch_slot)), \
+      mock.patch.object(gcs, "__init__", lambda *_, **__: None), \
       mock.patch.object(gcs, "download", download), \
       mock.patch.object(gcs, "get_conn", lambda *_, **__: recorder.get_conn()), \
       mock.patch.object(operators.DataflowStartFlexTemplateOperator,
@@ -601,6 +710,7 @@ def run_scenario(dag: Any, name: str) -> dict[str, Any]:
   if not states:
     raise HarnessError(f"{name}: the DAG run created no task instance")
   recorder.check_fallback(name)
+  recorder.check_gate(name)
   bodies, evaluation = recorder.split()
   result = {
       "task_states": dict(sorted(states.items())),

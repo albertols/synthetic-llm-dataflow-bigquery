@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import enum
 import importlib.util
 import json
 import re
@@ -33,6 +34,8 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
 from sdfb_beam.cli import run_pipeline as rp
 from sdfb_core.contracts.relationships import (RelationshipError,
                                                RelationshipRegistry)
@@ -780,6 +783,172 @@ def test_parallel_cap_reads_the_variable_then_the_overlaid_yaml(deployed):
       encoding="utf-8")
   with pytest.raises(ValueError, match=r"launch\.max_parallel_jobs"):
     m.parallel_cap(m.load_layers(folder), {})
+
+
+# -- the launch gate (ADR 0045 D5) -------------------------------------------
+@pytest.mark.parametrize(
+    "map_index, cap, states, expected",
+    [
+        (0, 1, {}, True),  # below the cap: no sibling to wait for
+        (1, 2, {}, True),
+        (5, 14, {}, True),  # a cap at or above the batch count
+        (1, 1, {
+            0: "running"
+        }, False),  # cap 1: waits for the one below
+        (1, 1, {
+            0: "success"
+        }, True),
+        (1, 1, {
+            0: "failed"
+        }, True),
+        (1, 1, {
+            0: "skipped"
+        }, True),
+        (1, 1, {
+            0: "removed"
+        }, True),
+        (1, 1, {
+            0: "upstream_failed"
+        }, True),
+        (1, 1, {
+            0: "scheduled"
+        }, False),
+        (1, 1, {
+            0: None
+        }, False),
+        (1, 1, {}, False),  # a missing index has not ended
+        (3, 1, {
+            0: "success",
+            1: "failed",
+            2: "success"
+        }, True),
+        (3, 1, {
+            0: "success",
+            2: "success"
+        }, False),
+        (3, 2, {
+            0: "success",
+            1: "success",
+            2: "running"
+        }, True),
+        (3, 2, {
+            0: "success",
+            1: "running",
+            2: "success"
+        }, False),
+    ])
+def test_may_launch(map_index, cap, states, expected):
+  assert M.may_launch(map_index, cap, states) is expected
+  assert {"success", "failed", "skipped", "upstream_failed",
+          "removed"} == M.TERMINAL_TI_STATES
+
+
+@settings(max_examples=300, deadline=None)
+@given(
+    data=st.data(),
+    batches=st.integers(min_value=1, max_value=20),
+    cap=st.integers(min_value=1, max_value=6))
+def test_the_gate_never_runs_more_than_cap_jobs(data, batches, cap):
+  """Every instance is RUNNING and pokes; launched jobs end in any order,
+  each in any terminal state. Never more than `cap` jobs open, and every
+  batch launches."""
+  states = {i: "running" for i in range(batches)}
+  launched: set[int] = set()
+  while len(launched) < batches or any(
+      states[i] == "running" for i in launched):
+    for i in data.draw(st.permutations(sorted(set(states) - launched))):
+      if M.may_launch(i, cap, states):
+        launched.add(i)
+    open_jobs = [i for i in launched if states[i] == "running"]
+    assert len(open_jobs) <= cap
+    assert open_jobs, "no job open and none may launch: a deadlock"
+    ending = data.draw(st.sampled_from(sorted(open_jobs)))
+    states[ending] = data.draw(st.sampled_from(sorted(M.TERMINAL_TI_STATES)))
+  assert launched == set(range(batches))
+
+
+def test_the_wait_reads_afresh_and_logs_each_new_blocker():
+  reads = iter([
+      {
+          0: "running",
+          1: "running"
+      },
+      {
+          0: "running",
+          1: "running"
+      },
+      {
+          0: "success",
+          1: "running"
+      },
+      {
+          0: "success",
+          1: "failed"
+      },
+  ])
+  slept, logged = [], []
+  M.wait_for_launch_slot(
+      2,
+      1,
+      lambda: next(reads),
+      sleep=slept.append,
+      poke_seconds=60,
+      log=logged.append)
+  assert slept == [60, 60, 60]
+  assert logged == [
+      "b02 waits for b00 to end (cap 1)", "b02 waits for b01 to end (cap 1)"
+  ]
+  M.wait_for_launch_slot(
+      0, 1, lambda: {}, sleep=slept.append, poke_seconds=60, log=logged.append)
+  assert len(slept) == 3  # the first batch never waits
+
+
+class _Ti:  # pylint: disable=too-few-public-methods  # a task instance's fields
+
+  def __init__(self, task_id, map_index, state, start_date=None, end_date=None):
+    self.task_id, self.map_index = task_id, map_index
+    self.state, self.start_date, self.end_date = state, start_date, end_date
+
+
+class _State(enum.StrEnum):
+  """Stands in for TaskInstanceState: a str Enum."""
+  SUCCESS = "success"
+  FAILED = "failed"
+
+
+def test_ti_states_and_never_started_read_only_the_task():
+  tis = [
+      _Ti("start_batch", 0, _State.SUCCESS, "2026-11-02T18:36:09"),
+      _Ti("start_batch", 1, _State.FAILED),  # failed by the scheduler
+      _Ti("start_batch", 2, "failed", "2026-11-02T19:00:00",
+          "2026-11-02T19:30:00"),  # ran, failed
+      # dag.test sets no start date on a task that ran: its end date tells
+      _Ti("start_batch", 5, "failed", None, "2026-11-02T19:31:00"),
+      _Ti("start_batch", 3, None),
+      _Ti("start_batch", 4, "failed"),
+      _Ti("collect_landed", -1, "failed"),
+  ]
+  states = M.ti_states(tis, "start_batch")
+  assert states == {
+      0: "success",
+      1: "failed",
+      2: "failed",
+      5: "failed",
+      3: None,
+      4: "failed"
+  }
+  assert not any(isinstance(s, enum.Enum) for s in states.values())
+  assert M.never_started(tis, "start_batch") == [1, 4]
+  assert M.never_started(tis[:1], "start_batch") == []
+  message = M.batch_failure_message(tis, "start_batch")
+  assert message.startswith("start_batch failed for b01, b02, b04, b05: ")
+  assert ("2 instance(s) failed without starting (b01, b04): the scheduler "
+          "failed them") in message
+  assert "dag_stale_not_seen_duration" in message
+  assert "clear them to launch those batches" in message
+  ran = M.batch_failure_message(tis[2:3], "start_batch")
+  assert ran == ("start_batch failed for b02: those batch jobs did not reach "
+                 "JOB_STATE_DONE; the batches that landed were evaluated")
 
 
 def test_verdict_inputs_read_the_overlay_then_the_file(deployed):

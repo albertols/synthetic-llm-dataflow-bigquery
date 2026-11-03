@@ -37,8 +37,8 @@ VM and the workers) and the optional SDFB_MAX_PARALLEL_JOBS (how many
 batch jobs of a `tables=all` launch run at once: the Variable when it is
 set, else launch.max_parallel_jobs of generator.yaml overlaid by
 sdfb_env.yaml, 1 by default; never below 1, `sdfb_batches.parallel_cap`).
-Airflow fixes a mapped task's concurrency when it parses the file, so a
-change to either takes effect at the next parse, without a re-import.
+The cap is read when the file is parsed, so a change to either takes effect
+at the next parse, without a re-import.
 
 The two branches::
 
@@ -178,6 +178,22 @@ Trigger rules, and why::
                                                     informational with
                                                     client_type=fake
 
+The launch gate (ADR 0045 D5). Every `start_batch` instance starts at once
+and waits RUNNING, in `pre_execute`, until every instance `cap` or more
+indexes below it has ended (`sdfb_batches.may_launch`, its siblings' states
+read once a minute); only then does it launch its job. So at most `cap`
+batch jobs run at once, and an instance waits only on lower ones. The DAG
+sets no task-level limit (`max_active_tis_per_dag`,
+`max_active_tis_per_dagrun`) on any task, and must not: with one, the
+scheduler checks the serialized DAG for every instance it queues, and when
+the DAG is missing from `serialized_dag` (the stale-DAG sweep of a standalone
+DAG processor, `[scheduler] dag_stale_not_seen_duration`, deletes it until
+the file is parsed again) it fails every SCHEDULED instance of the DAG, with
+no start date and no retry. The 2026-11-02 launch lost 13 of its 14 batches
+that way, parked in SCHEDULED by `max_active_tis_per_dag`. Without a
+task-level limit the scheduler never makes that check, so an instance that
+waits SCHEDULED (for a pool slot or the DAG's `max_active_tasks`) only waits.
+
 Run slot: a run stays running until the generation job ends (the first
 sensor waits for it, hours) and then until the evaluation's launch is over
 (the second sensor): at most the launcher's twelve minutes and one 60-second
@@ -202,10 +218,16 @@ launch the whole batch again under the same base run id, which replays the
 same rows, and after a BLOCKER, which fails the job once its rows have
 loaded, an append launch would land them twice. To run a failed batch
 again, fix the cause and clear its `start_batch` instance with its
-downstream tasks. Each running instance holds an Airflow worker slot until
-its job ends (the operator is not deferrable); killing it (a Composer worker
-restart, or marking it failed) cancels its Dataflow job, and with
-`retries=0` the instance then stays failed.
+downstream tasks; its lower siblings have ended, so it launches at once.
+Clear it only once the run has ended: cleared while a higher instance's job
+runs, it launches beside it, one job over the cap. Each instance holds an
+Airflow worker slot until its job ends, the waiting ones too (sleeping at
+the gate; the operator is not deferrable): with a cap of 1, 14 batches of
+half an hour hold about 45 slot-hours of waiting, up to the DAG's
+`max_active_tasks` slots at once (instances past it wait SCHEDULED, which
+is safe, see the launch gate). Killing an instance (a Composer worker
+restart, or marking it failed) cancels its Dataflow job if it launched one,
+and with `retries=0` the instance then stays failed.
 
 The explicit evaluation (`sdfb_batches.evaluation_body`, master's
 parameters) evaluates what the launch generated: the launched table
@@ -352,7 +374,7 @@ row of a job that dies on the workers.
 
 What has run, and what has not. `scripts/composer/check_dags.py` imports
 this folder into a real Airflow 2.10.5 with the Google provider 12.0.0 and
-runs twelve triggers through `dag.test()`, every Google call patched (the
+runs fourteen triggers through `dag.test()`, every Google call patched (the
 `BigQueryHook` read of `fail_if_a_table_failed` is served the scenario's
 rows): the branch, the trigger rules, the mapped batches, the XComs and the
 launch bodies are Airflow's own. Not run against Google: the provider's sensor
@@ -430,6 +452,9 @@ VARIABLES = {
 # ADR 0045: at most this many batch jobs at once. Each holds its workers'
 # GPUs, so the regional GPU quota bounds it. Parse-time (see the header).
 MAX_PARALLEL_JOBS = sdfb_batches.parallel_cap(LAYERS, VARIABLES)
+# How often a batch instance waiting at the launch gate reads its siblings'
+# states (ADR 0045 D5).
+GATE_POKE_SECONDS = 60
 
 # The DAG's id, template, buckets, labels and job names (the overlay's
 # `dag:` and `infra:`, and the Variables above), and every param's default.
@@ -1126,6 +1151,42 @@ def collect_landed(**context) -> dict:
       ts_nodash=context["ts_nodash"])
 
 
+class _GatedFlexTemplateOperator(DataflowStartFlexTemplateOperator):
+  """A batch's Flex launch that first waits, RUNNING, until it may launch:
+  every batch `cap` or more indexes below it has ended
+  (`sdfb_batches.may_launch`, ADR 0045 D5).
+
+  The wait is in `pre_execute`, not `execute`: an `execute` that called the
+  provider's would make Airflow's execute guard log, for every batch, that
+  the operator ran outside a task instance. The siblings' states are read
+  afresh each poke (`DagRun.get_task_instances` opens its own session).
+  """
+
+  def __init__(self,
+               *,
+               cap: int,
+               gate_poke_seconds: float = GATE_POKE_SECONDS,
+               **kwargs):
+    super().__init__(**kwargs)
+    self.cap = cap
+    self.gate_poke_seconds = gate_poke_seconds
+
+  def pre_execute(self, context):
+    import logging
+    import time
+
+    super().pre_execute(context)
+    dag_run = context["dag_run"]
+    sdfb_batches.wait_for_launch_slot(
+        context["ti"].map_index,
+        self.cap,
+        lambda: sdfb_batches.ti_states(dag_run.get_task_instances(), self.
+                                       task_id),
+        sleep=time.sleep,
+        poke_seconds=self.gate_poke_seconds,
+        log=logging.info)
+
+
 @task(task_id="fail_if_a_batch_failed", trigger_rule=TriggerRule.ONE_FAILED)
 def fail_if_a_batch_failed(**context) -> None:
   """A leaf that fails the run when a batch did.
@@ -1133,13 +1194,14 @@ def fail_if_a_batch_failed(**context) -> None:
   The evaluation after `collect_landed` may succeed, and Airflow fails a run
   only by a failed leaf. A failed `route` also reaches here (start_batch is
   then upstream-failed): nothing was launched, and route's own failure
-  already fails the run, so this one skips.
+  already fails the run, so this one skips. An instance that failed with no
+  start date never ran: the message names those, the ones to clear.
   """
   if not context["ti"].xcom_pull(task_ids="route", key="base_run_id"):
     raise AirflowSkipException("route planned no batch: no batch failed")
   raise AirflowFailException(
-      "a start_batch instance failed: its batch job did not reach "
-      "JOB_STATE_DONE; the batches that landed were evaluated")
+      sdfb_batches.batch_failure_message(
+          context["dag_run"].get_task_instances(), "start_batch"))
 
 
 def _verdict_rows(table: str, base: str) -> tuple[list[dict], bool]:
@@ -1615,17 +1677,19 @@ with models.DAG(
 
   # -- all: one mapped launch per batch -------------------------------------
   planned = batch_bodies()
-  # Each instance waits for its own job, so `max_active_tis_per_dag` caps the
-  # jobs that run at once. No retries: a retry would launch the whole batch
-  # again (see Retries in the header).
-  start_batch = DataflowStartFlexTemplateOperator.partial(
+  # Each instance waits for its own job, and the launch gate caps the jobs
+  # that run at once. Never `max_active_tis_per_dag` (or any task-level
+  # limit): it makes the scheduler fail every waiting instance whenever the
+  # DAG is swept as stale (ADR 0045 D5). No retries: a retry would launch the
+  # whole batch again (see Retries in the header).
+  start_batch = _GatedFlexTemplateOperator.partial(
       task_id="start_batch",
       project_id=project_id,
       location=region,
       wait_until_finished=True,
       do_xcom_push=True,
       retries=0,
-      max_active_tis_per_dag=MAX_PARALLEL_JOBS,
+      cap=MAX_PARALLEL_JOBS,
   ).expand(body=planned)
   landed = collect_landed()
 

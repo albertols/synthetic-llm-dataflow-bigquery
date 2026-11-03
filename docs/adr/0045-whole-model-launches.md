@@ -1,6 +1,6 @@
 # ADR 0045 — Whole-model launches: every enabled table of one model, in batch jobs
 
-**Status:** Accepted (2026-10-21). Built and tested on a laptop (DirectRunner, fake client; the generation DAG's `tables=all` branch run under Airflow 2.10.5's `dag.test()` with GCS and Dataflow stubbed, D6); the Dataflow acceptance (AC-B-5) is the corp run of [RUN_PLAYBOOK §2e](../RUN_PLAYBOOK.md#2e-corp-acceptance-of-whole-model-launches-b). Built in phase B of the config, record and model-launch work (the phase design is local to the branch and not committed). **Revised 2026-10-26** (unreleased, amended in place): D6's separate model DAG is deleted; the generation DAG launches `tables=all` on a second branch (see [D6](#d6--one-generation-dag-two-branches)). **Revised 2026-10-31** (unreleased, amended in place): under `tables=all` the table is the unit of failure ([D6](#the-table-is-the-unit-of-failure-2026-10-31)), the DAG's cap reads `launch.max_parallel_jobs` ([D5](#d5--the-parallel-cap)), and the overlay carries `relational.relationships_uri` ([D1](#d1--launchtables-explicit-or-all) note).
+**Status:** Accepted (2026-10-21). Built and tested on a laptop (DirectRunner, fake client; the generation DAG's `tables=all` branch run under Airflow 2.10.5's `dag.test()` with GCS and Dataflow stubbed, D6); the Dataflow acceptance (AC-B-5) is the corp run of [RUN_PLAYBOOK §2e](../RUN_PLAYBOOK.md#2e-corp-acceptance-of-whole-model-launches-b). Built in phase B of the config, record and model-launch work (the phase design is local to the branch and not committed). **Revised 2026-10-26** (unreleased, amended in place): D6's separate model DAG is deleted; the generation DAG launches `tables=all` on a second branch (see [D6](#d6--one-generation-dag-two-branches)). **Revised 2026-10-31** (unreleased, amended in place): under `tables=all` the table is the unit of failure ([D6](#the-table-is-the-unit-of-failure-2026-10-31)), the DAG's cap reads `launch.max_parallel_jobs` ([D5](#d5--the-parallel-cap)), and the overlay carries `relational.relationships_uri` ([D1](#d1--launchtables-explicit-or-all) note). **Revised 2026-11-03** (unreleased, amended in place): the DAG holds its cap with a launch gate, no longer with `max_active_tis_per_dag`, after the scheduler failed 13 of a launch's 14 batches before they ran ([D5](#the-launch-gate-2026-11-03)).
 **Design:** [`docs/DESIGN.md` §4 Relational generation](../DESIGN.md#4-relational-generation) ([§4.5 Whole-model launches](../DESIGN.md#45-whole-model-launches))
 **Code:** [`sdfb_core/launch/tables.py`](../../packages/sdfb-core/src/sdfb_core/launch/tables.py) (the launch modes, a table's source and rows) · [`sdfb_core/launch/batches.py`](../../packages/sdfb-core/src/sdfb_core/launch/batches.py) (the planner) · `sdfb_beam/cli/run_pipeline.py` (`_run_model`, `chosen_batches`, `_run_batch`, `PrepReadAhead`, `_prep_relational_specs`) · `sdfb_beam/pipeline.py` (`_BlockerGateDoFn`, the recording gate) · [`sdfb_core/validation/summary.py`](../../packages/sdfb-core/src/sdfb_core/validation/summary.py) (`FAILED_PREFLIGHT`, `status_reason`) · [`composer/synthetic_beam_bigquery.py`](../../composer/synthetic_beam_bigquery.py) (the generation DAG, its `tables=all` branch) · [`composer/sdfb_batches.py`](../../composer/sdfb_batches.py) (its launch helpers and the planner mirror) · [`scripts/launch/run_model.py`](../../scripts/launch/run_model.py) (the CLI runner) · `sdfb_evaluation/context/runs.py` (`rows_of_jobs`), `sdfb_evaluation/context/launch.py` (`_launch_of`)
 **Builds on:** [ADR 0030](0030-single-job-relational-generation.md) (a component in one job) · [ADR 0032](0032-relationships-as-config.md) (relationships are configuration) · [ADR 0036](0036-parent-driven-fanout-generation.md) (a child's rows follow its parents) · [ADR 0043](0043-generator-config.md) (the config keys) · [ADR 0044](0044-generation-record.md) (the record each batch writes)
@@ -338,9 +338,10 @@ regional GPU quota. Ruling 13 says where each cap lives:
   was the Airflow Variable alone): the Variable `SDFB_MAX_PARALLEL_JOBS` when
   it is set and not empty, else `launch.max_parallel_jobs` of
   `generator.yaml` overlaid by `sdfb_env.yaml`; never below 1. It is read
-  when Composer parses the file into the mapped task's
-  `max_active_tis_per_dag`: Airflow fixes a mapped task's concurrency at parse
-  time ([Airflow: dynamic task mapping](https://airflow.apache.org/docs/apache-airflow/stable/authoring-and-scheduling/dynamic-task-mapping.html)).
+  when Composer parses the file, and the launch gate holds it (*revised
+  2026-11-03*: it was the mapped task's `max_active_tis_per_dag`, which
+  Airflow fixes at parse time, [Airflow: dynamic task mapping](https://airflow.apache.org/docs/apache-airflow/stable/authoring-and-scheduling/dynamic-task-mapping.html);
+  see [the launch gate](#the-launch-gate-2026-11-03)).
   The Variable applies at the next parse, without a re-import; an overlay
   change takes the next import (it is a DAGs-folder file). A value
   that is no integer fails the DAG's import with a `ValueError` naming where
@@ -365,12 +366,141 @@ flowchart LR
   O[("📄 sdfb_env.yaml<br/>config.launch, optional")]:::store
   V["⚪ Variable<br/>SDFB_MAX_PARALLEL_JOBS<br/>optional"]:::data
   C["⚙️ parallel_cap<br/>at parse time"]:::cpu
-  M["🔀 start_batch<br/>max_active_tis_per_dag"]:::beam
+  M["🛡️ start_batch<br/>launch gate cap"]:::cpu
   V -->|"1st"| C
   O -->|"2nd"| C
   Y -->|"3rd"| C
   C --> M
 ```
+
+#### The launch gate (2026-11-03)
+
+*Revised 2026-11-03 (unreleased, amended in place).* The first corp
+whole-model launch (2026-11-02: an isolated forest of 132 tables, K = 10, 14
+batches, cap 1) ran b00 and lost b01 to b13: the scheduler failed all 13
+instances, with no start date and no try, 10 minutes into the launch. Two
+Airflow 2.x mechanisms combine; both read in the scheduler's source,
+identical in 2.10.5 and 2.11.0:
+
+- **The stale-DAG sweep.** With a standalone DAG processor (Composer 3) the
+  scheduler deactivates every DAG whose file was last parsed more than
+  `[scheduler] dag_stale_not_seen_duration` ago (600 s by default) and
+  deletes its serialized DAG
+  ([`_cleanup_stale_dags`](https://github.com/apache/airflow/blob/2.11.0/airflow/jobs/scheduler_job_runner.py#L2143-L2165);
+  [the setting](https://airflow.apache.org/docs/apache-airflow/2.11.0/configurations-ref.html#dag-stale-not-seen-duration)).
+  The shared environment parsed the file about every 670 s, so the DAG was
+  missing for up to a minute in every parse cycle until its file was parsed
+  again.
+- **The fail-fast, for a DAG with a task-level limit only.** When the
+  scheduler queues a SCHEDULED instance of a DAG whose
+  `has_task_concurrency_limits` is set (some task sets
+  `max_active_tis_per_dag` or `max_active_tis_per_dagrun`,
+  [`dag.py`](https://github.com/apache/airflow/blob/2.11.0/airflow/models/dag.py#L3300-L3303)),
+  it loads the serialized DAG to read the limit; when the DAG is missing it
+  sets every SCHEDULED instance of that DAG to FAILED
+  ([`_executable_task_instances_to_queued`](https://github.com/apache/airflow/blob/2.11.0/airflow/jobs/scheduler_job_runner.py#L524-L541)).
+  A RUNNING instance is not touched, and no retry follows.
+
+`max_active_tis_per_dag` both set that flag and parked `batches - cap`
+instances in SCHEDULED for the whole launch, so a sweep was certain to find
+them. The flag covers the whole DAG: the explicit branch's reschedule-mode
+sensors were exposed too, briefly, at each poke.
+
+*Before, and after (one scheduler pass over a SCHEDULED instance).*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  S["⚪ instance<br/>SCHEDULED"]:::data --> P{"pool or DAG<br/>limit full?"}
+  P -->|"yes"| W["⚪ waits<br/>next pass"]:::data
+  P -->|"no"| F{"a task-level<br/>limit in the DAG?"}
+  F -->|"no: after"| Q["🔀 queued"]:::beam
+  F -->|"yes: before"| D[("🗄️ serialized_dag<br/>has the DAG?")]:::store
+  D -->|"yes"| Q
+  D -->|"no: swept"| X["∅ every SCHEDULED<br/>instance FAILED"]:::data
+```
+
+**Decision.** The DAG sets no task-level limit on any task, and the cap is
+a launch gate in the batch operator: `_GatedFlexTemplateOperator`, a
+`DataflowStartFlexTemplateOperator` whose `pre_execute` waits, RUNNING, until
+`sdfb_batches.may_launch` holds (every batch `cap` or more indexes below it
+has ended), reading its siblings' states once a minute. Every instance is
+queued at once and passes SCHEDULED in the scheduler pass that queues it, and
+an instance that does wait SCHEDULED (for a pool slot, or the DAG's
+`max_active_tasks`) only waits: without the flag the scheduler never checks
+the serialized DAG there. At most `cap` jobs run at once, and an instance
+waits only on lower indexes, so no two wait on each other. A pin keeps the
+flag off: `test_generation_dag.py::test_no_task_sets_a_task_level_concurrency_limit`.
+
+*The gate at cap 1 (time runs right).*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  subgraph R["🔥 every instance RUNNING from the start"]
+    G0["🔀 b00<br/>launches"]:::beam
+    G1["🛡️ b01<br/>waits for b00"]:::cpu
+    G2["🛡️ b02<br/>waits for b01"]:::cpu
+  end
+  G0 -->|"ends"| L1["🔀 b01<br/>launches"]:::beam
+  G1 -.-> L1
+  L1 -->|"ends"| L2["🔀 b02<br/>launches"]:::beam
+  G2 -.-> L2
+```
+
+What it costs, and what it does not do:
+
+- **A worker slot per waiting instance.** The operator is not deferrable, so
+  a waiting instance sleeps on its worker as a running one already waited for
+  its job: with cap 1 and 14 half-hour batches, about 45 slot-hours of
+  waiting, at most the DAG's `max_active_tasks` slots at once. Instances
+  past that wait in SCHEDULED, which is safe now; the lower indexes are
+  queued first.
+- **Clearing.** A cleared instance launches once its lower siblings have
+  ended, so clearing a failed one after the run has ended launches it at
+  once; cleared while a higher batch's job still runs, it launches beside it,
+  one job over the cap.
+- **The diagnosis.** `fail_if_a_batch_failed` names the instances that
+  failed with neither a start nor an end date (`sdfb_batches.never_started`):
+  the ones the scheduler failed, to clear.
+- **The environment.** Raising `dag_stale_not_seen_duration` above the
+  parse cycle stops the sweep itself (DEPLOYMENT_PREREQUISITES, Composer; the
+  check is in RUN_PLAYBOOK §2e). The DAG does not depend on it: the gate
+  holds without it.
+- **Laptop evidence, no Composer.** The harness runs the real gate on the
+  real task instances (`all_14_batches_cap_1`, `all_middle_batch_fails`):
+  `dag.test()` starts the mapped instances in no fixed order, and the batches
+  launched b00 to b13, one at a time; after b01 fails, b02 launches. The
+  property `test_sdfb_batches.py::test_the_gate_never_runs_more_than_cap_jobs`
+  holds over any order of completions. Unverified until the corp relaunch:
+  Composer's own parse cycle, the sweep, and a waiting instance surviving a
+  worker restart.
+
+Rejected:
+
+- **One dispatcher task** launching every batch through `DataflowHook` and
+  polling: one slot and no SCHEDULED instance at all, but no per-batch
+  instance to clear, no per-batch XCom for `collect_landed`, and its own
+  cancel-on-kill. The fallback if the gate fails on Composer.
+- **`max_active_tis_per_dag` or `max_active_tis_per_dagrun`**: either sets
+  the flag.
+- **A Composer pool, or a reschedule-mode or deferrable gate.** Without the
+  flag their waits would be safe too, but a pool is an environment setting
+  the DAG cannot check (an instance in a pool that does not exist is never
+  scheduled), and a gate that reschedules a mapped operator that is not a
+  sensor, or a trigger, is machinery nothing here has run.
+- **Only raising `dag_stale_not_seen_duration`**: needed, but a DAG must
+  not depend on a setting it cannot check.
 
 ### D6 — One generation DAG, two branches
 
@@ -444,7 +574,7 @@ pushes the resolved `mode` either way.
 | `route` | both | `all_success` | the branch, the bodies, the plan's `MODEL LAUNCH PLAN` banner (above). A `PlanError` (bad YAML, a bad `launch:` or `serving:` value, a missing or non-UTF-8 object, a model that is not one gs:// file, K below one) fails it with `AirflowFailException`, never retried; any other error (a transient GCS read) is retried as the environment says |
 | `start_sdfb` → `run_evaluation_gate` → `wait_for_generation` → `trigger_evaluation` → `wait_for_evaluation_launch` | explicit | `all_success` | master's five tasks, ids and arguments; the gate builds the evaluation body (the job id `start_sdfb` returned, the mode `route` resolved) |
 | `batch_bodies` | all | `all_success` | returns `route`'s bodies: Airflow maps a task only over another task's return value, never a custom XCom key, and a branch's return value is the branch it takes |
-| `start_batch` | all | `all_success` | one mapped `DataflowStartFlexTemplateOperator` per body, `wait_until_finished=True`, `retries=0`, `max_active_tis_per_dag` = the parallel cap (D5). A job that ends in any state but DONE fails its own instance; the other instances run on (the DAG sets no fail-stop) |
+| `start_batch` | all | `all_success` | one mapped `DataflowStartFlexTemplateOperator` per body, `wait_until_finished=True`, `retries=0`, the launch gate holding the parallel cap (D5). A job that ends in any state but DONE fails its own instance; the other instances run on (the DAG sets no fail-stop) |
 | `collect_landed` | all | `all_done` | after every instance, the failed ones included: returns the evaluation's launch body over the jobs that reached DONE, in batch order; skips (and so skips the evaluation) when `route` planned no batch, when `run_evaluation` is off, or when nothing landed |
 | `trigger_evaluation_batches` | all | `all_success` | one CPU Flex launch of the same template, its body `collect_landed`'s: `sdfb_job=evaluation`, `run_id=<base>`, `generation_job_ids=<the landed ids>`, `relationships_uri` (empty when `generate_fk_relationships` is false), `scope=manual`, `trigger=chained`, `output_dataset` = `evaluation_output_dataset`; neither `reference_rows_limit` nor `validation_runs_table` (Ruling 30). Not waited for |
 | `wait_for_batch_evaluation_launch` | all | `all_success` | master's reschedule sensor on the evaluation job; its failure callback `_close_batch_running_row` closes the evaluation's RUNNING registry row, found by `base_run_id` |
@@ -479,7 +609,7 @@ pushes the resolved `mode` either way.
   [`scripts/composer/check_dags.py`](../../scripts/composer/check_dags.py)
   imports the DAG folder (the DAG, `sdfb_batches.py`, `generator.yaml` and a
   filled `sdfb_env.yaml`) into Airflow 2.10.5 with the Google provider 12.0.0
-  and runs twelve triggers through `dag.test()` with every Google call
+  and runs fourteen triggers through `dag.test()` with every Google call
   patched, `BigQueryHook` included (it serves each scenario's
   `validation_runs` rows): four explicit launches (L4, T4, an FK group, the
   evaluation off), an explicit trigger whose config file says `all`, one
@@ -488,7 +618,8 @@ pushes the resolved `mode` either way.
   (`all_from_overlay`), a table whose gate failed while every batch job
   reached DONE (`all_table_fails`), and a `validation_runs` table without
   `status_reason` (`all_old_validation_runs`, which proves the query without
-  the column was issued). Every task state, launch body and GCS read
+  the column was issued), and two through the launch gate at cap 1
+  (`all_14_batches_cap_1`, `all_middle_batch_fails`; D5). Every task state, launch body and GCS read
   matched (`test_generation_dag.py::test_the_harness_run_is_the_plans`); the
   explicit launches resolve like master's recorded ones but for
   `DELIBERATE_CHANGES` and read nothing from GCS
@@ -904,11 +1035,12 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
 - **One evaluation per batch job**, the standalone evaluation DAG's fan-out.
   The acceptance wants one evaluation over every landed table; one evaluation
   per batch would split the launch's scores and registry rows.
-- **A runtime DAG param for the parallel cap.** Not possible with task
-  mapping: Airflow fixes a mapped task's concurrency when it parses the file
-  (D5).
+- **A runtime DAG param for the parallel cap.** Not possible while the cap
+  was `max_active_tis_per_dag`, which Airflow fixes when it parses the file;
+  the launch gate (2026-11-03) could read one at run time, not done (D5).
 - **A Composer pool for the cap** ([Airflow: pools](https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/pools.html)).
-  An Airflow admin setting outside the DAG file; possible later.
+  An Airflow admin setting outside the DAG file, which the DAG cannot check
+  ([the launch gate](#the-launch-gate-2026-11-03)).
 - **A second DAG file for whole-model launches.** Decided first (the model
   DAG of 2026-10-21) and reversed on 2026-10-26: it duplicated most of the
   generation DAG, and every launch shape now goes through one DAG (D6).
@@ -1002,6 +1134,7 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
 | AC-B-6 | Under `tables=all` a component that fails preflight is skipped with its `FAILED_PREFLIGHT` row and reason, and the rest of the batch lands | `packages/sdfb-tests/tests/unit/cli/test_model_launch_main.py::test_a_table_that_fails_preflight_is_skipped_and_the_rest_land` (and the component, parent-already-prepped, any-exception and every-table-fails tests beside it) |
 | AC-B-7 | Under `tables=all` a tripped gate ends the job DONE with a `FAILED_BLOCKER` row and its reason; the DAG fails the run naming every failed and missing table while evaluating every DONE batch | `packages/sdfb-tests/tests/integration/test_validation_runs.py::test_a_whole_model_batch_lands_a_failed_blocker_row_and_the_pipeline_completes`; `packages/sdfb-tests/tests/unit/composer/test_sdfb_batches.py::test_table_verdicts_names_passed_failed_missing_and_unplanned`; the harness scenario `all_table_fails` (`test_generation_dag.py::test_the_harness_run_is_the_plans`) |
 | AC-B-8 | A trigger with only `tables=all` plans the overlay's model file; an empty `relationships_uri` in the overlay stops the import | `packages/sdfb-tests/tests/unit/composer/test_launch_helpers.py::test_an_empty_relationships_uri_in_the_overlay_is_refused`; the harness scenario `all_from_overlay` |
+| AC-B-9 | No task of the DAG sets a task-level limit; the launch gate runs at most `cap` batch jobs at once, each after every batch `cap` or more below it ended, and a failed batch does not stop the later ones; the relaunch of the 2026-11-02 forest runs all 14 batches | `packages/sdfb-tests/tests/unit/composer/test_generation_dag.py::test_no_task_sets_a_task_level_concurrency_limit`; `test_sdfb_batches.py::test_the_gate_never_runs_more_than_cap_jobs`; the harness scenarios `all_14_batches_cap_1` and `all_middle_batch_fails`; the corp relaunch (RUN_PLAYBOOK §2e, pending) |
 
 ## Figure provenance
 
@@ -1013,6 +1146,7 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
 | M4, per-table resolution (D2) | inline mermaid, this file | a table's source and rows come from the model when it says so, else from the launch |
 | M5, the launcher is authoritative (D4) | inline mermaid, this file | every batch job plans the model again and stops when its count is not the orchestrator's |
 | M6, `max_parallel_jobs` = 1 and = 2, and the DAG cap's layers (D5; third panel 2026-10-31) | inline mermaid, three panels, this file | the cap decides how many batch jobs hold GPUs at once, never what they generate; the DAG's cap is the highest layer that sets it, `generator.yaml` < `sdfb_env.yaml` < the Variable |
+| M6b, the scheduler's pass before and after, and the gate at cap 1 (D5, 2026-11-03) | inline mermaid, two panels, this file | only a DAG with a task-level limit loses its SCHEDULED instances to a stale-DAG sweep; with the gate every instance waits RUNNING and the batches launch in turn |
 | M7, one DAG, two branches (D6; revised 2026-10-26 and 2026-10-31) | inline mermaid, this file | one evaluation covers what the launch landed; under `all` a failed batch or a failed table fails the run, not its neighbours |
 | M8, `prep_workers` = 1 and = W (D8) | inline mermaid, two panels, this file | threads read ahead; the cross-table steps keep the plan's order, so the outputs do not change |
 | M9, the unit of failure (D6, 2026-10-31; also in DESIGN.md §4.5) | inline mermaid, this file | a failed table fails itself; a component's members fail together; the job ends DONE. The statuses are those `test_model_launch_main.py` and `test_validation_runs.py` assert |
@@ -1024,5 +1158,7 @@ above. Links retrieved 2026-10-21. M7 was redrawn on 2026-10-26 from
 `composer/synthetic_beam_bigquery.py` (its header and `route`), and again
 from `composer/synthetic_beam_bigquery.py` on 2026-10-31 (the
 `fail_if_a_table_failed` leaf, its header's trigger-rule table). M6's third
-panel is read from `sdfb_batches.parallel_cap`, M9 from
+panel is read from `sdfb_batches.parallel_cap`, M6b from Airflow 2.11.0's
+`scheduler_job_runner.py` (lines 486-541, 2143-2165) and `dag.py` (3300-3303),
+retrieved 2026-11-03, and from `sdfb_batches.may_launch`, M9 from
 `run_pipeline.py::_prep_relational_specs` and `pipeline.py::_BlockerGateDoFn`.
