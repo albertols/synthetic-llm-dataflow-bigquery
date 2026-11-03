@@ -2309,6 +2309,7 @@ export const knobs: KnobsFile = {
         "null.required",
         "pk.duplicate",
         "row.duplicate",
+        "schema.column",
         "schema.types"
       ],
       "unit": null,
@@ -2331,6 +2332,7 @@ export const knobs: KnobsFile = {
         "null.required",
         "pk.duplicate",
         "row.duplicate",
+        "schema.column",
         "schema.types"
       ],
       "unit": null,
@@ -3874,7 +3876,7 @@ export const knobs: KnobsFile = {
     }
   ],
   "exported_from": {
-    "commit": "c4452ed6c8b8d2689dc82e918d68b2735085821f",
+    "commit": "9c10e9f871096ed1ba5c5f4697a811df9dee8751",
     "dirty": []
   }
 };

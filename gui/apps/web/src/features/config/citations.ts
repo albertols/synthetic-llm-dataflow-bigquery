@@ -24,7 +24,7 @@ export const CITES = {
   skillLineThree: { source: ".claude/skills/validation-mode-a.md:28", excerpt: "## Line 3 — BigQueryIO `FailedRows`" },
   readmeUniqueness: { source: "README.md:204", excerpt: "3. **Uniqueness**" },
   gateRatio: {
-    source: "packages/sdfb-core/src/sdfb_core/validation/summary.py:201",
+    source: "packages/sdfb-core/src/sdfb_core/validation/summary.py:203",
     excerpt: "observed = (blocker_count / total)",
   },
   adr0033D2: {

@@ -19,6 +19,7 @@ export type DlqRuleId =
   | "regex.format"
   | "row.duplicate"
   | "schema.batch"
+  | "schema.column"
   | "schema.non_finite"
   | "schema.types";
 
@@ -227,12 +228,25 @@ export const dlqRules: DlqRulesFile = {
       "error_type": "pandera",
       "pipeline_step": "PanderaValidateBatchDoFn",
       "stage": "pre_write",
-      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/pandera_batch.py:70",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/pandera_batch.py:101",
       "declared": true,
       "severity": "CRITICAL",
       "dimension": "validity",
       "scope": "in_dag",
       "counted_in_blocker_gate": false
+    },
+    {
+      "rule_id": "schema.column",
+      "emitted": true,
+      "error_type": "pandera",
+      "pipeline_step": "PanderaValidateBatchDoFn",
+      "stage": "pre_write",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/pandera_batch.py:101",
+      "declared": true,
+      "severity": "BLOCKER",
+      "dimension": "validity",
+      "scope": "in_dag",
+      "counted_in_blocker_gate": true
     },
     {
       "rule_id": "schema.non_finite",
@@ -262,7 +276,7 @@ export const dlqRules: DlqRulesFile = {
     }
   ],
   "exported_from": {
-    "commit": "993384804302665e6814f3cb29b91882bc22dd54",
+    "commit": "9c10e9f871096ed1ba5c5f4697a811df9dee8751",
     "dirty": []
   }
 };
