@@ -498,19 +498,25 @@ def test_batches_are_one_mapped_launch_capped_by_the_gate():
   assert ast.unparse(_kw(start, "cap")) == "MAX_PARALLEL_JOBS"
   assert ast.unparse(_assignments()["MAX_PARALLEL_JOBS"]) == (
       "sdfb_batches.parallel_cap(LAYERS, VARIABLES)")
-  assert ast.literal_eval(_assignments()["GATE_POKE_SECONDS"]) == 60
+  assert ast.literal_eval(_assignments()["GATE_POKE_SECONDS"]) == 120
+  assert ast.unparse(_kw(start, "gate_poke_seconds")) == "GATE_POKE_SECONDS"
   gated = _class("_GatedFlexTemplateOperator")
   assert [ast.unparse(b) for b in gated.bases
          ] == ["DataflowStartFlexTemplateOperator"]
   methods = {n.name: n for n in gated.body if isinstance(n, ast.FunctionDef)}
-  # The wait is before the launch, and never overrides execute (Airflow's
+  # The gate is before the launch, and never overrides execute (Airflow's
   # execute guard would log each nested call).
   assert set(methods) == {"__init__", "pre_execute"}
   pre = ast.unparse(methods["pre_execute"])
   assert "super().pre_execute(context)" in pre
-  assert "sdfb_batches.wait_for_launch_slot(" in pre
-  assert "sdfb_batches.ti_states(dag_run.get_task_instances()" in pre
-  assert "poke_seconds=self.gate_poke_seconds" in pre
+  assert ("sdfb_batches.ti_states(context['dag_run'].get_task_instances(), "
+          "self.task_id)") in pre
+  assert "sdfb_batches.launch_blocker(" in pre
+  # A waiting instance is rescheduled a poke later, never sleeps: it must
+  # hold no worker slot while it waits.
+  assert "raise AirflowRescheduleException(" in pre
+  assert "seconds=self.gate_poke_seconds" in pre
+  assert "sleep" not in ast.unparse(gated)
 
 
 def test_no_task_sets_a_task_level_concurrency_limit():
@@ -840,7 +846,7 @@ def test_the_harness_run_is_the_plans():
 def test_the_harness_runs_the_launch_gate():
   """ADR 0045 D5: the launch gate at the cap of 1. dag.test starts the
   instances in any order; the harness fails the run unless they launched in
-  the gate's order, one job at a time."""
+  the gate's order."""
   output = _harness_output()
   fourteen = output["all_14_batches_cap_1"]
   assert len(fourteen["bodies"]) == 14

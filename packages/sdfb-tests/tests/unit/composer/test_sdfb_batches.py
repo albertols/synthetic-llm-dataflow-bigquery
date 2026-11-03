@@ -849,7 +849,7 @@ def test_may_launch(map_index, cap, states, expected):
     batches=st.integers(min_value=1, max_value=20),
     cap=st.integers(min_value=1, max_value=6))
 def test_the_gate_never_runs_more_than_cap_jobs(data, batches, cap):
-  """Every instance is RUNNING and pokes; launched jobs end in any order,
+  """Every waiting instance pokes; launched jobs end in any order,
   each in any terminal state. Never more than `cap` jobs open, and every
   batch launches."""
   states = {i: "running" for i in range(batches)}
@@ -867,40 +867,14 @@ def test_the_gate_never_runs_more_than_cap_jobs(data, batches, cap):
   assert launched == set(range(batches))
 
 
-def test_the_wait_reads_afresh_and_logs_each_new_blocker():
-  reads = iter([
-      {
-          0: "running",
-          1: "running"
-      },
-      {
-          0: "running",
-          1: "running"
-      },
-      {
-          0: "success",
-          1: "running"
-      },
-      {
-          0: "success",
-          1: "failed"
-      },
-  ])
-  slept, logged = [], []
-  M.wait_for_launch_slot(
-      2,
-      1,
-      lambda: next(reads),
-      sleep=slept.append,
-      poke_seconds=60,
-      log=logged.append)
-  assert slept == [60, 60, 60]
-  assert logged == [
-      "b02 waits for b00 to end (cap 1)", "b02 waits for b01 to end (cap 1)"
-  ]
-  M.wait_for_launch_slot(
-      0, 1, lambda: {}, sleep=slept.append, poke_seconds=60, log=logged.append)
-  assert len(slept) == 3  # the first batch never waits
+def test_the_blocker_is_the_lowest_unfinished_sibling():
+  states = {0: "success", 1: "running", 2: "up_for_reschedule", 3: None}
+  assert M.launch_blocker(3, 1, states) == 1
+  assert M.launch_blocker(3, 2, states) == 1
+  assert M.launch_blocker(3, 3, states) is None  # only b00 is cap below
+  assert M.launch_blocker(0, 1, {}) is None  # the first batch never waits
+  assert M.launch_blocker(2, 1, {0: "success"}) == 1  # missing: not ended
+  assert M.gate_wait_line(3, 1, 2) == "b03 waits for b01 to end (cap 2)"
 
 
 class _Ti:  # pylint: disable=too-few-public-methods  # a task instance's fields

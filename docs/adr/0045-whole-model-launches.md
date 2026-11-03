@@ -427,15 +427,23 @@ flowchart LR
 
 **Decision.** The DAG sets no task-level limit on any task, and the cap is
 a launch gate in the batch operator: `_GatedFlexTemplateOperator`, a
-`DataflowStartFlexTemplateOperator` whose `pre_execute` waits, RUNNING, until
-`sdfb_batches.may_launch` holds (every batch `cap` or more indexes below it
-has ended), reading its siblings' states once a minute. Every instance is
-queued at once and passes SCHEDULED in the scheduler pass that queues it, and
-an instance that does wait SCHEDULED (for a pool slot, or the DAG's
+`DataflowStartFlexTemplateOperator` whose `pre_execute` reads its siblings'
+states and, until `sdfb_batches.may_launch` holds (every batch `cap` or more
+indexes below it has ended), raises `AirflowRescheduleException` for two
+minutes later: the instance waits up for reschedule, holding no worker slot,
+and pokes again. Once it may, it launches its job and waits for it. At most
+`cap` jobs run at once, and an instance waits only on lower indexes, so no
+two wait on each other. Each poke passes SCHEDULED and QUEUED for moments,
+and an instance that waits SCHEDULED longer (for a pool slot, or the DAG's
 `max_active_tasks`) only waits: without the flag the scheduler never checks
-the serialized DAG there. At most `cap` jobs run at once, and an instance
-waits only on lower indexes, so no two wait on each other. A pin keeps the
-flag off: `test_generation_dag.py::test_no_task_sets_a_task_level_concurrency_limit`.
+the serialized DAG there. A reschedule keeps the try
+([`dagrun.py`](https://github.com/apache/airflow/blob/2.11.0/airflow/models/dagrun.py#L1610-L1621):
+an instance up for reschedule is scheduled again without `try_number + 1`),
+so `retries=0` still means one launch; a mapped instance's reschedule date is
+honoured through its `task_reschedule` row
+([`ReadyToRescheduleDep`](https://github.com/apache/airflow/blob/2.11.0/airflow/ti_deps/deps/ready_to_reschedule.py)).
+A pin keeps the flag off:
+`test_generation_dag.py::test_no_task_sets_a_task_level_concurrency_limit`.
 
 *The gate at cap 1 (time runs right).*
 
@@ -447,58 +455,69 @@ flowchart LR
   classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
   classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
 
-  subgraph R["🔥 every instance RUNNING from the start"]
+  subgraph R["⚡ every instance pokes at once"]
     G0["🔀 b00<br/>launches"]:::beam
-    G1["🛡️ b01<br/>waits for b00"]:::cpu
-    G2["🛡️ b02<br/>waits for b01"]:::cpu
+    G1["🛡️ b01 waits<br/>up for reschedule"]:::cpu
+    G2["🛡️ b02 waits<br/>up for reschedule"]:::cpu
   end
   G0 -->|"ends"| L1["🔀 b01<br/>launches"]:::beam
-  G1 -.-> L1
+  G1 -.->|"pokes"| L1
   L1 -->|"ends"| L2["🔀 b02<br/>launches"]:::beam
-  G2 -.-> L2
+  G2 -.->|"pokes"| L2
 ```
 
 What it costs, and what it does not do:
 
-- **A worker slot per waiting instance.** The operator is not deferrable, so
-  a waiting instance sleeps on its worker as a running one already waited for
-  its job: with cap 1 and 14 half-hour batches, about 45 slot-hours of
-  waiting, at most the DAG's `max_active_tasks` slots at once. Instances
-  past that wait in SCHEDULED, which is safe now; the lower indexes are
-  queued first.
+- **A poke every two minutes per waiting instance**: a task start that
+  parses the DAG file (about 3 s on the corp environment), and up to two
+  minutes between a batch's end and the next one's launch. A sleeping gate
+  was the first version of this decision, and the review of 2026-11-03
+  rejected it (below).
 - **Clearing.** A cleared instance launches once its lower siblings have
   ended, so clearing a failed one after the run has ended launches it at
   once; cleared while a higher batch's job still runs, it launches beside it,
   one job over the cap.
-- **The diagnosis.** `fail_if_a_batch_failed` names the instances that
-  failed with neither a start nor an end date (`sdfb_batches.never_started`):
-  the ones the scheduler failed, to clear.
+- **The diagnosis.** `fail_if_a_batch_failed` names the failed batches, and
+  those that failed with neither a start nor an end date
+  (`sdfb_batches.never_started`): the ones the scheduler failed, to clear.
 - **The environment.** Raising `dag_stale_not_seen_duration` above the
   parse cycle stops the sweep itself (DEPLOYMENT_PREREQUISITES, Composer; the
   check is in RUN_PLAYBOOK §2e). The DAG does not depend on it: the gate
   holds without it.
 - **Laptop evidence, no Composer.** The harness runs the real gate on the
-  real task instances (`all_14_batches_cap_1`, `all_middle_batch_fails`):
-  `dag.test()` starts the mapped instances in no fixed order, and the batches
-  launched b00 to b13, one at a time; after b01 fails, b02 launches. The
-  property `test_sdfb_batches.py::test_the_gate_never_runs_more_than_cap_jobs`
-  holds over any order of completions. Unverified until the corp relaunch:
-  Composer's own parse cycle, the sweep, and a waiting instance surviving a
-  worker restart.
+  real task instances (`all_14_batches_cap_1`, `all_middle_batch_fails`) with
+  the poke at 0: `dag.test()` starts the mapped instances in no fixed order,
+  the waiting ones are rescheduled (64 waits in the two scenarios) and run
+  again, every instance on its first try, and the batches launched in the
+  gate's order, b00 to b13; after b01 fails, b02 launches. `dag.test()` runs
+  one task at a time, so how many jobs run at once is the property
+  `test_sdfb_batches.py::test_the_gate_never_runs_more_than_cap_jobs`, over
+  any order of completions. Unverified until the corp relaunch: Composer's
+  own parse cycle, the sweep, and the reschedule dates under its scheduler.
 
 Rejected:
 
+- **A gate that sleeps, RUNNING** (the first version, and the fix brief's).
+  Each waiting instance holds a Celery worker slot for hours (with cap 1 and
+  14 half-hour batches, about 45 slot-hours). On a shared environment at its
+  most workers, the later instances then sit QUEUED, and after
+  `[scheduler] task_queued_timeout` (600 s by default) and two requeues the
+  scheduler fails them
+  ([`_handle_tasks_stuck_in_queued`](https://github.com/apache/airflow/blob/2.11.0/airflow/jobs/scheduler_job_runner.py#L1788-L1859)),
+  stamping a start and an end date: batches lost again, by another route,
+  where `max_active_tis_per_dag` had kept them SCHEDULED. The brief rejected
+  rescheduling because each poke passes SCHEDULED; that holds only for a DAG
+  with the flag.
 - **One dispatcher task** launching every batch through `DataflowHook` and
   polling: one slot and no SCHEDULED instance at all, but no per-batch
   instance to clear, no per-batch XCom for `collect_landed`, and its own
   cancel-on-kill. The fallback if the gate fails on Composer.
 - **`max_active_tis_per_dag` or `max_active_tis_per_dagrun`**: either sets
   the flag.
-- **A Composer pool, or a reschedule-mode or deferrable gate.** Without the
-  flag their waits would be safe too, but a pool is an environment setting
-  the DAG cannot check (an instance in a pool that does not exist is never
-  scheduled), and a gate that reschedules a mapped operator that is not a
-  sensor, or a trigger, is machinery nothing here has run.
+- **A Composer pool.** An environment setting the DAG cannot check: an
+  instance in a pool that does not exist is never scheduled.
+- **A deferrable gate** (a trigger): it needs a triggerer, which this DAG
+  does not need today.
 - **Only raising `dag_stale_not_seen_duration`**: needed, but a DAG must
   not depend on a setting it cannot check.
 
@@ -1146,7 +1165,7 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
 | M4, per-table resolution (D2) | inline mermaid, this file | a table's source and rows come from the model when it says so, else from the launch |
 | M5, the launcher is authoritative (D4) | inline mermaid, this file | every batch job plans the model again and stops when its count is not the orchestrator's |
 | M6, `max_parallel_jobs` = 1 and = 2, and the DAG cap's layers (D5; third panel 2026-10-31) | inline mermaid, three panels, this file | the cap decides how many batch jobs hold GPUs at once, never what they generate; the DAG's cap is the highest layer that sets it, `generator.yaml` < `sdfb_env.yaml` < the Variable |
-| M6b, the scheduler's pass before and after, and the gate at cap 1 (D5, 2026-11-03) | inline mermaid, two panels, this file | only a DAG with a task-level limit loses its SCHEDULED instances to a stale-DAG sweep; with the gate every instance waits RUNNING and the batches launch in turn |
+| M6b, the scheduler's pass before and after, and the gate at cap 1 (D5, 2026-11-03) | inline mermaid, two panels, this file | only a DAG with a task-level limit loses its SCHEDULED instances to a stale-DAG sweep; with the gate a waiting instance is rescheduled, holding no worker slot, and the batches launch in turn |
 | M7, one DAG, two branches (D6; revised 2026-10-26 and 2026-10-31) | inline mermaid, this file | one evaluation covers what the launch landed; under `all` a failed batch or a failed table fails the run, not its neighbours |
 | M8, `prep_workers` = 1 and = W (D8) | inline mermaid, two panels, this file | threads read ahead; the cross-table steps keep the plan's order, so the outputs do not change |
 | M9, the unit of failure (D6, 2026-10-31; also in DESIGN.md §4.5) | inline mermaid, this file | a failed table fails itself; a component's members fail together; the job ends DONE. The statuses are those `test_model_launch_main.py` and `test_validation_runs.py` assert |
@@ -1159,6 +1178,6 @@ above. Links retrieved 2026-10-21. M7 was redrawn on 2026-10-26 from
 from `composer/synthetic_beam_bigquery.py` on 2026-10-31 (the
 `fail_if_a_table_failed` leaf, its header's trigger-rule table). M6's third
 panel is read from `sdfb_batches.parallel_cap`, M6b from Airflow 2.11.0's
-`scheduler_job_runner.py` (lines 486-541, 2143-2165) and `dag.py` (3300-3303),
+`scheduler_job_runner.py` (lines 486-541, 1788-1859, 2143-2165), `dag.py` (3300-3303), `dagrun.py` (1610-1621) and `ready_to_reschedule.py`,
 retrieved 2026-11-03, and from `sdfb_batches.may_launch`, M9 from
 `run_pipeline.py::_prep_relational_specs` and `pipeline.py::_BlockerGateDoFn`.

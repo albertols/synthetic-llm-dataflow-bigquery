@@ -1172,11 +1172,11 @@ can show (mapped tasks on Composer 2, the provider's job-name suffix,
    ends success.
 
    **The launch gate** ([ADR 0045 D5](adr/0045-whole-model-launches.md#the-launch-gate-2026-11-03)).
-   Every `start_batch` instance is RUNNING within a minute of
+   Every `start_batch` instance runs once within a minute of
    `batch_bodies`, whatever the cap; at most `max_parallel_jobs` Dataflow
-   jobs run at once; a waiting instance's log reads
-   `b0N waits for b0M to end (cap C)` (one line each time the batch it waits
-   for changes), then the launch. The scheduler's stale-DAG sweep
+   jobs run at once; a waiting instance shows up for reschedule (light
+   blue), its log reads `b0N waits for b0M to end (cap C)` once each poke,
+   two minutes apart, and every instance stays on try 1 until it launches. The scheduler's stale-DAG sweep
    (`Found (N) stales dags not parsed after …`, naming this DAG) must fail no
    instance: no `not found in serialized_dag table` line for the DAG, and no
    `start_batch` instance failed with no start date. If the environment

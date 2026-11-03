@@ -48,8 +48,9 @@ PyYAML only, what the DAG needs:
                        launch.max_parallel_jobs overlaid
     may_launch         whether a batch instance may launch its job: every
                        sibling `cap` or more indexes below it has ended
-    wait_for_launch_slot  a batch instance's wait, RUNNING, for may_launch
-                       (ti_states reads the siblings' states)
+    launch_blocker     the sibling a batch instance still waits for, if any
+                       (ti_states reads the siblings' states; gate_wait_line
+                       is the waiting instance's log line)
     never_started      the batch instances the scheduler failed before they
                        ran
     batch_failure_message  the failed batches, for fail_if_a_batch_failed
@@ -89,7 +90,7 @@ Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
 import hashlib
 import os
 import re
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -100,15 +101,16 @@ __all__ = [
     "MISSING_REASON_COLUMN", "T4_ACCELERATOR", "TERMINAL_TI_STATES",
     "VERDICT_FAILED_BLOCKER", "VERDICT_FAILED_PREFLIGHT", "VERDICT_NO_ROW",
     "VERDICT_PASSED", "ConfigInput", "Layers", "PlanError", "TablesMode",
-    "batch_job_name", "batch_parameters", "cli_text", "common_parameters",
-    "dag_constants", "decode_object", "evaluation_body", "explicit_body",
-    "failed_tables", "is_missing_reason_column", "landed_job_ids",
+    "batch_failure_message", "batch_job_name", "batch_parameters", "cli_text",
+    "common_parameters", "dag_constants", "decode_object", "evaluation_body",
+    "explicit_body", "failed_tables", "gate_wait_line",
+    "is_missing_reason_column", "landed_job_ids", "launch_blocker",
     "launch_environment", "launch_overrides", "launch_plan", "load_layers",
     "may_launch", "model_slug", "never_started", "parallel_cap",
     "param_defaults", "parse_config", "plan_banner", "plan_batches",
     "planning_inputs", "resolve_tables_mode", "table_verdicts", "ti_states",
-    "verdict_banner", "verdicts_query", "wait_for_launch_slot",
-    "whole_model_params", "with_file_hardware"
+    "verdict_banner", "verdicts_query", "whole_model_params",
+    "with_file_hardware"
 ]
 
 DEFAULT_MAX_TABLES_PER_JOB = 10
@@ -1003,8 +1005,11 @@ TERMINAL_TI_STATES = frozenset(
     {"success", "failed", "skipped", "upstream_failed", "removed"})
 
 
-def _first_unfinished(map_index: int, cap: int,
-                      states: Mapping[int, str | None]) -> int | None:
+def launch_blocker(map_index: int, cap: int,
+                   states: Mapping[int, str | None]) -> int | None:
+  """The lowest sibling batch instance `map_index` still waits for (one at
+  index `map_index - cap` or below that has not ended; a missing index has
+  not), or None when it may launch its job."""
   for j in range(map_index - cap + 1):
     if states.get(j) not in TERMINAL_TI_STATES:
       return j
@@ -1019,7 +1024,7 @@ def may_launch(map_index: int, cap: int, states: Mapping[int,
   The instances past the gate and not ended are then a subset of the `cap`
   indices up to the highest of them, so at most `cap` jobs run at once; and
   an instance waits only on lower indices, so no two wait on each other."""
-  return _first_unfinished(map_index, cap, states) is None
+  return launch_blocker(map_index, cap, states) is None
 
 
 def ti_states(task_instances: Iterable[Any],
@@ -1035,22 +1040,9 @@ def ti_states(task_instances: Iterable[Any],
   return states
 
 
-def wait_for_launch_slot(map_index: int, cap: int,
-                         read_states: Callable[[], Mapping[int, str | None]], *,
-                         sleep: Callable[[float], None], poke_seconds: float,
-                         log: Callable[[str], None]) -> None:
-  """Return once `may_launch` holds, reading the states afresh each poke
-  and sleeping `poke_seconds` between pokes. Logs one line each time the
-  batch it waits for changes."""
-  logged = None
-  while True:
-    blocking = _first_unfinished(map_index, cap, read_states())
-    if blocking is None:
-      return
-    if blocking != logged:
-      log(f"b{map_index:02d} waits for b{blocking:02d} to end (cap {cap})")
-      logged = blocking
-    sleep(poke_seconds)
+def gate_wait_line(map_index: int, blocking: int, cap: int) -> str:
+  """The log line of a batch instance that waits at the gate."""
+  return f"b{map_index:02d} waits for b{blocking:02d} to end (cap {cap})"
 
 
 def never_started(task_instances: Iterable[Any], task_id: str) -> list[int]:

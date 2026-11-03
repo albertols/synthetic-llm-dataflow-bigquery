@@ -41,14 +41,16 @@ The patches:
   launch whose `jobName` ends with one of the scenario's `fail_job_suffixes`
   raises instead (a batch job that fails).
 - `DataflowJobStatusSensor.poke`: returns True (the job reached the state).
-- `sdfb_batches.wait_for_launch_slot` (the batch launch gate, ADR 0045 D5):
-  the real gate, reading the real task instances' states, with every read
-  recorded. `dag.test` runs one task instance at a time, in no fixed order,
-  so where the gate would sleep the instance is rescheduled instead and
-  pokes again in a later pass. After the run every `start_batch` launch
-  must have passed the gate, in an order the gate allows (each batch only
-  once every batch `cap` or more below it had ended), with never more than
-  `cap` jobs open at once, or it is a harness failure (exit 1).
+- `sdfb_batches.launch_blocker` (the batch launch gate, ADR 0045 D5): the
+  real gate on the real task instances' states, each read recorded; the
+  mapped task's `gate_poke_seconds` is set to 0, so a waiting instance is
+  rescheduled for now and pokes again in `dag.test`'s next pass. `dag.test`
+  runs one task instance at a time, in no fixed order, so the check is the
+  launch order: after the run every `start_batch` launch must have read the
+  gate, and each batch must have launched only once every batch `cap` or
+  more below it had launched (and so ended), or it is a harness failure
+  (exit 1). How many jobs run at once cannot be seen here, one task running
+  at a time: `test_sdfb_batches.py` holds that property.
 - `BigQueryHook.__init__` / `BigQueryHook.insert_job`: no connection; each
   query is recorded (its text and parameters) and answered with the
   scenario's `verdict_rows` (the launch's `validation_runs` rows). A
@@ -506,11 +508,8 @@ class Recorder:
     self.launches: list[tuple[str, int, dict[str, Any]]] = []
     self.gcs_reads: list[str] = []
     self.bq_queries: list[tuple[str, list]] = []
-    # The launch gate: (map index, cap, the states it read), each read;
-    # the jobs open now, and the most ever open at once.
+    # The launch gate: (map index, cap, the states it read), each read.
     self.gate_reads: list[tuple[int, int, dict[int, str | None]]] = []
-    self.open_jobs: set[tuple[str, int]] = set()
-    self.max_open = 0
 
   def download(self, bucket_name: str, object_name: str, *_: Any,
                **__: Any) -> bytes:
@@ -565,45 +564,24 @@ class Recorder:
     map_index = int(getattr(ti, "map_index", -1))
     body = json.loads(json.dumps(task.body, default=str))
     self.launches.append((task.task_id, map_index, body))
-    job = (task.task_id, map_index)
-    self.open_jobs.add(job)
-    self.max_open = max(self.max_open, len(self.open_jobs))
-    try:
-      job_name = str(body.get("launchParameter", {}).get("jobName", ""))
-      if any(job_name.endswith(s) for s in self.scenario["fail_job_suffixes"]):
-        raise RuntimeError(f"check_dags: job {job_name} fails (scenario)")
-      suffix = f"-{map_index}" if map_index >= 0 else ""
-      return {"id": f"fakejob-{task.task_id}{suffix}", "name": job_name}
-    finally:  # a batch launch waits for its job: it ends here
-      self.open_jobs.discard(job)
+    job_name = str(body.get("launchParameter", {}).get("jobName", ""))
+    if any(job_name.endswith(s) for s in self.scenario["fail_job_suffixes"]):
+      raise RuntimeError(f"check_dags: job {job_name} fails (scenario)")
+    suffix = f"-{map_index}" if map_index >= 0 else ""
+    return {"id": f"fakejob-{task.task_id}{suffix}", "name": job_name}
 
   def gate(self, real_gate: Any) -> Any:
-    """The launch gate, recording each read. Where it would sleep it hands
-    the instance back to `dag.test` as rescheduled instead: `dag.test` runs
-    one instance at a time, so the siblings it waits for run in later passes
-    and the instance pokes again then (a poke a minute later, in Composer).
-    Each launch's order is then the gate's, whatever order `dag.test` picks."""
-    exceptions = _airflow("airflow.exceptions")
-    timezone = _airflow("airflow.utils.timezone")
+    """`sdfb_batches.launch_blocker`, recording each read."""
 
-    def gate(map_index: int, cap: int, read_states: Any, **kwargs: Any) -> None:
-
-      def read() -> dict[int, str | None]:
-        states = dict(read_states())
-        self.gate_reads.append((map_index, cap, states))
-        return states
-
-      def sleep(_: float) -> None:
-        raise exceptions.AirflowRescheduleException(timezone.utcnow())
-
-      real_gate(
-          map_index, cap, read, sleep=sleep, poke_seconds=0, log=kwargs["log"])
+    def gate(map_index: int, cap: int, states: Any) -> int | None:
+      self.gate_reads.append((map_index, cap, dict(states)))
+      return real_gate(map_index, cap, states)
 
     return gate
 
   def check_gate(self, name: str) -> None:
-    """HarnessError unless every batch launch passed the gate, in an order
-    it allows, and no more than its cap of jobs was ever open at once."""
+    """HarnessError unless every batch launch read the gate and came in an
+    order it allows."""
     order = [i for task_id, i, _ in self.launches if task_id == "start_batch"]
     if not order:
       return
@@ -619,9 +597,6 @@ class Recorder:
                            f"allowed it (launch order {order}, cap {cap})")
     if set(order) - {i for i, _, _ in self.gate_reads}:
       raise HarnessError(f"{name}: a batch launched without the gate")
-    if self.max_open > cap:
-      raise HarnessError(f"{name}: {self.max_open} jobs open at once, cap "
-                         f"{cap}")
 
   def split(self) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """(generation bodies, the evaluation body or None)."""
@@ -688,9 +663,11 @@ def run_scenario(dag: Any, name: str) -> dict[str, Any]:
     return recorder.insert_job(*args[1:], **kwargs)
 
   batches = sys.modules["sdfb_batches"]  # the DAG imported it
+  # The gate's poke: now, so dag.test's next pass pokes again.
+  dag.get_task("start_batch").partial_kwargs["gate_poke_seconds"] = 0
   when = logical_date(name)
-  with mock.patch.object(batches, "wait_for_launch_slot",
-                         recorder.gate(batches.wait_for_launch_slot)), \
+  with mock.patch.object(batches, "launch_blocker",
+                         recorder.gate(batches.launch_blocker)), \
       mock.patch.object(gcs, "__init__", lambda *_, **__: None), \
       mock.patch.object(gcs, "download", download), \
       mock.patch.object(gcs, "get_conn", lambda *_, **__: recorder.get_conn()), \
