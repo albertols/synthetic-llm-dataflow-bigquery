@@ -144,7 +144,8 @@ What it shows today:
 | :--------------------------------------------------- | :---------------------- | :------------------------- | :------------- | :----------------------------------------------------------------------------------------------- |
 | `schema.types`                                       | `pydantic`              | `ValidateRecordDoFn`       | `pre_write`    | BLOCKER, counted                                                                                 |
 | `schema.non_finite`                                  | `load_safety`           | — (no mapping in dlq.py)   | `pre_write`    | not declared in thresholds.yml                                                                   |
-| `schema.batch`                                       | `pandera`               | `PanderaValidateBatchDoFn` | `pre_write`    | CRITICAL                                                                                         |
+| `schema.batch`                                       | `pandera`               | `PanderaValidateBatchDoFn` | `pre_write`    | CRITICAL: a failure tied to a row                                                                |
+| `schema.column`                                      | `pandera`               | `PanderaValidateBatchDoFn` | `pre_write`    | BLOCKER, counted: a column-level failure (no row index), its whole micro-batch to the DLQ        |
 | `row.duplicate` / `pk.duplicate` / `identity.unique` | `uniqueness`            | `EnforceUniqueness`        | `pre_write`    | BLOCKER, counted                                                                                 |
 | `fk.orphan`                                          | `referential_integrity` | `EnforceFkIntegrityDoFn`   | `pre_write`    | BLOCKER in thresholds.yml, **not counted** by the gate                                           |
 | `fk.unmatched`                                       | `referential_integrity` | `GenerateRecordsDoFn`      | `pre_generate` | not declared in thresholds.yml                                                                   |
@@ -524,7 +525,7 @@ Fetched rows are cached in memory (LRU) and never persisted.
   TIMESTAMP has six fraction digits, and `evaluated_at` carries real
   microseconds. DLQ rows take `error_type` / `pipeline_step` / `stage` from
   `dlq_rules.json` (fk.orphan, fk.unmatched, schema.types, schema.batch,
-  row/pk duplicates, engine_failure; never `null.required`). Every
+  schema.column, row/pk duplicates, engine_failure; never `null.required`). Every
   `not_evaluated` metric has `detail.reason`.
 - **Storyline** (`storyline.ts`): 40 evaluations, 2026-08-03 … 2026-09-27.
   Weeks 1–4: b1 on the sample tier, the 512-value pool collapses on

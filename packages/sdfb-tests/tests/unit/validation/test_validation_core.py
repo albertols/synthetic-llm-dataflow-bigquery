@@ -119,6 +119,30 @@ class TestRunSummary:
     assert s.observed_blocker_ratio == pytest.approx(0.10)
     assert s.status == STATUS_FAILED_BLOCKER
 
+  def test_a_table_that_fails_its_contract_wholesale_fails_blocker(self):
+    """The SCD table of 2026-11-02: every row to the DLQ on a column-level
+    Pandera failure. As schema.batch (CRITICAL) it read PASSED with
+    valid_count 0; as schema.column it trips the gate, with its reason."""
+    as_batch = build_run_summary(
+        run_id="r",
+        reference_digest="d",
+        valid_count=0,
+        dlq_by_rule={"schema.batch": 1_000_000},
+        thresholds=_thresholds(0.20),
+    )
+    assert as_batch.status == STATUS_PASSED  # row-level: R11, still open
+    s = build_run_summary(
+        run_id="r",
+        reference_digest="d",
+        valid_count=0,
+        dlq_by_rule={"schema.column": 1_000_000},
+        thresholds=_thresholds(0.20),
+    )
+    assert s.blocker_count == 1_000_000
+    assert s.status == STATUS_FAILED_BLOCKER
+    assert s.status_reason == blocker_gate_reason(s)
+    assert s.status_reason.startswith("BLOCKER failures 1000000/1000000")
+
   def test_boundary_equal_is_pass(self):
     # exactly at the ratio is NOT strictly greater -> pass
     s = build_run_summary(
@@ -297,6 +321,7 @@ class TestDlqNormalize:
 def test_blocker_rule_ids_constant():
   assert "schema.types" in BLOCKER_RULE_IDS
   assert "schema.batch" not in BLOCKER_RULE_IDS
+  assert "schema.column" in BLOCKER_RULE_IDS
 
 
 def test_engine_failure_counts_as_blocker():

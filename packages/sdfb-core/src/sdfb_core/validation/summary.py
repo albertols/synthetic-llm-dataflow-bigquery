@@ -50,6 +50,8 @@ BLOCKER_RULE_IDS = frozenset({
     "pk.duplicate",
     "row.duplicate",
     "identity.unique",
+    # A column that fails its contract dtype fails every row of its batch.
+    "schema.column",
     # An engine crash (incl. strict_freetext re-raise reaching the DoFn)
     # loses the whole batch — that must count toward the gate, not PASS
     # with fewer rows. The pipeline layer (`sdfb_beam.pipeline._dlq_rule_weight`)
