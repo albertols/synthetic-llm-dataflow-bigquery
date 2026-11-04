@@ -272,6 +272,7 @@ def build_pipeline(
     label_prefix: str = "",
     fk_side: Any = None,
     requests: Any = None,
+    defer_shared_writes: bool = False,
 ) -> dict[str, Any]:
   """Wire the synthesis DAG onto an existing Beam Pipeline.
 
@@ -288,6 +289,13 @@ def build_pipeline(
     request dicts (`_fanout_requests`) that REPLACES the driver-built
     ``Create(request_specs)`` below — a driven child has no `--num_rows`
     batch plan, only its parent's landed key batches.
+
+    ``defer_shared_writes`` leaves the three writes N tables share (the RAG
+    chunks, the DLQ, the validation_runs row) and the BLOCKER gate to the
+    caller: the result carries ``rag_chunks``, ``dlq`` and
+    ``validation_run`` for `build_relational_pipeline` to write ONCE per
+    destination (`_SharedWrites`; one load job per table per job, not one
+    per generated table).
     """
   for label, cols in (
       ("identity_columns", config.identity_columns),
@@ -350,7 +358,8 @@ def build_pipeline(
   if rag_chunks_sink is not None:
     chunks = _population_branch(
         p, config, reference_rows, digest, label_prefix=label_prefix)
-    _ = chunks | f"{label_prefix}WriteRagChunks" >> rag_chunks_sink
+    if not defer_shared_writes:
+      _ = chunks | f"{label_prefix}WriteRagChunks" >> rag_chunks_sink
 
   # WS5 §2 / 2026-07-29 four-run postmortem — optional free-text pool
   # build branch. The driver decides (digest existence check) whether to
@@ -446,13 +455,15 @@ def build_pipeline(
                         uniq) | f"{label_prefix}FlattenDLQ" >> beam.Flatten()
   dlq = dlq_raw | f"{label_prefix}NormalizeDLQ" >> beam.Map(
       normalize_dlq_record, run_id=config.run_id)
-  _ = dlq | f"{label_prefix}WriteDLQ" >> dlq_sink
+  if not defer_shared_writes:
+    _ = dlq | f"{label_prefix}WriteDLQ" >> dlq_sink
 
   result: dict[str, Any] = {
       "reference_digest": digest,
       "run_id": config.run_id,
       "valid": uniq["unique"],
       "dlq": dlq,
+      "rag_chunks": chunks,
       "generation_context": ctx,
   }
 
@@ -504,23 +515,34 @@ def build_pipeline(
             valid_count=beam.pvalue.AsSingleton(valid_count),
             dlq_by_rule=beam.pvalue.AsSingleton(dlq_by_rule),
         ))
-    write_result = summary_rows | f"{label_prefix}WriteValidationRun" >> validation_runs_sink
-    if config.fail_on_blocker or config.blocker_verdict_only:
-      gate_kwargs = {}
-      load_jobs = getattr(write_result, "destination_load_jobid_pairs", None)
-      if load_jobs is not None:
-        # Order the gate AFTER the FILE_LOADS load jobs commit — a
-        # tripped gate must fail the JOB, not suppress the FAILED
-        # run's own summary row (2026-07-20 b2 run: zero
-        # validation_runs trace). Non-BQ sinks (DirectRunner tests)
-        # expose no WriteResult and keep the sibling wiring.
-        gate_kwargs["wait_on_write"] = beam.pvalue.AsIter(load_jobs)
-      _ = summary_rows | f"{label_prefix}BlockerGate" >> beam.ParDo(
-          _BlockerGateDoFn(fail_job=config.fail_on_blocker and
-                           not config.blocker_verdict_only), **gate_kwargs)
+    if not defer_shared_writes:
+      write_result = summary_rows | f"{label_prefix}WriteValidationRun" >> validation_runs_sink
+      _blocker_gate(summary_rows, write_result, config, label_prefix)
     result["validation_run"] = summary_rows
 
   return result
+
+
+def _blocker_gate(summary_rows, write_result, config: PipelineConfig,
+                  label_prefix: str) -> None:
+  """The table's BLOCKER gate over its summary row, ordered after the
+    `validation_runs` write that row went through (its own, or the one a
+    relational job's tables share). No gate unless the config asks for
+    one."""
+  if not (config.fail_on_blocker or config.blocker_verdict_only):
+    return
+  gate_kwargs = {}
+  load_jobs = getattr(write_result, "destination_load_jobid_pairs", None)
+  if load_jobs is not None:
+    # Order the gate AFTER the FILE_LOADS load jobs commit — a
+    # tripped gate must fail the JOB, not suppress the FAILED
+    # run's own summary row (2026-07-20 b2 run: zero
+    # validation_runs trace). Non-BQ sinks (DirectRunner tests)
+    # expose no WriteResult and keep the sibling wiring.
+    gate_kwargs["wait_on_write"] = beam.pvalue.AsIter(load_jobs)
+  _ = summary_rows | f"{label_prefix}BlockerGate" >> beam.ParDo(
+      _BlockerGateDoFn(fail_job=config.fail_on_blocker and
+                       not config.blocker_verdict_only), **gate_kwargs)
 
 
 def _dlq_inputs(generated, fk_invalid, record_validated, batch_validated, uniq):
@@ -1198,15 +1220,29 @@ def build_relational_pipeline(
 
     ``specs`` must arrive parents-first (`plan_launch` order). Each
     ``skipped`` table gets its prebuilt row written, with ``record``.
+
+    The RAG chunks, the DLQ and the validation_runs rows are written once
+    per sink: the tables handed the SAME sink object (the launcher shares
+    one per destination table, `run_pipeline._share_sinks`) are flattened
+    into one write, so a batch of ten tables fires one load job into each
+    shared table instead of ten — BigQuery allows about five table updates
+    per ten seconds per table, and the 2026-11-03 batches whose ten
+    `rag_chunks` loads landed inside fifteen seconds failed on
+    `rateLimitExceeded` (ADR 0045 D9). Each row still carries its own
+    table and run id; each table's pool trigger still waits on its own
+    chunks (ADR 0034 D8); each table's BLOCKER gate waits on the shared
+    write's load jobs. A table alone on its sink keeps its own labelled
+    write, as before.
     Returns
     {landing_table: build_pipeline result}."""
   valid_by_landing: dict[str, Any] = {}
   results: dict[str, dict[str, Any]] = {}
+  writes = _SharedWrites()
   for spec in specs:
     name = spec.config.landing_table.rsplit(".", 1)[-1]
     prefix = f"{name}/"
     side, requests = _route_parent_edges(spec, valid_by_landing, prefix)
-    results[spec.config.landing_table] = build_pipeline(
+    result = build_pipeline(
         p,
         reference_rows=spec.reference_rows,
         config=spec.config,
@@ -1219,11 +1255,27 @@ def build_relational_pipeline(
         label_prefix=prefix,
         fk_side=side,
         requests=requests,
+        defer_shared_writes=True,
     )
-    valid_by_landing[spec.config.landing_table] = results[
-        spec.config.landing_table]["valid"]
+    results[spec.config.landing_table] = result
+    valid_by_landing[spec.config.landing_table] = result["valid"]
+    if spec.rag_chunks_sink is not None:
+      writes.add(_RAG_CHUNKS, spec.rag_chunks_sink,
+                 _Write(result["rag_chunks"], f"{prefix}WriteRagChunks"))
+    writes.add(_DLQ, spec.dlq_sink, _Write(result["dlq"], f"{prefix}WriteDLQ"))
+    if spec.validation_runs_sink is not None:
+      writes.add(
+          _VALIDATION_RUNS, spec.validation_runs_sink,
+          _Write(result["validation_run"], f"{prefix}WriteValidationRun",
+                 (spec.config, prefix)))
   for s in skipped:
-    write_skipped_validation_run(p, s, record=record)
+    name = s.landing_table.rsplit(".", 1)[-1]
+    writes.add(
+        _VALIDATION_RUNS, s.validation_runs_sink,
+        _Write(
+            skipped_validation_rows(p, s, record=record),
+            f"{name}/WriteSkippedValidationRun"))
+  writes.apply()
   return results
 
 
@@ -1233,11 +1285,70 @@ def write_skipped_validation_run(p: beam.Pipeline, skipped: SkippedTable, *,
     launch record's columns and the worker fields when ``record`` is given."""
   name = skipped.landing_table.rsplit(".", 1)[-1]
   _ = (
-      p
-      | f"{name}/SkippedSeed" >> beam.Create([None])
-      | f"{name}/BuildSkippedValidationRun" >> beam.ParDo(
-          _BuildValidationRunDoFn(record=record, prebuilt_row=skipped.row))
+      skipped_validation_rows(p, skipped, record=record)
       | f"{name}/WriteSkippedValidationRun" >> skipped.validation_runs_sink)
+
+
+def skipped_validation_rows(p: beam.Pipeline, skipped: SkippedTable, *,
+                            record: LaunchRecord | None):
+  """A skipped table's one `FAILED_PREFLIGHT` row, unwritten."""
+  name = skipped.landing_table.rsplit(".", 1)[-1]
+  return (p
+          | f"{name}/SkippedSeed" >> beam.Create([None])
+          | f"{name}/BuildSkippedValidationRun" >> beam.ParDo(
+              _BuildValidationRunDoFn(record=record, prebuilt_row=skipped.row)))
+
+
+# The writes a relational job's tables share, and the labels a shared one
+# takes (`_SharedWrites`): one Flatten, one write.
+_RAG_CHUNKS = ("RagChunks", "WriteRagChunks")
+_DLQ = ("DLQ", "WriteDLQ")
+_VALIDATION_RUNS = ("ValidationRuns", "WriteValidationRun")
+
+
+@dataclass(frozen=True)
+class _Write:
+  """One table's rows for a shared sink: the PCollection, the label its
+    write takes when the table is alone on the sink, and, for a
+    validation_runs row, the (config, label prefix) of its BLOCKER gate."""
+
+  rows: Any
+  label: str
+  gate: tuple[PipelineConfig, str] | None = None
+
+
+class _SharedWrites:
+  """The shared writes of `build_relational_pipeline`, grouped by sink
+    object, in the order the tables added them."""
+
+  def __init__(self) -> None:
+    self._groups: dict[tuple[tuple[str, str], int], tuple[Any,
+                                                          list[_Write]]] = {}
+
+  def add(self, kind: tuple[str, str], sink: beam.PTransform,
+          write: _Write) -> None:
+    self._groups.setdefault((kind, id(sink)), (sink, []))[1].append(write)
+
+  def apply(self) -> None:
+    """Apply every write: a sink with one table writes under that table's
+      label (the graph of before); a sink several tables share writes once,
+      over a Flatten, under the kind's label (numbered from the second
+      such sink of a kind). Then each validation_runs row's gate."""
+    shared: dict[tuple[str, str], int] = {}
+    for (kind, _), (sink, writes) in self._groups.items():
+      if len(writes) == 1:
+        written = writes[0].rows | writes[0].label >> sink
+      else:
+        shared[kind] = shared.get(kind, 0) + 1
+        number = "" if shared[kind] == 1 else str(shared[kind])
+        flatten, label = kind
+        written = (
+            tuple(w.rows for w in writes)
+            | f"{flatten}{number}/Flatten" >> beam.Flatten()
+            | f"{label}{number}" >> sink)
+      for w in writes:
+        if w.gate is not None:
+          _blocker_gate(w.rows, written, *w.gate)
 
 
 def _population_branch(

@@ -3833,6 +3833,47 @@ def validation_runs_sink_for(args) -> beam.PTransform | None:
   )
 
 
+def _share_sinks(
+    specs: Sequence[TableSpec],
+    skipped: Sequence[SkippedTable],
+    args_by_landing: Mapping[str, argparse.Namespace],
+) -> tuple[list[TableSpec], list[SkippedTable]]:
+  """The specs and skipped tables of one relational job with ONE sink object
+    per destination table: every table whose `rag_chunks_table`,
+    `dlq_table` or `validation_runs_table` names the same table gets the
+    first such table's sink, so `build_relational_pipeline` writes each
+    shared table once per job (ADR 0045 D9). A spec without a sink keeps
+    none (a RAG layer this table skipped stays skipped)."""
+  canonical: dict[tuple[str, str], Any] = {}
+
+  def one(kind: str, table: str, sink):
+    if sink is None or not table:
+      return sink
+    return canonical.setdefault((kind, table), sink)
+
+  out_specs = []
+  for spec in specs:
+    args = args_by_landing[spec.config.landing_table]
+    out_specs.append(
+        dataclasses.replace(
+            spec,
+            rag_chunks_sink=one("rag_chunks", args.rag_chunks_table,
+                                spec.rag_chunks_sink),
+            dlq_sink=one("dlq", args.dlq_table, spec.dlq_sink),
+            validation_runs_sink=one("validation_runs",
+                                     args.validation_runs_table,
+                                     spec.validation_runs_sink)))
+  out_skipped = [
+      dataclasses.replace(
+          s,
+          validation_runs_sink=one(
+              "validation_runs",
+              args_by_landing[s.landing_table].validation_runs_table,
+              s.validation_runs_sink)) for s in skipped
+  ]
+  return out_specs, out_skipped
+
+
 def _prepare_table_spec(
     args,
     model_client,
@@ -4475,6 +4516,12 @@ def _run_relational_job(
                      f"{summary}")
   skipped = _skipped_tables(
       plan, args, skipped_runs, write_status_reason=write_status_reason)
+  # ADR 0045 D9: one load job per shared table per job, not one per table.
+  specs, skipped = _share_sinks(
+      specs, skipped, {
+          run.landing_table: table_args
+          for run, table_args in zip(plan.runs, table_args_list, strict=True)
+      })
   # Patch each edge's parent_pk from the sibling spec so the composer
   # can skip the Distinct shuffle when ref tuple == parent PK.
   pk_by_landing = {

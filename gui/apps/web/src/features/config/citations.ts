@@ -9,10 +9,10 @@ export type Citation = { source: string; excerpt: string };
 const PIPELINE = "packages/sdfb-beam/src/sdfb_beam/pipeline.py";
 
 export const CITES = {
-  fkIntegrityLine: { source: `${PIPELINE}:394`, excerpt: "# Line 4 of defense (ADR 0031)" },
-  panderaBatch: { source: `${PIPELINE}:414`, excerpt: "beam.BatchElements(" },
-  uniquenessLine: { source: `${PIPELINE}:422`, excerpt: "# Line 3 of defense" },
-  gateAfterLoad: { source: `${PIPELINE}:512`, excerpt: "# Order the gate AFTER the FILE_LOADS load jobs commit" },
+  fkIntegrityLine: { source: `${PIPELINE}:403`, excerpt: "# Line 4 of defense (ADR 0031)" },
+  panderaBatch: { source: `${PIPELINE}:423`, excerpt: "beam.BatchElements(" },
+  uniquenessLine: { source: `${PIPELINE}:431`, excerpt: "# Line 3 of defense" },
+  gateAfterLoad: { source: `${PIPELINE}:537`, excerpt: "# Order the gate AFTER the FILE_LOADS load jobs commit" },
   loadSafety: {
     source: "packages/sdfb-beam/src/sdfb_beam/dofns/validate_record.py:50",
     excerpt: "# Load-safety bound",

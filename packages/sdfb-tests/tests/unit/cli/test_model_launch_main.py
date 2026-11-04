@@ -444,9 +444,15 @@ def fixture_direct(tmp_path, monkeypatch):
 
 
 def _only_row(out: Path, stem: str) -> dict:
-  paths = list(out.glob(f"vr_{stem}*"))
-  assert len(paths) == 1, paths
-  rows = [json.loads(line) for line in paths[0].read_text().splitlines()]
+  """The one validation_runs row of table `stem`. A job's tables naming one
+    validation_runs table share its first table's sink (ADR 0045 D9), so a
+    row is read from whichever `vr_*` file holds it, by its landing table."""
+  rows = [
+      row for path in sorted(out.glob("vr_*"))
+      for row in map(json.loads,
+                     path.read_text().splitlines())
+      if row["landing_table"].rsplit(".", 1)[-1] == stem
+  ]
   assert len(rows) == 1, rows
   return rows[0]
 

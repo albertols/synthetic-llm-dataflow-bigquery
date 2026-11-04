@@ -21,6 +21,9 @@ rows are readable. `google.cloud.bigquery` is imported lazily so the module
 
 Mirrors `sdfb_beam.rag.store.BigQueryChunkStore` deliberately — same
 lifecycle, same injection point, same parameter-binding discipline.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0045).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -31,6 +34,8 @@ from __future__ import annotations
 from typing import Any
 
 from sdfb_core.pools import FreeTextPool
+
+from sdfb_beam.io.bq_load import load_json_rows
 
 
 def pool_to_row(pool: FreeTextPool) -> dict[str, Any]:
@@ -138,8 +143,8 @@ class BigQueryFreeTextPoolStore:
     from google.cloud import bigquery
 
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-    self._bq().load_table_from_json(
-        rows, self.table_fqn, job_config=job_config).result()
+    # ADR 0045 D9: a batch's tables build their pools together.
+    load_json_rows(self._bq(), rows, self.table_fqn, job_config)
 
   def delete(self, reference_digest: str, model_uri: str) -> None:
     """Drop every pool row for this digest + LLM (blocking DML).

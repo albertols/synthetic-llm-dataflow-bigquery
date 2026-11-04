@@ -22,7 +22,7 @@ re-launch pays nothing. A 5k-row sample cannot measure this: it almost
 never holds two rows of one parent (design §10).
 
 Design: docs/DESIGN.md §4 Relational generation
-(ADR 0036, 0038, 0039).
+(ADR 0036, 0038, 0039, 0045).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -38,6 +38,8 @@ from typing import Any
 
 from sdfb_core.contracts.model_adjustment import pk_repeat_share
 from sdfb_core.observability import log_milestone
+
+from sdfb_beam.io.bq_load import load_json_rows
 
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -353,9 +355,8 @@ class BigQueryFanoutStatsStore:
         "payload": json.dumps(payload, separators=(",", ":"), default=str),
     }
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-    self._bq().load_table_from_json([row],
-                                    self.table_fqn,
-                                    job_config=job_config).result()
+    # ADR 0045 D9: parallel batch launchers append here at once.
+    load_json_rows(self._bq(), [row], self.table_fqn, job_config)
 
 
 __all__ = [

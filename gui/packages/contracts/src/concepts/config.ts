@@ -544,7 +544,7 @@ const configConcepts: Concept[] = [
       P.pydantic,
       P.pandera,
       P.beamDlq,
-      code("sdfb_beam/pipeline.py", "packages/sdfb-beam/src/sdfb_beam/pipeline.py", 394),
+      code("sdfb_beam/pipeline.py", "packages/sdfb-beam/src/sdfb_beam/pipeline.py", 403),
     ],
   },
   {
