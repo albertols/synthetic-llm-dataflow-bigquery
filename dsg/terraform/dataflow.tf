@@ -15,7 +15,11 @@
 locals {
   # The launch parameters of scripts/04_run_dataflow.sh, minus run_id and
   # num_rows. Targeting order_items expands the launch to the whole model in
-  # config/relationships/gcp_public_fk_example.yaml.
+  # config/relationships/gcp_public_fk_example.yaml. A parameter left out
+  # takes its default from config/generator.yaml (ADR 0043): both layers are
+  # built, and the launcher derives vllm_dtype from gpu (l4: bfloat16, t4:
+  # float16). sdk_containers = "single" records the
+  # no_use_multiple_sdk_containers experiment below.
   launch_parameters = {
     reference_table       = "${local.source_fqn}.order_items"
     landing_table         = "${local.landing_fqn}.order_items"
@@ -23,16 +27,16 @@ locals {
     validation_runs_table = "${var.project_id}.${local.quality_dataset}.validation_runs"
     fk_fanout_stats_table = "${var.project_id}.${local.quality_dataset}.fk_fanout_stats"
     rag_chunks_table      = "${var.project_id}.${local.rag_dataset}.rag_chunks"
-    build_rag_layer       = "true"
     freetext_pools_table  = "${var.project_id}.${local.rag_dataset}.freetext_pools"
-    build_pool_layer      = "true"
     source_stats_table    = "${var.project_id}.${local.rag_dataset}.source_table_stats"
     relationships_uri     = local.relationships_uri
     engine                = "b1_rag"
     client_type           = "vllm"
     model_uri             = local.model_uri
     embedder_uri          = local.embedder_uri
-    vllm_dtype            = local.gpu.vllm_dtype
+    gpu                   = var.gpu
+    sdk_containers        = "single"
+    launcher_machine_type = local.launcher_machine_type
     vllm_max_model_len    = "8192"
     reference_rows_limit  = "10000"
     create_if_not_exists  = "false"
@@ -50,6 +54,7 @@ resource "random_id" "launch" {
     num_rows   = var.num_rows
     model      = var.model
     machine    = local.machine_type
+    config_uri = var.config_uri
     parameters = sha256(jsonencode(local.launch_parameters))
   }
 }
@@ -68,6 +73,7 @@ resource "google_dataflow_flex_template_job" "generation" {
   subnetwork              = local.subnetwork != "" ? local.subnetwork : null
   ip_configuration        = "WORKER_IP_PRIVATE"
   machine_type            = local.machine_type
+  launcher_machine_type   = local.launcher_machine_type
   num_workers             = 1
   max_workers             = local.max_dataflow_workers
   # One SDK process per GPU worker: every process would otherwise start its
@@ -77,7 +83,7 @@ resource "google_dataflow_flex_template_job" "generation" {
     "worker_accelerator=${local.gpu.accelerator}",
     "no_use_multiple_sdk_containers",
   ]
-  parameters = merge(local.launch_parameters, {
+  parameters = merge(local.launch_parameters, var.config_uri == "" ? {} : { config_uri = var.config_uri }, {
     num_rows = tostring(var.num_rows)
     run_id   = "thelook-tf-${random_id.launch[0].hex}"
   })

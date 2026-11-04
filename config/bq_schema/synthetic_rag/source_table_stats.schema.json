@@ -24,6 +24,6 @@
   {"name": "stats_tier", "type": "STRING", "mode": "NULLABLE",
    "description": "sample = computed from the eager reference sample (distinct is sample-bound); exact = merged with the one-scan full-table aggregate pass (--source_stats=exact)."},
   {"name": "profiler_version", "type": "STRING", "mode": "NULLABLE",
-   "description": "profile_source_table version; part of the append-skip key so profiler upgrades re-write stats for an unchanged reference_digest."},
+   "description": "profile_source_table version; part of the append-skip key so profiler upgrades re-write stats for an unchanged reference_digest. A non-default stats-shaping setting suffixes it with +cfg.<salt> (ADR 0043); recorded as derived.cache_keys.source_stats (ADR 0044)."},
   {"name": "computed_at", "type": "TIMESTAMP", "mode": "REQUIRED"}
 ]

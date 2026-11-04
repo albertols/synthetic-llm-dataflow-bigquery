@@ -1,0 +1,41 @@
+#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+
+# A whole-model launch over unrelated tables (ADR 0045). With
+# `--tables=all` every enabled table generates, in batch jobs of at most
+# `launch.max_tables_per_job` tables; no table here has an FK edge, so each
+# one is its own component and the planner packs them freely.
+#
+# In this repository (the golden source) plan it without launching:
+#
+#   uv run --no-sync python3 scripts/launch/run_model.py --dry_run \
+#     --relationships_uri=config/relationships/example_isolated_forest.yaml \
+#     --source_dataset=<PROJECT>.<SOURCE_DATASET> \
+#     --landing_dataset=<PROJECT>.<LANDING_DATASET> \
+#     --dlq_table=<PROJECT>.synthetic_data_quality.dlq --num_rows=1000 \
+#     --run_id=plan --model_uri=gs://<BUCKET>/synthetic/models/<family>/<model>/<version>/
+#
+# `scripts/launch/run_model.py` is golden-source only and is not shipped in
+# the Dataflow Solution Guides copy. There, run the launcher with
+# `--tables=all` (the tables launch one after another, sequentially) and the
+# same `--relationships_uri`, source, landing and DLQ options.
+#
+# A directory scan skips this sample (`example_*`); name the file to load it.
+model: isolated_forest_example
+description: Unrelated landing tables, generated together.
+tables:
+  T_ACCOUNTS: {pk: [ACC_ID]}                                # source: <source dataset>.T_ACCOUNTS
+  T_EVENTS_LOG: {}                                          # no PK: pk.duplicate idle
+  T_RATES: {source_table: other_ds.RATES_V2, num_rows: 5000}
+  T_LEGACY: {enabled: false}                                # skipped by `tables: all`

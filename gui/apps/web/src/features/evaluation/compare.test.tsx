@@ -5,16 +5,18 @@
  * encoding plan are flagged "not comparable". The verdicts themselves are held
  * to `sdfb-eval compare` by lib/compare.golden.test.ts.
  */
-import { configure, screen, within } from "@testing-library/react";
+import { configure, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 
 import type { MetricCell } from "@contracts/api";
+import type { GenerationRecord } from "@contracts/record";
 
+import { ConfigDiff } from "./components/ConfigDiff";
 import { diffMetric, encodingDiffers, paretoFrontier, pairReasons, slotMap } from "./lib/compare";
 import { radarSpec, scoreAxisFloor, topMovers, trendSpec } from "./lib/compareCharts";
 import { FALLBACK_TOKENS } from "./lib/tokens";
-import { comparison } from "./test/fixtures";
+import { comparison, generationRecord } from "./test/fixtures";
 import { EMPTY_PAGE, renderAt, stubApi } from "./test/harness";
 
 configure({ asyncUtilTimeout: 15_000 });
@@ -305,5 +307,64 @@ describe("the compare view", () => {
       .getByText(/TVD · users\.state/)
       .closest("tr")!;
     expect(tvd).toHaveAttribute("data-verdict", "worse");
+  });
+});
+
+const COMPARE_URL = `/evaluation/compare?ids=${encodeURIComponent(JSON.stringify(["eval-a", "eval-b"]))}`;
+
+function stubCompare(records: { a: GenerationRecord; b: GenerationRecord }) {
+  return stubApi({
+    "/api/compare": comparison(),
+    "/api/evaluations": EMPTY_PAGE,
+    "/api/evaluations/eval-a/record": { ...records.a, evaluation_id: "eval-a" },
+    "/api/evaluations/eval-b/record": { ...records.b, evaluation_id: "eval-b" },
+  });
+}
+
+describe("config diff (ADR 0044)", () => {
+  it("shows only the config keys that differ, side by side", async () => {
+    const b = generationRecord();
+    b.snapshot = {
+      ...b.snapshot!,
+      values: { ...b.snapshot!.values!, generation: { engine: "b1_rag", similarity: 0.5, seed: "" } },
+    };
+    stubCompare({ a: generationRecord(), b });
+    renderAt(COMPARE_URL);
+    const card = await screen.findByRole("region", { name: /config diff/i });
+    const texts = within(card)
+      .getAllByRole("row")
+      .map((r) => r.textContent ?? "");
+    expect(texts.some((t) => /generation\.similarity.*0\.7.*0\.5/.test(t))).toBe(true);
+    expect(within(card).queryByText("generation.engine")).toBeNull();
+  });
+
+  it("says when one side has no record", async () => {
+    stubCompare({ a: generationRecord(), b: { ...generationRecord(), snapshot: null } });
+    renderAt(COMPARE_URL);
+    expect(await screen.findByText(/no generation record for eval-b/i)).toBeInTheDocument();
+  });
+
+  it("says when the configs are the same", async () => {
+    stubCompare({ a: generationRecord(), b: generationRecord() });
+    renderAt(COMPARE_URL);
+    const same = await screen.findByText(/same generator config/i);
+    expect(same).toHaveTextContent("(0123456789ab)");
+  });
+
+  it("says the record could not be read when its request fails, and the page still renders", async () => {
+    stubApi({
+      "/api/compare": comparison(),
+      "/api/evaluations": EMPTY_PAGE,
+      "/api/evaluations/eval-a/record": { ...generationRecord(), evaluation_id: "eval-a" },
+    });
+    renderAt(COMPARE_URL);
+    expect(await screen.findByText(/generation record of eval-b could not be read/i)).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /config diff/i })).toBeInTheDocument();
+  });
+
+  it("shows a skeleton while a record is loading", () => {
+    const { container } = render(<ConfigDiff ids={["eval-a", "eval-b"]} records={[undefined, undefined]} />);
+    expect(container.querySelector(".animate-skeleton")).not.toBeNull();
+    expect(screen.queryByText(/could not be read/i)).toBeNull();
   });
 });

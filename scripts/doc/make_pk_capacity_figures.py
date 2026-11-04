@@ -51,10 +51,8 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.engines.pk_capacity import (
-    FK_KEY_SAMPLE_CEILING,
-    FK_KEY_SAMPLE_FLOOR,
-    FK_KEY_SAMPLE_MARGIN,
     expected_duplicate_share,
     max_rows_under_share,
 )
@@ -199,16 +197,17 @@ def panel_curve(ax):
           "color": MUTED,
           "linewidth": 0.8
       })
-  margin = expected_duplicate_share(1_000, 1_000 * FK_KEY_SAMPLE_MARGIN)
-  ax.scatter([FK_KEY_SAMPLE_MARGIN], [margin],
+  margin = expected_duplicate_share(
+      1_000, 1_000 * DEFAULT_CONFIG.relational.fk_key_sample_margin)
+  ax.scatter([DEFAULT_CONFIG.relational.fk_key_sample_margin], [margin],
              s=55,
              color=AQUA,
              zorder=5,
              edgecolor=SURFACE,
              linewidth=1.5)
   ax.annotate(
-      f"sizing margin x{FK_KEY_SAMPLE_MARGIN}\n{margin:.1%} duplicates",
-      (FK_KEY_SAMPLE_MARGIN, margin),
+      f"sizing margin x{DEFAULT_CONFIG.relational.fk_key_sample_margin}\n{margin:.1%} duplicates",
+      (DEFAULT_CONFIG.relational.fk_key_sample_margin, margin),
       xytext=(14, 0.30),
       color=INK,
       fontsize=9,
@@ -236,7 +235,8 @@ def panel_curve(ax):
 def panel_ladder(ax):
   rungs = [
       ("flat cap\n(ADR 0030)", FK_KEYS_SEEN, ORANGE),
-      ("sizing ceiling\n(ADR 0035)", FK_KEY_SAMPLE_CEILING, BLUE),
+      ("sizing ceiling\n(ADR 0035)",
+       DEFAULT_CONFIG.relational.fk_key_sample_ceiling, BLUE),
       ("whole parent\n(co-partitioned join)", PARENT_ROWS, AQUA),
   ]
   xs = np.arange(len(rungs))
@@ -274,8 +274,8 @@ def panel_ladder(ax):
   _title(
       ax, "C_TABLE: parent keys the child sees x 12",
       f"PK (D_COL_001 → B_TABLE, C_COL_002, D_COL_018); floor "
-      f"{_fmt_m(FK_KEY_SAMPLE_FLOOR)} · ceiling {_fmt_m(FK_KEY_SAMPLE_CEILING)}"
-  )
+      f"{_fmt_m(DEFAULT_CONFIG.relational.fk_key_sample_floor)} · ceiling "
+      f"{_fmt_m(DEFAULT_CONFIG.relational.fk_key_sample_ceiling)}")
 
 
 def fig_pk_capacity():
@@ -339,7 +339,8 @@ def main() -> None:
   print(f"{RUN}: {PK_DUPLICATES / NUM_ROWS:.1%} measured pk.duplicate; "
         f"predicted {expected_duplicate_share(NUM_ROWS, SURVIVORS):.1%} "
         f"at capacity {SURVIVORS:,} (other factor x{OTHER_FACTOR})")
-  for keys in (FK_KEY_SAMPLE_FLOOR, FK_KEY_SAMPLE_CEILING, PARENT_ROWS):
+  for keys in (DEFAULT_CONFIG.relational.fk_key_sample_floor,
+               DEFAULT_CONFIG.relational.fk_key_sample_ceiling, PARENT_ROWS):
     cap = keys * OTHER_FACTOR
     print(f"  {keys:>10,} keys -> {cap:>12,} tuples: "
           f"{expected_duplicate_share(NUM_ROWS, cap):.1%} dup at {NUM_ROWS:,}; "

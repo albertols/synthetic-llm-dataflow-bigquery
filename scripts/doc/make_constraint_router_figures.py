@@ -67,7 +67,7 @@ SRGB_CUTOFF = 0.04045
 # lines.
 RUN = "2026-08-21_14_54_30-1966084111444777604"
 NUM_ROWS = 1_000_000
-POOL_CAP = 512  # _FREE_TEXT_POOL_MAX (engine.py)
+POOL_CAP = 512  # config key free_text.free_text_pool_max (its default)
 LANDED = 512  # valid_count (validation_runs)
 DLQ_PK_DUPLICATE = 999_488  # dlq_by_rule {"pk.duplicate": ...}
 SOURCE_DISTINCT_PK = 52_549  # freetext_pool_source_filter PK_COL

@@ -1,7 +1,8 @@
 /**
  * The run view, /evaluation/$evaluationId: one evaluation read top-down —
  * header (status, scope, reference, sampled mode), scorecards per family
- * with level chips, the interpretation, the model graph, then one section
+ * with level chips, from ten tables a filter bar over the tiles and the
+ * per-table scorecards (ADR 0042), the interpretation, the model graph, then one section
  * per question (columns, pairs, privacy, detection, relational, parameters)
  * in URL-driven tabs. Only the active section renders; column profiles load
  * when a drawer opens. The noise-floor legend is docked to the bottom.
@@ -12,6 +13,7 @@ import { useCallback, useMemo } from "react";
 
 import { isEvaluatorJobName } from "@contracts/adjustments";
 import type { EvaluationDetail } from "@contracts/api";
+import { inapplicableKey } from "@contracts/applicability";
 
 import { Callout } from "@/components/Callout";
 import { EmptyState } from "@/components/EmptyState";
@@ -22,30 +24,51 @@ import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { ApiError, useEvaluation, useEvaluationAdjustments, useEvaluations, useRelationships } from "@/lib/api";
+import {
+  ApiError,
+  useEvaluation,
+  useEvaluationAdjustments,
+  useEvaluationRecord,
+  useEvaluations,
+  useRelationships,
+} from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { formatCompact, formatCount, formatDateTime } from "@/lib/format";
 import { CLOSE_BY_HAND, isStale, STALE_AFTER_HOURS } from "@/lib/runState";
 
 import { NoiseLegend } from "./components/NoiseLegend";
 import { StatusCounts } from "./components/StatusCounts";
+import { TableFilters } from "./components/TableFilters";
 import { adjustedSummary, adjustedTableCount, adjustmentRows, PK_METRIC } from "./lib/adjustment";
 import { isRollup } from "./lib/catalogue";
 import { fmtScore, shortModel } from "./lib/format";
-import { buildGraph } from "./lib/graph";
+import { buildGraph, WIDE_GRAPH_MIN_TILES } from "./lib/graph";
 import { findings, headline } from "./lib/interpret";
 import { columnSummaries, countStatuses, familyCards, heatmapModel, tableNames } from "./lib/model";
+import { generationRegion, projectOf, toleranceOf } from "./lib/record";
+import {
+  declaresNoEdges,
+  FILTER_MIN_TABLES,
+  modelSummary,
+  SUMMARY_MIN_TABLES,
+  tableFacts,
+  tableView,
+  type TableFilter,
+} from "./lib/tables";
 import { ColumnDrawer } from "./panels/ColumnDrawer";
 import { ColumnHeatmap, HEATMAP_PAGE } from "./panels/ColumnHeatmap";
 import { DetectionPanel } from "./panels/DetectionPanel";
 import { InterpretationPanel } from "./panels/InterpretationPanel";
+import { GeneratorPanel } from "./panels/GeneratorPanel";
 import { ModelGraph } from "./panels/ModelGraph";
+import { ModelSummaryCard } from "./panels/ModelSummary";
 import { PairsPanel } from "./panels/PairsPanel";
 import { ParamsPanel } from "./panels/ParamsPanel";
 import { PrivacyPanel } from "./panels/PrivacyPanel";
 import { RelationalPanel } from "./panels/RelationalPanel";
 import { RunHeader } from "./panels/RunHeader";
 import { Scorecards, type OpenTarget } from "./panels/Scorecards";
-import type { EvaluationRunSearch, RunTabId } from "./route";
+import { runSearchSchema, type EvaluationRunSearch, type RunTabId } from "./route";
 import { RelatedKnobsProvider } from "./components/RelatedKnobs";
 
 const route = getRouteApi("/evaluation/$evaluationId");
@@ -118,9 +141,13 @@ function RunPageContent() {
   // ADR 0038: the generator's own verdict on each table's declared key, from validation_runs. Its
   // own request, so a failure there never blanks the evaluation (the Relational section says so).
   const adjustmentsQuery = useEvaluationAdjustments(knownId);
+  // ADR 0044: the generation record, also its own request. Its tolerance is the band of the relational readings.
+  const recordQuery = useEvaluationRecord(knownId);
   const relationships = useRelationships();
   const detail = query.data?.data;
   const adjustments = adjustmentsQuery.data?.data;
+  const record = recordQuery.data?.data;
+  const tolerance = toleranceOf(record);
   const previous = usePrevious(detail);
 
   const setSearch = useCallback(
@@ -136,7 +163,9 @@ function RunPageContent() {
     const summaries = columnSummaries(detail.metrics);
     // A re-reading layered on the evaluator's rows: the cards, the headline and the counts below
     // are computed from the rows as stored, whatever the adjustments say.
-    const adjusted = adjustmentRows(detail, adjustments?.model_adjustments);
+    const adjusted = adjustmentRows(detail, adjustments?.model_adjustments, tolerance);
+    const graph = buildGraph(detail, model, adjusted, record?.declared_tables);
+    const facts = tableFacts({ detail, graph, record });
     return {
       model,
       summaries,
@@ -144,13 +173,17 @@ function RunPageContent() {
       adjustedSummary: adjustedSummary(adjusted),
       adjustedTables: adjustedTableCount(adjustments?.model_adjustments),
       cards: familyCards(detail),
-      findings: findings(detail, adjustments?.model_adjustments),
+      findings: findings(detail, adjustments?.model_adjustments, tolerance),
       headline: headline(detail),
-      graph: buildGraph(detail, model, adjusted),
+      graph,
+      facts,
+      factsByName: new Map(facts.map((f) => [f.name, f])),
+      summary: modelSummary({ evaluation: detail.evaluation, record, facts, graph, model }),
+      isolated: declaresNoEdges({ facts, graph, evaluation: detail.evaluation }),
       tables: tableNames(detail.evaluation, detail.metrics),
       counts: countStatuses(detail.metrics.filter((m) => !isRollup(m.metric_id))),
     };
-  }, [detail, adjustments, relationships.data]);
+  }, [detail, adjustments, tolerance, relationships.data, record]);
 
   const table = search.table && derived?.tables.includes(search.table) ? search.table : undefined;
   const scopedMetrics = useMemo(
@@ -173,6 +206,46 @@ function RunPageContent() {
           })
         : null,
     [derived, table, search.family, search.problems, search.q],
+  );
+
+  // The router merges the raw URL over a key its validator dropped, so a stale `?ts=bogus` still reads
+  // as "bogus" here: validate the filter keys again, and a stale link shows every table.
+  const tableFilter = useMemo<TableFilter>(() => {
+    const field = runSearchSchema.fields;
+    return {
+      query: field.tq(search.tq),
+      pk: field.pk(search.pk),
+      status: field.ts(search.ts),
+      batch: field.batch(search.batch),
+      sort: field.tsort(search.tsort),
+    };
+  }, [search.tq, search.pk, search.ts, search.batch, search.tsort]);
+  // Ten or more tables: the bar shows, and its values narrow the tiles and the per-table scorecards. The
+  // table the view is scoped to stays shown (pinned first) when a filter would hide it.
+  const view = useMemo(
+    () => (derived && derived.facts.length >= FILTER_MIN_TABLES ? tableView(derived.facts, tableFilter, table) : null),
+    [derived, tableFilter, table],
+  );
+  // The run's own tables drawn in the layered graph: the bar does not narrow them.
+  const layeredTables = useMemo(() => (derived ? derived.facts.filter((f) => f.degree > 0).length : 0), [derived]);
+  const batchJobs = useMemo(
+    () =>
+      derived
+        ? [...new Set(derived.facts.flatMap((f) => (f.batch === null ? [] : [f.batch])))].sort((a, b) => a - b)
+        : [],
+    [derived],
+  );
+  const onTableFilter = useCallback(
+    (patch: Partial<TableFilter>) => {
+      const next: Partial<EvaluationRunSearch> = {};
+      if ("query" in patch) next.tq = patch.query || undefined;
+      if ("pk" in patch) next.pk = patch.pk;
+      if ("status" in patch) next.ts = patch.status;
+      if ("batch" in patch) next.batch = patch.batch;
+      if ("sort" in patch) next.tsort = patch.sort === "score" ? undefined : patch.sort;
+      setSearch(next, true);
+    },
+    [setSearch],
   );
 
   const onOpen = useCallback(
@@ -215,9 +288,31 @@ function RunPageContent() {
   const hasMetrics = detail.metrics.length > 0;
   // An old RUNNING event: the launch or the job most likely ended without a FINAL row (lib/runState.ts).
   const stale = isStale(evaluation);
+  // Beside a forest of isolated tables the graph takes the full row: the tile grid needs the width.
+  const wideGraph = derived.graph.tiles.length >= WIDE_GRAPH_MIN_TILES;
   const running = evaluation.status === "RUNNING" && !stale;
   // No metric row in the whole evaluation (not the table scope): "yet" only while its last event is a live RUNNING.
   const noMetrics = hasMetrics ? undefined : evaluation.event === "RUNNING" && !stale ? "yet" : "at-all";
+  const summaryCard =
+    derived.facts.length >= SUMMARY_MIN_TABLES ? (
+      <ModelSummaryCard
+        summary={derived.summary}
+        region={generationRegion(evaluation.generation_region, record)}
+        project={projectOf(record?.runs[0]?.landing_table ?? evaluation.tables[0]?.landing_table)}
+      />
+    ) : null;
+  const filterBar = view ? (
+    <TableFilters
+      value={tableFilter}
+      onChange={onTableFilter}
+      batches={batchJobs}
+      shown={view.matched}
+      total={view.total}
+      pinned={view.pinned}
+      layered={layeredTables}
+    />
+  ) : null;
+  const notApplicable = detail.metrics.filter((m) => inapplicableKey(m) !== null).length;
   const rowsSynthetic = evaluation.tables.reduce((acc, t) => acc + (t.rows_synthetic ?? 0), 0);
   // The registry row names an evaluator job as its generation job: by that job's name, or because
   // another evaluation ran as it. Scope and adjustments are then joined to the wrong job.
@@ -377,7 +472,14 @@ function RunPageContent() {
                   label="Not evaluated"
                   value={derived.counts.not_evaluated}
                   format={formatCount}
-                  footnote="Not evaluated is not a pass: see the reasons below."
+                  footnote={
+                    notApplicable
+                      ? `${formatCount(notApplicable)} not applicable (no key declared): nothing to check.${
+                          // Only when something else was not evaluated: on a forest every one is a key check with no key.
+                          notApplicable < derived.counts.not_evaluated ? " The rest is not a pass." : ""
+                        }`
+                      : "Not evaluated is not a pass: see the reasons below."
+                  }
                 />
                 <StatTile
                   label="Synthetic rows in scope"
@@ -386,8 +488,17 @@ function RunPageContent() {
                   footnote={`${derived.tables.length} table${derived.tables.length === 1 ? "" : "s"} · ${formatCount(detail.flags.length)} flagged rows`}
                 />
               </div>
-              <Scorecards cards={derived.cards} selectedTable={table} adjustments={derived.adjusted} onOpen={onOpen} />
-              <div className="grid gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]">
+              {summaryCard}
+              {filterBar}
+              <Scorecards
+                cards={derived.cards}
+                selectedTable={table}
+                adjustments={derived.adjusted}
+                tolerance={tolerance}
+                view={view}
+                onOpen={onOpen}
+              />
+              <div className={cn("grid gap-6", !wideGraph && "xl:grid-cols-[minmax(0,1.15fr)_minmax(0,1fr)]")}>
                 <InterpretationPanel
                   headline={derived.headline}
                   findings={derived.findings}
@@ -396,8 +507,10 @@ function RunPageContent() {
                 />
                 <ModelGraph
                   graph={derived.graph}
+                  facts={derived.factsByName}
+                  view={view}
                   modelName={evaluation.relationship_model}
-                  resolvedFrom={derived.model ? "model" : "edges"}
+                  resolvedFrom={derived.graph.resolvedFrom}
                   selected={table}
                   onSelect={(t) => setSearch({ table: t })}
                 />
@@ -405,6 +518,7 @@ function RunPageContent() {
             </>
           ) : (
             <>
+              {summaryCard}
               <EmptyState
                 title={
                   stale
@@ -422,10 +536,13 @@ function RunPageContent() {
                       : "The evaluator wrote a registry row but no metric rows.")
                 }
               />
+              {filterBar}
               <ModelGraph
                 graph={derived.graph}
+                facts={derived.factsByName}
+                view={view}
                 modelName={evaluation.relationship_model}
-                resolvedFrom={derived.model ? "model" : "edges"}
+                resolvedFrom={derived.graph.resolvedFrom}
                 selected={table}
                 onSelect={(t) => setSearch({ table: t })}
               />
@@ -485,11 +602,22 @@ function RunPageContent() {
               noMetrics={noMetrics}
               adjustments={derived.adjusted}
               adjustmentsError={adjustmentsError}
+              tolerance={tolerance}
+              isolated={derived.isolated}
             />
           ) : null}
         </TabsContent>
         <TabsContent value="params">
-          {tab === "params" ? <ParamsPanel evaluation={evaluation} adjustedTables={derived.adjustedTables} /> : null}
+          {tab === "params" ? (
+            <div className="grid gap-4">
+              <GeneratorPanel
+                evaluation={evaluation}
+                record={record}
+                error={recordQuery.error ? String(recordQuery.error.message) : null}
+              />
+              <ParamsPanel evaluation={evaluation} adjustedTables={derived.adjustedTables} />
+            </div>
+          ) : null}
         </TabsContent>
       </Tabs>
 

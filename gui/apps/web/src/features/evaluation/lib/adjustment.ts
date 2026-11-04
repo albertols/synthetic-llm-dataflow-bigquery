@@ -104,11 +104,11 @@ function evaluatorClause(row: MetricRow | null): string {
     : ` The evaluator's ${value} passes its own rule, which expects a unique key.`;
 }
 
-function adjustedSentence(a: TableModelAdjustment, row: MetricRow | null): string {
+function adjustedSentence(a: TableModelAdjustment, row: MetricRow | null, toleranceShare: number): string {
   const source = fmtRepeatShare(a.source_repeat_share);
   const synthetic = fmtRepeatShare(a.landing_repeat_share);
   const delta = fmtPoints(a.repeat_share_delta);
-  const tolerance = fmtTolerance(REPEAT_SHARE_TOLERANCE);
+  const tolerance = fmtTolerance(toleranceShare);
   const tail = evaluatorClause(row);
   if (a.verdict === "faithful")
     return `${a.table}'s declared key repeats in the source (${source} of rows), so the launch adjusted the model (ADR 0038) and copied that share: synthetic ${synthetic} (Δ ${delta}, within ${tolerance}).${tail}`;
@@ -128,7 +128,7 @@ function adjustedSentence(a: TableModelAdjustment, row: MetricRow | null): strin
 export function readAdjustedPk(
   row: MetricRow | null | undefined,
   adjustment: TableModelAdjustment | undefined,
-  options: { modelAdjusted?: boolean | null } = {},
+  options: { modelAdjusted?: boolean | null; tolerance?: number } = {},
 ): AdjustedReading | null {
   if (!adjustment) return null;
   const pk = row ?? null;
@@ -181,7 +181,7 @@ export function readAdjustedPk(
     status: mark.tone,
     tone: mark.tone,
     label: mark.label,
-    sentence: adjustedSentence(adjustment, pk),
+    sentence: adjustedSentence(adjustment, pk, options.tolerance ?? REPEAT_SHARE_TOLERANCE),
     agrees,
   };
 }
@@ -204,6 +204,7 @@ export interface AdjustmentRow {
 export function adjustmentRows(
   detail: Pick<EvaluationDetail, "evaluation" | "metrics">,
   adjustments: readonly TableModelAdjustment[] | undefined,
+  tolerance: number = REPEAT_SHARE_TOLERANCE,
 ): AdjustmentRow[] {
   const pk = new Map<string, MetricRow>();
   for (const row of detail.metrics) if (row.metric_id === PK_METRIC) pk.set(row.table_name, row);
@@ -214,7 +215,7 @@ export function adjustmentRows(
       table: adjustment.table,
       adjustment,
       row,
-      reading: readAdjustedPk(row, adjustment, { modelAdjusted: detail.evaluation.model_adjusted }),
+      reading: readAdjustedPk(row, adjustment, { modelAdjusted: detail.evaluation.model_adjusted, tolerance }),
       keyColumns: Array.isArray(columns) ? columns.filter((c): c is string => typeof c === "string") : [],
       evaluatorShare: repeatShareFromEvaluator(row),
     };

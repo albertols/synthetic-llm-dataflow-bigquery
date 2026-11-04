@@ -144,6 +144,7 @@ select from it.
 | :-- | :-- | :-- |
 | [`config/relationships/gcp_public_fk_example.yaml`](../../pipelines/synthetic-llm-dataflow-bigquery/config/relationships/gcp_public_fk_example.yaml) | Launcher, `relationships_uri` | Primary keys, identity columns and foreign keys of `users`, `orders`, `order_items`. Point `relationships_uri` at a `gs://` copy to change them without rebuilding the image. |
 | [`config/thresholds.yml`](../../pipelines/synthetic-llm-dataflow-bigquery/config/thresholds.yml) | The job, `thresholds_uri` default, `env=dev` | Severity per rule. PK duplicates and FK orphans are BLOCKERs with a threshold of 0; the job fails when more than 20% of rows fail a BLOCKER rule on `dev` (5% `uat`, 1% `prd`). |
+| [`config/generator.yaml`](../../pipelines/synthetic-llm-dataflow-bigquery/config/generator.yaml) | Nobody at runtime: a copy of `packages/sdfb-core/src/sdfb_core/config/generator.yaml`, the file the launcher loads | Every generator default, with what raising or lowering it does. Change a value through a `config_uri` file that sets only that key ([`config/generator.personal.example.yaml`](../../pipelines/synthetic-llm-dataflow-bigquery/config/generator.personal.example.yaml) is one), not by editing this copy, which nothing reads. |
 | [`config/models.yml`](../../pipelines/synthetic-llm-dataflow-bigquery/config/models.yml) | Nobody at runtime: a registry | GCS layout, Hugging Face repository, license and GPU memory of each model. Terraform's `model` variable picks the matching `gcs_uri` as `model_uri`. |
 | [`docker/flex_template_metadata.json`](../../pipelines/synthetic-llm-dataflow-bigquery/docker/flex_template_metadata.json) | `03_build_flex_template.sh` | The Flex Template parameter contract. |
 | [`config/bq_schema/`](../../pipelines/synthetic-llm-dataflow-bigquery/config/bq_schema/) | Terraform | The pipeline tables above. |
@@ -194,23 +195,28 @@ Alternatives:
 
 ## GPU, machine type and vLLM dtype
 
-Each worker has one GPU. The `gpu` variable picks the machine family, the
-accelerator and the dtype vLLM serves the model with, and it limits which
-models can run:
+Each worker has one GPU. The `gpu` variable picks the machine family and the
+accelerator, and it limits which models can run. Both launches pass it as the
+`gpu` parameter, and the launcher derives the dtype vLLM serves the model with
+from it (`config/generator.yaml`; a `vllm_dtype` set in a `config_uri` file
+wins). A `config_uri` file's `serving.gpu` and `serving.sdk_containers` must
+match the Terraform `gpu` and the launch's experiments (one SDK process per
+worker, `single`): the file wins over the launch's flags in the generation
+record and in the dtype derivation, but not over the machine Terraform set.
 
 ```mermaid
 flowchart LR
   gpu{gpu} -->|l4| l4["NVIDIA L4<br/>compute capability 8.9 · 24 GB"]
   gpu -->|t4| t4["NVIDIA T4<br/>compute capability 7.5 · 16 GB"]
-  l4 --> g2["G2 machines<br/>g2-standard-8"] --> auto["vllm_dtype = auto<br/>bf16 checkpoint as shipped"]
+  l4 --> g2["G2 machines<br/>g2-standard-8"] --> bf16["vllm_dtype = bfloat16<br/>bf16 checkpoint as shipped"]
   t4 --> n1["N1 machines<br/>n1-standard-8"] --> fp16["vllm_dtype = float16<br/>explicit downcast"]
-  auto --> ok1["gemma4-e4b-it ✓<br/>qwen3-4b ✓"]
+  bf16 --> ok1["gemma4-e4b-it ✓<br/>qwen3-4b ✓"]
   fp16 --> ok2["qwen3-4b ✓<br/>gemma4-e4b-it ✗"]
 ```
 
-| `gpu` | GPU | Machine family (default) | `worker_accelerator` | Models | `vllm_dtype` |
+| `gpu` | GPU | Machine family (default) | `worker_accelerator` | Models | `vllm_dtype` (derived) |
 | :-- | :-- | :-- | :-- | :-- | :-- |
-| `l4` (default) | NVIDIA L4, compute capability 8.9, 24 GB | G2 only (`g2-standard-8`) | `type:nvidia-l4;count:1;install-nvidia-driver` | `gemma4-e4b-it`, `qwen3-4b` | `auto`: serves the bf16 checkpoint as is |
+| `l4` (default) | NVIDIA L4, compute capability 8.9, 24 GB | G2 only (`g2-standard-8`) | `type:nvidia-l4;count:1;install-nvidia-driver` | `gemma4-e4b-it`, `qwen3-4b` | `bfloat16`: serves the bf16 checkpoint as is |
 | `t4` | NVIDIA T4, compute capability 7.5, 16 GB | N1 only (`n1-standard-8`) | `type:nvidia-tesla-t4;count:1;install-nvidia-driver:5xx` | `qwen3-4b` only | `float16`, required |
 
 Why the dtype depends on the GPU:
@@ -230,8 +236,9 @@ Why the dtype depends on the GPU:
 carry one L4), and Terraform rejects a machine type from the other family.
 The T4 driver pin `:5xx` follows Dataflow's guidance for vLLM. Check that
 `region` offers the GPU and that you have quota for it. Terraform writes
-`GPU`, `MACHINE_TYPE`, `ACCELERATOR` and `VLLM_DTYPE` to
-`scripts/00_set_variables.sh`, and both launches use them.
+`GPU`, `MACHINE_TYPE`, `ACCELERATOR` and `LAUNCHER_MACHINE_TYPE`
+(`e2-standard-8`, the Flex launcher VM) to `scripts/00_set_variables.sh`,
+and both launches use them.
 
 ## Bill of resources created by this script
 
@@ -267,7 +274,7 @@ across locations.
 | `build_service_account_name` | `string` | Optional. Default `synthetic-llm-build-sa`. |
 | `model` | `string` | Optional. `gemma4-e4b-it` (default, needs `gpu = "l4"`) or `qwen3-4b`. |
 | `model_source` | `string` | Optional. `huggingface` (default) or `modelscope`, where `02_stage_models.sh` downloads from. |
-| `gpu` | `string` | Optional. `l4` (default, G2, dtype `auto`) or `t4` (N1, dtype `float16`, `qwen3-4b` only). See [GPU, machine type and vLLM dtype](#gpu-machine-type-and-vllm-dtype). |
+| `gpu` | `string` | Optional. `l4` (default, G2, dtype `bfloat16`) or `t4` (N1, dtype `float16`, `qwen3-4b` only); the launcher derives the dtype from `gpu`. See [GPU, machine type and vLLM dtype](#gpu-machine-type-and-vllm-dtype). |
 | `machine_type` | `string` | Optional. A machine type of the GPU's family. Default `g2-standard-8` for `l4`, `n1-standard-8` for `t4`. |
 | `num_rows` | `number` | Optional. Rows for the root table `users`. Default `1000`. |
 | `launch_job` | `bool` | Optional. Default `false`. `true` launches the generation job from Terraform. |

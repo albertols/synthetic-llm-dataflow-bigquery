@@ -14,8 +14,8 @@
 
 # Mode A validation thresholds — env-scoped severity gates.
 #
-# Loaded by the Beam pipeline at job start (M1 §12 — wiring not yet implemented;
-# this file is the contract).
+# Loaded by the Beam pipeline at job start (read by `resolve_thresholds`;
+# `guardrails.thresholds_uri` / `--thresholds_uri` points at it).
 #
 # Severity ladder (see .claude/skills/validation-mode-a.md and the brief §8):
 #   BLOCKER  → raises BlockerThresholdExceeded → Dataflow job FAILED
@@ -79,6 +79,16 @@ rules:
     dimension: validity
     severity: CRITICAL
     threshold: 1.0   # 100% of batch passes the Pandera-derived schema
+
+  schema.column:
+    dimension: validity
+    severity: BLOCKER
+    threshold: 1.0   # every column coerces to its contract dtype
+    # A Pandera failure with no row index: the column's own (a dtype it
+    # cannot be coerced to, a missing or unexpected column), so its whole
+    # micro-batch goes to the DLQ. Added after an SCD table (every row's
+    # VALID_TO at 9999-12-30, past pandas' nanosecond range) sent all of
+    # its 1,000,000 rows to the DLQ as schema.batch and read PASSED.
 
   null.optional:
     dimension: completeness

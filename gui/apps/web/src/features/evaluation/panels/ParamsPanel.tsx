@@ -59,6 +59,8 @@ export function ParamsPanel({
     ],
     ["model_adjusted", modelAdjusted(evaluation, adjustedTables)],
     ["generation_job", `${evaluation.generation_job_name ?? MISSING} · ${evaluation.generation_job_id ?? MISSING}`],
+    ["generator_version", evaluation.generator_version ?? MISSING],
+    ["generator_config_digest", evaluation.generator_config_digest ?? MISSING],
     [
       "generation window",
       `${formatDateTime(evaluation.generation_started_at)} → ${formatDateTime(evaluation.generation_finished_at)}`,

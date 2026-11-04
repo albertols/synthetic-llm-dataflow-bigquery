@@ -64,6 +64,18 @@ the GUI shows it as **Stale**.
 "A RUNNING row that never closes", lists the open evaluations and has the
 statement that closes one by hand.
 
+Every row also says which generation it evaluated, and with what:
+
+| Column | Read it as |
+| :-- | :-- |
+| `params_source` | where the generation parameters came from: `jobs_labels+logs`, `logs`, `dataflow_params`, `validation_runs` (the generation's own record, ADR 0044) or `manual` |
+| `generation_params` | the generation's config snapshot (`validation_runs.config`) when it wrote one; otherwise the flat launch parameters |
+| `retrieval_method` | `free_text.pool_seed_strategy` as launched, for every engine, `b2_library` included (as before ADR 0044); `validation_runs.retrieval_method` is NULL for `b2_library` |
+| `generator_version` | `validation_runs.generator_version` of the evaluated generation, `<base>-<branch>-<sha7>[-dirty]`; NULL when the generation wrote no record |
+| `generator_config_digest` | `validation_runs.config_digest` of the evaluated generation: same digest, same generator config; NULL when the generation wrote no record |
+| `generation_job_ids` | the Dataflow job ids of the generation this evaluation covers: each batch job of a whole-model launch that landed (`generation_job_id` is the first, ADR 0045), else the one generation job; empty when the evaluation names no job, or when the row was written before the column existed (read `generation_job_id` then) |
+| `base_run_id` | of a whole-model launch (ADR 0045): the launch's base `B` when the evaluation took the launch by its base (`--run_id B`, with or without `--generation_job_ids`), or a batch job by its id without the job's log (the seed path: the rows' recorded `launch_run_id`); the batch's own `B-bNN` for `--run_id B-bNN`, and for a batch job's full lookup by `--job_id`, whose launch log names the batch's run id. Either way `run_ids` names the batches covered, so `B` does not by itself mean every batch |
+
 ## How to read a metric row
 
 A row of `evaluation_metrics` carries everything needed to judge it without

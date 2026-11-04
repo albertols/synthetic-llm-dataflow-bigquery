@@ -199,9 +199,9 @@ packages/sdfb-beam/               Beam pipeline + DoFns + DDL extractor + handle
 packages/sdfb-tests/              unit + integration tests
 docker/                           Dockerfile + .dockerignore + flex_entry.py (the template's entry) + flex_template_metadata.json
 scripts/                          extract_ddl, hello_synthetic_mlx, e2e/, release/, doc/
-config/                           thresholds.yml + models.yml
-composer/                         synthetic_beam_bigquery.py (Airflow DAG template)
-.github/workflows/                ci.yml + 1_build / 2_deploy / 3_import_dag
+config/                           generator.yaml (link to sdfb-core's defaults) + thresholds.yml + models.yml + relationships/
+composer/                         synthetic_beam_bigquery.py (the generation DAG, no deploy marker) + sdfb_batches.py + sdfb_env.yaml (the env overlay workflow 3's sed fills) + evaluation_framework.py
+.github/workflows/                ci.yml + gui.yml + release_tag_report.yaml (1_build / 2_deploy / 3_import_dag are untracked: RUN_PLAYBOOK §0a/§0b)
 ```
 
 When in doubt: `CLAUDE.md` + [`adr/`](adr/) carry the locked decisions from planning. Re-read them if anything ever feels ambiguous.

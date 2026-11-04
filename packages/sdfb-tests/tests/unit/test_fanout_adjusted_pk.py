@@ -44,9 +44,9 @@ from sdfb_beam.pipeline import (
     TableSpec,
     build_relational_pipeline,
 )
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.model_adjustment import (
-    REPEAT_SHARE_TOLERANCE,
     ModelAdjustment,
     source_repeat_share,
 )
@@ -253,7 +253,8 @@ def test_an_adjusted_child_copies_the_source_repeat_share(tmp_path):
   e_keys = {r["PID"] for r in children}
   landed = 1 - len(e_keys) / len(children)
   assert landed == pytest.approx(
-      source_repeat_share(_E_HISTOGRAM), abs=REPEAT_SHARE_TOLERANCE)
+      source_repeat_share(_E_HISTOGRAM),
+      abs=DEFAULT_CONFIG.guardrails.repeat_share_tolerance)
   # and the key genuinely repeats — not a share matched by accident
   assert len(children) > len(e_keys)
 
@@ -396,4 +397,5 @@ def test_a_driven_child_whose_declared_key_repeats_lands_rows(tmp_path):
   #    ±0.05 verdict means what it says.
   landed = 1 - len({(r["PID"], r["NR"]) for r in children}) / len(children)
   assert landed > 0, "a landing share of 0 would be the capped fan-out"
-  assert landed == pytest.approx(source_share, abs=REPEAT_SHARE_TOLERANCE)
+  assert landed == pytest.approx(
+      source_share, abs=DEFAULT_CONFIG.guardrails.repeat_share_tolerance)

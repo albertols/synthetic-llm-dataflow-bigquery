@@ -1,0 +1,379 @@
+{
+  "autoscaling": {
+    "choices": [
+      "auto",
+      "throughput",
+      "fixed"
+    ],
+    "const": null,
+    "default": "auto",
+    "nargs": null,
+    "required": false
+  },
+  "batch_size": {
+    "choices": null,
+    "const": null,
+    "default": 16,
+    "nargs": null,
+    "required": false
+  },
+  "build_pool_layer": {
+    "choices": null,
+    "const": "true",
+    "default": "",
+    "nargs": "?",
+    "required": false
+  },
+  "build_rag_layer": {
+    "choices": null,
+    "const": "true",
+    "default": "",
+    "nargs": "?",
+    "required": false
+  },
+  "client_type": {
+    "choices": [
+      "vllm",
+      "mlx",
+      "fake"
+    ],
+    "const": null,
+    "default": "vllm",
+    "nargs": null,
+    "required": false
+  },
+  "create_if_not_exists": {
+    "choices": null,
+    "const": null,
+    "default": "false",
+    "nargs": null,
+    "required": false
+  },
+  "ddl_uri": {
+    "choices": null,
+    "const": null,
+    "default": "",
+    "nargs": null,
+    "required": false
+  },
+  "dlq_table": {
+    "choices": null,
+    "const": null,
+    "default": null,
+    "nargs": null,
+    "required": true
+  },
+  "driven_uniqueness_mode": {
+    "choices": [
+      "exact",
+      "exact_chained",
+      "streaming"
+    ],
+    "const": null,
+    "default": "streaming",
+    "nargs": null,
+    "required": false
+  },
+  "embedder_uri": {
+    "choices": null,
+    "const": null,
+    "default": "",
+    "nargs": null,
+    "required": false
+  },
+  "engine": {
+    "choices": null,
+    "const": null,
+    "default": "b1_rag",
+    "nargs": null,
+    "required": false
+  },
+  "env": {
+    "choices": null,
+    "const": null,
+    "default": "dev",
+    "nargs": null,
+    "required": false
+  },
+  "fk_candidate_cap": {
+    "choices": null,
+    "const": null,
+    "default": 64,
+    "nargs": null,
+    "required": false
+  },
+  "fk_fanout_stats_table": {
+    "choices": null,
+    "const": null,
+    "default": "",
+    "nargs": null,
+    "required": false
+  },
+  "fk_parent_landing": {
+    "choices": null,
+    "const": null,
+    "default": "",
+    "nargs": null,
+    "required": false
+  },
+  "freetext_expansion": {
+    "choices": [
+      "off",
+      "identifiers",
+      "all"
+    ],
+    "const": null,
+    "default": "identifiers",
+    "nargs": null,
+    "required": false
+  },
+  "freetext_pools_table": {
+    "choices": null,
+    "const": null,
+    "default": "",
+    "nargs": null,
+    "required": false
+  },
+  "generate_fk_relationships": {
+    "choices": null,
+    "const": null,
+    "default": "true",
+    "nargs": null,
+    "required": false
+  },
+  "identity_cols": {
+    "choices": null,
+    "const": null,
+    "default": "",
+    "nargs": null,
+    "required": false
+  },
+  "initial_workers": {
+    "choices": null,
+    "const": null,
+    "default": "",
+    "nargs": null,
+    "required": false
+  },
+  "landing_table": {
+    "choices": null,
+    "const": null,
+    "default": null,
+    "nargs": null,
+    "required": true
+  },
+  "model_uri": {
+    "choices": null,
+    "const": null,
+    "default": null,
+    "nargs": null,
+    "required": true
+  },
+  "multi_table_mode": {
+    "choices": [
+      "single_job",
+      "sequential_jobs"
+    ],
+    "const": null,
+    "default": "single_job",
+    "nargs": null,
+    "required": false
+  },
+  "num_rows": {
+    "choices": null,
+    "const": null,
+    "default": null,
+    "nargs": null,
+    "required": true
+  },
+  "on_model_conflict": {
+    "choices": [
+      "adjust",
+      "stop"
+    ],
+    "const": null,
+    "default": "adjust",
+    "nargs": null,
+    "required": false
+  },
+  "pk_cols": {
+    "choices": null,
+    "const": null,
+    "default": "",
+    "nargs": null,
+    "required": false
+  },
+  "pool_pattern_guidance": {
+    "choices": null,
+    "const": "true",
+    "default": "",
+    "nargs": "?",
+    "required": false
+  },
+  "pool_seed_strategy": {
+    "choices": [
+      "centroid",
+      "kcenter",
+      "kcenter_rotate"
+    ],
+    "const": null,
+    "default": "centroid",
+    "nargs": null,
+    "required": false
+  },
+  "prompt_constraints": {
+    "choices": [
+      "on",
+      "off"
+    ],
+    "const": null,
+    "default": "on",
+    "nargs": null,
+    "required": false
+  },
+  "prompt_debug": {
+    "choices": [
+      "off",
+      "redacted",
+      "full"
+    ],
+    "const": null,
+    "default": "off",
+    "nargs": null,
+    "required": false
+  },
+  "rag_chunks_table": {
+    "choices": null,
+    "const": null,
+    "default": "",
+    "nargs": null,
+    "required": false
+  },
+  "rag_row_docs_limit": {
+    "choices": null,
+    "const": null,
+    "default": 1024,
+    "nargs": null,
+    "required": false
+  },
+  "reference_rows_limit": {
+    "choices": null,
+    "const": null,
+    "default": 10000,
+    "nargs": null,
+    "required": false
+  },
+  "reference_table": {
+    "choices": null,
+    "const": null,
+    "default": null,
+    "nargs": null,
+    "required": true
+  },
+  "relationships_uri": {
+    "choices": null,
+    "const": null,
+    "default": "config/relationships",
+    "nargs": null,
+    "required": false
+  },
+  "run_id": {
+    "choices": null,
+    "const": null,
+    "default": null,
+    "nargs": null,
+    "required": true
+  },
+  "seed": {
+    "choices": null,
+    "const": null,
+    "default": "",
+    "nargs": null,
+    "required": false
+  },
+  "similarity": {
+    "choices": null,
+    "const": null,
+    "default": 0.5,
+    "nargs": null,
+    "required": false
+  },
+  "source_stats": {
+    "choices": [
+      "off",
+      "sample",
+      "exact"
+    ],
+    "const": null,
+    "default": "sample",
+    "nargs": null,
+    "required": false
+  },
+  "source_stats_json": {
+    "choices": null,
+    "const": null,
+    "default": "",
+    "nargs": null,
+    "required": false
+  },
+  "source_stats_table": {
+    "choices": null,
+    "const": null,
+    "default": "",
+    "nargs": null,
+    "required": false
+  },
+  "thresholds_uri": {
+    "choices": null,
+    "const": null,
+    "default": "config/thresholds.yml",
+    "nargs": null,
+    "required": false
+  },
+  "uniqueness_mode": {
+    "choices": [
+      "exact",
+      "exact_chained",
+      "streaming"
+    ],
+    "const": null,
+    "default": "exact",
+    "nargs": null,
+    "required": false
+  },
+  "validation_runs_table": {
+    "choices": null,
+    "const": null,
+    "default": "",
+    "nargs": null,
+    "required": false
+  },
+  "vllm_dtype": {
+    "choices": [
+      "auto",
+      "float16",
+      "bfloat16"
+    ],
+    "const": null,
+    "default": "auto",
+    "nargs": null,
+    "required": false
+  },
+  "vllm_max_model_len": {
+    "choices": null,
+    "const": null,
+    "default": "8192",
+    "nargs": null,
+    "required": false
+  },
+  "write_disposition": {
+    "choices": [
+      "append",
+      "overwrite"
+    ],
+    "const": null,
+    "default": "append",
+    "nargs": null,
+    "required": false
+  }
+}

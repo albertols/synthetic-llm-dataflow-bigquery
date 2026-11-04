@@ -77,6 +77,9 @@ export const EVALUATION_FILTER_TYPES: Record<string, ParamType> = {
   evaluator_version: ["STRING"],
   catalogue_version: ["STRING"],
   relationship_model: ["STRING"],
+  generator_version: ["STRING"],
+  generator_branch: ["STRING"],
+  config_digest: ["STRING"],
   from: "STRING",
   to: "STRING",
   q: "STRING",
@@ -111,12 +114,17 @@ function evaluationWhere(a: string): string {
     inList("evaluator_version", "evaluator_version"),
     inList("catalogue_version", "catalogue_version"),
     inList("relationship_model", "relationship_model"),
+    inList("generator_version", "generator_version"),
+    inList("config_digest", "generator_config_digest"),
+    // The branch group of GENERATOR_VERSION_RE (@contracts/record) in RE2 syntax.
+    `(IFNULL(ARRAY_LENGTH(@generator_branch), 0) = 0 OR REGEXP_EXTRACT(${a}.generator_version, r'^[^-]+-(.+)-(?:[0-9a-f]{7}|unknown)(?:-dirty)?$') IN UNNEST(@generator_branch))`,
     `(@from IS NULL OR ${a}.evaluated_at >= TIMESTAMP(@from))`,
     `(@to IS NULL OR ${a}.evaluated_at < TIMESTAMP(@to))`,
     `(@q IS NULL OR STRPOS(LOWER(${a}.evaluation_id), LOWER(@q)) > 0
       OR STRPOS(LOWER(IFNULL(${a}.base_run_id, '')), LOWER(@q)) > 0
       OR STRPOS(LOWER(IFNULL(${a}.generation_job_id, '')), LOWER(@q)) > 0
       OR STRPOS(LOWER(IFNULL(${a}.generation_job_name, '')), LOWER(@q)) > 0
+      OR EXISTS (SELECT 1 FROM UNNEST(${a}.generation_job_ids) AS j WHERE STRPOS(LOWER(j), LOWER(@q)) > 0)
       OR EXISTS (SELECT 1 FROM UNNEST(${a}.run_ids) AS r WHERE STRPOS(LOWER(r), LOWER(@q)) > 0))`,
   ].join("\n  AND ");
 }
@@ -320,7 +328,7 @@ LIMIT @limit`,
 WHERE (IFNULL(ARRAY_LENGTH(@run_ids), 0) = 0 OR run_id IN UNNEST(@run_ids))
   AND (@base_run_id IS NULL OR run_id = @base_run_id
     OR (STARTS_WITH(run_id, CONCAT(@base_run_id, '-'))
-      AND REGEXP_CONTAINS(SUBSTR(run_id, LENGTH(@base_run_id) + 2), r'^[0-9]{2}-.+$')))
+      AND REGEXP_CONTAINS(SUBSTR(run_id, LENGTH(@base_run_id) + 2), r'^(b[0-9]{2,}-)?[0-9]{2,}-.+$')))
   AND (IFNULL(ARRAY_LENGTH(@landing_table), 0) = 0 OR landing_table IN UNNEST(@landing_table))
   AND (IFNULL(ARRAY_LENGTH(@engine), 0) = 0 OR engine IN UNNEST(@engine))
   AND (IFNULL(ARRAY_LENGTH(@status), 0) = 0 OR status IN UNNEST(@status))

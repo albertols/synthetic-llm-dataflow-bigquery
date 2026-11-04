@@ -31,10 +31,8 @@ from __future__ import annotations
 import math
 
 import pytest
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.engines.pk_capacity import (
-    FK_KEY_SAMPLE_CEILING,
-    FK_KEY_SAMPLE_FLOOR,
-    FK_KEY_SAMPLE_MARGIN,
     expected_duplicate_share,
     fk_key_sample_cap,
     max_rows_under_share,
@@ -78,27 +76,32 @@ class TestFkKeySampleCap:
     clamped to the side-input floor (today's flat cap) and ceiling."""
 
   def test_constants_bracket_the_historic_cap(self):
-    assert FK_KEY_SAMPLE_FLOOR == 100_000
-    assert FK_KEY_SAMPLE_CEILING > FK_KEY_SAMPLE_FLOOR
-    assert FK_KEY_SAMPLE_MARGIN >= 10
+    relational = DEFAULT_CONFIG.relational
+    assert relational.fk_key_sample_floor == 100_000
+    assert relational.fk_key_sample_ceiling > relational.fk_key_sample_floor
+    assert relational.fk_key_sample_margin >= 10
 
   def test_c_table_shape_at_one_million_rows(self):
     # other members contribute x12; 10 x 1M / 12 = 833 334 keys.
-    assert fk_key_sample_cap(1_000_000, 12) == math.ceil(FK_KEY_SAMPLE_MARGIN *
-                                                         1_000_000 / 12)
+    assert fk_key_sample_cap(1_000_000, 12) == math.ceil(
+        DEFAULT_CONFIG.relational.fk_key_sample_margin * 1_000_000 / 12)
 
   def test_c_table_shape_at_ten_million_rows_hits_the_ceiling(self):
-    assert fk_key_sample_cap(10_000_000, 12) == FK_KEY_SAMPLE_CEILING
+    assert fk_key_sample_cap(
+        10_000_000, 12) == DEFAULT_CONFIG.relational.fk_key_sample_ceiling
 
   def test_small_runs_keep_the_floor(self):
-    assert fk_key_sample_cap(1_000, 12) == FK_KEY_SAMPLE_FLOOR
+    assert fk_key_sample_cap(
+        1_000, 12) == DEFAULT_CONFIG.relational.fk_key_sample_floor
 
   def test_unbounded_siblings_keep_the_floor(self):
     # A temporal/numeric PK member already covers the tuple.
-    assert fk_key_sample_cap(10_000_000, None) == FK_KEY_SAMPLE_FLOOR
+    assert fk_key_sample_cap(
+        10_000_000, None) == DEFAULT_CONFIG.relational.fk_key_sample_floor
 
   def test_fk_alone_as_the_pk_needs_margin_times_rows(self):
-    assert fk_key_sample_cap(50_000, 1) == FK_KEY_SAMPLE_MARGIN * 50_000
+    assert fk_key_sample_cap(
+        50_000, 1) == DEFAULT_CONFIG.relational.fk_key_sample_margin * 50_000
 
 
 class TestMaxRowsUnderShare:

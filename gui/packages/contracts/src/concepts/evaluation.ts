@@ -358,6 +358,51 @@ export const concepts = defineConcepts([
     links: [{ label: "Relationship models — README", url: RELATIONSHIPS, kind: "docs" }],
   },
   {
+    id: "eval:isolated-tables",
+    title: "Isolated tables",
+    purpose:
+      "Tables with no foreign key to or from any other table of the launch: there is no relationship to draw, so the model graph packs them into a grid of tiles instead of one tall column. Each tile shows the table's overall score and, when the launch adjusted its declared primary key, the PK adj. chip.",
+    interpretation: {
+      tip: "Click a tile to scope every section to that table.",
+    },
+    links: [
+      { label: "Relationship models — README", url: RELATIONSHIPS, kind: "docs" },
+      { label: "GUI UX rules", url: `${REPO}/gui/docs/UX.md`, kind: "docs" },
+    ],
+  },
+  {
+    id: "eval:not-applicable",
+    title: "Not applicable (no key declared)",
+    purpose:
+      "The relationship model declares no primary key (or no identity columns) for this table, so there is no key whose duplicates could be counted: the evaluator writes the check as not evaluated with that reason, and the GUI shows it as not applicable — not a gap, never a FAIL. The table's integrity score is then the mean over the units it has: its columns and its row count.",
+    pitfalls:
+      "Any other reason (sampled mode, no synthetic rows) stays Not evaluated: that one is a gap in the evaluation, and not a pass.",
+    links: [
+      { label: "Metric catalogue — table.pk_duplicate_rate", url: CATALOGUE, kind: "code" },
+      { label: "Relationship models — README", url: RELATIONSHIPS, kind: "docs" },
+    ],
+  },
+  {
+    id: "eval:model-summary",
+    title: "Model summary",
+    purpose:
+      "What the launch declared, in counts: its tables, how many declare a primary key, the foreign keys between them, the isolated ones, the tables read from another source table and the batch jobs a whole-model launch was split into. The counts come from the launch's generation record when it has one, else from the registry and the metric rows.",
+    interpretation: {
+      tip: "Disabled tables are counted only when the GUI can read the whole model: a launch records only the tables it generated.",
+    },
+    links: [
+      { label: "Relationship models — README", url: RELATIONSHIPS, kind: "docs" },
+      { label: "GUI data contracts", url: CONTRACTS, kind: "docs" },
+    ],
+  },
+  {
+    id: "eval:integrity-units",
+    title: "Integrity units",
+    purpose:
+      "A table's integrity score is the mean over units: each column once, each table-level check once (row count, key duplicates) and each foreign key where the table is the child once. A unit with nothing scored — a key check with no key declared, an INFO row — is left out, so it neither raises nor lowers the score.",
+    links: [catalogueLink],
+  },
+  {
     id: "eval:documented-edge",
     title: "Documented edge",
     purpose:

@@ -5,6 +5,7 @@
  * reason — and that profiles load only when a drawer opens.
  */
 import type { RowFlag } from "@contracts/api";
+import type { GeneratorSnapshot } from "@contracts/record";
 import { configure, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -21,6 +22,7 @@ import {
   countsDetail,
   evaluation,
   flag,
+  generationRecord,
   metric,
   profile,
   richDetail,
@@ -49,10 +51,25 @@ function stubRun(detail = richDetail(), extra: Record<string, unknown> = {}) {
       model_adjustments: [],
       generation_job_evaluation_id: null,
     },
+    // No generation record (ADR 0044) unless a test says otherwise.
+    [`/api/evaluations/${id}/record`]: {
+      ...generationRecord(),
+      evaluation_id: id,
+      runs: [],
+      snapshot: null,
+      snapshot_run_id: null,
+      launcher_version: null,
+      worker_versions: [],
+      version_mismatch: false,
+      config_digests: [],
+      declared_tables: [],
+      batches: [],
+    },
     ...extra,
   });
 }
 
+const RECORD = "/api/evaluations/eval-t001/record";
 const ADJUSTMENTS = "/api/evaluations/eval-t001/adjustments";
 const ABOUT_ADJUSTED = "About: Adjusted model (ADR 0038)";
 const ABOUT_SHARES = "About: Key-repeat share and duplicate rate";
@@ -605,6 +622,36 @@ describe("adjusted keys in the run view (ADR 0038)", () => {
     expect(within(orphans).getByText("Info · documented")).toBeInTheDocument();
   });
 
+  it("the relational band follows the run's tolerance (R16)", async () => {
+    stubRun(adjustedDetail(), {
+      [ADJUSTMENTS]: adjustedAdjustments(),
+      [RECORD]: generationRecord({ tolerance: 0.08 }),
+    });
+    renderAt("/evaluation/eval-t001?tab=relational");
+    const section = await screen.findByRole("region", { name: /^Model adjustments \(ADR 0038\)/ });
+    await waitFor(() => expect(within(section).getByRole("figure")).toHaveTextContent("tolerance, ±8 pt"));
+    expect(section).toHaveTextContent("tolerance ±8 pt");
+    const readout = section.querySelector<HTMLElement>('article[data-metric="table.pk_duplicate_rate"]')!;
+    const figures = Object.fromEntries(
+      [...readout.querySelectorAll("dt")].map((dt) => [dt.textContent, dt.nextElementSibling?.textContent]),
+    );
+    expect(figures).toMatchObject({ Tolerance: "±8 pt" });
+    expect(section).not.toHaveTextContent("±5 pt");
+    expect(section.textContent).toMatch(/within ±8 pt|outside ±8 pt/);
+  });
+
+  it("the scorecard's tolerance follows the run's too (R16)", async () => {
+    stubRun(adjustedDetail(), {
+      [ADJUSTMENTS]: adjustedAdjustments(),
+      [RECORD]: generationRecord({ tolerance: 0.08 }),
+    });
+    renderAt("/evaluation/eval-t001");
+    const integrity = await screen.findByRole("region", { name: /^Integrity/ });
+    await waitFor(() =>
+      expect(integrity.querySelector<HTMLElement>('li[data-adjusted="true"]')).toHaveTextContent("tolerance ±8 pt"),
+    );
+  });
+
   it("marks adjusted tables in the model graph and explains the chip in its legend", async () => {
     stubRun(adjustedDetail(), { [ADJUSTMENTS]: adjustedAdjustments() });
     renderAt("/evaluation/eval-t001");
@@ -737,5 +784,129 @@ describe("count breakdowns add up to their totals", () => {
     expect(kpi.querySelector('[data-bucket="other"]')).not.toBeNull();
     expect(breakdowns.some((el) => el !== kpi && el.querySelector('[data-bucket="info"]'))).toBe(true);
     expect(breakdowns.some((el) => el !== kpi && el.querySelector('[data-bucket="other"]'))).toBe(true);
+  });
+});
+
+describe("Generator panel (ADR 0044)", () => {
+  it("shows the resolved config with a badge per value, the override warning, the model card and the job link", async () => {
+    stubRun(richDetail(), { [RECORD]: generationRecord({ overridden: true }) });
+    renderAt("/evaluation/eval-t001?tab=params");
+    const panel = await screen.findByRole("region", { name: /generator/i });
+    // The config row of `similarity` carries the `file` badge; the `launch` section is empty, so no card.
+    const row = within(panel).getByText("similarity").parentElement!;
+    expect(within(row).getByText("file")).toBeInTheDocument();
+    expect(within(panel).getByText("generation.similarity", { selector: "code" })).toBeInTheDocument();
+    expect(within(panel).queryByText("launch")).toBeNull();
+    expect(within(panel).getByText(/overrode 1 typed param/i)).toBeInTheDocument();
+    expect(within(panel).getByText(/example_retail/)).toBeInTheDocument();
+    expect(within(panel).getByRole("link", { name: /2026-10-21_01_02_03-123/ })).toHaveAttribute(
+      "href",
+      expect.stringContaining("/dataflow/jobs/"),
+    );
+    expect(within(panel).getByRole("button", { name: /download as config\.yaml/i })).toBeEnabled();
+  });
+
+  describe("the job link's region: the registry's, else the record's beam.region, else none", () => {
+    const JOB = "2026-10-21_01_02_03-123";
+    /** richDetail without a registry region (an evaluation by --run_id), the snapshot's beam block as given. */
+    function stubWithoutRegion(beam: unknown) {
+      const detail = richDetail();
+      detail.evaluation = { ...detail.evaluation, generation_region: null };
+      const record = generationRecord();
+      stubRun(detail, { [RECORD]: { ...record, snapshot: { ...record.snapshot!, beam } } });
+    }
+    const panel = () => screen.findByRole("region", { name: /generator/i });
+
+    it("links the job in the registry's region", async () => {
+      stubRun(richDetail(), { [RECORD]: generationRecord() });
+      renderAt("/evaluation/eval-t001?tab=params");
+      expect(within(await panel()).getByRole("link", { name: JOB })).toHaveAttribute(
+        "href",
+        `https://console.cloud.google.com/dataflow/jobs/europe-west3/${JOB}?project=p`,
+      );
+    });
+
+    it("falls back to the record snapshot's beam.region", async () => {
+      stubWithoutRegion({ runner: "DataflowRunner", region: "us-central1" });
+      renderAt("/evaluation/eval-t001?tab=params");
+      expect(within(await panel()).getByRole("link", { name: JOB })).toHaveAttribute(
+        "href",
+        `https://console.cloud.google.com/dataflow/jobs/us-central1/${JOB}?project=p`,
+      );
+    });
+
+    it.each([
+      ["an A2-era beam block (no region)", { runner: "DataflowRunner", job_name: "synthetic-sdfb-v0-6-1-m" }],
+      ["no beam block", undefined],
+      ["a malformed beam block", "us-central1"],
+    ])("shows the job id as text, not a link without its region, for %s", async (_, beam) => {
+      stubWithoutRegion(beam);
+      renderAt("/evaluation/eval-t001?tab=params");
+      const generator = within(await panel());
+      expect(generator.queryByRole("link", { name: JOB })).toBeNull();
+      expect(generator.getByText(JOB)).toHaveClass("font-mono");
+    });
+  });
+
+  it("version mismatch badge", async () => {
+    stubRun(richDetail(), { [RECORD]: generationRecord({ mismatch: true }) });
+    renderAt("/evaluation/eval-t001?tab=params");
+    const panel = await screen.findByRole("region", { name: /generator/i });
+    expect(
+      within(panel).getByText(/launcher 0\.6\.1-master-edcfdcd ≠ worker 0\.6\.1-master-1111111/),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a skeleton, not 'no record', while the record loads", async () => {
+    stubRun(richDetail());
+    const real = globalThis.fetch;
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      return url.includes("/record") ? gate.then(() => real(input, init)) : real(input, init);
+    });
+    renderAt("/evaluation/eval-t001?tab=params");
+    const panel = await screen.findByRole("region", { name: /generator/i });
+    expect(panel).toHaveAttribute("aria-busy", "true");
+    expect(screen.queryByText(/no generation record/i)).toBeNull();
+    release();
+    expect(await screen.findByText(/no generation record/i)).toBeInTheDocument();
+    expect(screen.getByRole("region", { name: /generator/i })).not.toHaveAttribute("aria-busy");
+  });
+
+  it("says when the run has no record", async () => {
+    stubRun(richDetail());
+    renderAt("/evaluation/eval-t001?tab=params");
+    expect(await screen.findByText(/no generation record/i)).toBeInTheDocument();
+  });
+
+  // Final review M3: the panel never trusts the snapshot's block types.
+  it("reads a snapshot whose values is not an object as no record", async () => {
+    const snapshot = { config_version: 1, values: 42, overridden: [null] } as unknown as GeneratorSnapshot;
+    stubRun(richDetail(), { [RECORD]: { ...generationRecord(), snapshot } });
+    renderAt("/evaluation/eval-t001?tab=params");
+    expect(await screen.findByText(/no generation record/i)).toBeInTheDocument();
+  });
+
+  it("skips a block, a badge or an override of the wrong type and shows the rest", async () => {
+    const record = generationRecord();
+    const snapshot = {
+      ...record.snapshot!,
+      values: { generation: 5, guardrails: { env: "dev" } },
+      provenance: { "guardrails.env": { nested: true } },
+      overridden: [null, 7, { key: "generation.similarity", typed: 0.3, file: 0.7 }],
+      relationships: { model: { odd: 1 }, uri: 5, sha12: null, tables: "users" },
+    } as unknown as GeneratorSnapshot;
+    stubRun(richDetail(), { [RECORD]: { ...record, snapshot } });
+    renderAt("/evaluation/eval-t001?tab=params");
+    const panel = await screen.findByRole("region", { name: /generator/i });
+    expect(within(panel).getByText("guardrails")).toBeInTheDocument();
+    expect(within(panel).getByText("env")).toBeInTheDocument();
+    expect(within(panel).queryByText("generation")).toBeNull();
+    expect(within(panel).getByText(/overrode 1 typed param/i)).toBeInTheDocument();
+    expect(within(panel).getByText("Relationships model")).toBeInTheDocument();
   });
 });

@@ -29,7 +29,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Skeleton } from "@/components/ui/skeleton";
 import { Table, TableBody, TableCell, TableContainer, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
-import { useCompare, useEvaluations } from "@/lib/api";
+import { useCompare, useEvaluationRecords, useEvaluations } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { formatCompact, formatDateTime, MISSING } from "@/lib/format";
 
@@ -56,6 +56,7 @@ import { downgradeLabel } from "./lib/reading";
 import { statusRank } from "./lib/model";
 import { useChartTokens } from "./lib/tokens";
 import type { EvaluationCompareSearch } from "./route";
+import { ConfigDiff } from "./components/ConfigDiff";
 import { RelatedKnobsProvider } from "./components/RelatedKnobs";
 
 const route = getRouteApi("/evaluation/compare");
@@ -686,6 +687,9 @@ function ComparePageContent() {
     [navigate],
   );
   const comparison = compare.data?.data;
+  // Only the evaluations the registry holds have a record to ask for (an unknown id would 404).
+  const comparedIds = useMemo(() => comparison?.evaluations.map((e) => e.evaluation_id) ?? [], [comparison]);
+  const records = useEvaluationRecords(comparedIds);
   const charts = useMemo(() => {
     if (!comparison || comparison.evaluations.length < 1) return null;
     const idx = comparison.evaluations.map((_, i) => i);
@@ -938,6 +942,11 @@ function ComparePageContent() {
         onRows={(rows) => setSearch({ rows })}
       />
       <RunMetricHeatmap comparison={comparison} family={search.family} />
+      <ConfigDiff
+        ids={comparedIds}
+        records={records.map((q) => q.data?.data)}
+        errored={records.map((q) => q.isError)}
+      />
       <ParamsDiff comparison={comparison} />
     </div>
   );

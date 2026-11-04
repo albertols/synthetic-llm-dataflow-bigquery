@@ -36,6 +36,7 @@ import {
   LIFT_COUNT_KEYS,
   isCanonicalTimestamp,
   parseEdge,
+  parseSnapshot,
   snapshotKey,
 } from "@synthetic-platform/contracts";
 
@@ -48,6 +49,7 @@ import {
   createMockDataset,
   EDGES,
   edgeLabel,
+  FOREST_EVALUATION,
   MOCK_RELATIONSHIP_MODEL,
   STORYLINE,
   type MockDataset,
@@ -86,9 +88,9 @@ function profile(
 }
 
 describe("the storyline", { timeout: 60_000 }, () => {
-  it("has 40 evaluations over 8 weeks, RUNNING then FINAL (plus the two of the adjusted-keys launch)", () => {
+  it("has 40 evaluations over 8 weeks, RUNNING then FINAL (plus the two of the adjusted-keys launch and the isolated-forest one)", () => {
     expect(STORYLINE).toHaveLength(40);
-    expect(latest.size).toBe(STORYLINE.length + ADJUSTED_EVALUATIONS.length);
+    expect(latest.size).toBe(STORYLINE.length + ADJUSTED_EVALUATIONS.length + 1);
     const dates = [...latest.values()].map((r) => r.evaluated_at).sort();
     expect(dates[0]!.slice(0, 10)).toBe("2026-08-03");
     expect(dates.at(-1)!.slice(0, 10)).toBe("2026-09-27");
@@ -495,7 +497,10 @@ describe("the mock mirrors what the pipeline writes", { timeout: 60_000 }, () =>
 
   it("per-table run ids are <base>-NN-<table> in generation order; one table keeps the base", () => {
     const adjusted = new Set<string>(ADJUSTED_EVALUATIONS);
-    for (const row of [...latest.values()].filter((r) => !adjusted.has(r.evaluation_id))) {
+    // The forest's batched ids (<base>-bNN-MM-<table>) are pinned by mock.forest.test.ts.
+    for (const row of [...latest.values()].filter(
+      (r) => !adjusted.has(r.evaluation_id) && r.evaluation_id !== FOREST_EVALUATION,
+    )) {
       const base = row.base_run_id!;
       if (row.relationship_model)
         expect(row.run_ids).toEqual([`${base}-00-users`, `${base}-01-orders`, `${base}-02-order_items`]);
@@ -715,6 +720,7 @@ describe("the adjusted-keys launch (ADR 0038)", { timeout: 60_000 }, () => {
     expect(isEvaluatorJobName(chained.generation_job_name)).toBe(false);
     expect(isEvaluatorJobName(miswired.generation_job_name)).toBe(true);
     expect(miswired.generation_job_id).toBe(chained.evaluation_job_id);
+    expect(miswired.generation_job_ids).toEqual([chained.evaluation_job_id]);
     expect([miswired.generation_started_at, miswired.generation_finished_at]).toEqual([
       chained.evaluated_at,
       chained.finished_at,
@@ -725,5 +731,38 @@ describe("the adjusted-keys launch (ADR 0038)", { timeout: 60_000 }, () => {
     // The launch's rows were written before that "generation" window opened.
     for (const run of launchRuns()) expect(run.created_at < miswired.generation_started_at!).toBe(true);
     expect(miswired.status).toBe("SUCCEEDED_WITH_WARNINGS");
+  });
+});
+
+describe("the generation record (ADR 0044)", { timeout: 60_000 }, () => {
+  it("records every storyline launch, consistently with its registry row", () => {
+    // The forest's rows carry twelve job ids, one per batch: mock.forest.test.ts pins them.
+    const recorded = data.registry.filter((r) => r.generator_version && r.evaluation_id !== FOREST_EVALUATION);
+    expect(recorded.length).toBeGreaterThan(0);
+    for (const e of recorded) {
+      const runs = data.validationRuns.filter((r) => e.run_ids.includes(r.run_id));
+      expect(runs.length).toBeGreaterThan(0);
+      for (const r of runs) {
+        expect(r.job_id).toBe(e.generation_job_id);
+        expect(r.config_digest).toBe(e.generator_config_digest);
+        const values = parseSnapshot(r.config)!.values!;
+        expect(values.generation!.engine).toBe(e.engine);
+        expect(values.generation!.similarity).toBe(e.similarity);
+        expect(values.serving!.model_uri).toBe(e.llm_model_uri);
+      }
+    }
+  });
+
+  it("keeps launches without a record (the extra launches)", () => {
+    expect(data.validationRuns.some((r) => r.config === null)).toBe(true);
+    expect(data.registry.some((r) => r.generator_version === null)).toBe(true);
+  });
+
+  it("has one launch whose worker version differs from its launcher's", () => {
+    const mismatched = data.validationRuns.filter((r) => {
+      const launcher = parseSnapshot(r.config)?.launcher?.version;
+      return typeof launcher === "string" && launcher !== r.generator_version;
+    });
+    expect(mismatched.length).toBeGreaterThan(0);
   });
 });

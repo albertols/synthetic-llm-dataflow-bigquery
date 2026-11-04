@@ -3,7 +3,8 @@
  * and flags; profiles only with `?profiles=all` (the default is `none`: a detail page
  * loads them per drawer from `/profiles`, never hundreds of payloads up front); `GET /api/evaluations/:id/profiles`
  * — profiles of one table / column / kind / side, for lazy drawers; `GET /api/evaluations/:id/adjustments` —
- * the launch's model adjustments (ADR 0038), read from `validation_runs`.
+ * the launch's model adjustments (ADR 0038), read from `validation_runs`; `GET /api/evaluations/:id/record` —
+ * the launch's generation record (ADR 0044), read from the same rows.
  */
 import { evaluationDetailQuerySchema, profileQuerySchema } from "@synthetic-platform/contracts";
 import type { FastifyPluginAsync } from "fastify";
@@ -43,6 +44,16 @@ export const evaluationRoutes: FastifyPluginAsync<RouteOptions> = (app, { provid
     if (!adjustments)
       return reply.code(404).send({ statusCode: 404, error: "Not Found", message: `no evaluation "${id}"` });
     return adjustments;
+  });
+  // ADR 0044: the generation record of the evaluation's launch, from validation_runs. A sibling route,
+  // like /adjustments, so a failed read of that table never blanks the evaluation itself.
+  app.get("/api/evaluations/:id/record", async (request, reply) => {
+    const { id } = parse(idParams, request.params);
+    const ctx = newContext();
+    const record = await provider.evaluationRecord(id, ctx);
+    stamp(reply, provider, ctx);
+    if (!record) return reply.code(404).send({ statusCode: 404, error: "Not Found", message: `no evaluation "${id}"` });
+    return record;
   });
   return Promise.resolve();
 };

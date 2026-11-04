@@ -39,6 +39,7 @@ import apache_beam as beam
 from apache_beam.options.pipeline_options import PipelineOptions
 from sdfb_beam.io.local_sinks import WriteToJsonLines
 from sdfb_beam.pipeline import PipelineConfig, build_pipeline
+from sdfb_core.engines.generation_plan import clear_generation_plan_log
 from sdfb_tests.fakes import FakeModelClient
 
 _RUN_PIPELINE = (
@@ -72,6 +73,7 @@ def test_the_relationship_card_reaches_the_workers(tmp_path, customers_schema,
   """A field that exists but is never threaded into the
     GenerationContext is worse than a crash: the worker log would just
     be missing the card, silently."""
+  clear_generation_plan_log()
   card = "RELATIONSHIP MODEL retail | source config/relationships/retail.yaml"
   config = PipelineConfig(
       table_schema=customers_schema,

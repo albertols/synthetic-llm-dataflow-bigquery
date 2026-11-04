@@ -24,6 +24,9 @@ lifts). The tables are big enough for a real panel: R and H hold
 `MIN_PANEL_ROWS` rows each.
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §7 Validation and the dead-letter queue
+(ADR 0044).
 """
 
 from __future__ import annotations
@@ -136,8 +139,9 @@ def test_a_matching_digest_verifies_the_panel_down_to_both_decisions(
   planned, session = _plan(bq, load_fixture, "--validation_runs_table",
                            RUNS_TABLE)
   # what was read: the Dataflow job and one validation_runs query
-  assert [m for m, _ in session.calls] == ["GET"]
-  assert len([1 for sql, _ in bq.queries if "validation_runs" in sql]) == 1
+  # +1 of each: the record read before the targets, ADR 0044
+  assert [m for m, _ in session.calls] == ["GET", "GET"]
+  assert len([1 for sql, _ in bq.queries if "validation_runs" in sql]) == 2
   assert not [1 for sql, _ in bq.queries if "JOBS_BY_PROJECT" in sql]
   panel, privacy_reason, lift_reason, near_reason = _decisions(planned)
   assert panel.verified and panel.reason is None
@@ -188,8 +192,13 @@ def test_without_the_job_window_validation_runs_is_not_read(failure):
   panel, privacy_reason, _, _ = _decisions(planned)
   assert not panel.verified and privacy_reason.startswith(
       privacy.UNVERIFIED_REASON)
-  (note,) = [w for w in planned.warnings if JOB_ID in w]
-  assert "reference sample cannot be verified" in note
+  # the window's note, and (final review M4) the record's that could not be
+  # read before the targets were known
+  window, record = sorted((w for w in planned.warnings if JOB_ID in w),
+                          key=lambda w: w.startswith("the generation record"))
+  assert "reference sample cannot be verified" in window
+  assert record.startswith(
+      f"the generation record of Dataflow job {JOB_ID} could not be read")
 
 
 def test_two_launches_in_the_window_use_the_latest(load_fixture):

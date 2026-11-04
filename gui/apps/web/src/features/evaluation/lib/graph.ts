@@ -4,9 +4,13 @@
  * carrying its orphan and fan-out rows. Built from the relationship model
  * when `/api/relationships` resolves it, and always from the metric rows'
  * `edge` labels (`parseEdge`), so a live model the BFF cannot read still
- * draws.
+ * draws. Without a served model the launch's generation record (ADR 0044)
+ * supplies the declared tables and keys. A table with no foreign key at all
+ * leaves the layers and becomes a tile (ADR 0036): a forest of 100 tables is
+ * a grid, not one 8,800-unit column.
  */
 import type { EvaluationDetail, MetricRow } from "@contracts/api";
+import type { DeclaredTable } from "@contracts/record";
 import { findEdge, formatEdge, parseEdge, type RelationshipModel } from "@contracts/relational";
 
 import type { AdjustedReading, AdjustmentRow } from "./adjustment";
@@ -28,6 +32,11 @@ export interface GraphNode {
   layer: number;
   x: number;
   y: number;
+  /**
+   * "layer": the table has a foreign key (as child or parent, or to itself) and is drawn in the layered
+   * SVG at x, y. "tile": degree 0, drawn in the isolated-tables grid; x and y are 0.
+   */
+  placement: "layer" | "tile";
 }
 
 export interface GraphEdge {
@@ -45,10 +54,16 @@ export interface GraphEdge {
 }
 
 export interface Graph {
+  /** Every node: the layered ones first, then the tiles. */
   nodes: GraphNode[];
   edges: GraphEdge[];
+  /** Size of the layered drawing; 0 x 0 when every node is a tile. */
   width: number;
   height: number;
+  /** The degree-0 nodes in grid order (generation order, then name). */
+  tiles: GraphNode[];
+  /** What drew the model: a served model, the launch's record (ADR 0044), or the metric rows' edge labels. */
+  resolvedFrom: "model" | "record" | "edges";
 }
 
 export const NODE_W = 168;
@@ -56,6 +71,18 @@ export const NODE_H = 60;
 const COL_GAP = 132;
 const ROW_GAP = 28;
 const PAD = 16;
+/**
+ * The isolated-tables grid (ADR 0036, about 12 rows of 10): tiles at least TILE_MIN_REM wide (about ten
+ * per row at full width), TILE_H_REM tall, TILE_GAP_REM apart; the frame is at most TILE_ROWS_MAX rows
+ * tall and scrolls beyond that.
+ */
+export const TILE_MIN_REM = 7;
+export const TILE_H_REM = 3.5;
+export const TILE_GAP_REM = 0.375;
+export const TILE_ROWS_MAX = 12;
+export const TILE_GRID_MAX_REM = TILE_ROWS_MAX * TILE_H_REM + (TILE_ROWS_MAX - 1) * TILE_GAP_REM;
+/** From this many tiles the overview gives the model graph the full row (the grid needs the width). */
+export const WIDE_GRAPH_MIN_TILES = 10;
 
 function lastSegment(name: string): string {
   return name.split(".").at(-1) ?? name;
@@ -65,12 +92,19 @@ export function buildGraph(
   detail: Pick<EvaluationDetail, "evaluation" | "metrics">,
   model?: RelationshipModel | null,
   adjustments?: readonly AdjustmentRow[],
+  declared?: readonly DeclaredTable[],
 ): Graph {
   const { evaluation, metrics } = detail;
   const readings = new Map((adjustments ?? []).map((a) => [a.table, a.reading]));
+  // Without a served model, the launch's record says what it declared (ADR 0044); a served model wins.
+  const recorded = model ? [] : (declared ?? []);
   const tables = new Map<string, { role: string | null }>();
   for (const t of evaluation.tables) if (t.name) tables.set(t.name, { role: t.role });
+  // What the evaluation covers: a table with facts or a score. A model table outside it is not a tile (below).
+  const covered = new Set(tables.keys());
+  for (const m of metrics) if (m.level !== "model") covered.add(m.table_name);
   for (const t of model?.tables ?? []) if (!tables.has(t.name)) tables.set(t.name, { role: null });
+  for (const t of recorded) if (!tables.has(t.name)) tables.set(t.name, { role: null });
   for (const m of metrics)
     if (m.level !== "model" && !tables.has(m.table_name)) tables.set(m.table_name, { role: null });
 
@@ -81,6 +115,7 @@ export function buildGraph(
     return ref;
   };
 
+  const recordedEnforced = new Map<string, boolean>();
   const edges = new Map<string, GraphEdge>();
   const ensureEdge = (label: string, fallbackChild: string): GraphEdge | null => {
     const existing = edges.get(label);
@@ -95,7 +130,7 @@ export function buildGraph(
       child,
       parent,
       role: found?.edge.role ?? null,
-      documented: found ? !found.edge.enforced : false,
+      documented: found ? !found.edge.enforced : recordedEnforced.get(label) === false,
       orphan: null,
       orphanSource: null,
       fanout: null,
@@ -108,6 +143,13 @@ export function buildGraph(
 
   for (const table of model?.tables ?? []) {
     for (const fk of table.fk) ensureEdge(formatEdge(table.name, fk), table.name);
+  }
+  for (const table of recorded) {
+    for (const fk of table.fk) {
+      const label = formatEdge(table.name, fk);
+      recordedEnforced.set(label, fk.enforced);
+      ensureEdge(label, table.name);
+    }
   }
   for (const row of metrics) {
     if (row.level !== "relationship" || !row.edge) continue;
@@ -134,9 +176,13 @@ export function buildGraph(
 
   // Nodes: every table plus every parent the edges name (external parents).
   const names = new Set<string>(tables.keys());
+  // Degree 0 (no edge as child or parent): a tile, out of the layered layout (ADR 0036).
+  const touched = new Set<string>();
   for (const edge of edges.values()) {
     names.add(edge.child);
     names.add(edge.parent);
+    touched.add(edge.child);
+    touched.add(edge.parent);
   }
   const parentsOf = new Map<string, Set<string>>();
   for (const edge of edges.values()) {
@@ -163,7 +209,13 @@ export function buildGraph(
     return (ia < 0 ? 999 : ia) - (ib < 0 ? 999 : ib) || a.localeCompare(b);
   });
   const layers = new Map<number, string[]>();
+  const tileNames: string[] = [];
   for (const name of sorted) {
+    if (!touched.has(name)) {
+      // A table the evaluation does not cover has no facts and no score: not a tile (the card counts it).
+      if (covered.has(name)) tileNames.push(name);
+      continue;
+    }
     const d = depthOf(name, new Set());
     const list = layers.get(d) ?? [];
     list.push(name);
@@ -171,34 +223,45 @@ export function buildGraph(
   }
   const scoreRows = new Map<string, MetricRow>();
   for (const row of metrics) if (row.metric_id === "table.overall_score") scoreRows.set(row.table_name, row);
+  const nodeOf = (name: string, layer: number, x: number, y: number, placement: GraphNode["placement"]): GraphNode => {
+    const info = tables.get(name);
+    const registry = evaluation.tables.find((t) => t.name === name);
+    const scoreRow = scoreRows.get(name);
+    return {
+      name,
+      external: !info || info.role === "external",
+      role: info?.role ?? "external",
+      score: scoreRow?.value ?? registry?.table_score ?? null,
+      status: scoreRow?.status ?? null,
+      adjustment: readings.get(name) ?? null,
+      layer,
+      x,
+      y,
+      placement,
+    };
+  };
   const nodes: GraphNode[] = [];
-  const layerCount = Math.max(...layers.keys(), 0) + 1;
-  const tallest = Math.max(...[...layers.values()].map((l) => l.length), 1);
+  const layered = layers.size > 0;
+  const layerCount = layered ? Math.max(...layers.keys()) + 1 : 0;
+  const tallest = layered ? Math.max(...[...layers.values()].map((l) => l.length)) : 0;
   for (const [layer, list] of layers) {
     const offset = ((tallest - list.length) * (NODE_H + ROW_GAP)) / 2;
     list.forEach((name, index) => {
-      const info = tables.get(name);
-      const registry = evaluation.tables.find((t) => t.name === name);
-      const scoreRow = scoreRows.get(name);
-      nodes.push({
-        name,
-        external: !info || info.role === "external",
-        role: info?.role ?? "external",
-        score: scoreRow?.value ?? registry?.table_score ?? null,
-        status: scoreRow?.status ?? null,
-        adjustment: readings.get(name) ?? null,
-        layer,
-        x: PAD + layer * (NODE_W + COL_GAP),
-        y: PAD + offset + index * (NODE_H + ROW_GAP),
-      });
+      nodes.push(
+        nodeOf(name, layer, PAD + layer * (NODE_W + COL_GAP), PAD + offset + index * (NODE_H + ROW_GAP), "layer"),
+      );
     });
   }
+  const tiles = tileNames.map((name) => nodeOf(name, 0, 0, 0, "tile"));
+  nodes.push(...tiles);
   return {
     nodes,
     edges: [...edges.values()].sort(
       (a, b) => statusRank(a.status) - statusRank(b.status) || a.label.localeCompare(b.label),
     ),
-    width: PAD * 2 + layerCount * NODE_W + (layerCount - 1) * COL_GAP,
-    height: PAD * 2 + tallest * NODE_H + (tallest - 1) * ROW_GAP,
+    width: layered ? PAD * 2 + layerCount * NODE_W + (layerCount - 1) * COL_GAP : 0,
+    height: layered ? PAD * 2 + tallest * NODE_H + (tallest - 1) * ROW_GAP : 0,
+    tiles,
+    resolvedFrom: model ? "model" : recorded.length ? "record" : "edges",
   };
 }

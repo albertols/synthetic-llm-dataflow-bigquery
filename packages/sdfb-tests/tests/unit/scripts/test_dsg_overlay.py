@@ -130,6 +130,30 @@ def test_the_copy_ships_the_evaluator_and_never_the_gui():
   ]
 
 
+def test_generator_yaml_is_one_tracked_file_and_ships_twice():
+  packaged = "packages/sdfb-core/src/sdfb_core/config/generator.yaml"
+  modes = dict(
+      line.split("\t")[::-1]
+      for line in subprocess.run([
+          "git", "-C",
+          str(_ROOT), "ls-files", "-s", "config/generator.yaml", packaged
+      ],
+                                 capture_output=True,
+                                 text=True,
+                                 check=True).stdout.splitlines())
+  # one tracked copy: config/generator.yaml is a link to the packaged file
+  assert modes["config/generator.yaml"].startswith("120000 ")
+  assert modes[packaged].startswith("100644 ")
+  tracked = subprocess.run(["git", "-C", str(_ROOT), "ls-files"],
+                           capture_output=True,
+                           text=True,
+                           check=True).stdout.splitlines()
+  shipped = sync.select_files(
+      _ROOT, sync.Manifest.load(_DSG / "manifest.yaml"), files=tracked)
+  # the guide gets both paths; staging copies through the link
+  assert {"config/generator.yaml", packaged} <= set(shipped)
+
+
 def test_terraform_partitions_the_evaluation_tables_as_the_evaluator_does():
   schemas = _EVALUATOR + "src/sdfb_evaluation/schemas/__init__.py"
   partitioning = _literal(schemas, "PARTITIONING")

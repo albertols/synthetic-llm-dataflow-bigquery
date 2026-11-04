@@ -32,8 +32,8 @@ where NumPy is used and deferred-imported.
 
 REF: spec §2 fidelity primitives; ADR 0013 distribution-estimator spine.
 
-Design: docs/DESIGN.md §2 Engines; §5 Fidelity
-(ADR 0013, 0022, 0023, 0024, 0028).
+Design: docs/DESIGN.md §2 Engines; §5 Fidelity; §8 Configuration
+(ADR 0013, 0022, 0023, 0024, 0028, 0043).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -49,6 +49,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
+from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
 from sdfb_core.contracts.prompt_constraint import (
     PromptConstraint,
     parse_prompt_constraint,
@@ -72,16 +73,8 @@ _NUMERIC_BQ_TYPES = frozenset(
 # BQ types whose Python value is a string we might treat as free text.
 _STRINGY_BQ_TYPES = frozenset({"STRING", "JSON", "GEOGRAPHY", "BYTES"})
 
-# A string column with more unique non-null values than this *fraction* of
-# its non-null count, AND a mean rendered length above the threshold, is
-# treated as FREE_TEXT rather than CATEGORICAL. Tuned so low-cardinality
-# enums (country, tier) stay categorical while names / descriptions /
-# free-form notes go to the LLM pool.
-_FREE_TEXT_UNIQUE_RATIO = 0.9
-_FREE_TEXT_MIN_MEAN_LEN = 20
-# Above this absolute distinct count a string column is high-cardinality and
-# treated as free text even if short (e.g. emails, ids-as-strings).
-_FREE_TEXT_MAX_CATEGORIES = 50
+# The routing thresholds (unique ratio, mean length, categories cap) live in
+# the config: `free_text.free_text_*` (ADR 0043).
 # Head-value (dominant literal) capture for FREE_TEXT columns: a value must
 # hold at least this share of the substantive (non-null, non-empty) rows AND
 # at least this many observations before it is re-emitted verbatim — the
@@ -90,7 +83,8 @@ _FREE_TEXT_MAX_CATEGORIES = 50
 _FREE_TEXT_HEAD_MIN_SHARE = 0.05
 _FREE_TEXT_HEAD_MIN_COUNT = 10
 _FREE_TEXT_HEAD_MAX = 8
-# Shape-mix cap for the engines (the stats module keeps 8 for display):
+# Shape-mix cap for the engines; the stats profiler keeps its own,
+# sampling.shape_mix_top_k (8), for the source_table_stats rows only:
 # 2026-08-11 B_TABLE R1, COL_019 — dozens of source shapes, the top-8 mix
 # left ~62% of row mass uncovered (shape recall 0.24).
 _SHAPE_MIX_TOP_K = 32
@@ -109,11 +103,10 @@ _NUMERIC_MAX_CATEGORIES = 20
 # "72-08-01" in the 2026-07-23 E2E run. Mirrors b2_library/fidelity.py.
 _TEMPORAL_SENTINEL_YEARS = frozenset({1, 9999})
 # Interim temporal-age policy (2026-07-23): the jitter floor is clamped to
-# now - 10y; fully-historical columns keep their observed range. Subject to
-# per-column DDL-JSON functional descriptions later (audit fields, FK
-# referential integrity, M2+) — see b2_library/fidelity.py for the full
-# rationale.
-_MAX_TEMPORAL_AGE_YEARS = 10
+# now - `generation.temporal_max_age_years_b1`; fully-historical columns keep
+# their observed range. Subject to per-column DDL-JSON functional
+# descriptions later (audit fields, FK referential integrity, M2+) — see
+# b2_library/fidelity.py for the full rationale.
 
 
 class ColumnKind(StrEnum):
@@ -201,8 +194,12 @@ class ColumnProfile:
   observed_values: tuple[object, ...] = ()
 
 
-def profile_columns(table_schema: TableSchema,
-                    reference_rows: list[dict]) -> dict[str, ColumnProfile]:
+def profile_columns(
+    table_schema: TableSchema,
+    reference_rows: list[dict],
+    *,
+    config: GeneratorConfig = DEFAULT_CONFIG,
+) -> dict[str, ColumnProfile]:
   """Profile every top-level column. Returns name → `ColumnProfile`.
 
     STRUCT/RECORD and REPEATED columns are profiled as CATEGORICAL over
@@ -212,11 +209,12 @@ def profile_columns(table_schema: TableSchema,
   profiles: dict[str, ColumnProfile] = {}
   for col in table_schema.columns:
     values = [r.get(col.name, None) for r in reference_rows]
-    profiles[col.name] = _profile_one(col, values)
+    profiles[col.name] = _profile_one(col, values, config)
   return profiles
 
 
-def _profile_one(col: FieldSchema, values: list[object]) -> ColumnProfile:
+def _profile_one(col: FieldSchema, values: list[object],
+                 config: GeneratorConfig) -> ColumnProfile:
   n = len(values)
   non_null = [v for v in values if v is not None]
   null_fraction = (n - len(non_null)) / n if n else 0.0
@@ -278,10 +276,11 @@ def _profile_one(col: FieldSchema, values: list[object]) -> ColumnProfile:
         with_empties=non_null,
         pc=pc,
         force_llm=force_llm,
+        config=config,
     )
 
   if col.bq_type in _TEMPORAL_BQ_TYPES:
-    return _profile_temporal(col, non_null, nullable, null_fraction)
+    return _profile_temporal(col, non_null, nullable, null_fraction, config)
 
   # BOOL (and anything unrecognized) → categorical over observed values.
   return _profile_categorical(col, non_null, nullable, null_fraction)
@@ -337,6 +336,7 @@ def _profile_temporal(
     non_null: list[object],
     nullable: bool,
     null_fraction: float,
+    config: GeneratorConfig,
 ) -> ColumnProfile:
   """DATE/DATETIME/TIME/TIMESTAMP → TEMPORAL (range-sampled novel values)
     when high-cardinality, CATEGORICAL when the column is an enum in disguise
@@ -353,7 +353,7 @@ def _profile_temporal(
            if f is not None]
   if len(distinct) <= _TEMPORAL_MAX_CATEGORIES or not pairs:
     return _profile_categorical(col, non_null, nullable, null_fraction)
-  lo, hi, sentinels = _temporal_range_and_sentinels(pairs, col.name)
+  lo, hi, sentinels = _temporal_range_and_sentinels(pairs, col.name, config)
   return ColumnProfile(
       name=col.name,
       bq_type=col.bq_type,
@@ -370,6 +370,7 @@ def _profile_temporal(
 def _temporal_range_and_sentinels(
     pairs: list[tuple[object, float, int | None]],
     column_name: str,
+    config: GeneratorConfig,
 ) -> tuple[float, float, tuple[tuple[object, float], ...]]:
   """(lo, hi, sentinels) for a TEMPORAL column's jitter range.
 
@@ -377,8 +378,8 @@ def _temporal_range_and_sentinels(
     Sentinel-year values leave the range and come back as ``(value,
     fraction)`` pairs the sampler re-injects; an all-sentinel column keeps
     its observed range (nothing to trim toward). The floor is then clamped
-    to now - `_MAX_TEMPORAL_AGE_YEARS` unless the whole range is older
-    (fully-historical columns keep old truth; per-column DDL-JSON
+    to now - `generation.temporal_max_age_years_b1` unless the whole range
+    is older (fully-historical columns keep old truth; per-column DDL-JSON
     descriptions will govern those later). TIME columns are untouched by
     the clamp: their axis is seconds-of-day, far below any epoch floor.
     """
@@ -392,14 +393,15 @@ def _temporal_range_and_sentinels(
     sentinels = ()
     floats = [f for _, f, _ in pairs]
   lo, hi = min(floats), max(floats)
+  max_age_years = config.generation.temporal_max_age_years_b1
   floor = (datetime.now(UTC) -
-           timedelta(days=round(_MAX_TEMPORAL_AGE_YEARS * 365.25))).timestamp()
+           timedelta(days=round(max_age_years * 365.25))).timestamp()
   if lo < floor <= hi:
     lo = floor
     log_milestone(
         "temporal_range_clamped",
         column=column_name,
-        max_age_years=_MAX_TEMPORAL_AGE_YEARS,
+        max_age_years=max_age_years,
     )
   return lo, hi, sentinels
 
@@ -458,6 +460,7 @@ def _profile_string(
     with_empties: list[object] | None = None,
     pc: PromptConstraint | None = None,
     force_llm: bool = False,
+    config: GeneratorConfig = DEFAULT_CONFIG,
 ) -> ColumnProfile:
   """`non_null` arrives with trimmed-empty strings already removed;
     `with_empties` keeps them for the CATEGORICAL fallthrough, where the
@@ -482,9 +485,11 @@ def _profile_string(
   unique_ratio = (len(distinct) / n) if n else 0.0
   mean_len = (sum(len(s) for s in strings) / n) if n else 0.0
 
-  is_free_text = force_llm or (len(distinct) > _FREE_TEXT_MAX_CATEGORIES or
-                               (unique_ratio >= _FREE_TEXT_UNIQUE_RATIO and
-                                mean_len >= _FREE_TEXT_MIN_MEAN_LEN))
+  routing = config.free_text
+  unique_valued = unique_ratio >= routing.free_text_unique_ratio
+  is_free_text = force_llm or (
+      len(distinct) > routing.free_text_max_categories or
+      (unique_valued and mean_len >= routing.free_text_min_mean_len))
   head_values = _free_text_head_values(strings) if is_free_text else ()
   # Shape-mix input is ROWS minus head values (2026-08-11 R1 pair): the
   # distinct-set input weighted every mask by its distinct-value count and
@@ -505,7 +510,7 @@ def _profile_string(
       for s in strings:
         parsed = parse_temporal_string(s, fmt)
         pairs.append((s, parsed.replace(tzinfo=UTC).timestamp(), parsed.year))
-      lo, hi, sentinels = _temporal_range_and_sentinels(pairs, col.name)
+      lo, hi, sentinels = _temporal_range_and_sentinels(pairs, col.name, config)
       return ColumnProfile(
           name=col.name,
           bq_type=col.bq_type,
@@ -531,7 +536,7 @@ def _profile_string(
           null_fraction=null_fraction,
           empty_fraction=empty_fraction,
           identifier_shape=shape,
-          is_unique_valued=unique_ratio >= _FREE_TEXT_UNIQUE_RATIO,
+          is_unique_valued=unique_valued,
           observed_values=tuple(strings),
           # The mask MIX, not just the collapsed template: variant
           # masks merge into digit+upper classes and lose fixed
@@ -559,7 +564,7 @@ def _profile_string(
         text_examples=examples,
         # Nearly-all-distinct reference values (ids, unique prose): the
         # engine must not fold observed values into the generated pool.
-        is_unique_valued=unique_ratio >= _FREE_TEXT_UNIQUE_RATIO,
+        is_unique_valued=unique_valued,
         observed_values=tuple(strings),
         shape_mix=build_shape_mix(mix_rows, top_k=_SHAPE_MIX_TOP_K),
         head_values=head_values,

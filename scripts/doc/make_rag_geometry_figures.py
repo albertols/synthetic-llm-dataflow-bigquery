@@ -81,6 +81,7 @@ import b1_rag_walkthrough as walkthrough
 import make_ws5_figures as ws5
 # The article quotes what these private helpers do, so the figures run them.
 # pylint: disable=protected-access
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.engines.b1_rag import engine as b1
 from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.rag.chunking import MAX_ROW_DOC_ROWS
@@ -100,7 +101,7 @@ DOT = "#c3cad3"  # recessive data points (darker than GRID: they are data)
 # The drawio/mermaid house classes lend two more hues when five columns of a
 # table each need their own (identity is also carried by the printed name).
 PURPLE, SLATE = "#7a3fd1", "#6b7280"
-K = b1._DEFAULT_TOP_K  # 8 — the engine's own constant
+K = DEFAULT_CONFIG.rag.rag_top_k  # 8 — the engine's own default
 # What article 4 prints for (seeds per column, indexed rows): a change to
 # either constant must fail here, so the article is re-synced on purpose.
 ARTICLE_CONSTANTS = (8, 1024)
@@ -499,7 +500,8 @@ def fig_seed_budget(pts, lab) -> None:
   values = list(dict.fromkeys(walkthrough._MERCHANTS))
   prompt_bytes = [
       len(
-          b1._build_pool_prompt("merchant_name", b1._POOL_VALUES_PER_CALL,
+          b1._build_pool_prompt("merchant_name",
+                                DEFAULT_CONFIG.free_text.pool_values_per_call,
                                 values[:k]).encode()) for k in ks
   ]
   fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(13, 4.9), facecolor=SURFACE)
@@ -540,7 +542,7 @@ def fig_seed_budget(pts, lab) -> None:
       color=INK,
       fontsize=9.5,
       ha="right")
-  ax1.text(K + 0.4, 0.25, f"k = {K}\n(_DEFAULT_TOP_K)", color=MUTED, fontsize=9)
+  ax1.text(K + 0.4, 0.25, f"k = {K}\n(rag.rag_top_k)", color=MUTED, fontsize=9)
   ws5._title(ax1, "Coverage saturates early when seeds are spread",
              "toy column, 5 modes — picks by select_seed_examples()")
   ax2.plot(ks, prompt_bytes, color=INK, linewidth=2, marker="o", markersize=4.5)

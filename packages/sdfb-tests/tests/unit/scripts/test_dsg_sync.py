@@ -496,6 +496,27 @@ def test_export_ref_uses_git_archive_so_untracked_files_never_ship(tmp_path):
   assert sorted(p.name for p in dest.iterdir()) == [".gitignore", "tracked.txt"]
 
 
+def test_a_linked_file_ships_as_a_real_file_with_its_target_bytes(tmp_path):
+  repo = tmp_path / "repo"
+  git = _git_repo(repo)
+  _source(repo)
+  _write(repo, "pkg/conf/defaults.yaml", "a: 1\n")
+  (repo / "conf").mkdir()
+  (repo / "conf/defaults.yaml").symlink_to("../pkg/conf/defaults.yaml")
+  subprocess.run([*git, "add", "."], check=True)
+  subprocess.run([*git, "commit", "-qm", "init"], check=True)
+  export, staging = tmp_path / "export", tmp_path / "staging"
+  sha, _ = sync.export_ref(repo, "HEAD", export)
+  assert (export / "conf/defaults.yaml").is_symlink()
+  manifest = _manifest(
+      include=["README.md", "pkg/**", "scripts/tool.py", "conf/defaults.yaml"])
+  sync.stage_tree(export, manifest, staging, sha=sha, ref="v1")
+  shipped = staging / _PIPE / "conf/defaults.yaml"
+  assert shipped.is_file() and not shipped.is_symlink()
+  assert shipped.read_text(encoding="utf-8") == "a: 1\n"
+  assert (staging / _PIPE / "pkg/conf/defaults.yaml").is_file()
+
+
 def test_commit_uses_the_checkout_identity_and_no_trailers(tmp_path):
   repo = tmp_path / "dsg"
   repo.mkdir()

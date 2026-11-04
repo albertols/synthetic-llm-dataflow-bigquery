@@ -37,9 +37,12 @@ service account needs no `roles/logging.viewer` and no
        the datasets as the import filled them, and give `generation_job_id`
        when it is known. The job id is then only the launch's identity: the
        evaluator reads the Dataflow job for its window (needs
-       `roles/dataflow.viewer`; without it, a warning and no window) and one
-       query on `validation_runs_table` for this launch's rows, whose digest
-       verifies the reference sample.
+       `roles/dataflow.viewer`; without it, a warning and no window) and
+       this launch's rows of `validation_runs_table`, whose digest verifies
+       the reference sample. When those rows carry the generation record
+       (ADR 0044), the record names the tables, their datasets, the
+       relationship model and `reference_rows_limit` instead of the seed and
+       the params, each difference a warning.
     2. a landed run whose job id is unknown: `seed_table` alone. No identity,
        no window, so the reference sample cannot be verified and the metrics
        that compare with it are "not evaluated" (the reason is on the row).
@@ -73,8 +76,10 @@ The DAG id is fixed (`sdfb_evaluation_framework`).
 
 Substitution markers (all of them are ones the import workflow already
 substitutes for the generation DAG; run the same substitution on this file):
-  {{PROJECT_VERSION}}         project version the template was built for
-                              (`sdfb-<version>-template.json`)
+  {{PROJECT_VERSION}}         the version the template is named after
+                              (`sdfb-<version>-template.json`); a Release build
+                              takes GENERATOR_VERSION_BASE from
+                              sdfb_core/version.py (ADR 0044, RUN_PLAYBOOK §0a)
   {{ENV}}                     dev | uat | prd
   {{GCS_DATAFLOW_STAGING}}    <env>-…-dataflow-staging bucket name
   {{GCS_DATAFLOW_TEMPLATES}}  <env>-…-dataflow-templates bucket name
@@ -556,7 +561,10 @@ default_dag_params = {
             description="Shapes 1 and 2: the table a generation launched "
             "(default: the import's default table). Evaluates its enabled "
             "group of tables in the relationship model (relationships_uri), "
-            "or that table alone. EMPTY it for the full lookup (shape 3). "
+            "or that table alone. With generation_job_id and "
+            "validation_runs_table (shape 1), the launch's generation record "
+            "names the tables instead when it has one (ADR 0044). EMPTY it "
+            "for the full lookup (shape 3). "
             "Ignored when run_id or tables is given.",
         ),
     "run_id":
@@ -611,7 +619,10 @@ default_dag_params = {
             "With seed_table it is where the seed's group of tables is read; "
             "empty, or a folder with no model file, evaluates the seed "
             "alone. For a multi-table run, give the model the generation "
-            "used.",
+            "used. With generation_job_id and validation_runs_table (shape "
+            "1), a generation record replaces it with the model the launch "
+            "used, or with none when the launch generated without one (ADR "
+            "0044).",
         ),
     "scope":
         Param(
@@ -634,7 +645,9 @@ default_dag_params = {
             description="The generation's reference sample size (the value "
             "the generation DAG passes): it sizes the reference panel behind "
             "the privacy metrics and limits nothing that is compared. It "
-            "must equal the generation's.",
+            "must equal the generation's; with generation_job_id and "
+            "validation_runs_table (shape 1) a generation record's value "
+            "replaces it (ADR 0044), this one being the fallback.",
         ),
     "validation_runs_table":
         Param(
@@ -646,7 +659,9 @@ default_dag_params = {
             "launch's rows of it verify the rebuilt reference sample, so the "
             "reference-based privacy metrics are evaluated; without it, or "
             "without the job's window, they are not evaluated and the row "
-            "says why. Needs read on the table.",
+            "says why. Needs read on the table. When those rows carry the "
+            "generation record (ADR 0044), it also names the tables, their "
+            "datasets, the relationship model and reference_rows_limit.",
         ),
     "mode":
         Param(

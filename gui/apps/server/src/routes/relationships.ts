@@ -1,7 +1,8 @@
 /**
  * `GET /api/relationships` — the relationship models a registry row can name: the
  * committed sample models (generated/relationships.json) plus, in mock mode, the
- * mock's invented model. Real models (gitignored, or on GCS) are never read here.
+ * mock's three invented models (`thelook_demo`, `adjusted_keys_demo`,
+ * `isolated_forest_demo`). Real models (gitignored, or on GCS) are never read here.
  */
 import { relationships, type RelationshipsResponse } from "@synthetic-platform/contracts";
 import type { FastifyPluginAsync } from "fastify";

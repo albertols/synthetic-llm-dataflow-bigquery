@@ -30,6 +30,8 @@ from __future__ import annotations
 import argparse
 from unittest import mock
 
+from sdfb_core.config.model import REQUIRED_FLAGS
+
 __all__ = ["generator_flags", "generator_parser", "generator_required"]
 
 
@@ -76,4 +78,4 @@ def generator_flags() -> set[str]:
 
 def generator_required() -> set[str]:
   """The flags the generator's parser refuses a launch without."""
-  return _names(action for action in _actions() if action.required)
+  return set(REQUIRED_FLAGS)

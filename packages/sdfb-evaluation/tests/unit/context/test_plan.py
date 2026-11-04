@@ -63,6 +63,7 @@ from .plan_fakes import (
     BASE,
     DS,
     EXTERNAL,
+    JOB_ID,
     MODEL_URI,
     NOW,
     QDS,
@@ -1595,3 +1596,67 @@ def test_planning_logs_every_step_of_every_table_and_a_summary(caplog):
   # the summary is the last line; no SQL text and no row value is logged
   assert _SUMMARY.fullmatch(lines[-1])
   assert not [m for m in lines if "SELECT" in m or "example.com" in m]
+
+
+def test_the_registry_row_carries_the_generation_record():
+  bq = thelook_bq()
+  launch = thelook_launch(bq)
+  snapshot = {
+      "config_version": 1,
+      "values": {
+          "generation": {
+              "similarity": 0.7
+          }
+      }
+  }
+  runs = tuple(
+      dataclasses.replace(
+          r,
+          generator_version="0.6.1-master-edcfdcd",
+          config_digest="0123456789ab",
+          config=snapshot) for r in launch.runs)
+  plan, _ = _plan(bq, dataclasses.replace(launch, runs=runs))
+  seed = plan.registry_seed()
+  _check_row(seed)
+  assert seed["generator_version"] == "0.6.1-master-edcfdcd"
+  assert seed["generator_config_digest"] == "0123456789ab"
+  assert seed["generation_params"] == snapshot
+
+
+def test_a_launch_without_a_record_writes_nulls_and_flat_params():
+  plan, _ = _plan()
+  seed = plan.registry_seed()
+  assert seed["generator_version"] is None
+  assert seed["generator_config_digest"] is None
+  assert seed["generation_params"]["run_id"] == BASE
+  assert "values" not in seed["generation_params"]
+
+
+def test_the_registry_row_records_every_generation_job():
+  bq = thelook_bq()
+  launch = dataclasses.replace(
+      thelook_launch(bq),
+      generation_job_id="job-0",
+      generation_job_ids=("job-0", "job-1"))
+  plan, _ = _plan(bq, launch)
+  seed = plan.registry_seed()
+  _check_row(seed)
+  assert seed["generation_job_id"] == "job-0"
+  assert seed["generation_job_ids"] == ["job-0", "job-1"]
+
+
+def test_a_single_job_evaluation_records_its_one_job():
+  plan, _ = _plan()
+  seed = plan.registry_seed()
+  assert seed["generation_job_id"] == JOB_ID
+  assert seed["generation_job_ids"] == [JOB_ID]
+
+
+def test_an_evaluation_that_names_no_job_records_none():
+  bq = thelook_bq()
+  plan, _ = _plan(
+      bq, dataclasses.replace(thelook_launch(bq), generation_job_id=None))
+  seed = plan.registry_seed()
+  _check_row(seed)
+  assert seed["generation_job_id"] is None
+  assert seed["generation_job_ids"] == []

@@ -20,8 +20,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [[ -n "${PROJECT:-}" ]] || source "${SCRIPT_DIR}/00_set_variables.sh"
 cd "${SCRIPT_DIR}/.."
 
-# Stamped into the image and logged by every job, so a run names its build.
+# Stamped into the image and logged by every job, with the branch, so a run
+# names its build (ADR 0044).
 GIT_COMMIT="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+GIT_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
 
 gcloud builds submit \
   --project="${PROJECT}" \
@@ -29,5 +31,5 @@ gcloud builds submit \
   --config=cloudbuild.yaml \
   --service-account="projects/${PROJECT}/serviceAccounts/${BUILD_SERVICE_ACCOUNT}" \
   --default-buckets-behavior=regional-user-owned-bucket \
-  --substitutions="_TAG=${CONTAINER_URI},_GIT_COMMIT=${GIT_COMMIT}" \
+  --substitutions="_TAG=${CONTAINER_URI},_GIT_COMMIT=${GIT_COMMIT},_GIT_BRANCH=${GIT_BRANCH}" \
   .

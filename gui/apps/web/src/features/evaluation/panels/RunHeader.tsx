@@ -48,6 +48,9 @@ function whenLine(evaluation: EvaluationRecord, stale: boolean): string {
   return `${evaluation.event === "RUNNING" ? "running since" : "evaluated"} ${formatDateTime(evaluation.evaluated_at)}`;
 }
 
+/** Above this many tables the scope table scrolls inside its frame (its header row is sticky). */
+const SCOPE_ROWS_MAX = 12;
+
 export function RunHeader({
   evaluation,
   contractWarnings,
@@ -153,7 +156,10 @@ export function RunHeader({
         </Callout>
       ) : null}
 
-      <TableContainer aria-label="Tables in scope">
+      <TableContainer
+        aria-label="Tables in scope"
+        className={evaluation.tables.length > SCOPE_ROWS_MAX ? "max-h-96" : undefined}
+      >
         <Table>
           <TableHeader>
             <TableRow className="hover:bg-transparent">

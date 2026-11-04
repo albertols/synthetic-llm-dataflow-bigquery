@@ -47,9 +47,9 @@ Pure-Python module: NO `apache_beam` / `torch` / `vllm` / `faiss` / `numpy`
 imports at module scope. Heavy deps are deferred into the seams.
 
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
-§6 Throughput
+§6 Throughput; §8 Configuration
 (ADR 0013, 0018, 0019, 0020, 0022, 0023, 0024, 0028, 0030, 0031, 0033, 0034,
-0036, 0037).
+0036, 0037, 0043).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -67,6 +67,7 @@ from collections import Counter
 from typing import TYPE_CHECKING, Any, NamedTuple, cast
 
 from sdfb_core.codegen import derive_record_model
+from sdfb_core.config.salt import settings_salt
 from sdfb_core.engines.b1_rag._fidelity import ColumnSampler, numpy_available
 from sdfb_core.engines.b1_rag.profile import (
     ColumnKind,
@@ -87,7 +88,6 @@ from sdfb_core.engines.constraint_sampler import (
 )
 from sdfb_core.engines.fanout import FanoutPlan, expand_keys
 from sdfb_core.engines.fk_keys import bind_fk_key_pools
-from sdfb_core.engines.generation_plan import FREE_TEXT_POOL_MAX
 from sdfb_core.engines.generation_plan import (
     build_constraints_detail as _build_constraints_detail,)
 from sdfb_core.engines.generation_plan import build_plan as _build_plan
@@ -135,6 +135,7 @@ from sdfb_core.seeding import derive_batch_seed
 if TYPE_CHECKING:  # pragma: no cover - typing only
   from collections.abc import Callable, Iterator, Mapping, Sequence
 
+  from sdfb_core.config.model import FreeTextSettings
   from sdfb_core.contracts import GeneratedRecord
   from sdfb_core.engines.base import (
       GenerationConfig,
@@ -144,49 +145,19 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
   from sdfb_core.rag.index import ExactIPIndex
   from sdfb_core.rag.store import ChunkStore
 
-# Top-k exemplars retrieved to condition the LLM's free-text inference.
-_DEFAULT_TOP_K = 8
-# Free-text pool scaling (WS2 §4b.2). Per-column target =
-# min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX); the 32-value pool
-# of the 2026-07-19 run oversampled 3 columns 28-619x. Each LLM call stays
-# bounded at _POOL_VALUES_PER_CALL values — multiple bounded calls, never
-# per-row work (ADR 0013's FASTGEN spine).
-_FREE_TEXT_POOL_MAX = FREE_TEXT_POOL_MAX
-_POOL_VALUES_PER_CALL = 32
+# The pool ladder's knobs (pool ceiling, per-call batch, parallel choices,
+# stagnation and format-collapse exits, ladder threads) and the exemplar
+# top-k come from the launch config — `ctx.generator_config.free_text` and
+# `.rag` (ADR 0043); each field's rationale sits beside it in
+# `sdfb_core/config/model.py`. Free-text pool scaling (WS2 §4b.2): the
+# per-column target is min(num_rows, column_distinct, free_text_pool_max);
+# the 32-value pool of the 2026-07-19 run oversampled 3 columns 28-619x.
+# Each LLM call stays bounded at pool_values_per_call values — multiple
+# bounded calls, never per-row work (ADR 0013's FASTGEN spine).
 # Routed-draw rejection bound (ADR 0028): with clause value spaces at
 # 1e19+ and forbidden sets at 1e5, a miss is ~1e-14 per try — the bound
 # exists to make pathological saturation a loud error, not a hang.
 _ROUTED_DRAW_TRIES = 16
-# Server-side parallel sampling (2026-07-25 perf fix): each pool HTTP round
-# trip requests this many INDEPENDENT array-completions (`n=`) and de-dupes
-# across them, multiplying per-call novel yield ~4x. Safe because pool
-# requests are UNSEEDED — the 2026-07-16 collapse was n=32 single-value
-# choices under a pinned seed, a different shape entirely. The prompt stays
-# byte-identical across attempts (stable prefix ⇒ vLLM APC / LMCache-ready).
-_POOL_PARALLEL_CHOICES = 4
-# Stagnation exit (2026-07-23 E2E): 2 of 3 pool columns rode the full
-# 2*ceil(target/32)=32-call budget (~30 min of T4 setup) while marginal
-# novel yield had collapsed to cross-call duplicates and prompt echoes.
-# Once every escalation level has run, _POOL_STAGNATION_WINDOW consecutive
-# attempts each adding fewer than _POOL_STAGNATION_MIN_NOVEL novel values
-# end the ladder — more retries at the ceiling level cannot outrun the
-# yield decay.
-_POOL_STAGNATION_WINDOW = 3
-_POOL_STAGNATION_MIN_NOVEL = max(1, _POOL_VALUES_PER_CALL // 8)
-# Format-collapse exit (ADR 0033, 2026-08-25/26 R6 A_COL_037): 385/393
-# and 386/393 parsed values were format-rejected — 28-char values into a
-# fixed 31-char bucket, the model echoing its clause's own off-format
-# example — over three ~150 s T4 rounds before the stagnation window
-# closed. A full-yield round with ZERO in-format values is a structural
-# mismatch temperature cannot fix; two in a row end the ladder.
-_POOL_FORMAT_COLLAPSE_ROUNDS = 2
-# Ladders for different columns are independent — run them on a bounded
-# thread pool. vLLM continuous-batches concurrent requests on the server
-# side; the client (openai/httpx) is thread-safe; embedder work is NOT
-# (HF "Already borrowed") and therefore finishes before any thread spawns.
-_POOL_BUILD_MAX_WORKERS = 4
-# Back-compat alias: the historical single-call pool size == one call's batch.
-_DEFAULT_FREE_TEXT_POOL = _POOL_VALUES_PER_CALL
 # Identifier mask-mix gate: the top-8 masks must cover at least this share
 # of the column's DISTINCT values before the mix replaces the collapsed
 # template (rigid-mask columns qualify; 36-hex-style random masks must not
@@ -216,10 +187,12 @@ _NUMERIC_KANON_MIN_COUNT = 10
 # column's ladder crashes DoFn.setup() and Dataflow retries the bundle with
 # a FRESH engine in the SAME worker process — without this cache the retry
 # rebuilt every sibling column's pool from scratch (~15-19 min/attempt).
-# Keyed on (reference_digest, model_uri, column, target); disabled when the
-# digest is empty. Deliberately process-lived (teardown() must not clear
+# Keyed on (reference_digest, model_uri, column, target, settings salt) —
+# the salt keeps two configs in one process from sharing a pool, exactly
+# as the persisted store's key does (ADR 0043); disabled when the digest
+# is empty. Deliberately process-lived (teardown() must not clear
 # it) — the module-level vLLM server reuse (_SERVER_REFS) is the precedent.
-_POOL_CACHE: dict[tuple[str, str, str, int], tuple[str, ...]] = {}
+_POOL_CACHE: dict[tuple[str, str, str, int, str], tuple[str, ...]] = {}
 _POOL_CACHE_LOCK = threading.Lock()
 
 
@@ -316,7 +289,8 @@ class B1RagEngine(GenerationEngine):
     self._record_model = derive_record_model(ctx.table_schema)
 
     # 3. profile columns (cheap O(N_ref) pass).
-    self._profiles = profile_columns(ctx.table_schema, ctx.reference_rows)
+    self._profiles = profile_columns(
+        ctx.table_schema, ctx.reference_rows, config=ctx.generator_config)
     # FK columns take the parent's landed key TUPLES (ADR 0031) —
     # drawn jointly at batch time, so the profile override here only
     # keeps them OFF the free-text/LLM path and out of the per-column
@@ -341,7 +315,12 @@ class B1RagEngine(GenerationEngine):
       # "auto" = the worker's GPU when present — the bulk row-doc
       # embed runs before vLLM ignition and demotes right after
       # (ADR 0019), so the two never contend for VRAM.
-      self._embedder = BgeEmbedder(ctx.embedder_uri, device="auto")
+      rag = ctx.generator_config.rag
+      self._embedder = BgeEmbedder(
+          ctx.embedder_uri,
+          device="auto",
+          max_length=rag.bge_max_length,
+          min_free_vram=rag.embedder_min_free_vram)
     else:
       self._embedder = HashingEmbedder(dim=384)
     if ctx.reference_rows:
@@ -587,7 +566,7 @@ class B1RagEngine(GenerationEngine):
         table=ctx.table_schema.fqn,
         columns=len(self._profiles),
         seed_strategy=getattr(ctx, "pool_seed_strategy", "centroid"),
-        top_k=_DEFAULT_TOP_K,
+        top_k=ctx.generator_config.rag.rag_top_k,
         plan=json.dumps(_build_plan(self._profiles), separators=(",", ":")),
         pool_sources=json.dumps(
             dict(sorted(self._pool_sources.items())),
@@ -1079,7 +1058,7 @@ class B1RagEngine(GenerationEngine):
     return value()
 
   def _stored_pools(self, ctx: GenerationContext) -> dict[str, list[str]]:
-    """Pools already persisted for this (reference_digest, model_uri).
+    """Pools already persisted for this (reference_digest, model key).
 
         Returns column → values. Empty on any of: no store attached, no
         digest to key on, or a store that raised — in every case the ladder
@@ -1089,7 +1068,7 @@ class B1RagEngine(GenerationEngine):
     if store is None or not ctx.reference_digest:
       return {}
     try:
-      fetched = store.fetch(ctx.reference_digest, ctx.model_uri)
+      fetched = store.fetch(ctx.reference_digest, ctx.pool_key())
     except Exception as exc:  # pylint: disable=broad-exception-caught
       log_milestone("freetext_pool_store_error", error=type(exc).__name__)
       return {}
@@ -1163,7 +1142,8 @@ class B1RagEngine(GenerationEngine):
     # never fatal: pools are an optimisation, not a dependency.
     stored = self._resolve_stored_pools(ctx, len(free_text_cols))
 
-    exemplars = self._retrieve_exemplars(ctx, _DEFAULT_TOP_K)
+    exemplars = self._retrieve_exemplars(ctx,
+                                         ctx.generator_config.rag.rag_top_k)
     chunks_by_column = self._fetch_free_text_chunks(ctx)
     # Phase 1 — sequential: seed-example retrieval touches the embedder
     # (HF fast tokenizers are not thread-safe), and the source-value
@@ -1195,7 +1175,8 @@ class B1RagEngine(GenerationEngine):
     # table tag the moment they hop threads.
     scope_table = milestone_scope_value()
     with ThreadPoolExecutor(
-        max_workers=min(_POOL_BUILD_MAX_WORKERS, len(jobs)),
+        max_workers=min(ctx.generator_config.free_text.pool_build_max_workers,
+                        len(jobs)),
         thread_name_prefix="sdfb-pool",
         initializer=(functools.partial(set_milestone_scope_for_thread,
                                        scope_table) if scope_table else None),
@@ -1263,12 +1244,13 @@ class B1RagEngine(GenerationEngine):
       return None
     if self._take_binary_fallback(prof, ctx, pools):
       return None
-    seed_examples = self._column_seed_examples(prof, ctx, _DEFAULT_TOP_K,
+    top_k = ctx.generator_config.rag.rag_top_k
+    seed_examples = self._column_seed_examples(prof, ctx, top_k,
                                                chunks_by_column.get(prof.name))
     if not seed_examples:
       seed_examples = [
           e[prof.name] for e in exemplars if e.get(prof.name) not in (None, "")
-      ][:_DEFAULT_TOP_K] or list(prof.text_examples[:_DEFAULT_TOP_K])
+      ][:top_k] or list(prof.text_examples[:top_k])
     # The source filter is fetched BEFORE the target is sized: its
     # size is the column's exact cardinality, already paid for (ADR
     # 0033 — 2026-08-25/26 R6 A_COL_015: sample distinct 94, filter
@@ -1561,10 +1543,11 @@ class B1RagEngine(GenerationEngine):
     return frozenset(values)
 
   def _pool_cache_key(self, ctx: GenerationContext, column: str,
-                      target: int) -> tuple[str, str, str, int] | None:
+                      target: int) -> tuple[str, str, str, int, str] | None:
     if not ctx.reference_digest:
       return None
-    return (ctx.reference_digest, ctx.model_uri, column, target)
+    return (ctx.reference_digest, ctx.model_uri, column, target,
+            settings_salt(ctx.generator_config, "freetext_pools"))
 
   def _pool_target(
       self,
@@ -1572,7 +1555,7 @@ class B1RagEngine(GenerationEngine):
       ctx: GenerationContext,
       source_cardinality: int = 0,
   ) -> int:
-    """min(num_rows, column_distinct, _FREE_TEXT_POOL_MAX), skipping
+    """min(num_rows, column_distinct, free_text_pool_max), skipping
         unknown (zero/empty) bounds. `column_distinct` prefers the Tier-2
         exact count (`ctx.source_distinct`, ADR 0022), then the source
         filter's cardinality (`source_cardinality`, ADR 0033 — the filter
@@ -1580,7 +1563,7 @@ class B1RagEngine(GenerationEngine):
         only then the sample distinct, which under-estimates true
         cardinality and starved pools (five-run verdict: sample 95 vs
         source 4k; 2026-08-25/26 R6: 94 vs 4,022 with Tier-2 absent)."""
-    bounds = [_FREE_TEXT_POOL_MAX]
+    bounds = [ctx.generator_config.free_text.free_text_pool_max]
     if ctx.num_rows > 0:
       bounds.append(ctx.num_rows)
     distinct = (
@@ -1630,6 +1613,8 @@ class B1RagEngine(GenerationEngine):
     if space is None:
       return None
     vectors, texts = space
+    assert self._ctx is not None  # a seed space exists only after setup()
+    top_k = self._ctx.generator_config.rag.rag_top_k
 
     constraint = self._column_constraint(prof)
 
@@ -1637,7 +1622,7 @@ class B1RagEngine(GenerationEngine):
       rotated = select_seed_examples(
           vectors,
           texts,
-          _DEFAULT_TOP_K,
+          top_k,
           strategy="kcenter_rotate",
           attempt=attempt,
       )
@@ -1696,9 +1681,11 @@ class B1RagEngine(GenerationEngine):
     """Fill a bounded unique pool for one free-text column from batched
         LLM calls conditioned on retrieved exemplars."""
     assert self._client is not None
+    assert self._ctx is not None
+    ladder = self._ctx.generator_config.free_text
     t_column = time.monotonic()
     self._pool_sources[prof.name] = "llm_ladder"
-    per_call = min(target, _POOL_VALUES_PER_CALL)
+    per_call = min(target, ladder.pool_values_per_call)
     constraint = self._column_constraint(prof)
     prompt = _build_pool_prompt(
         prof.name, per_call, seed_examples, constraint=constraint)
@@ -1735,8 +1722,10 @@ class B1RagEngine(GenerationEngine):
           prof,
           seed_examples,
           target=target,
+          n_choices=ladder.pool_parallel_choices,
           prompt_for_attempt=prompt_for_attempt,
           source_values=source_values,
+          ladder=ladder,
       )
     except ModelClientTransientError:
       # The client was not usable — not "the LLM yielded nothing".
@@ -2086,10 +2075,12 @@ def _pool_llm_yield(
     json_schema: dict,
     prof: ColumnProfile,
     seed_examples: list[str],
-    target: int = _DEFAULT_FREE_TEXT_POOL,
-    n_choices: int = _POOL_PARALLEL_CHOICES,
+    target: int,
+    n_choices: int,
     prompt_for_attempt=None,
     source_values: frozenset[str] = frozenset(),
+    *,
+    ladder: FreeTextSettings,
 ) -> _PoolYield:
   """Run the pool call at escalating sampling levels, accumulating novel
     values until the pool reaches ``target``. Breaking on the FIRST
@@ -2098,16 +2089,18 @@ def _pool_llm_yield(
     2026-07-17 E2E run landed a 4-value pool over 1000 rows and the
     unclamped retry levels never executed.
 
-    Calls are bounded at `max(len(levels), 2*ceil(target/_POOL_VALUES_PER_CALL))`,
+    Calls are bounded at `max(len(levels), 2*ceil(target/per_round))`,
     cycling the escalation ladder (last level repeats). After every level has
-    run once, `_POOL_STAGNATION_WINDOW` consecutive low-novelty attempts end
-    the loop early (`freetext_pool_stagnated` milestone) — the 2026-07-23 E2E
-    run burned 30 min of T4 setup on attempts that only re-emitted duplicates.
+    run once, `ladder.pool_stagnation_window` consecutive low-novelty
+    attempts end the loop early (`freetext_pool_stagnated` milestone) — the
+    2026-07-23 E2E run burned 30 min of T4 setup on attempts that only
+    re-emitted duplicates.
 
     No request seed: a pinned seed with n>1 collapses all n vLLM choices
     into one completion (2026-07-15 run). Unseeded, the n choices sample
-    independently, so one round trip carries n distinct 32-value arrays —
-    the call budget scales down by the same factor (`per_round`).
+    independently, so one round trip carries n distinct arrays of
+    `ladder.pool_values_per_call` values each — the call budget scales down
+    by the same factor (`per_round`).
     """
   # Rejection set: the profiled sample PLUS (when a SourceValueStore is
   # attached) the column's full source domain — a candidate equal to ANY
@@ -2150,7 +2143,7 @@ def _pool_llm_yield(
   n_format_rejected = 0
   attempts = 0
   levels = escalating_sampling()
-  per_round = _POOL_VALUES_PER_CALL * max(1, n_choices)
+  per_round = ladder.pool_values_per_call * max(1, n_choices)
   max_calls = max(len(levels), 2 * -(-target // per_round))
   stagnant = 0
   hit_stagnation = False
@@ -2180,8 +2173,9 @@ def _pool_llm_yield(
     values = [v for v in parsed_values if in_format(v)]
     n_format_rejected += len(parsed_values) - len(values)
     # Format collapse: a full-yield round with zero in-format values.
-    collapse_rounds = _collapse_rounds(collapse_rounds, parsed_values, values)
-    if collapse_rounds >= _POOL_FORMAT_COLLAPSE_ROUNDS:
+    collapse_rounds = _collapse_rounds(
+        collapse_rounds, parsed_values, values, ladder=ladder)
+    if collapse_rounds >= ladder.pool_format_collapse_rounds:
       n_parsed += len(parsed_values)
       log_milestone(
           "freetext_pool_format_collapse",
@@ -2201,8 +2195,8 @@ def _pool_llm_yield(
     n_copies += copies
     n_echoes += echoes
     seen.update(values)
-    stagnant = stagnant + 1 if added < _POOL_STAGNATION_MIN_NOVEL else 0
-    if stagnant >= _POOL_STAGNATION_WINDOW and attempts >= len(levels):
+    stagnant = stagnant + 1 if added < ladder.stagnation_min_novel else 0
+    if stagnant >= ladder.pool_stagnation_window and attempts >= len(levels):
       log_milestone(
           "freetext_pool_stagnated",
           level=logging.WARNING,
@@ -2265,11 +2259,11 @@ def _clamp_to_ceiling(values: list[str],
   return [v[:ceiling] for v in values], n_long
 
 
-def _collapse_rounds(streak: int, parsed: list[str],
-                     in_format: list[str]) -> int:
+def _collapse_rounds(streak: int, parsed: list[str], in_format: list[str], *,
+                     ladder: FreeTextSettings) -> int:
   """Consecutive full-yield rounds (≥ one array's worth parsed) with zero
     in-format values — the format-collapse signature (ADR 0033)."""
-  if len(parsed) >= _POOL_VALUES_PER_CALL and not in_format:
+  if len(parsed) >= ladder.pool_values_per_call and not in_format:
     return streak + 1
   return 0
 

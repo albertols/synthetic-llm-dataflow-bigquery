@@ -489,8 +489,8 @@ def test_all_sentinel_year_temporal_column_keeps_full_range():
 
 # ---------------------------------------------------------------------------
 # Interim temporal-age policy (2026-07-23): generated dates must not be older
-# than _MAX_TEMPORAL_AGE_YEARS (10). The jitter floor is clamped to
-# max(observed_min, now - 10y); fully-historical columns keep their observed
+# than generation.temporal_max_age_years_b2 (10). The jitter floor is clamped
+# to max(observed_min, now - 10y); fully-historical columns keep their observed
 # range untouched (a fabricated recent window would be worse than old truth —
 # per-column DDL-JSON functional descriptions will govern those later).
 # ---------------------------------------------------------------------------

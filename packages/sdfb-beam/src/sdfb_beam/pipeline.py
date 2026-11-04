@@ -30,9 +30,9 @@ REFs:
   - https://beam.apache.org/documentation/programming-guide/#additional-outputs
 
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
-§6 Throughput; §8 Configuration
-(ADR 0019, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0034, 0035, 0036, 0037,
-0038).
+§6 Throughput; §7 Validation and the dead-letter queue; §8 Configuration
+(ADR 0019, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0034, 0036, 0037, 0038,
+0043, 0044, 0045).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -47,20 +47,18 @@ from __future__ import annotations
 import functools
 import hashlib
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import apache_beam as beam
 from apache_beam.metrics import Metrics
 from apache_beam.transforms import combiners
+from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
 from sdfb_core.contracts import TableSchema
-from sdfb_core.contracts.model_adjustment import (
-    REPEAT_SHARE_TOLERANCE,
-    ModelAdjustment,
-)
+from sdfb_core.contracts.model_adjustment import ModelAdjustment
 from sdfb_core.engines import GenerationContext, ModelClient
 from sdfb_core.engines.fanout import FanoutPlan, conditional_edge_id
-from sdfb_core.engines.pk_capacity import FK_KEY_SAMPLE_FLOOR
 from sdfb_core.observability import log_milestone
 from sdfb_core.rag.chunking import (
     MAX_ROW_DOC_ROWS,
@@ -68,6 +66,8 @@ from sdfb_core.rag.chunking import (
     compute_row_digest,
     distinct_free_text_values,
 )
+from sdfb_core.record import LaunchRecord
+from sdfb_core.version import generator_version
 from sdfb_core.validation import (
     STATUS_FAILED_BLOCKER,
     BlockerThresholdExceeded,
@@ -85,6 +85,7 @@ from sdfb_beam.dofns import (
 from sdfb_beam.dofns.fk_integrity import EnforceFkIntegrityDoFn
 from sdfb_beam.dofns.pools import BuildFreeTextPoolsDoFn
 from sdfb_beam.io.digest import compute_reference_digest
+from sdfb_beam.io.gce_metadata import read_job_id
 from sdfb_beam.rag.population import ChunkReferenceRowsDoFn, EmbedChunksDoFn
 
 
@@ -101,8 +102,8 @@ class PipelineConfig:
   engine_name: str
   model_client: ModelClient
   num_rows: int
-  batch_size: int = 16
-  similarity: float = 0.5
+  batch_size: int = DEFAULT_CONFIG.generation.batch_size
+  similarity: float = DEFAULT_CONFIG.generation.similarity
   seed: int | None = None
   # Per-row-unique columns (PK/UUID) synthesized fresh each row; never
   # sampled from reference data. See engines/identity.py.
@@ -143,6 +144,12 @@ class PipelineConfig:
   landing_table: str = ""
   thresholds: Thresholds | None = None
   fail_on_blocker: bool = True
+  # A whole-model batch records the BLOCKER verdict in validation_runs
+  # instead of failing the job (ADR 0045, revised 2026-10-31).
+  blocker_verdict_only: bool = False
+  # False when the live validation_runs table lacks status_reason, so
+  # FILE_LOADS gets no unknown field.
+  write_status_reason: bool = True
   # RAG layer (WS2 §4b). rag_chunks_table threads the READ path into the
   # worker ctx (self-gating on data); embedder identity pins the vector
   # space and must come from the ORIGINAL embedder URI (driver-side).
@@ -169,17 +176,17 @@ class PipelineConfig:
   # gated separately by the driver passing `freetext_pools_store`.
   freetext_pools_table: str = ""
   # WS5 §3 seeding experiment: centroid | kcenter | kcenter_rotate.
-  pool_seed_strategy: str = "centroid"
+  pool_seed_strategy: str = DEFAULT_CONFIG.free_text.pool_seed_strategy
   # Shape-preserving expander (2026-08-05 spec C3): off | identifiers
   # (default) | all. See GenerationContext.freetext_expansion.
-  freetext_expansion: str = "identifiers"
+  freetext_expansion: str = DEFAULT_CONFIG.free_text.freetext_expansion
   # Attach per-column llm_prompt_constraint (from column-description
   # JSON) to pool prompts (spec C5). See GenerationContext.prompt_constraints.
   prompt_constraints: bool = True
   # off | redacted | full — log each built pool prompt as a
   # freetext_pool_prompt milestone (ADR 0024 §3c). See
   # GenerationContext.prompt_debug.
-  prompt_debug: str = "off"
+  prompt_debug: str = DEFAULT_CONFIG.free_text.prompt_debug
   # Tier-2 exact per-column distinct counts (--source_stats=exact,
   # ADR 0022) — feeds free-text pool sizing. Empty = Tier 1 only.
   source_distinct: dict = field(default_factory=dict)
@@ -206,7 +213,7 @@ class PipelineConfig:
   # WS6 W3: "exact" (default, today) diverts every duplicate to the DLQ
   # behind up to three shuffle barriers; "streaming" lands rows as they
   # are generated and measures the duplicate rate instead.
-  uniqueness_mode: str = "exact"
+  uniqueness_mode: str = DEFAULT_CONFIG.guardrails.uniqueness_mode
   # RAG population embed (ADR 0034 D8, rev. 2026-09-08). The device is
   # the worker GPU on every topology ("auto"); moving it to CPU under
   # multi starved the model pull and the vLLM engine init instead
@@ -223,6 +230,16 @@ class PipelineConfig:
   # None = this table generates from `--num_rows` batch requests as
   # before.
   fanout: dict | None = None
+  # ADR 0043: the launch's resolved generator config, copied into the
+  # worker `GenerationContext`.
+  generator_config: GeneratorConfig = field(
+      default_factory=lambda: DEFAULT_CONFIG)
+  # A1 ruling R14 — the pool store key the launcher computed once.
+  pool_store_key: str = ""
+  # ADR 0044 — this job's generation record as the launcher built it.
+  # None writes exactly master's 21-column summary row (the launcher passes
+  # None when validation_runs lacks the record columns).
+  record: LaunchRecord | None = None
 
 
 def _default_requests(p: beam.Pipeline, config: PipelineConfig,
@@ -255,6 +272,7 @@ def build_pipeline(
     label_prefix: str = "",
     fk_side: Any = None,
     requests: Any = None,
+    defer_shared_writes: bool = False,
 ) -> dict[str, Any]:
   """Wire the synthesis DAG onto an existing Beam Pipeline.
 
@@ -271,6 +289,13 @@ def build_pipeline(
     request dicts (`_fanout_requests`) that REPLACES the driver-built
     ``Create(request_specs)`` below — a driven child has no `--num_rows`
     batch plan, only its parent's landed key batches.
+
+    ``defer_shared_writes`` leaves the three writes N tables share (the RAG
+    chunks, the DLQ, the validation_runs row) and the BLOCKER gate to the
+    caller: the result carries ``rag_chunks``, ``dlq`` and
+    ``validation_run`` for `build_relational_pipeline` to write ONCE per
+    destination (`_SharedWrites`; one load job per table per job, not one
+    per generated table).
     """
   for label, cols in (
       ("identity_columns", config.identity_columns),
@@ -315,6 +340,8 @@ def build_pipeline(
       source_distinct=config.source_distinct,
       source_values_table=config.source_values_table,
       fanout=config.fanout,
+      generator_config=config.generator_config,
+      pool_store_key=config.pool_store_key,
   )
 
   if requests is None:
@@ -331,7 +358,8 @@ def build_pipeline(
   if rag_chunks_sink is not None:
     chunks = _population_branch(
         p, config, reference_rows, digest, label_prefix=label_prefix)
-    _ = chunks | f"{label_prefix}WriteRagChunks" >> rag_chunks_sink
+    if not defer_shared_writes:
+      _ = chunks | f"{label_prefix}WriteRagChunks" >> rag_chunks_sink
 
   # WS5 §2 / 2026-07-29 four-run postmortem — optional free-text pool
   # build branch. The driver decides (digest existence check) whether to
@@ -427,19 +455,23 @@ def build_pipeline(
                         uniq) | f"{label_prefix}FlattenDLQ" >> beam.Flatten()
   dlq = dlq_raw | f"{label_prefix}NormalizeDLQ" >> beam.Map(
       normalize_dlq_record, run_id=config.run_id)
-  _ = dlq | f"{label_prefix}WriteDLQ" >> dlq_sink
+  if not defer_shared_writes:
+    _ = dlq | f"{label_prefix}WriteDLQ" >> dlq_sink
 
   result: dict[str, Any] = {
       "reference_digest": digest,
       "run_id": config.run_id,
       "valid": uniq["unique"],
       "dlq": dlq,
+      "rag_chunks": chunks,
       "generation_context": ctx,
   }
 
   # §12 — run-level summary row + BLOCKER gate. Only wired when a
   # validation_runs sink is supplied; happy-path DirectRunner tests that
-  # don't assert run metadata omit it.
+  # don't assert run metadata omit it. Under `blocker_verdict_only` the
+  # gate logs and yields instead of raising; a `SkippedTable` row rides
+  # the same job (`write_skipped_validation_run`).
   if validation_runs_sink is not None:
     thresholds = config.thresholds or Thresholds(
         env="dev", blocker_failure_ratio=1.0)
@@ -449,37 +481,68 @@ def build_pipeline(
     summary_rows = (
         p
         | f"{label_prefix}SummarySeed" >> beam.Create([None])
-        | f"{label_prefix}BuildValidationRun" >> beam.Map(
-            _build_validation_run_row,
+        | f"{label_prefix}BuildValidationRun" >> beam.ParDo(
+            _BuildValidationRunDoFn(
+                record=config.record,
+                row_kwargs={
+                    "thresholds":
+                        thresholds,
+                    "run_id":
+                        config.run_id,
+                    "reference_digest":
+                        digest,
+                    "num_rows":
+                        config.num_rows,
+                    "reference_table":
+                        config.reference_table,
+                    "landing_table":
+                        config.landing_table,
+                    "engine":
+                        config.engine_name,
+                    "model_uri":
+                        config.model_uri,
+                    "excluded_blocker_rules":
+                        tuple(config.gate_excluded_rules),
+                    "write_status_reason":
+                        config.write_status_reason,
+                    "source_repeat_share":
+                        config.source_repeat_share,
+                    "repeat_share_tolerance":
+                        config.generator_config.guardrails
+                        .repeat_share_tolerance,
+                },
+            ),
             valid_count=beam.pvalue.AsSingleton(valid_count),
             dlq_by_rule=beam.pvalue.AsSingleton(dlq_by_rule),
-            thresholds=thresholds,
-            run_id=config.run_id,
-            reference_digest=digest,
-            num_rows=config.num_rows,
-            reference_table=config.reference_table,
-            landing_table=config.landing_table,
-            engine=config.engine_name,
-            model_uri=config.model_uri,
-            excluded_blocker_rules=tuple(config.gate_excluded_rules),
-            source_repeat_share=config.source_repeat_share,
         ))
-    write_result = summary_rows | f"{label_prefix}WriteValidationRun" >> validation_runs_sink
-    if config.fail_on_blocker:
-      gate_kwargs = {}
-      load_jobs = getattr(write_result, "destination_load_jobid_pairs", None)
-      if load_jobs is not None:
-        # Order the gate AFTER the FILE_LOADS load jobs commit — a
-        # tripped gate must fail the JOB, not suppress the FAILED
-        # run's own summary row (2026-07-20 b2 run: zero
-        # validation_runs trace). Non-BQ sinks (DirectRunner tests)
-        # expose no WriteResult and keep the sibling wiring.
-        gate_kwargs["wait_on_write"] = beam.pvalue.AsIter(load_jobs)
-      _ = summary_rows | f"{label_prefix}BlockerGate" >> beam.ParDo(
-          _BlockerGateDoFn(), **gate_kwargs)
+    if not defer_shared_writes:
+      write_result = summary_rows | f"{label_prefix}WriteValidationRun" >> validation_runs_sink
+      _blocker_gate(summary_rows, write_result, config, label_prefix)
     result["validation_run"] = summary_rows
 
   return result
+
+
+def _blocker_gate(summary_rows, write_result, config: PipelineConfig,
+                  label_prefix: str) -> None:
+  """The table's BLOCKER gate over its summary row, ordered after the
+    `validation_runs` write that row went through (its own, or the one a
+    relational job's tables share). No gate unless the config asks for
+    one."""
+  if not (config.fail_on_blocker or config.blocker_verdict_only):
+    return
+  gate_kwargs = {}
+  load_jobs = getattr(write_result, "destination_load_jobid_pairs", None)
+  if load_jobs is not None:
+    # Order the gate AFTER the FILE_LOADS load jobs commit — a
+    # tripped gate must fail the JOB, not suppress the FAILED
+    # run's own summary row (2026-07-20 b2 run: zero
+    # validation_runs trace). Non-BQ sinks (DirectRunner tests)
+    # expose no WriteResult and keep the sibling wiring.
+    gate_kwargs["wait_on_write"] = beam.pvalue.AsIter(load_jobs)
+  _ = summary_rows | f"{label_prefix}BlockerGate" >> beam.ParDo(
+      _BlockerGateDoFn(fail_job=config.fail_on_blocker and
+                       not config.blocker_verdict_only), **gate_kwargs)
 
 
 def _dlq_inputs(generated, fk_invalid, record_validated, batch_validated, uniq):
@@ -532,13 +595,6 @@ def _generate_pardo(config: PipelineConfig, ctx, fk_side):
   return beam.ParDo(dofn)
 
 
-# In-DAG FK key-pool cap (ADR 0030) — the floor: a child samples from at
-# most this many parent key tuples unless its PK contains the FK, in which
-# case preflight sizes the edge's `key_sample_cap` from num_rows and the
-# sibling PK members (ADR 0035 — the 2026-09-09 C_TABLE collapse).
-_FK_SIDE_SAMPLE_CAP = FK_KEY_SAMPLE_FLOOR
-
-
 @dataclass(frozen=True)
 class FkEdgeSpec:
   """One enforced FK edge resolved INSIDE the job (ADR 0030): the
@@ -557,9 +613,11 @@ class FkEdgeSpec:
   # built PCollection up by.
   parent_table: str = ""
   parent_pk: tuple[str, ...] = ()
-  # Parent key tuples the child sees (ADR 0035): the floor unless the
-  # child's PK contains this edge's columns, then preflight's sizing.
-  key_sample_cap: int = FK_KEY_SAMPLE_FLOOR
+  # Parent key tuples the child sees (ADR 0030, 0035): the floor
+  # (`relational.fk_key_sample_floor`) unless the child's PK contains this
+  # edge's columns, then preflight's sizing from num_rows and the sibling
+  # PK members (the 2026-09-09 C_TABLE collapse).
+  key_sample_cap: int = DEFAULT_CONFIG.relational.fk_key_sample_floor
   # ADR 0036: "side_input" (ADR 0030 key sample), "fanout" (this edge DRIVES
   # the child — its parent's keys are the child's generation input) or
   # "implied" (satisfied by construction through the driving edge; no DAG
@@ -577,7 +635,7 @@ class FkEdgeSpec:
   # every `rest` column is NULLABLE in the landing schema — the engine's
   # NULL policy for a key with no candidate (design §4 ruling B).
   overlap: tuple[str, ...] = ()
-  candidate_cap: int = 64
+  candidate_cap: int = DEFAULT_CONFIG.relational.fk_candidate_cap
   nullable: bool = False
 
   @property
@@ -607,6 +665,16 @@ class TableSpec:
   adjustments: tuple[ModelAdjustment, ...] = ()
 
 
+@dataclass(frozen=True)
+class SkippedTable:
+  """A table the launcher skipped at preflight: its prebuilt
+    `FAILED_PREFLIGHT` validation_runs row, written by the same job."""
+
+  landing_table: str
+  row: dict
+  validation_runs_sink: beam.PTransform
+
+
 def _edge_key_pools(parent_valid, edge: FkEdgeSpec, prefix: str):
   """The parent's landed key TUPLES for one edge → a one-element
     PCollection holding ``[{"cols": [...], "keys": [(v, …), …]}]``.
@@ -632,9 +700,7 @@ def _edge_key_pools(parent_valid, edge: FkEdgeSpec, prefix: str):
       _key_pool_payload, cols=list(edge.child_cols), cap=edge.key_sample_cap)
 
 
-def _key_pool_payload(keys,
-                      cols: list[str],
-                      cap: int = _FK_SIDE_SAMPLE_CAP) -> list[dict]:
+def _key_pool_payload(keys, cols: list[str], cap: int) -> list[dict]:
   """One edge's side-input payload. The cap is announced, never
     silent: a child sampling 100k of a larger parent's keys references
     only those, which caps its own FK distinct count."""
@@ -1140,7 +1206,11 @@ def _route_parent_edges(spec: TableSpec, valid_by_landing: dict[str, Any],
 
 
 def build_relational_pipeline(
-    p: beam.Pipeline, specs: list[TableSpec]) -> dict[str, dict[str, Any]]:
+    p: beam.Pipeline,
+    specs: list[TableSpec],
+    skipped: Sequence[SkippedTable] = (),
+    *,
+    record: LaunchRecord | None = None) -> dict[str, dict[str, Any]]:
   """N tables, ONE pipeline (ADR 0030): each table's full subgraph
     (pools, RAG, generation, validation, DLQ, gate) label-namespaced by
     its landing table name; a child's FK columns take the parent's
@@ -1148,15 +1218,31 @@ def build_relational_pipeline(
     ordering barrier — children never generate before parents. One
     worker fleet, one vLLM ignition, serves every table.
 
-    ``specs`` must arrive parents-first (`plan_launch` order). Returns
+    ``specs`` must arrive parents-first (`plan_launch` order). Each
+    ``skipped`` table gets its prebuilt row written, with ``record``.
+
+    The RAG chunks, the DLQ and the validation_runs rows are written once
+    per sink: the tables handed the SAME sink object (the launcher shares
+    one per destination table, `run_pipeline._share_sinks`) are flattened
+    into one write, so a batch of ten tables fires one load job into each
+    shared table instead of ten — BigQuery allows about five table updates
+    per ten seconds per table, and the 2026-11-03 batches whose ten
+    `rag_chunks` loads landed inside fifteen seconds failed on
+    `rateLimitExceeded` (ADR 0045 D9). Each row still carries its own
+    table and run id; each table's pool trigger still waits on its own
+    chunks (ADR 0034 D8); each table's BLOCKER gate waits on the shared
+    write's load jobs. A table alone on its sink keeps its own labelled
+    write, as before.
+    Returns
     {landing_table: build_pipeline result}."""
   valid_by_landing: dict[str, Any] = {}
   results: dict[str, dict[str, Any]] = {}
+  writes = _SharedWrites()
   for spec in specs:
     name = spec.config.landing_table.rsplit(".", 1)[-1]
     prefix = f"{name}/"
     side, requests = _route_parent_edges(spec, valid_by_landing, prefix)
-    results[spec.config.landing_table] = build_pipeline(
+    result = build_pipeline(
         p,
         reference_rows=spec.reference_rows,
         config=spec.config,
@@ -1169,10 +1255,100 @@ def build_relational_pipeline(
         label_prefix=prefix,
         fk_side=side,
         requests=requests,
+        defer_shared_writes=True,
     )
-    valid_by_landing[spec.config.landing_table] = results[
-        spec.config.landing_table]["valid"]
+    results[spec.config.landing_table] = result
+    valid_by_landing[spec.config.landing_table] = result["valid"]
+    if spec.rag_chunks_sink is not None:
+      writes.add(_RAG_CHUNKS, spec.rag_chunks_sink,
+                 _Write(result["rag_chunks"], f"{prefix}WriteRagChunks"))
+    writes.add(_DLQ, spec.dlq_sink, _Write(result["dlq"], f"{prefix}WriteDLQ"))
+    if spec.validation_runs_sink is not None:
+      writes.add(
+          _VALIDATION_RUNS, spec.validation_runs_sink,
+          _Write(result["validation_run"], f"{prefix}WriteValidationRun",
+                 (spec.config, prefix)))
+  for s in skipped:
+    name = s.landing_table.rsplit(".", 1)[-1]
+    writes.add(
+        _VALIDATION_RUNS, s.validation_runs_sink,
+        _Write(
+            skipped_validation_rows(p, s, record=record),
+            f"{name}/WriteSkippedValidationRun"))
+  writes.apply()
   return results
+
+
+def write_skipped_validation_run(p: beam.Pipeline, skipped: SkippedTable, *,
+                                 record: LaunchRecord | None) -> None:
+  """Write a skipped table's prebuilt `FAILED_PREFLIGHT` row, with the
+    launch record's columns and the worker fields when ``record`` is given."""
+  name = skipped.landing_table.rsplit(".", 1)[-1]
+  _ = (
+      skipped_validation_rows(p, skipped, record=record)
+      | f"{name}/WriteSkippedValidationRun" >> skipped.validation_runs_sink)
+
+
+def skipped_validation_rows(p: beam.Pipeline, skipped: SkippedTable, *,
+                            record: LaunchRecord | None):
+  """A skipped table's one `FAILED_PREFLIGHT` row, unwritten."""
+  name = skipped.landing_table.rsplit(".", 1)[-1]
+  return (p
+          | f"{name}/SkippedSeed" >> beam.Create([None])
+          | f"{name}/BuildSkippedValidationRun" >> beam.ParDo(
+              _BuildValidationRunDoFn(record=record, prebuilt_row=skipped.row)))
+
+
+# The writes a relational job's tables share, and the labels a shared one
+# takes (`_SharedWrites`): one Flatten, one write.
+_RAG_CHUNKS = ("RagChunks", "WriteRagChunks")
+_DLQ = ("DLQ", "WriteDLQ")
+_VALIDATION_RUNS = ("ValidationRuns", "WriteValidationRun")
+
+
+@dataclass(frozen=True)
+class _Write:
+  """One table's rows for a shared sink: the PCollection, the label its
+    write takes when the table is alone on the sink, and, for a
+    validation_runs row, the (config, label prefix) of its BLOCKER gate."""
+
+  rows: Any
+  label: str
+  gate: tuple[PipelineConfig, str] | None = None
+
+
+class _SharedWrites:
+  """The shared writes of `build_relational_pipeline`, grouped by sink
+    object, in the order the tables added them."""
+
+  def __init__(self) -> None:
+    self._groups: dict[tuple[tuple[str, str], int], tuple[Any,
+                                                          list[_Write]]] = {}
+
+  def add(self, kind: tuple[str, str], sink: beam.PTransform,
+          write: _Write) -> None:
+    self._groups.setdefault((kind, id(sink)), (sink, []))[1].append(write)
+
+  def apply(self) -> None:
+    """Apply every write: a sink with one table writes under that table's
+      label (the graph of before); a sink several tables share writes once,
+      over a Flatten, under the kind's label (numbered from the second
+      such sink of a kind). Then each validation_runs row's gate."""
+    shared: dict[tuple[str, str], int] = {}
+    for (kind, _), (sink, writes) in self._groups.items():
+      if len(writes) == 1:
+        written = writes[0].rows | writes[0].label >> sink
+      else:
+        shared[kind] = shared.get(kind, 0) + 1
+        number = "" if shared[kind] == 1 else str(shared[kind])
+        flatten, label = kind
+        written = (
+            tuple(w.rows for w in writes)
+            | f"{flatten}{number}/Flatten" >> beam.Flatten()
+            | f"{label}{number}" >> sink)
+      for w in writes:
+        if w.gate is not None:
+          _blocker_gate(w.rows, written, *w.gate)
 
 
 def _population_branch(
@@ -1204,9 +1380,12 @@ def _population_branch(
   distinct_values: dict[str, list[str]] = {}
   if present is None:
     free_text_columns = _rag_free_text_columns(config.table_schema,
-                                               reference_rows)
-    distinct_values = distinct_free_text_values(reference_rows,
-                                                free_text_columns)
+                                               reference_rows,
+                                               config.generator_config)
+    distinct_values = distinct_free_text_values(
+        reference_rows,
+        free_text_columns,
+        cap=config.generator_config.rag.max_free_text_values_per_column)
   row_doc_chunks = (
       p
       | f"{label_prefix}RagReferenceRows" >> beam.Create(prefix)
@@ -1248,7 +1427,12 @@ def _population_branch(
       | f"{label_prefix}RagBatchChunks" >> beam.BatchElements(
           min_batch_size=32, max_batch_size=256)
       | f"{label_prefix}RagEmbedChunks" >> beam.ParDo(
-          EmbedChunksDoFn(config.embedder_uri, device=config.rag_embed_device)))
+          EmbedChunksDoFn(
+              config.embedder_uri,
+              device=config.rag_embed_device,
+              max_length=config.generator_config.rag.bge_max_length,
+              min_free_vram=config.generator_config.rag.embedder_min_free_vram))
+  )
   return chunks
 
 
@@ -1261,13 +1445,15 @@ def _rag_shard_key(chunk, shards: int) -> int:
 
 
 def _rag_free_text_columns(table_schema: TableSchema,
-                           reference_rows: list[dict]) -> list[str]:
+                           reference_rows: list[dict],
+                           generator_config: GeneratorConfig) -> list[str]:
   """Columns that get `free_text_col` chunks — B.1's own FREE_TEXT
     classification, minus identifier-shaped ones (retrieval-worthy prose,
     not per-row IDs)."""
   from sdfb_core.engines.b1_rag.profile import ColumnKind, profile_columns
 
-  profiles = profile_columns(table_schema, reference_rows)
+  profiles = profile_columns(
+      table_schema, reference_rows, config=generator_config)
   return [
       p.name
       for p in profiles.values()
@@ -1357,6 +1543,8 @@ def _build_validation_run_row(
     model_uri: str,
     excluded_blocker_rules: tuple[str, ...] = (),
     source_repeat_share: float | None = None,
+    repeat_share_tolerance: float,
+    write_status_reason: bool = True,
 ) -> dict:
   """Driver of the single validation_runs row (side inputs are singletons).
 
@@ -1379,6 +1567,7 @@ def _build_validation_run_row(
       model_uri=model_uri,
       excluded_blocker_rules=excluded_blocker_rules,
       source_repeat_share=source_repeat_share,
+      repeat_share_tolerance=repeat_share_tolerance,
   )
   if summary.source_repeat_share is not None:
     log_milestone(
@@ -1395,15 +1584,74 @@ def _build_validation_run_row(
                  if summary.landing_repeat_share is not None else ""),
         delta=(round(summary.repeat_share_delta, 4)
                if summary.repeat_share_delta is not None else ""),
-        tolerance=REPEAT_SHARE_TOLERANCE,
+        tolerance=repeat_share_tolerance,
         within_tolerance=summary.repeat_share_within_tolerance,
         excluded_blocker_rules=summary.excluded_blocker_rules,
     )
-  return summary.to_bq_row()
+  return summary.to_bq_row(with_status_reason=write_status_reason)
+
+
+class _BuildValidationRunDoFn(beam.DoFn):
+  """The table's one `validation_runs` row and, with a launch record, the
+    generation record's fourteen columns (ADR 0044).
+
+    `setup()` runs once per DoFn instance on a worker: it reads the
+    Dataflow job id from the GCE metadata server — only when the launcher
+    ran on Dataflow — and this worker's generator version, and warns once
+    when that version is not the launcher's (the rows are the worker's
+    code's, so the row records the worker's)."""
+
+  def __init__(self,
+               *,
+               record: LaunchRecord | None,
+               row_kwargs: dict[str, Any] | None = None,
+               prebuilt_row: dict | None = None):
+    super().__init__()
+    if (row_kwargs is None) == (prebuilt_row is None):
+      raise ValueError("give exactly one of row_kwargs and prebuilt_row")
+    self._record = record
+    self._row_kwargs = row_kwargs
+    self._prebuilt_row = prebuilt_row
+    self._worker: dict[str, Any] = {}
+
+  def setup(self):
+    if self._record is None:
+      return
+    job_id, source = (
+        read_job_id() if self._record.read_job_id else (None, "not_dataflow"))
+    worker_version = generator_version()
+    log_milestone(
+        "generation_record_job_id", job_id=job_id or "", source=source)
+    if worker_version != self._record.launcher_version:
+      log_milestone(
+          "generator_version_mismatch",
+          level=logging.WARNING,
+          launcher=self._record.launcher_version,
+          worker=worker_version,
+      )
+    self._worker = {"job_id": job_id, "generator_version": worker_version}
+
+  # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
+  def process(self, unused_seed, valid_count=None, dlq_by_rule=None):
+    if self._prebuilt_row is not None:
+      row = dict(self._prebuilt_row)
+    else:
+      row = _build_validation_run_row(
+          unused_seed,
+          valid_count=valid_count,
+          dlq_by_rule=dlq_by_rule,
+          **self._row_kwargs)
+    if self._record is not None:
+      row.update(self._record.columns)
+      row.update(self._worker)
+    yield row
 
 
 class _BlockerGateDoFn(beam.DoFn):
   """Fails the Dataflow job when the run summary tripped the BLOCKER gate.
+
+    With ``fail_job=False`` (a whole-model batch) it logs
+    ``blocker_gate_recorded`` and yields instead.
 
     ``wait_on_write`` is an optional ``AsIter`` side input over the
     upstream sink's FILE_LOADS ``destination_load_jobid_pairs`` (see
@@ -1416,9 +1664,23 @@ class _BlockerGateDoFn(beam.DoFn):
     which left zero trace in `synthetic_data_quality.validation_runs`.
     """
 
+  def __init__(self, *, fail_job: bool = True):
+    super().__init__()
+    self._fail_job = fail_job
+
   # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, row: dict, wait_on_write=None):  # pylint: disable=unused-argument
-    if row.get("status") == STATUS_FAILED_BLOCKER:
+    if row.get("status") == STATUS_FAILED_BLOCKER and not self._fail_job:
+      log_milestone(
+          "blocker_gate_recorded",
+          level=logging.ERROR,
+          table=(row.get("landing_table") or "").rsplit(".", 1)[-1],
+          run_id=row.get("run_id"),
+          blocker_count=row.get("blocker_count"),
+          observed=row.get("observed_blocker_ratio"),
+          gate=row.get("blocker_failure_ratio"),
+      )
+    elif row.get("status") == STATUS_FAILED_BLOCKER:
       raise BlockerThresholdExceeded(
           f"run_id={row.get('run_id')} blocker_count={row.get('blocker_count')} "
           f"observed={row.get('observed_blocker_ratio')} > "

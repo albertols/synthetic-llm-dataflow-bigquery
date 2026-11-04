@@ -44,6 +44,10 @@ export interface RelationTable {
   enabled: boolean;
   note: string;
   fk: RelationEdge[];
+  /** ADR 0045 — `[project.]dataset.table` this table's source is read from, when not the launch's source dataset under its own name. Absent when the model does not set it. */
+  source_table?: string;
+  /** ADR 0045 — this table's own row count; absent = the launch's `num_rows` (a child driven by its parent's keys never has one). */
+  num_rows?: number;
 }
 
 export interface RelationshipModel {

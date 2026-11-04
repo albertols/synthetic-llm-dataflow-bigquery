@@ -37,13 +37,6 @@ from sdfb_core.observability import (
     sha12,
 )
 
-# The bounded-pool ceiling shared by the engines' free-text ladders and
-# the launcher's PK-capacity preflight (ADR 0028 P4): a constrained
-# column with no samplable pattern can never exceed this many distinct
-# values, so a PK routed there caps at it — the 2026-08-21 run DLQ'd
-# 999 488 of 1M rows exactly this way.
-FREE_TEXT_POOL_MAX = 512
-
 # (engine, reference_digest, table_fqn) triples already logged by this
 # worker process. Keyed per engine so a b1 + b2 comparison run on the same
 # reference sample logs BOTH plans.

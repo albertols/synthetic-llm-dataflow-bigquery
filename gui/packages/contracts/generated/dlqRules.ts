@@ -19,6 +19,7 @@ export type DlqRuleId =
   | "regex.format"
   | "row.duplicate"
   | "schema.batch"
+  | "schema.column"
   | "schema.non_finite"
   | "schema.types";
 
@@ -32,7 +33,7 @@ export const dlqRules: DlqRulesFile = {
       "error_type": "engine",
       "pipeline_step": "GenerateRecordsDoFn",
       "stage": "pre_write",
-      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:627",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:629",
       "declared": true,
       "severity": "BLOCKER",
       "dimension": "reliability",
@@ -71,7 +72,7 @@ export const dlqRules: DlqRulesFile = {
       "error_type": "referential_integrity",
       "pipeline_step": "GenerateRecordsDoFn",
       "stage": "pre_generate",
-      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:476",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:478",
       "declared": false,
       "severity": null,
       "dimension": null,
@@ -227,12 +228,25 @@ export const dlqRules: DlqRulesFile = {
       "error_type": "pandera",
       "pipeline_step": "PanderaValidateBatchDoFn",
       "stage": "pre_write",
-      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/pandera_batch.py:70",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/pandera_batch.py:101",
       "declared": true,
       "severity": "CRITICAL",
       "dimension": "validity",
       "scope": "in_dag",
       "counted_in_blocker_gate": false
+    },
+    {
+      "rule_id": "schema.column",
+      "emitted": true,
+      "error_type": "pandera",
+      "pipeline_step": "PanderaValidateBatchDoFn",
+      "stage": "pre_write",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/pandera_batch.py:101",
+      "declared": true,
+      "severity": "BLOCKER",
+      "dimension": "validity",
+      "scope": "in_dag",
+      "counted_in_blocker_gate": true
     },
     {
       "rule_id": "schema.non_finite",
@@ -262,7 +276,7 @@ export const dlqRules: DlqRulesFile = {
     }
   ],
   "exported_from": {
-    "commit": "b1e672da682837318495b58323194e771d6af644",
+    "commit": "6f0f286c831279dc5209d16a8e52fc9c92c64e40",
     "dirty": []
   }
 };

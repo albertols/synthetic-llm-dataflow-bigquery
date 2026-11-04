@@ -85,7 +85,7 @@ SOURCE_FILTER_DISTINCT = (3_030, 4_022, 45_708, 144_039, 73_231
                          )  # freetext_pool_source_filter size=
 POOL_TARGET = (512, 94, 512, 512, 512)  # freetext_pool_built target=
 A15_SAMPLE_DISTINCT = 94  # the 10k-sample cardinality that sized the target
-POOL_CAP = 512  # FREE_TEXT_POOL_MAX
+POOL_CAP = 512  # config key free_text.free_text_pool_max (its default)
 FORMAT_REJECTED_1M = (9, 46, 45, 278, 385)
 FORMAT_REJECTED_10M = (15, 59, 61, 301, 386)
 A37_PARSED = 393  # both runs; attempts=3; shape fallback both runs

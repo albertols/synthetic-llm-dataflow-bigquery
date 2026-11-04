@@ -205,11 +205,13 @@ gcloud billing accounts remove-iam-policy-binding $BILLING_ACCOUNT_ID \
 
 Seeded from the build of this layer; append as discovered.
 
-- **T4 needs `vllm_dtype=float16` + `vllm_max_model_len=8192`.** The staged
+- **T4 needs `gpu=t4` (float16) + `vllm_max_model_len=8192`.** The staged
   qwen3-4b checkpoint ships bf16, which Turing (T4) can't run natively —
-  `vllm_dtype=float16` downcasts it. `vllm_max_model_len=8192` caps the KV
-  cache so it fits the T4's 16GB VRAM; both are baked into `tiers.yaml`
-  defaults, not optional.
+  `gpu=t4` derives `vllm_dtype=float16`, which downcasts it (left at the `l4`
+  default, the launch derives bfloat16 and the vLLM client refuses it before
+  the server starts); `tiers.yaml` also pins `vllm_dtype=float16`.
+  `vllm_max_model_len=8192` caps the KV cache so it fits the T4's 16GB VRAM;
+  all three are baked into `tiers.yaml` defaults, not optional.
 - **citibike has no natural primary key.** The public
   `bigquery-public-data.new_york_citibike.citibike_trips` table has no row
   id, so the one-time snapshot in `03_storage_bq.sh` synthesizes one with

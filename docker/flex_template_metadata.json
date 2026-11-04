@@ -23,7 +23,7 @@
     {
       "name": "reference_rows_limit",
       "label": "Reference rows LIMIT",
-      "helpText": "Generation: cap on rows pulled by SELECT ... LIMIT N. Default 10000; a positive integer. Evaluation: the generation's reference sample size (a positive integer; empty means not given). It sizes the reference panel behind the privacy metrics, which an evaluation named by seed_table, tables or relationships_uri cannot read from the launch's records: without it those metrics are not evaluated.",
+      "helpText": "Generation: cap on rows pulled by SELECT ... LIMIT N. Default 10000; a positive integer. Evaluation: the generation's reference sample size (a positive integer; empty means not given). It sizes the reference panel behind the privacy metrics. An evaluation named by tables or relationships_uri cannot read it from the launch's records; one named by seed_table reads it from the generation record (with generation_job_id and validation_runs_table, ADR 0044), whose value wins, this one being the fallback. With a value from neither, those metrics are not evaluated.",
       "isOptional": true
     },
     {
@@ -56,7 +56,7 @@
     {
       "name": "num_rows",
       "label": "Number of synthetic rows to generate",
-      "helpText": "Positive integer. Required for generation.",
+      "helpText": "Positive integer: the rows a root table generates; a driven child derives its own (ADR 0036). Omitted: config/generator.yaml's default.",
       "isOptional": true,
       "regexes": [
         "^[1-9][0-9]*$"
@@ -161,7 +161,7 @@
     {
       "name": "build_rag_layer",
       "label": "Populate the RAG chunk store",
-      "helpText": "true/false. Populate rag_chunks from this run's reference sample (skipped when the reference_digest already exists for the embedder id+version). Requires rag_chunks_table.",
+      "helpText": "true/false. Populate rag_chunks from this run's reference sample (skipped when the reference_digest already exists for the embedder id+version). Takes effect with rag_chunks_table; an explicit true without it is refused. Omitted: config/generator.yaml's default.",
       "isOptional": true,
       "regexes": [
         "^(true|false|1|0|yes|no)?$"
@@ -170,7 +170,7 @@
     {
       "name": "validation_runs_table",
       "label": "validation_runs table FQN",
-      "helpText": "Generation: destination BigQuery table for the run-level summary row. project.dataset.table. Optional; empty skips the write. Evaluation: the generator's validation-runs table (project.dataset.table; empty means not given). With generation_job_id next to seed_table, this launch's rows of it, found by landing table and the job's window, give the digest that verifies the reference sample, so the metrics that compare with it are evaluated; without it, or when the job's window cannot be read, those metrics are not evaluated and the row says why.",
+      "helpText": "Generation: destination BigQuery table for the run-level summary row. project.dataset.table. Optional; empty skips the write. Evaluation: the generator's validation-runs table (project.dataset.table; empty means not given). With generation_job_id next to seed_table, this launch's rows of it, found by landing table and the job's window, give the digest that verifies the reference sample, so the metrics that compare with it are evaluated; without it, or when the job's window cannot be read, those metrics are not evaluated and the row says why. Their generation record, when present, also names the tables, datasets, relationship model and reference_rows_limit that were generated (ADR 0044).",
       "isOptional": true
     },
     {
@@ -200,10 +200,37 @@
     {
       "name": "vllm_dtype",
       "label": "vLLM serve dtype override",
-      "helpText": "auto (default) = checkpoint dtype (bf16 for Gemma/Qwen). float16 = explicit downcast REQUIRED on T4 for fp16-safe bf16 checkpoints (Qwen); refused for gemma-family models.",
+      "helpText": "Omitted: derived from gpu (t4 = float16, l4 = bfloat16); a value given here wins. auto = checkpoint dtype (bf16 for Gemma/Qwen). float16 = explicit downcast REQUIRED on T4 for fp16-safe bf16 checkpoints (Qwen); refused for gemma-family models.",
       "isOptional": true,
       "regexes": [
         "^(auto|float16|bfloat16)$"
+      ]
+    },
+    {
+      "name": "gpu",
+      "label": "Worker GPU profile",
+      "helpText": "l4 or t4: the workers' GPU. The launcher derives vllm_dtype from it when vllm_dtype is omitted, and records it; the worker machine and accelerator are the launch's own (workerMachineType, the accelerator experiment). Omitted: config/generator.yaml's default.",
+      "isOptional": true,
+      "regexes": [
+        "^(l4|t4)$"
+      ]
+    },
+    {
+      "name": "sdk_containers",
+      "label": "SDK containers per worker",
+      "helpText": "multi or single (ADR 0034): the worker topology of a vLLM launch. Recorded by the launcher; the topology itself is the launch's experiments (no_use_multiple_sdk_containers for single). Omitted: config/generator.yaml's default.",
+      "isOptional": true,
+      "regexes": [
+        "^(multi|single)$"
+      ]
+    },
+    {
+      "name": "launcher_machine_type",
+      "label": "Launcher machine type",
+      "helpText": "Machine type of the Flex Template launcher VM, recorded by the launcher; the VM itself is the launch's launcherMachineType. Omitted: config/generator.yaml's default.",
+      "isOptional": true,
+      "regexes": [
+        "^[a-z0-9-]+$"
       ]
     },
     {
@@ -254,7 +281,7 @@
     {
       "name": "build_pool_layer",
       "label": "Build the free-text pool store",
-      "helpText": "true/false. Build free-text pools in their own branch and persist them (skipped when this reference_digest already exists for this model_uri). Requires freetext_pools_table.",
+      "helpText": "true/false. Build free-text pools in their own branch and persist them (skipped when this reference_digest already exists for this model_uri). Takes effect with freetext_pools_table; an explicit true without it is refused. Omitted: config/generator.yaml's default.",
       "isOptional": true,
       "regexes": [
         "^(true|false|True|False|1|0|yes|no)?$"
@@ -377,8 +404,59 @@
     {
       "name": "relationships_uri",
       "label": "Relationship models URI",
-      "helpText": "Generation: where the relational models live (ADR 0032): a folder or a single YAML file, local or gs://. Default: the config/relationships folder packaged in the image. Point it at gs://... to change PK/FK/identity without rebuilding \u2014 this is the ONLY source of relational truth; table descriptions are never read for it. Evaluation: the relationship model file or directory. Given alone (with landing_dataset and reference_dataset) it names the tables: every enabled table of the model, parents first. With seed_table it names the model the seed's component is read from; a URI that holds no model file evaluates the seed alone, with a warning. By generation_job_id it is read only when the generation launch's own records name none, and the default folder is in this same image.",
+      "helpText": "Generation: where the relational models live (ADR 0032): a folder or a single YAML file, local or gs://. Default: the config/relationships folder packaged in the image. Point it at gs://... to change PK/FK/identity without rebuilding \u2014 this is the ONLY source of relational truth; table descriptions are never read for it. Evaluation: the relationship model file or directory. Given alone (with landing_dataset and reference_dataset) it names the tables: every enabled table of the model, parents first. With seed_table it names the model the seed's component is read from; a URI that holds no model file evaluates the seed alone, with a warning. By generation_job_id it is read only when the generation launch's own records name none, and the default folder is in this same image. On the seed path a generation record naming a model replaces it, and one stating relationships off overrides it when the record names the tables (ADR 0044).",
       "isOptional": true
+    },
+    {
+      "name": "config_uri",
+      "label": "Generator config file",
+      "helpText": "gs:// path to a generator config YAML (ADR 0043). Keys it sets win over the same parameters here; parameters fill the keys it leaves out. Empty = no file, exactly as before. Reference with every key documented: config/generator.yaml.",
+      "isOptional": true,
+      "regexes": [
+        "^(gs://[^/]+/.+\\.ya?ml)?$"
+      ]
+    },
+    {
+      "name": "source_dataset",
+      "label": "Source dataset (whole-model launch)",
+      "helpText": "With tables=all (ADR 0045): the project.dataset every table's source is read from under its own name, unless the relationships model gives the table a source_table.",
+      "isOptional": true,
+      "regexes": ["^([a-z0-9_-]+\\.[A-Za-z0-9_]+)?$"]
+    },
+    {
+      "name": "max_tables_per_job",
+      "label": "Tables per batch job",
+      "helpText": "With tables=all (ADR 0045): the most tables one Dataflow job generates; a connected component is never split. Default 10.",
+      "isOptional": true,
+      "regexes": ["^[1-9][0-9]*$"]
+    },
+    {
+      "name": "prep_workers",
+      "label": "Launcher prep threads",
+      "helpText": "Threads a multi-table launcher reads schemas, reference samples and source stats on (ADR 0045); 1 = one table after another. Default 8.",
+      "isOptional": true,
+      "regexes": ["^[1-9][0-9]*$"]
+    },
+    {
+      "name": "batch_index",
+      "label": "Batch index",
+      "helpText": "With tables=all and batch_count (ADR 0045): the batch this job generates (b00 is 0). The Composer DAG's tables=all branch sets it; the launcher plans the model again and generates that batch.",
+      "isOptional": true,
+      "regexes": ["^[0-9]+$"]
+    },
+    {
+      "name": "batch_count",
+      "label": "Batch count",
+      "helpText": "With batch_index (ADR 0045): how many batches the Composer DAG's tables=all branch planned; the launcher stops when its own plan differs.",
+      "isOptional": true,
+      "regexes": ["^[1-9][0-9]*$"]
+    },
+    {
+      "name": "generator_defaults_digest",
+      "label": "Generator defaults digest",
+      "helpText": "The digest of the generator.yaml the Composer DAG was imported with. The launcher logs generator_defaults_mismatch when it is not the image's. The DAG sets it.",
+      "isOptional": true,
+      "regexes": ["^[0-9a-f]{12}$"]
     },
     {
       "name": "multi_table_mode",
@@ -440,7 +518,14 @@
     {
       "name": "generation_job_id",
       "label": "Evaluation: Generation job id",
-      "helpText": "Evaluation only. Target: the generation job's Dataflow id. Needs region. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone; the one exception is a seed_table, which generation_job_id may accompany: it is then the identity of the launch the seed names, and only the Dataflow job is read (for its window; never its log or BigQuery job labels; with validation_runs_table given and the window known, this launch's rows of that table are read as well, to verify the reference sample), a job that cannot be read costing the window and a warning. It is not called job_id because the template launcher does not pass a parameter of that name to the pipeline.",
+      "helpText": "Evaluation only. Target: the generation job's Dataflow id. Needs region. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone; the one exception is a seed_table, which generation_job_id may accompany: it is then the identity of the launch the seed names, and only the Dataflow job is read (for its window; never its log or BigQuery job labels; with validation_runs_table given and the window known, this launch's rows of that table are read as well: first for the generation record (ADR 0044), which then names the tables and inputs, and to verify the reference sample), a job that cannot be read costing the window and a warning. It is not called job_id because the template launcher does not pass a parameter of that name to the pipeline.",
+      "paramType": "TEXT",
+      "isOptional": true
+    },
+    {
+      "name": "generation_job_ids",
+      "label": "Evaluation: Generation job ids",
+      "helpText": "Evaluation only. With run_id alone (a whole-model launch's base run id, ADR 0045): the Dataflow ids of its batch jobs that landed, comma-separated. Only their rows of validation_runs are evaluated (a row without a job id is kept, with a note); the registry row records every id, the first as generation_job_id.",
       "paramType": "TEXT",
       "isOptional": true
     },
@@ -453,8 +538,8 @@
     },
     {
       "name": "landing_dataset",
-      "label": "Evaluation: Landing dataset",
-      "helpText": "Evaluation only. With tables, seed_table, or relationships_uri alone: the dataset (or project.dataset) the tables landed in.",
+      "label": "Landing dataset",
+      "helpText": "Generation: with tables=all (ADR 0045), the project.dataset every table lands in. Evaluation: with tables, seed_table, or relationships_uri alone: the dataset (or project.dataset) the tables landed in. On the seed path a generation record's landing dataset replaces it (ADR 0044).",
       "paramType": "TEXT",
       "isOptional": true
     },
@@ -525,7 +610,7 @@
     {
       "name": "reference_dataset",
       "label": "Evaluation: Reference dataset",
-      "helpText": "Evaluation only. With tables, seed_table, or relationships_uri alone: the dataset (or project.dataset) of their sources, same table names.",
+      "helpText": "Evaluation only. With tables, seed_table, or relationships_uri alone: the dataset (or project.dataset) of their sources, same table names. On the seed path a generation record's source dataset replaces it (ADR 0044).",
       "paramType": "TEXT",
       "isOptional": true
     },
@@ -582,14 +667,14 @@
     {
       "name": "seed_table",
       "label": "Evaluation: Seed table",
-      "helpText": "Evaluation only. Target: the table a launch targeted; evaluates what that launch generated: its enabled component in the relationship model (relationships_uri), or the table alone when no model names it or none is given. Needs landing_dataset and reference_dataset. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone; generation_job_id may accompany a seed_table (it then says which generation job the row belongs to, and the row takes the job's start and end from the Dataflow API).",
+      "helpText": "Evaluation only. Target: the table a launch targeted; evaluates what that launch generated: its enabled component in the relationship model (relationships_uri), or the table alone when no model names it or none is given; with generation_job_id and validation_runs_table, the job's generation record names the tables instead when present (ADR 0044), the seed's component being the fallback. Needs landing_dataset and reference_dataset. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone; generation_job_id may accompany a seed_table (it then says which generation job the row belongs to, and the row takes the job's start and end from the Dataflow API).",
       "paramType": "TEXT",
       "isOptional": true
     },
     {
       "name": "tables",
-      "label": "Evaluation: Tables",
-      "helpText": "Evaluation only. Target: landing table names, comma-separated, parents first. Needs landing_dataset and reference_dataset. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone.",
+      "label": "Tables",
+      "helpText": "Generation: which tables the launch generates (ADR 0045). explicit (the default): landing_table and every table its components pull in; all: every enabled table of the one model file relationships_uri names, from source_dataset into landing_dataset, in batch jobs. Evaluation: a target: landing table names, comma-separated, parents first. Needs landing_dataset and reference_dataset. Name exactly one of generation_job_id, run_id, tables, seed_table, or give relationships_uri alone.",
       "paramType": "TEXT",
       "isOptional": true
     },

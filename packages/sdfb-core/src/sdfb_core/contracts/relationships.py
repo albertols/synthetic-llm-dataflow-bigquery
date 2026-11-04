@@ -28,6 +28,8 @@ A model file, whole::
       A_TABLE:
         pk: [A_COL_001, A_COL_002]
         identity: [A_COL_009]
+        source_table: other_ds.A_TABLE_V2   # optional (ADR 0045): read here
+        num_rows: 5000                      # optional: this table's rows
       B_TABLE:
         pk: [B_COL_001]
         enabled: true                 # false = detach from the model
@@ -60,13 +62,19 @@ Three flags, three different jobs:
   :meth:`RelationshipRegistry.edge_roles`. Only more than one edge
   marked `drives: true` still stops the launch.
 
+Two optional keys say where a launch reads a table and how much of it to
+make (ADR 0045): ``source_table`` (``[project.]dataset.table``; a missing
+project is the launch source dataset's) and ``num_rows`` (a root's own row
+count — a child generated from its parent's keys may not set it).
+
 Column-level ``llm_prompt_constraint`` stays in COLUMN descriptions
 (:mod:`sdfb_core.contracts.prompt_constraint`) — that is per-column
 generation steering, not relational structure, and it belongs next to
 the column it steers.
 
-Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
-(ADR 0032, 0036, 0037).
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration;
+§11 Evaluation (sdfb-evaluation)
+(ADR 0032, 0036, 0037, 0041, 0045).
 """
 
 # f-string fields keep single quotes: yapf 0.43 cannot parse PEP 701
@@ -75,15 +83,19 @@ Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from typing import Annotated
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import (BaseModel, ConfigDict, Field, StrictInt, StrictStr,
+                      ValidationError, field_validator)
 
 from sdfb_core.observability import sha12
 
 __all__ = [
+    "SOURCE_TABLE_RE",
     "FkEdge",
     "RelationshipError",
     "RelationshipModel",
@@ -102,6 +114,13 @@ class RelationshipError(ValueError):
 def _name(table: str) -> str:
   """Bare table name: model files key on it, targets arrive as FQNs."""
   return table.rsplit(".", 1)[-1]
+
+
+# ADR 0045 — a table's source as `[project.]dataset.table`. The standalone
+# evaluator's relationships parser keeps its own copy of this grammar (it
+# may not import this package, ADR 0041).
+SOURCE_TABLE_RE = re.compile(
+    r"(?:[A-Za-z0-9_-]+\.)?[A-Za-z0-9_]+\.[A-Za-z0-9_-]+")
 
 
 class FkEdge(BaseModel):
@@ -145,6 +164,21 @@ class TableRelations(BaseModel):
   # False = detached from the model (see module docstring).
   enabled: bool = True
   note: str = ""
+  # ADR 0045 — where a launch reads this table's source when it is not the
+  # launch's source dataset under the table's own name, and the table's own
+  # row count when it is not the launch's num_rows. Strict types: the
+  # evaluator's parser accepts exactly what this one does. Absent (or null)
+  # unless set, so no existing model's sha12 moves.
+  source_table: StrictStr | None = None
+  num_rows: Annotated[StrictInt, Field(ge=1)] | None = None
+
+  @field_validator("source_table")
+  @classmethod
+  def _qualified(cls, v: str | None) -> str | None:
+    if v is not None and not SOURCE_TABLE_RE.fullmatch(v):
+      raise ValueError(
+          f"source_table must be [project.]dataset.table, got {v!r}")
+    return v
 
 
 class RelationshipModel(BaseModel):
@@ -175,6 +209,7 @@ def parse_relationship_model(text: str, source: str = "") -> RelationshipModel:
   except ValidationError as exc:
     raise RelationshipError(f"{source}: {exc}") from exc
   _validate_refs(model)
+  _validate_rows(model)
   return model
 
 
@@ -207,6 +242,38 @@ def _validate_refs(model: RelationshipModel) -> None:
             f"not name a table in model {model.model!r} "
             f"({sorted(known)}). Qualify it as dataset.table if "
             f"the parent lives outside this model.")
+
+
+def _validate_rows(model: RelationshipModel) -> None:
+  """`num_rows` belongs to a table no parent drives (ADR 0045): a child
+    generated from its parent's keys takes its row count from them
+    (ADR 0036). Those are the tables `RelationshipRegistry.edge_roles`
+    gives a driving edge: enabled, with an enforced in-model edge to an
+    enabled parent."""
+  for table, relations in model.tables.items():
+    if relations.num_rows is None or not relations.enabled:
+      continue
+    parents = [
+        edge.ref for edge in relations.fk if edge.enforced and
+        not edge.external and model.tables[edge.ref].enabled
+    ]
+    if parents:
+      raise RelationshipError(
+          f"{model.source}: {table}: num_rows is set, but {table} is "
+          f"generated from its parent {parents[0]}'s keys (ADR 0036): its "
+          f"rows follow its parents. Remove num_rows here, or set it on the "
+          f"root of its component.")
+
+
+def _launch_canon(relations: TableRelations) -> str:
+  """The ADR 0045 keys' slice of `sha12`'s canonical string: empty when
+    neither is set, so every model without them keeps its sha."""
+  parts = []
+  if relations.source_table is not None:
+    parts.append(f"src={relations.source_table}")
+  if relations.num_rows is not None:
+    parts.append(f"rows={relations.num_rows}")
+  return "".join(f":{part}" for part in parts)
 
 
 @dataclass(frozen=True)
@@ -738,7 +805,7 @@ class RelationshipRegistry:
                f"{int(r.enabled)}:" +
                "|".join(f"{','.join(e.cols)}->{e.ref}:{','.join(e.ref_cols)}:"
                         f"{int(e.enforced)}:{int(e.drives)}"
-                        for e in r.fk)
+                        for e in r.fk) + _launch_canon(r)
                for m in self.models
                for t, r in m.tables.items()))
     return sha12(canon)
@@ -873,9 +940,16 @@ class RelationshipRegistry:
     if relations.identity:
       keys.append(f"identity({','.join(relations.identity)})")
     state = "" if relations.enabled else "   [DISABLED — detached]"
+    # ADR 0045 — a source or row-count override, after the keys.
+    overrides = []
+    if relations.source_table is not None:
+      overrides.append(f"source {relations.source_table}")
+    if relations.num_rows is not None:
+      overrides.append(f"rows {relations.num_rows}")
+    extra = f"   {' · '.join(overrides)}" if overrides else ""
     lines = [
         f" {prefix} | {name:<24} {' '.join(keys) or '(no keys declared)'}"
-        f"{state}"
+        f"{extra}{state}"
     ]
     # Compute roles once per table (ADR 0036/0037).
     try:

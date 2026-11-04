@@ -59,8 +59,8 @@ REFs:
   - https://docs.vllm.ai/en/latest/serving/openai_compatible_server.html
 
 Design: docs/DESIGN.md §1 Architecture; §2 Engines; §3 Serving;
-§4 Relational generation; §5 Fidelity; §6 Throughput
-(ADR 0001, 0011, 0012, 0013, 0014, 0030, 0033, 0034).
+§4 Relational generation; §5 Fidelity; §6 Throughput; §8 Configuration
+(ADR 0001, 0011, 0012, 0013, 0014, 0030, 0033, 0034, 0043).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -222,6 +222,21 @@ class ModelGpuIncompatibleError(RuntimeError):
 
 
 _MIN_BF16_CAPABILITY = (8, 0)
+_BF16_SERVE_DTYPES = frozenset({"bfloat16", "bf16"})
+
+
+def _sub_ampere_remedy(model_type: str) -> str:
+  """What fixes a bfloat16 serve on a sub-Ampere GPU, for this family."""
+  if model_type.startswith("gemma"):
+    return ("A gemma-family checkpoint cannot run on this GPU in any dtype: "
+            "fp16 Gemma silently emits empty output. Run it with gpu=l4, or "
+            "point SDFB_MODEL_URI at an fp16-safe model (config/models.yml: "
+            "qwen3_4b_instruct_2507) and pass gpu=t4.")
+  return ("Serve it in float16: pass gpu=t4 (which derives "
+          "vllm_dtype=float16) or vllm_dtype=float16. That holds for an "
+          "fp16-safe family such as Qwen (config/models.yml: "
+          "qwen3_4b_instruct_2507, itself a bf16 checkpoint), not for Gemma, "
+          "whose fp16 output is silently empty: run Gemma with gpu=l4.")
 
 
 def _assert_dtype_supported(
@@ -231,16 +246,21 @@ def _assert_dtype_supported(
     dtype_override: str = "",
     model_type: str = "",
 ) -> None:
-  """Raise `ModelGpuIncompatibleError` if `torch_dtype` cannot run on a GPU
+  """Raise `ModelGpuIncompatibleError` if the serve dtype cannot run on a GPU
     reporting `capability` (major, minor). Pure function — no torch import
     required, unit-testable on the laptop.
 
     ``dtype_override`` is the explicit ``--dtype`` the server will be launched
-    with (from ``vllm_server_kwargs``). An explicit fp16 downcast makes a bf16
-    checkpoint runnable on Turing for fp16-safe families (Qwen ships bf16
-    checkpoints but is numerically stable in fp16) — EXCEPT gemma, whose fp16
-    activations overflow and silently emit empty/pad output, so the override
-    never bypasses the guard for gemma-family ``model_type``s.
+    with (from ``vllm_server_kwargs``): ``serving.vllm_dtype`` as given, or
+    derived from ``serving.gpu`` when unset (ADR 0043: ``t4`` → float16,
+    ``l4`` → bfloat16). Empty means ``auto``, the checkpoint's
+    ``torch_dtype``. bfloat16 needs compute capability 8.0, so a T4 launch
+    that left ``gpu`` at its ``l4`` default is refused here, naming the fix.
+    An explicit fp16 downcast makes a bf16 checkpoint runnable on Turing for
+    fp16-safe families (Qwen ships bf16 checkpoints but is numerically stable
+    in fp16) — EXCEPT gemma, whose fp16 activations overflow and silently
+    emit empty/pad output, so the override never bypasses the guard for
+    gemma-family ``model_type``s.
     """
   if dtype_override in {"float16", "half"}:
     if model_type.startswith("gemma"):
@@ -251,13 +271,19 @@ def _assert_dtype_supported(
           "Gemma on gpu=l4, or point SDFB_MODEL_URI at an fp16-safe "
           "model (config/models.yml: qwen3_4b_instruct_2507).")
     return  # explicit fp16 serve dtype — checkpoint bf16 no longer applies
-  if torch_dtype == "bfloat16" and capability < _MIN_BF16_CAPABILITY:
+  if capability >= _MIN_BF16_CAPABILITY:
+    return
+  floor = (f"needs GPU compute capability >= 8.0 (Ampere/L4+); this worker "
+           f"reports {capability[0]}.{capability[1]} (e.g. T4/Turing).")
+  if dtype_override in _BF16_SERVE_DTYPES:
     raise ModelGpuIncompatibleError(
-        f"model dtype bfloat16 needs GPU compute capability >= 8.0 "
-        f"(Ampere/L4+); this worker reports {capability[0]}.{capability[1]} "
-        "(e.g. T4/Turing). Run with gpu=l4, or point SDFB_MODEL_URI at a "
-        "T4-safe fp16 model (see config/models.yml: qwen3_4b_instruct_2507). "
-        "Do NOT force --dtype=half for Gemma: it silently emits empty output.")
+        f"--dtype={dtype_override} {floor} It is serving.vllm_dtype as "
+        "given, or derived from serving.gpu=l4 (the default) when vllm_dtype "
+        "is unset. " + _sub_ampere_remedy(model_type))
+  if torch_dtype == "bfloat16":
+    raise ModelGpuIncompatibleError(
+        f"model dtype bfloat16 (the checkpoint's own, served under "
+        f"vllm_dtype=auto) {floor} " + _sub_ampere_remedy(model_type))
 
 
 class _PortMutex:

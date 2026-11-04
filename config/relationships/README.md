@@ -45,6 +45,8 @@ tables:
     identity: [COL_C]         # unique-but-not-key columns
     enabled:  true            # default true — see "Detaching" below
     note:     order header    # optional, for humans
+    source_table: other_ds.A_TABLE_V2  # optional (ADR 0045): read this table's source here
+    num_rows: 5000                     # optional: this table's rows (never on a driven child)
     fk:
       - cols:     [COL_D, COL_E]      # this table's columns
         ref:      B_TABLE             # a table in THIS model…
@@ -432,6 +434,106 @@ A table that appears in no model file generates alone, with `--pk_cols` /
 that IS in a model takes its keys from the model, and a conflicting
 `--pk_cols` is ignored with a WARNING.
 
+## Whole-model launches (`tables: all`, ADR 0045)
+
+`--tables=all` (config: `launch.tables: all`) generates every
+`enabled: true` table of ONE model file — `--relationships_uri` must name the
+file, not a folder — reading each source from `--source_dataset` under the
+table's name and landing it in `--landing_dataset`. `enabled: false` tables
+are skipped. Connected components stay together: the launch is split into
+batch jobs of at most `launch.max_tables_per_job` tables (default 10), and a
+component larger than that runs whole, as its own job.
+
+```yaml
+model: isolated_forest_example
+description: Unrelated landing tables, generated together.
+tables:
+  T_ACCOUNTS: {pk: [ACC_ID]}                                # source: <source dataset>.T_ACCOUNTS
+  T_EVENTS_LOG: {}                                          # no PK: pk.duplicate idle
+  T_RATES: {source_table: other_ds.RATES_V2, num_rows: 5000}
+  T_LEGACY: {enabled: false}                                # skipped by `tables: all`
+```
+
+(`config/relationships/example_isolated_forest.yaml`; a directory scan skips
+it, so name the file.)
+
+| Key | Means | Rules |
+|---|---|---|
+| `source_table` | where the table's source is read | `[project.]dataset.table`; a two-part name takes the source dataset's project (`--source_dataset`, or the reference table's dataset in an explicit launch); applies to explicit launches too |
+| `num_rows` | the table's own rows | an integer ≥ 1 (`5000`, never `"5000"` or `true`); a table a parent drives (ADR 0036) may not set it — the load refuses the model; applies to explicit launches too |
+
+Each table the model overrides is announced once, by the job that generates
+it, before any table of that job is read (a CLI run of several batches
+announces each batch's overrides when that batch starts):
+`SDFB_MILESTONE name=table_override num_rows=5000 source_table=<project>.other_ds.RATES_V2 table=T_RATES`.
+A model without the two keys keeps its sha12, so its caches and every
+launch of it are unchanged.
+
+A global `--pk_cols` / `--identity_cols` is refused with `--tables=all`:
+declare `pk:` / `identity:` per table. `--reference_table`,
+`--landing_table` and `--ddl_uri` are not read (one `launch_option_unused`
+WARNING each when given).
+
+**In the source repository (golden source)**, see the plan without
+launching, then launch it with the Composer generation DAG
+(`composer/synthetic_beam_bigquery.py`, trigger `tables` = `all`; an empty
+`source_dataset` or `landing_dataset` takes the `project.dataset` of the
+deployment's default source or landing table) or `run_model.py`
+(RUN_PLAYBOOK §9d). Both, and this dry run, exist only there:
+`scripts/launch/run_model.py` and `composer/` are not shipped in the
+Dataflow Solution Guides copy. A `config_uri` file's `launch.tables` decides
+the DAG's branch: a file that says `all` runs the batches whatever the
+trigger says.
+
+```bash
+# golden source only
+uv run --no-sync python3 scripts/launch/run_model.py --dry_run \
+  --relationships_uri=<the model file> --source_dataset=<P>.<SRC> \
+  --landing_dataset=<P>.<LAND> --dlq_table=<P>.synthetic_data_quality.dlq \
+  --num_rows=1000 --run_id=plan --model_uri=gs://<B>/synthetic/models/<f>/<m>/<v>/
+```
+
+**In the Dataflow Solution Guides copy**, run the launcher itself from a
+checkout with `--tables=all` and the same options, plus a run id of its own
+and Beam's: it logs the same plan (`model_launch_plan`, the `MODEL LAUNCH`
+block) before it reads any table, then runs the batches one after another,
+in sequence, and a failed batch does not stop the next. A table that fails
+preflight is skipped with its component and the rest of its batch runs
+(below); the launch then exits 1 naming every skipped table. There is no
+dry run: this launches.
+
+```bash
+uv run --no-sync python3 -m sdfb_beam.cli.run_pipeline --tables=all \
+  --relationships_uri=<the model file> --source_dataset=<P>.<SRC> \
+  --landing_dataset=<P>.<LAND> --dlq_table=<P>.synthetic_data_quality.dlq \
+  --num_rows=1000 --run_id=<run id> --model_uri=gs://<B>/synthetic/models/<f>/<m>/<v>/ \
+  --validation_runs_table=<P>.synthetic_data_quality.validation_runs \
+  --sdk_container_image=<the GPU image> <Beam's other options>
+```
+
+A Flex Template launch runs one Dataflow job, so it takes a plan of one
+batch, or one `batch_index` with its `batch_count`, and refuses more.
+
+### When a table fails
+
+Under `tables: all` the table is the unit of failure, not the batch job
+(ADR 0045 D6, revised 2026-10-31): a table that fails preflight is skipped
+with the other tables of its connected component inside the batch, a table
+whose gate trips fails alone, and the job ends DONE. Every table's verdict
+is its `validation_runs` row:
+
+| The row | What happened | The batch job |
+|---|---|---|
+| `FAILED_PREFLIGHT` | skipped before generation: its preflight stopped it (or a read failed, or another table of its component did); `valid_count` 0, the reason in `status_reason` | runs on: the batch's other tables land |
+| `FAILED_BLOCKER` | generated and landed, then the BLOCKER gate tripped; the gate's sentence in `status_reason` | ends DONE: the verdict is recorded, not raised |
+| no row | nothing recorded for the table: its batch job failed (every table of the batch skipped, a one-table batch whose table stopped at preflight, or an infrastructure failure), or no `validation_runs_table` was named | failed, or the record is off |
+
+In the source repository the Composer generation DAG fails a `tables=all`
+run from those rows (`fail_if_a_table_failed`, naming each table, its status
+and its reason) while it evaluates every batch that reached DONE. Explicit
+launches keep today's behaviour: one table's preflight stop stops the
+launch, and a tripped gate fails its Dataflow job.
+
 ## `pk:` must actually BE a key
 
 Preflight measures the declared PK against the reference sample and
@@ -544,6 +646,8 @@ resolve a model that contradicts itself.
   entry is a parse error (`declared twice`), because "the first declared
   edge drives" must not depend on which copy you meant
 - enforced edges form a DAG (no cycles)
+- `source_table` is `[project.]dataset.table`; `num_rows` is an integer ≥ 1
+  and is not set on a table a parent drives (ADR 0045)
 - every column named by `pk` / `identity` / an enforced `fk.cols` exists in
   the real table (preflight P2 — this is where a YAML typo stops the run,
   before any GPU spend)

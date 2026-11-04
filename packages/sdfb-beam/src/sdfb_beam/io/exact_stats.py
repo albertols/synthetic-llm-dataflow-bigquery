@@ -43,6 +43,8 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Any
 
+from sdfb_core.config.model import DEFAULT_CONFIG, SamplingSettings
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
   from sdfb_core.contracts.schema import TableSchema
 
@@ -53,8 +55,6 @@ _NUMERIC_BQ_TYPES = frozenset(
 # stay Tier 1 (documented deferral, ADR 0022).
 _CASTABLE_BQ_TYPES = _NUMERIC_BQ_TYPES | frozenset(
     {"STRING", "BOOL", "BOOLEAN", "DATE", "DATETIME", "TIME", "TIMESTAMP"})
-# Mirrors sdfb_core.stats.source_stats._TOP_VALUES_MAX_DISTINCT.
-_TOP_VALUES_MAX_DISTINCT = 50
 
 
 def _exact_columns(table_schema: TableSchema) -> list:
@@ -68,7 +68,8 @@ def build_exact_stats_sql(
     table_fqn: str,
     table_schema: TableSchema,
     tier1_stats: dict[str, dict],
-    top_k: int = 8,
+    *,
+    sampling: SamplingSettings = DEFAULT_CONFIG.sampling,
 ) -> str:
   """The single aggregate SELECT. Aliases are positional (``c0_null``…)
     so arbitrary column names never have to survive as SQL identifiers."""
@@ -85,9 +86,10 @@ def build_exact_stats_sql(
       selects.append(f"AVG({f64}) AS c{i}_avg")
       selects.append(f"STDDEV_POP({f64}) AS c{i}_sd")
     tier1 = tier1_stats.get(col.name, {})
-    if 0 < tier1.get("distinct", 0) <= _TOP_VALUES_MAX_DISTINCT:
-      selects.append(f"TO_JSON_STRING(APPROX_TOP_COUNT({s}, {int(top_k)})) "
-                     f"AS c{i}_top")
+    if 0 < tier1.get("distinct", 0) <= sampling.top_values_max_distinct:
+      selects.append(
+          f"TO_JSON_STRING(APPROX_TOP_COUNT({s}, {sampling.top_values_top_k})) "
+          f"AS c{i}_top")
   return "SELECT " + ", ".join(selects) + f" FROM `{table_fqn}`"
 
 
@@ -97,7 +99,7 @@ def compute_exact_stats(
     tier1_stats: dict[str, dict],
     *,
     client: Any = None,
-    top_k: int = 8,
+    sampling: SamplingSettings = DEFAULT_CONFIG.sampling,
 ) -> dict[str, dict]:
   """Tier-1 stats merged with the exact aggregate pass.
 
@@ -111,7 +113,8 @@ def compute_exact_stats(
     from google.cloud import bigquery
 
     client = bigquery.Client()
-  sql = build_exact_stats_sql(table_fqn, table_schema, tier1_stats, top_k)
+  sql = build_exact_stats_sql(
+      table_fqn, table_schema, tier1_stats, sampling=sampling)
   rows = list(client.query(sql).result())
   if not rows:
     return dict(tier1_stats)

@@ -25,8 +25,8 @@ source so a tainted warm store is rebuilt, never replayed (the 2026-08-07
 Mirrors `sdfb_beam.pools.store.BigQueryFreeTextPoolStore` deliberately —
 lazy client, pickle-safe, injectable fake for laptop tests.
 
-Design: docs/DESIGN.md §6 Throughput
-(ADR 0034).
+Design: docs/DESIGN.md §6 Throughput; §7 Validation and the dead-letter queue
+(ADR 0034, 0044).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -39,23 +39,18 @@ import re
 import threading
 from typing import TYPE_CHECKING
 
+from sdfb_core.config.salt import pool_store_model_key
 from sdfb_core.observability import log_milestone
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
   from collections.abc import Iterable, Mapping
 
+  from sdfb_core.config.model import GeneratorConfig
   from sdfb_core.pools import FreeTextPool
 
 # BigQuery column names: letters, digits, underscores — anything else in a
 # fetch request is a bug (or an injection attempt), never a real column.
 _IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-# Above this many distinct values the filter set stops being a cheap
-# worker-side frozenset; the store reports "unavailable" and the engine
-# degrades loudly to sample-only rejection. 1M strings ~= tens of MB on an
-# n1-highmem-8 — far below worker RAM, far above every observed E2E column
-# (max seen: 146k distinct, B_TABLE COL_038).
-_DEFAULT_CAP = 1_000_000
 
 # Process-level fetch cache, keyed (table_fqn, column, cap). B.2 builds its
 # pools lazily inside Generate DoFns (no pool branch), so up to 16 sibling
@@ -84,13 +79,19 @@ def clear_source_value_cache() -> None:
 
 
 class BigQuerySourceValueStore:
-  """`SourceValueStore` over one reference table."""
+  """`SourceValueStore` over one reference table.
+
+    ``cap`` is the launch config's ``free_text.source_domain_cap`` (ADR
+    0043): above it the filter set stops being a cheap worker-side
+    frozenset, the store reports "unavailable" and the engine degrades
+    loudly to sample-only rejection.
+    """
 
   def __init__(
       self,
       table_fqn: str,
       *,
-      cap: int = _DEFAULT_CAP,
+      cap: int,
       client: object | None = None,
   ) -> None:
     self.table_fqn = table_fqn
@@ -178,11 +179,17 @@ def pool_source_overlap(
     value_store,
     reference_digest: str,
     model_uri: str,
+    *,
+    config: GeneratorConfig,
+    pool_key: str | None = None,
 ) -> dict[str, int]:
   """Per-column count of persisted pool values that exist in the live
     source — nonzero means the warm store is tainted and must be rebuilt,
-    not replayed. Columns with zero overlap are omitted."""
-  pools: list[FreeTextPool] = pool_store.fetch(reference_digest, model_uri)
+    not replayed. Columns with zero overlap are omitted. The pools are
+    read under the launch's pool key (``pool_store_model_key``), or the
+    explicit ``pool_key`` the launcher computed once (ADR 0044)."""
+  pools: list[FreeTextPool] = pool_store.fetch(
+      reference_digest, pool_key or pool_store_model_key(model_uri, config))
   overlap: dict[str, int] = {}
   for pool in pools:
     if not pool.values:

@@ -1,0 +1,1348 @@
+{
+  "b1_rag": {
+    "dlq": [],
+    "landing": [
+      {
+        "country": "DE",
+        "customer_id": 2353007578100578090,
+        "email": "frank@example.com",
+        "lifetime_value": "2019.48",
+        "signup_at": "2025-07-20 14:15:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "DE",
+        "customer_id": 3167994264886283884,
+        "email": "alice@example.com",
+        "lifetime_value": "460.70",
+        "signup_at": "2025-09-10 16:45:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "DE",
+        "customer_id": 3291980726260991372,
+        "email": "alice@example.com",
+        "lifetime_value": "734.10",
+        "signup_at": "2026-01-03 15:30:00+00:00",
+        "tier": "FREE"
+      },
+      {
+        "country": "DE",
+        "customer_id": 4487550955212797451,
+        "email": "dave@example.com",
+        "lifetime_value": "806.87",
+        "signup_at": "2025-12-14 08:00:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "DE",
+        "customer_id": 4798322496449879610,
+        "email": "alice@example.com",
+        "lifetime_value": "1116.54",
+        "signup_at": "2025-06-15 10:30:00+00:00",
+        "tier": "FREE"
+      },
+      {
+        "country": "DE",
+        "customer_id": 4921418095116514058,
+        "email": "frank@example.com",
+        "lifetime_value": "337.65",
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "DE",
+        "customer_id": 5927184395764840533,
+        "email": "frank@example.com",
+        "lifetime_value": "1723.84",
+        "signup_at": "2026-01-03 15:30:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "DE",
+        "customer_id": 6719702014563648528,
+        "email": "iris@example.com",
+        "lifetime_value": "1935.84",
+        "signup_at": "2025-12-14 08:00:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "ES",
+        "customer_id": 3940041354085706962,
+        "email": "dave@example.com",
+        "lifetime_value": "435.81",
+        "signup_at": "2025-12-14 08:00:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "ES",
+        "customer_id": 5028029188368986980,
+        "email": "bob@example.com",
+        "lifetime_value": "1246.19",
+        "signup_at": "2025-12-14 08:00:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "ES",
+        "customer_id": 5542439192815400481,
+        "email": "frank@example.com",
+        "lifetime_value": null,
+        "signup_at": "2025-06-15 10:30:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "FR",
+        "customer_id": 1415652082430517347,
+        "email": "alice@example.com",
+        "lifetime_value": "1416.34",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "FREE"
+      },
+      {
+        "country": "FR",
+        "customer_id": 290864888221588939,
+        "email": "eve@example.com",
+        "lifetime_value": "532.56",
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "FR",
+        "customer_id": 9112719075194732854,
+        "email": "frank@example.com",
+        "lifetime_value": "410.86",
+        "signup_at": "2026-02-19 12:15:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "FR",
+        "customer_id": 97887225934369685,
+        "email": "dave@example.com",
+        "lifetime_value": "763.87",
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "GB",
+        "customer_id": 3408708616930712005,
+        "email": "carol@example.com",
+        "lifetime_value": null,
+        "signup_at": "2026-03-25 17:45:00+00:00",
+        "tier": "FREE"
+      },
+      {
+        "country": "GB",
+        "customer_id": 6824222639712190775,
+        "email": "iris@example.com",
+        "lifetime_value": "1602.57",
+        "signup_at": "2025-09-10 16:45:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "IT",
+        "customer_id": 8897954742257176221,
+        "email": "jack@example.com",
+        "lifetime_value": null,
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "NL",
+        "customer_id": 5969040534945329558,
+        "email": "alice@example.com",
+        "lifetime_value": "1216.02",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "NL",
+        "customer_id": 6904238705753014495,
+        "email": "iris@example.com",
+        "lifetime_value": "578.80",
+        "signup_at": "2025-08-05 09:00:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "NL",
+        "customer_id": 8822678917904096842,
+        "email": "alice@example.com",
+        "lifetime_value": "1964.57",
+        "signup_at": "2025-09-10 16:45:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "NL",
+        "customer_id": 9020685709670979338,
+        "email": "carol@example.com",
+        "lifetime_value": null,
+        "signup_at": "2026-03-25 17:45:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "PL",
+        "customer_id": 4487533322446346321,
+        "email": "jack@example.com",
+        "lifetime_value": null,
+        "signup_at": "2026-02-19 12:15:00+00:00",
+        "tier": "FREE"
+      },
+      {
+        "country": "PL",
+        "customer_id": 5126173197216482545,
+        "email": "carol@example.com",
+        "lifetime_value": "1107.75",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "PL",
+        "customer_id": 5334899288605606525,
+        "email": "bob@example.com",
+        "lifetime_value": "1731.71",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "PL",
+        "customer_id": 8018820302572896984,
+        "email": "alice@example.com",
+        "lifetime_value": "2005.53",
+        "signup_at": "2025-08-05 09:00:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "PL",
+        "customer_id": 8292749328306342494,
+        "email": "henry@example.com",
+        "lifetime_value": null,
+        "signup_at": "2025-07-20 14:15:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "PL",
+        "customer_id": 8846892605106574105,
+        "email": "jack@example.com",
+        "lifetime_value": "1235.15",
+        "signup_at": "2025-08-05 09:00:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "US",
+        "customer_id": 4558970562001434557,
+        "email": "carol@example.com",
+        "lifetime_value": null,
+        "signup_at": "2026-03-25 17:45:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "US",
+        "customer_id": 4770623526201699770,
+        "email": "henry@example.com",
+        "lifetime_value": "870.69",
+        "signup_at": "2025-08-05 09:00:00+00:00",
+        "tier": "ENTERPRISE"
+      }
+    ],
+    "validation_runs": [
+      {
+        "blocker_count": 0,
+        "blocker_failure_ratio": 0.2,
+        "dlq_by_rule": "{}",
+        "dlq_count": 0,
+        "engine": "b1_rag",
+        "env": "dev",
+        "excluded_blocker_rules": "",
+        "landing_repeat_share": null,
+        "landing_table": "proj.ds.customers_landing",
+        "model_uri": "",
+        "num_rows_requested": 30,
+        "observed_blocker_ratio": 0.0,
+        "reference_digest": "6f6db1106a2748a6c39196a0e0f434f49aa62d512718fa8e7f7aefb86cc3dea6",
+        "reference_table": "proj.ds.customers",
+        "repeat_share_delta": null,
+        "repeat_share_within_tolerance": null,
+        "run_id": "parity-b1_rag",
+        "source_repeat_share": null,
+        "status": "PASSED",
+        "valid_count": 30
+      }
+    ]
+  },
+  "b2_library": {
+    "dlq": [],
+    "landing": [
+      {
+        "country": "DE",
+        "customer_id": 179648065751890239,
+        "email": "rmvch@example.com",
+        "lifetime_value": "322.83",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "FREE"
+      },
+      {
+        "country": "DE",
+        "customer_id": 2150934206603982194,
+        "email": "ajhy@example.com",
+        "lifetime_value": "1819.04",
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "DE",
+        "customer_id": 3733450970286744243,
+        "email": "crxr@example.com",
+        "lifetime_value": "475.25",
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "DE",
+        "customer_id": 3823154088874502757,
+        "email": "efckr@example.com",
+        "lifetime_value": "3005.77",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "DE",
+        "customer_id": 4280992199207187336,
+        "email": "onldl@example.com",
+        "lifetime_value": "446.89",
+        "signup_at": "2025-07-20 14:15:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "DE",
+        "customer_id": 535020501910697536,
+        "email": "anwx@example.com",
+        "lifetime_value": "475.25",
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "DE",
+        "customer_id": 6178095591580067707,
+        "email": "iir@example.com",
+        "lifetime_value": "3060.31",
+        "signup_at": "2025-08-05 09:00:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "DE",
+        "customer_id": 6391857627138447942,
+        "email": "ztwbc@example.com",
+        "lifetime_value": "667.88",
+        "signup_at": "2025-12-14 08:00:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "ES",
+        "customer_id": 7668018982003652871,
+        "email": "kdt@example.com",
+        "lifetime_value": "2227.81",
+        "signup_at": "2025-06-15 10:30:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "ES",
+        "customer_id": 8428268867571541876,
+        "email": "rwesg@example.com",
+        "lifetime_value": "2100.00",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "FR",
+        "customer_id": 1528327365872228626,
+        "email": "feyu@example.com",
+        "lifetime_value": "3134.96",
+        "signup_at": "2025-08-05 09:00:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "FR",
+        "customer_id": 6150178993181784611,
+        "email": "fgi@example.com",
+        "lifetime_value": "373.03",
+        "signup_at": "2025-08-05 09:00:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "GB",
+        "customer_id": 3021346731753188516,
+        "email": "gkzjy@example.com",
+        "lifetime_value": "2100.00",
+        "signup_at": "2025-07-20 14:15:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "IT",
+        "customer_id": 6386008494973042101,
+        "email": "lslnh@example.com",
+        "lifetime_value": "2100.00",
+        "signup_at": "2026-02-19 12:15:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "IT",
+        "customer_id": 7309138293119807789,
+        "email": "qotji@example.com",
+        "lifetime_value": null,
+        "signup_at": "2026-02-19 12:15:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "NL",
+        "customer_id": 5301448791083250613,
+        "email": "nkzge@example.com",
+        "lifetime_value": null,
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "NL",
+        "customer_id": 5805787195338920876,
+        "email": "hth@example.com",
+        "lifetime_value": null,
+        "signup_at": "2026-02-19 12:15:00+00:00",
+        "tier": "FREE"
+      },
+      {
+        "country": "NL",
+        "customer_id": 7513640992907684607,
+        "email": "buf@example.com",
+        "lifetime_value": "3086.68",
+        "signup_at": "2025-08-05 09:00:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "NL",
+        "customer_id": 829273760500806757,
+        "email": "hphl@example.com",
+        "lifetime_value": "1972.31",
+        "signup_at": "2026-03-25 17:45:00+00:00",
+        "tier": "FREE"
+      },
+      {
+        "country": "PL",
+        "customer_id": 1024877483352507046,
+        "email": "abj@example.com",
+        "lifetime_value": "793.43",
+        "signup_at": "2025-06-15 10:30:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "PL",
+        "customer_id": 154533449191188469,
+        "email": "izcvm@example.com",
+        "lifetime_value": "1589.67",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "PL",
+        "customer_id": 1588417171215421230,
+        "email": "tdl@example.com",
+        "lifetime_value": "1005.99",
+        "signup_at": "2026-02-19 12:15:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "PL",
+        "customer_id": 5622251695636161653,
+        "email": "imrt@example.com",
+        "lifetime_value": "1154.37",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "PL",
+        "customer_id": 6463394056803415426,
+        "email": "unerc@example.com",
+        "lifetime_value": null,
+        "signup_at": "2025-09-10 16:45:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "PL",
+        "customer_id": 6893656117598027428,
+        "email": "xzs@example.com",
+        "lifetime_value": null,
+        "signup_at": "2025-07-20 14:15:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "PL",
+        "customer_id": 8748815383113517284,
+        "email": "wpzeg@example.com",
+        "lifetime_value": "620.08",
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "US",
+        "customer_id": 6825240867833153783,
+        "email": "iylu@example.com",
+        "lifetime_value": "1250.50",
+        "signup_at": "2026-01-03 15:30:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "US",
+        "customer_id": 7156515238425727535,
+        "email": "jwuys@example.com",
+        "lifetime_value": "1250.50",
+        "signup_at": "2025-07-20 14:15:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "US",
+        "customer_id": 7335354228930183242,
+        "email": "vovs@example.com",
+        "lifetime_value": "594.02",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "US",
+        "customer_id": 8426555586418152896,
+        "email": "rmhw@example.com",
+        "lifetime_value": "404.99",
+        "signup_at": "2025-12-14 08:00:00+00:00",
+        "tier": "ENTERPRISE"
+      }
+    ],
+    "validation_runs": [
+      {
+        "blocker_count": 0,
+        "blocker_failure_ratio": 0.2,
+        "dlq_by_rule": "{}",
+        "dlq_count": 0,
+        "engine": "b2_library",
+        "env": "dev",
+        "excluded_blocker_rules": "",
+        "landing_repeat_share": null,
+        "landing_table": "proj.ds.customers_landing",
+        "model_uri": "",
+        "num_rows_requested": 30,
+        "observed_blocker_ratio": 0.0,
+        "reference_digest": "6f6db1106a2748a6c39196a0e0f434f49aa62d512718fa8e7f7aefb86cc3dea6",
+        "reference_table": "proj.ds.customers",
+        "repeat_share_delta": null,
+        "repeat_share_within_tolerance": null,
+        "run_id": "parity-b2_library",
+        "source_repeat_share": null,
+        "status": "PASSED",
+        "valid_count": 30
+      }
+    ]
+  },
+  "relational": {
+    "child": [
+      {
+        "AMOUNT": 10,
+        "CUST_ID": 5891958148758077026,
+        "ORDER_ID": "ORD00006"
+      },
+      {
+        "AMOUNT": 10,
+        "CUST_ID": 7839836935667959611,
+        "ORDER_ID": "ORD00012"
+      },
+      {
+        "AMOUNT": 10,
+        "CUST_ID": 9028206416958822695,
+        "ORDER_ID": "ORD00032"
+      },
+      {
+        "AMOUNT": 100,
+        "CUST_ID": 6155664707364796062,
+        "ORDER_ID": "ORD00007"
+      },
+      {
+        "AMOUNT": 104,
+        "CUST_ID": 5891958148758077026,
+        "ORDER_ID": "ORD00018"
+      },
+      {
+        "AMOUNT": 104,
+        "CUST_ID": 6073742417872484275,
+        "ORDER_ID": "ORD00026"
+      },
+      {
+        "AMOUNT": 105,
+        "CUST_ID": 2759375469345784357,
+        "ORDER_ID": "ORD00005"
+      },
+      {
+        "AMOUNT": 106,
+        "CUST_ID": 7783530594062779947,
+        "ORDER_ID": "ORD00025"
+      },
+      {
+        "AMOUNT": 107,
+        "CUST_ID": 9028206416958822695,
+        "ORDER_ID": "ORD00013"
+      },
+      {
+        "AMOUNT": 108,
+        "CUST_ID": 4992827821942768703,
+        "ORDER_ID": "ORD00004"
+      },
+      {
+        "AMOUNT": 108,
+        "CUST_ID": 6073742417872484275,
+        "ORDER_ID": "ORD00006"
+      },
+      {
+        "AMOUNT": 111,
+        "CUST_ID": 9028206416958822695,
+        "ORDER_ID": "ORD00038"
+      },
+      {
+        "AMOUNT": 115,
+        "CUST_ID": 492213868486017920,
+        "ORDER_ID": "ORD00013"
+      },
+      {
+        "AMOUNT": 115,
+        "CUST_ID": 492213868486017920,
+        "ORDER_ID": "ORD00024"
+      },
+      {
+        "AMOUNT": 116,
+        "CUST_ID": 8703208578483484093,
+        "ORDER_ID": "ORD00013"
+      },
+      {
+        "AMOUNT": 117,
+        "CUST_ID": 422095453955519708,
+        "ORDER_ID": "ORD00037"
+      },
+      {
+        "AMOUNT": 17,
+        "CUST_ID": 5226268175144663523,
+        "ORDER_ID": "ORD00035"
+      },
+      {
+        "AMOUNT": 17,
+        "CUST_ID": 5226268175144663523,
+        "ORDER_ID": "ORD00037"
+      },
+      {
+        "AMOUNT": 18,
+        "CUST_ID": 6568709385858509600,
+        "ORDER_ID": "ORD00023"
+      },
+      {
+        "AMOUNT": 19,
+        "CUST_ID": 6641478265865817629,
+        "ORDER_ID": "ORD00015"
+      },
+      {
+        "AMOUNT": 19,
+        "CUST_ID": 8703208578483484093,
+        "ORDER_ID": "ORD00004"
+      },
+      {
+        "AMOUNT": 21,
+        "CUST_ID": 5814132275035804322,
+        "ORDER_ID": "ORD00038"
+      },
+      {
+        "AMOUNT": 23,
+        "CUST_ID": 6872247787631196658,
+        "ORDER_ID": "ORD00023"
+      },
+      {
+        "AMOUNT": 25,
+        "CUST_ID": 1308757809247325586,
+        "ORDER_ID": "ORD00016"
+      },
+      {
+        "AMOUNT": 25,
+        "CUST_ID": 5814132275035804322,
+        "ORDER_ID": "ORD00013"
+      },
+      {
+        "AMOUNT": 27,
+        "CUST_ID": 1644837281893630599,
+        "ORDER_ID": "ORD00037"
+      },
+      {
+        "AMOUNT": 29,
+        "CUST_ID": 6073742417872484275,
+        "ORDER_ID": "ORD00012"
+      },
+      {
+        "AMOUNT": 3,
+        "CUST_ID": 5920713779667021145,
+        "ORDER_ID": "ORD00001"
+      },
+      {
+        "AMOUNT": 30,
+        "CUST_ID": 7839836935667959611,
+        "ORDER_ID": "ORD00015"
+      },
+      {
+        "AMOUNT": 32,
+        "CUST_ID": 1644837281893630599,
+        "ORDER_ID": "ORD00009"
+      },
+      {
+        "AMOUNT": 32,
+        "CUST_ID": 2759375469345784357,
+        "ORDER_ID": "ORD00012"
+      },
+      {
+        "AMOUNT": 35,
+        "CUST_ID": 3309177864456317367,
+        "ORDER_ID": "ORD00034"
+      },
+      {
+        "AMOUNT": 35,
+        "CUST_ID": 6872247787631196658,
+        "ORDER_ID": "ORD00012"
+      },
+      {
+        "AMOUNT": 37,
+        "CUST_ID": 6641478265865817629,
+        "ORDER_ID": "ORD00008"
+      },
+      {
+        "AMOUNT": 38,
+        "CUST_ID": 3739387368616675859,
+        "ORDER_ID": "ORD00015"
+      },
+      {
+        "AMOUNT": 38,
+        "CUST_ID": 6642164805578548631,
+        "ORDER_ID": "ORD00003"
+      },
+      {
+        "AMOUNT": 4,
+        "CUST_ID": 4449549107764582830,
+        "ORDER_ID": "ORD00015"
+      },
+      {
+        "AMOUNT": 40,
+        "CUST_ID": 6641478265865817629,
+        "ORDER_ID": "ORD00035"
+      },
+      {
+        "AMOUNT": 41,
+        "CUST_ID": 5226268175144663523,
+        "ORDER_ID": "ORD00016"
+      },
+      {
+        "AMOUNT": 41,
+        "CUST_ID": 5226268175144663523,
+        "ORDER_ID": "ORD00017"
+      },
+      {
+        "AMOUNT": 43,
+        "CUST_ID": 6642164805578548631,
+        "ORDER_ID": "ORD00025"
+      },
+      {
+        "AMOUNT": 43,
+        "CUST_ID": 6872247787631196658,
+        "ORDER_ID": "ORD00036"
+      },
+      {
+        "AMOUNT": 44,
+        "CUST_ID": 6351571432841146249,
+        "ORDER_ID": "ORD00029"
+      },
+      {
+        "AMOUNT": 51,
+        "CUST_ID": 2495700738204036970,
+        "ORDER_ID": "ORD00032"
+      },
+      {
+        "AMOUNT": 51,
+        "CUST_ID": 3437253907709550640,
+        "ORDER_ID": "ORD00023"
+      },
+      {
+        "AMOUNT": 55,
+        "CUST_ID": 4319286055979588461,
+        "ORDER_ID": "ORD00014"
+      },
+      {
+        "AMOUNT": 56,
+        "CUST_ID": 4735284346571474783,
+        "ORDER_ID": "ORD00024"
+      },
+      {
+        "AMOUNT": 6,
+        "CUST_ID": 6989691780739418207,
+        "ORDER_ID": "ORD00032"
+      },
+      {
+        "AMOUNT": 62,
+        "CUST_ID": 2404410169399221922,
+        "ORDER_ID": "ORD00002"
+      },
+      {
+        "AMOUNT": 63,
+        "CUST_ID": 5901325043026182305,
+        "ORDER_ID": "ORD00000"
+      },
+      {
+        "AMOUNT": 66,
+        "CUST_ID": 5920713779667021145,
+        "ORDER_ID": "ORD00034"
+      },
+      {
+        "AMOUNT": 66,
+        "CUST_ID": 6155664707364796062,
+        "ORDER_ID": "ORD00018"
+      },
+      {
+        "AMOUNT": 66,
+        "CUST_ID": 8243968073076314713,
+        "ORDER_ID": "ORD00009"
+      },
+      {
+        "AMOUNT": 66,
+        "CUST_ID": 8703208578483484093,
+        "ORDER_ID": "ORD00014"
+      },
+      {
+        "AMOUNT": 68,
+        "CUST_ID": 1308757809247325586,
+        "ORDER_ID": "ORD00023"
+      },
+      {
+        "AMOUNT": 69,
+        "CUST_ID": 1644837281893630599,
+        "ORDER_ID": "ORD00031"
+      },
+      {
+        "AMOUNT": 69,
+        "CUST_ID": 2972080892974971346,
+        "ORDER_ID": "ORD00010"
+      },
+      {
+        "AMOUNT": 7,
+        "CUST_ID": 5891958148758077026,
+        "ORDER_ID": "ORD00001"
+      },
+      {
+        "AMOUNT": 70,
+        "CUST_ID": 7783530594062779947,
+        "ORDER_ID": "ORD00020"
+      },
+      {
+        "AMOUNT": 71,
+        "CUST_ID": 6073742417872484275,
+        "ORDER_ID": "ORD00006"
+      },
+      {
+        "AMOUNT": 73,
+        "CUST_ID": 8243968073076314713,
+        "ORDER_ID": "ORD00012"
+      },
+      {
+        "AMOUNT": 76,
+        "CUST_ID": 5814132275035804322,
+        "ORDER_ID": "ORD00016"
+      },
+      {
+        "AMOUNT": 76,
+        "CUST_ID": 6641478265865817629,
+        "ORDER_ID": "ORD00008"
+      },
+      {
+        "AMOUNT": 81,
+        "CUST_ID": 8762851926736807486,
+        "ORDER_ID": "ORD00013"
+      },
+      {
+        "AMOUNT": 86,
+        "CUST_ID": 1191238734458389754,
+        "ORDER_ID": "ORD00006"
+      },
+      {
+        "AMOUNT": 86,
+        "CUST_ID": 5684753274179968942,
+        "ORDER_ID": "ORD00001"
+      },
+      {
+        "AMOUNT": 86,
+        "CUST_ID": 5684753274179968942,
+        "ORDER_ID": "ORD00017"
+      },
+      {
+        "AMOUNT": 86,
+        "CUST_ID": 6872247787631196658,
+        "ORDER_ID": "ORD00010"
+      },
+      {
+        "AMOUNT": 87,
+        "CUST_ID": 1191238734458389754,
+        "ORDER_ID": "ORD00003"
+      },
+      {
+        "AMOUNT": 87,
+        "CUST_ID": 2495700738204036970,
+        "ORDER_ID": "ORD00036"
+      },
+      {
+        "AMOUNT": 88,
+        "CUST_ID": 7783530594062779947,
+        "ORDER_ID": "ORD00019"
+      },
+      {
+        "AMOUNT": 9,
+        "CUST_ID": 1678753161811096322,
+        "ORDER_ID": "ORD00004"
+      },
+      {
+        "AMOUNT": 9,
+        "CUST_ID": 422095453955519708,
+        "ORDER_ID": "ORD00013"
+      },
+      {
+        "AMOUNT": 91,
+        "CUST_ID": 2759375469345784357,
+        "ORDER_ID": "ORD00029"
+      },
+      {
+        "AMOUNT": 91,
+        "CUST_ID": 4449549107764582830,
+        "ORDER_ID": "ORD00001"
+      },
+      {
+        "AMOUNT": 92,
+        "CUST_ID": 1742885266106713495,
+        "ORDER_ID": "ORD00004"
+      },
+      {
+        "AMOUNT": 92,
+        "CUST_ID": 3739387368616675859,
+        "ORDER_ID": "ORD00015"
+      },
+      {
+        "AMOUNT": 92,
+        "CUST_ID": 8549326597681232541,
+        "ORDER_ID": "ORD00009"
+      },
+      {
+        "AMOUNT": 94,
+        "CUST_ID": 6642164805578548631,
+        "ORDER_ID": "ORD00001"
+      },
+      {
+        "AMOUNT": 98,
+        "CUST_ID": 5920713779667021145,
+        "ORDER_ID": "ORD00014"
+      }
+    ],
+    "dlq_child": [],
+    "dlq_parent": [],
+    "parent": [
+      {
+        "country": "DE",
+        "customer_id": 1644837281893630599,
+        "email": "dave@example.com",
+        "lifetime_value": "443.69",
+        "signup_at": "2025-08-05 09:00:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "DE",
+        "customer_id": 1742885266106713495,
+        "email": "frank@example.com",
+        "lifetime_value": "3020.78",
+        "signup_at": "2026-01-03 15:30:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "DE",
+        "customer_id": 1868372973705785793,
+        "email": "alice@example.com",
+        "lifetime_value": "3156.33",
+        "signup_at": "2025-09-10 16:45:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "DE",
+        "customer_id": 2404410169399221922,
+        "email": "bob@example.com",
+        "lifetime_value": "598.08",
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "DE",
+        "customer_id": 2495700738204036970,
+        "email": "bob@example.com",
+        "lifetime_value": "1387.71",
+        "signup_at": "2025-06-15 10:30:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "DE",
+        "customer_id": 436859552172017996,
+        "email": "dave@example.com",
+        "lifetime_value": "436.29",
+        "signup_at": "2025-07-20 14:15:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "DE",
+        "customer_id": 492213868486017920,
+        "email": "bob@example.com",
+        "lifetime_value": "1412.55",
+        "signup_at": "2025-06-15 10:30:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "DE",
+        "customer_id": 5506506047913627974,
+        "email": "iris@example.com",
+        "lifetime_value": "2077.11",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "DE",
+        "customer_id": 5920713779667021145,
+        "email": "dave@example.com",
+        "lifetime_value": null,
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "DE",
+        "customer_id": 6073742417872484275,
+        "email": "grace@example.com",
+        "lifetime_value": "427.27",
+        "signup_at": "2025-09-10 16:45:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "DE",
+        "customer_id": 6568709385858509600,
+        "email": "grace@example.com",
+        "lifetime_value": "496.57",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "DE",
+        "customer_id": 6642164805578548631,
+        "email": "frank@example.com",
+        "lifetime_value": "762.03",
+        "signup_at": "2025-12-14 08:00:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "DE",
+        "customer_id": 7839836935667959611,
+        "email": "henry@example.com",
+        "lifetime_value": "695.53",
+        "signup_at": "2026-01-03 15:30:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "DE",
+        "customer_id": 8260351756562613268,
+        "email": "alice@example.com",
+        "lifetime_value": "758.46",
+        "signup_at": "2026-01-03 15:30:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "ES",
+        "customer_id": 3309177864456317367,
+        "email": "henry@example.com",
+        "lifetime_value": "1242.29",
+        "signup_at": "2026-01-03 15:30:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "ES",
+        "customer_id": 5814132275035804322,
+        "email": "dave@example.com",
+        "lifetime_value": "2726.08",
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "ES",
+        "customer_id": 8762851926736807486,
+        "email": "bob@example.com",
+        "lifetime_value": null,
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "FR",
+        "customer_id": 3987392658505229406,
+        "email": "iris@example.com",
+        "lifetime_value": "1779.72",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "FR",
+        "customer_id": 4449549107764582830,
+        "email": "carol@example.com",
+        "lifetime_value": "1617.52",
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "FR",
+        "customer_id": 4992827821942768703,
+        "email": "frank@example.com",
+        "lifetime_value": "673.07",
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "FR",
+        "customer_id": 6155664707364796062,
+        "email": "dave@example.com",
+        "lifetime_value": null,
+        "signup_at": "2025-08-05 09:00:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "FR",
+        "customer_id": 6989691780739418207,
+        "email": "alice@example.com",
+        "lifetime_value": "3941.80",
+        "signup_at": "2025-07-20 14:15:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "GB",
+        "customer_id": 1678753161811096322,
+        "email": "eve@example.com",
+        "lifetime_value": "685.97",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "GB",
+        "customer_id": 422095453955519708,
+        "email": "bob@example.com",
+        "lifetime_value": "544.73",
+        "signup_at": "2026-02-19 12:15:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "GB",
+        "customer_id": 4319286055979588461,
+        "email": "frank@example.com",
+        "lifetime_value": "544.28",
+        "signup_at": "2025-09-10 16:45:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "GB",
+        "customer_id": 7342857076948664472,
+        "email": "frank@example.com",
+        "lifetime_value": "1991.46",
+        "signup_at": "2026-03-25 17:45:00+00:00",
+        "tier": "FREE"
+      },
+      {
+        "country": "IT",
+        "customer_id": 1308757809247325586,
+        "email": "henry@example.com",
+        "lifetime_value": null,
+        "signup_at": "2025-09-10 16:45:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "IT",
+        "customer_id": 2759375469345784357,
+        "email": "alice@example.com",
+        "lifetime_value": "2783.45",
+        "signup_at": "2026-03-25 17:45:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "IT",
+        "customer_id": 2928033461105915981,
+        "email": "iris@example.com",
+        "lifetime_value": "852.97",
+        "signup_at": "2025-07-20 14:15:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "IT",
+        "customer_id": 4464987074645504443,
+        "email": "iris@example.com",
+        "lifetime_value": "1727.12",
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "IT",
+        "customer_id": 5684753274179968942,
+        "email": "jack@example.com",
+        "lifetime_value": null,
+        "signup_at": "2025-06-15 10:30:00+00:00",
+        "tier": "FREE"
+      },
+      {
+        "country": "IT",
+        "customer_id": 6109984401726102539,
+        "email": "jack@example.com",
+        "lifetime_value": "973.16",
+        "signup_at": "2025-12-14 08:00:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "IT",
+        "customer_id": 6351571432841146249,
+        "email": "dave@example.com",
+        "lifetime_value": null,
+        "signup_at": "2025-12-14 08:00:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "IT",
+        "customer_id": 8243968073076314713,
+        "email": "iris@example.com",
+        "lifetime_value": "1421.11",
+        "signup_at": "2025-06-15 10:30:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "NL",
+        "customer_id": 3746394487545619542,
+        "email": "frank@example.com",
+        "lifetime_value": null,
+        "signup_at": "2025-11-08 13:20:00+00:00",
+        "tier": "FREE"
+      },
+      {
+        "country": "NL",
+        "customer_id": 4735284346571474783,
+        "email": "frank@example.com",
+        "lifetime_value": "868.76",
+        "signup_at": "2026-03-25 17:45:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "NL",
+        "customer_id": 5901325043026182305,
+        "email": "bob@example.com",
+        "lifetime_value": "706.76",
+        "signup_at": "2025-06-15 10:30:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "NL",
+        "customer_id": 6641478265865817629,
+        "email": "grace@example.com",
+        "lifetime_value": "1167.22",
+        "signup_at": "2025-09-10 16:45:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "NL",
+        "customer_id": 6872247787631196658,
+        "email": "grace@example.com",
+        "lifetime_value": "2429.75",
+        "signup_at": "2025-07-20 14:15:00+00:00",
+        "tier": "FREE"
+      },
+      {
+        "country": "NL",
+        "customer_id": 7783530594062779947,
+        "email": "bob@example.com",
+        "lifetime_value": "2846.88",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "SMB"
+      },
+      {
+        "country": "NL",
+        "customer_id": 8703208578483484093,
+        "email": "dave@example.com",
+        "lifetime_value": "2518.53",
+        "signup_at": "2025-07-20 14:15:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "NL",
+        "customer_id": 9028206416958822695,
+        "email": "dave@example.com",
+        "lifetime_value": "1796.85",
+        "signup_at": "2025-08-05 09:00:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "PL",
+        "customer_id": 1191238734458389754,
+        "email": "bob@example.com",
+        "lifetime_value": null,
+        "signup_at": "2025-06-15 10:30:00+00:00",
+        "tier": "FREE"
+      },
+      {
+        "country": "PL",
+        "customer_id": 4687262407770430811,
+        "email": "iris@example.com",
+        "lifetime_value": "719.46",
+        "signup_at": "2025-06-15 10:30:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "PL",
+        "customer_id": 5891958148758077026,
+        "email": "iris@example.com",
+        "lifetime_value": "2768.25",
+        "signup_at": "2025-10-22 11:30:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "US",
+        "customer_id": 2972080892974971346,
+        "email": "alice@example.com",
+        "lifetime_value": "458.78",
+        "signup_at": "2026-01-03 15:30:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "US",
+        "customer_id": 3437253907709550640,
+        "email": "iris@example.com",
+        "lifetime_value": "526.19",
+        "signup_at": "2026-03-25 17:45:00+00:00",
+        "tier": "STARTUP"
+      },
+      {
+        "country": "US",
+        "customer_id": 3739387368616675859,
+        "email": "frank@example.com",
+        "lifetime_value": "338.28",
+        "signup_at": "2026-01-03 15:30:00+00:00",
+        "tier": "ENTERPRISE"
+      },
+      {
+        "country": "US",
+        "customer_id": 5226268175144663523,
+        "email": "eve@example.com",
+        "lifetime_value": "3521.12",
+        "signup_at": "2025-12-14 08:00:00+00:00",
+        "tier": "FREE"
+      },
+      {
+        "country": "US",
+        "customer_id": 8549326597681232541,
+        "email": "dave@example.com",
+        "lifetime_value": "4118.30",
+        "signup_at": "2025-06-15 10:30:00+00:00",
+        "tier": "STARTUP"
+      }
+    ]
+  }
+}

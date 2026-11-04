@@ -23,6 +23,18 @@ import { FidelityCards } from "./FidelityCards";
 import { PerformanceCards } from "./PerformanceCards";
 import { ScaleCards } from "./ScaleCards";
 
+/** The scenario's inputs no launch flag sets, grouped by knobs.json `settable_via`: a config file key, or the code. */
+const PINNED = (
+  [
+    ["free_text_pool_max", CONSTANTS.poolCap],
+    ["rag_top_k", CONSTANTS.topK],
+  ] as const
+).map(([id, value]) => ({ id, value, config: knob(id).settable_via.includes("config") }));
+const PINNED_GROUPS = [
+  { title: "Set in a config file", note: "set in a config file", items: PINNED.filter((p) => p.config) },
+  { title: "Fixed by the code", note: "fixed constant", items: PINNED.filter((p) => !p.config) },
+].filter((group) => group.items.length > 0);
+
 const P_CHOICES = [0.01, 0.001, 0.0001, 0.00001];
 const Q_CHOICES = [0.9, 0.99, 0.999, 0.9999];
 
@@ -87,32 +99,29 @@ export function ScenarioCalculator({ onOpenKnob }: { onOpenKnob: (id: string) =>
               onCommit={(n) => setSetting("reference_rows_limit", n)}
               help={`--reference_rows_limit (default ${formatCount(CONSTANTS.defaultN)})`}
             />
-            <div className="grid content-start gap-1">
-              <span className="text-xs font-medium text-text-2">Fixed by the code</span>
-              <ul className="grid gap-1 text-sm">
-                {(
-                  [
-                    ["free_text_pool_max", CONSTANTS.poolCap],
-                    ["rag_top_k", CONSTANTS.topK],
-                  ] as const
-                ).map(([id, value]) => (
-                  <li key={id}>
-                    <button
-                      type="button"
-                      onClick={() => onOpenKnob(id)}
-                      className="inline-flex cursor-pointer items-center gap-1.5 rounded-sm text-left text-text-2 hover:text-text-1"
-                    >
-                      <svg viewBox="0 0 12 12" className="size-3 shrink-0" aria-hidden="true">
-                        <circle cx="6" cy="6" r="5" fill="var(--surface-3)" stroke="var(--control-border)" />
-                        <line x1="3" y1="4.5" x2="9" y2="7.5" stroke="var(--text-3)" strokeWidth="1.2" />
-                      </svg>
-                      {knob(id).label}: <span className="font-mono text-text-1">{formatCount(value)}</span>
-                      <span className="sr-only">, fixed constant; open its details</span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            </div>
+            {PINNED_GROUPS.map((group) => (
+              <div key={group.title} className="grid content-start gap-1">
+                <span className="text-xs font-medium text-text-2">{group.title}</span>
+                <ul className="grid gap-1 text-sm">
+                  {group.items.map(({ id, value }) => (
+                    <li key={id}>
+                      <button
+                        type="button"
+                        onClick={() => onOpenKnob(id)}
+                        className="inline-flex cursor-pointer items-center gap-1.5 rounded-sm text-left text-text-2 hover:text-text-1"
+                      >
+                        <svg viewBox="0 0 12 12" className="size-3 shrink-0" aria-hidden="true">
+                          <circle cx="6" cy="6" r="5" fill="var(--surface-3)" stroke="var(--control-border)" />
+                          <line x1="3" y1="4.5" x2="9" y2="7.5" stroke="var(--text-3)" strokeWidth="1.2" />
+                        </svg>
+                        {knob(id).label}: <span className="font-mono text-text-1">{formatCount(value)}</span>
+                        <span className="sr-only">, {group.note}; open its details</span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ))}
           </div>
 
           <div className="grid gap-4 lg:grid-cols-2">

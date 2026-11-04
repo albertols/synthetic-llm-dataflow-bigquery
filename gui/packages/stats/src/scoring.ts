@@ -395,7 +395,7 @@ const mean = (xs: readonly (number | null)[]): number | null => {
 };
 
 /** The roll-up unit of a non-aggregate row (R11): a column, the pair group, a row/table metric, an edge. */
-function unitOf(row: Pick<RollupRow, "level" | "column_name" | "metric_id" | "edge">): string {
+export function unitOf(row: Pick<RollupRow, "level" | "column_name" | "metric_id" | "edge">): string {
   switch (row.level) {
     case "field":
     case "column":

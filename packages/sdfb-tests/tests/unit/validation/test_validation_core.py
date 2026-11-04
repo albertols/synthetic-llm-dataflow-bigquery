@@ -23,19 +23,28 @@ Design: docs/DESIGN.md §4 Relational generation
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 
 import pytest
+from sdfb_core.record import SCHEMA_PATH
 from sdfb_core.validation import (
     BLOCKER_RULE_IDS,
     STATUS_FAILED_BLOCKER,
+    STATUS_FAILED_PREFLIGHT,
     STATUS_PASSED,
+    STATUS_REASON_MAX,
     BlockerThresholdExceeded,
     Thresholds,
+    blocker_gate_reason,
     build_run_summary,
     evaluate_blocker_gate,
     load_thresholds,
     normalize_dlq_record,
+    preflight_failed_summary,
 )
+
+_ROOT = Path(__file__).resolve().parents[5]
 
 
 def _thresholds(ratio: float = 0.05, env: str = "dev") -> Thresholds:
@@ -109,6 +118,30 @@ class TestRunSummary:
     assert s.blocker_count == 10
     assert s.observed_blocker_ratio == pytest.approx(0.10)
     assert s.status == STATUS_FAILED_BLOCKER
+
+  def test_a_table_that_fails_its_contract_wholesale_fails_blocker(self):
+    """The SCD table of 2026-11-02: every row to the DLQ on a column-level
+    Pandera failure. As schema.batch (CRITICAL) it read PASSED with
+    valid_count 0; as schema.column it trips the gate, with its reason."""
+    as_batch = build_run_summary(
+        run_id="r",
+        reference_digest="d",
+        valid_count=0,
+        dlq_by_rule={"schema.batch": 1_000_000},
+        thresholds=_thresholds(0.20),
+    )
+    assert as_batch.status == STATUS_PASSED  # row-level: R11, still open
+    s = build_run_summary(
+        run_id="r",
+        reference_digest="d",
+        valid_count=0,
+        dlq_by_rule={"schema.column": 1_000_000},
+        thresholds=_thresholds(0.20),
+    )
+    assert s.blocker_count == 1_000_000
+    assert s.status == STATUS_FAILED_BLOCKER
+    assert s.status_reason == blocker_gate_reason(s)
+    assert s.status_reason.startswith("BLOCKER failures 1000000/1000000")
 
   def test_boundary_equal_is_pass(self):
     # exactly at the ratio is NOT strictly greater -> pass
@@ -288,6 +321,7 @@ class TestDlqNormalize:
 def test_blocker_rule_ids_constant():
   assert "schema.types" in BLOCKER_RULE_IDS
   assert "schema.batch" not in BLOCKER_RULE_IDS
+  assert "schema.column" in BLOCKER_RULE_IDS
 
 
 def test_engine_failure_counts_as_blocker():
@@ -471,3 +505,62 @@ class TestExcludedRuleLeavesBothSidesOfTheRatio:
     with pytest.raises(BlockerThresholdExceeded) as exc:
       evaluate_blocker_gate(s)
     assert f"1400/{self._VALID + 1_400}" in str(exc.value)
+
+
+def test_a_failed_blocker_summary_carries_the_gate_sentence():
+  s = build_run_summary(
+      run_id="r",
+      reference_digest="d",
+      valid_count=1,
+      dlq_by_rule={"pk.duplicate": 9},
+      thresholds=Thresholds(env="dev", blocker_failure_ratio=0.05))
+  assert s.status == STATUS_FAILED_BLOCKER
+  assert s.status_reason == blocker_gate_reason(s)
+  assert s.status_reason.startswith(
+      "BLOCKER failures 9/10 = 0.9000 exceeds gate 0.0500")
+  with pytest.raises(
+      BlockerThresholdExceeded, match=re.escape(s.status_reason)):
+    evaluate_blocker_gate(s)
+
+
+def test_a_passed_summary_has_no_reason():
+  s = build_run_summary(
+      run_id="r",
+      reference_digest="d",
+      valid_count=10,
+      dlq_by_rule={},
+      thresholds=Thresholds(env="dev", blocker_failure_ratio=0.05))
+  assert s.status == STATUS_PASSED and s.status_reason is None
+  assert s.to_bq_row()["status_reason"] is None
+  assert "status_reason" not in s.to_bq_row(with_status_reason=False)
+
+
+def test_a_preflight_reason_is_cut_to_the_column_budget():
+  reason = "[preflight P5] p.land.T_B: the declared PK\nis not a key " + "x" * 2000
+  s = preflight_failed_summary(
+      run_id="r1-b00-01-T_B",
+      reference_table="p.src.T_B",
+      landing_table="p.land.T_B",
+      engine="b1_rag",
+      model_uri="gs://b/m/",
+      env="prd",
+      num_rows_requested=1000,
+      reason=reason)
+  assert s.status == STATUS_FAILED_PREFLIGHT == "FAILED_PREFLIGHT"
+  assert (s.valid_count, s.dlq_count, s.blocker_count, s.dlq_by_rule) == (0, 0,
+                                                                          0, {})
+  assert s.reference_digest == "" and s.env == "prd"
+  assert s.num_rows_requested == 1000
+  assert len(s.status_reason) == STATUS_REASON_MAX == 1000
+  assert s.status_reason == reason[:1000]
+  row = s.to_bq_row()
+  assert row["status"] == "FAILED_PREFLIGHT" and row["dlq_by_rule"] == "{}"
+
+
+def test_the_committed_schema_has_the_reason_column_last_and_the_three_statuses(
+):
+  schema = json.loads((_ROOT / SCHEMA_PATH).read_text())
+  assert len(schema) == 36 and schema[-1]["name"] == "status_reason"
+  assert schema[-1]["mode"] == "NULLABLE" and schema[-1]["type"] == "STRING"
+  status = next(c for c in schema if c["name"] == "status")
+  assert status["description"] == "PASSED | FAILED_BLOCKER | FAILED_PREFLIGHT."

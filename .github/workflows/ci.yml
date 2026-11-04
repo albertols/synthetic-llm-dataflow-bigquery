@@ -37,6 +37,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v5
+        with:
+          # Full history: test_launch_helpers.py reads master's DAG files
+          # with `git show <commit>:<path>` (the env overlay's markers).
+          fetch-depth: 0
 
       - name: Install uv
         # v6 runs on Node 24 (the v3 we used previously is being deprecated;
@@ -93,6 +97,13 @@ jobs:
         # evaluator itself is not installed here). A catalogue change
         # without a re-render, or a hand edit of the block, fails.
         run: uv run python scripts/doc/render_eval_catalogue.py --check
+
+      - name: Generator config reference
+        # generator.yaml's value lines are the defaults, edited by hand
+        # (ADR 0043); its comments are rendered from the catalogue around
+        # those values. A catalogue change without a re-render (--fix, which
+        # never changes a value), or a hand edit of a comment, fails.
+        run: uv run python scripts/doc/render_generator_config.py --check
 
       - name: Design references
         # Every shipped module that cites an ADR names the docs/DESIGN.md

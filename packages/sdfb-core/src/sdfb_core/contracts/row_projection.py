@@ -30,7 +30,7 @@ nothing here re-measures: a projection that cannot be derived says so
 rather than printing a number.
 
 Design: docs/DESIGN.md §4 Relational generation
-(ADR 0036, 0038, 0039).
+(ADR 0036, 0038, 0039, 0045).
 """
 
 # f-string fields keep single quotes: yapf 0.43 cannot parse PEP 701
@@ -62,12 +62,13 @@ __all__ = [
 # and each is deliberately loose: a warning an operator learns to ignore
 # is worse than no warning. A clean launch must print no warning at all.
 
-# A driven child projected at more than this multiple of the launch's own
-# `--num_rows` is a run the operator did not ask for. The five-table
-# launch 2026-09-13_06_10_16 asked for 210,958 rows and projected
-# 30,937,138 on one table — 146.7x, and ~18 hours of L4 time. Two
-# hops of an ordinary 2-4x fan-out land at 4-16x, so a ceiling below 10
-# would fire on shapes that are working exactly as declared.
+# A driven child projected at more than this multiple of what its chain's
+# root generates — the launch's own `--num_rows`, or the root's model
+# `num_rows` when the model sets one — is a run the operator did not ask
+# for. The five-table launch 2026-09-13_06_10_16 asked for 210,958 rows
+# and projected 30,937,138 on one table — 146.7x, and ~18 hours of L4
+# time. Two hops of an ordinary 2-4x fan-out land at 4-16x, so a ceiling
+# below 10 would fire on shapes that are working exactly as declared.
 PROJECTION_FACTOR_CEILING = 10.0
 
 # A driving edge whose source parent covers less than half of the source
@@ -106,7 +107,7 @@ class TableProjection:
   table: str
   rows: int | None
   # The DRIVING parent's bare model name. Empty = a root, sized by
-  # `--num_rows`.
+  # `--num_rows` (or by its model's own `num_rows`: `own_rows`).
   parent: str = ""
   # `FkEdgeSpec.edge_id` for the driving edge, e.g. `(D_COL_001)->B_TABLE`.
   edge: str = ""
@@ -130,6 +131,9 @@ class TableProjection:
   repeat_share: float | None = None
   # Why ``rows`` is None. Empty whenever ``rows`` is set.
   undecided: str = ""
+  # A root sized by its model's own `num_rows`, not the launch's
+  # `--num_rows` (ADR 0045). Always False for a driven child.
+  own_rows: bool = False
 
   @property
   def table_name(self) -> str:
@@ -146,7 +150,8 @@ class TableProjection:
     if self.rows is None:
       return f"{_NOT_DERIVABLE} — {self.undecided}"
     if not self.driven:
-      return f"root — sized by --num_rows={self.rows:,}"
+      sized_by = "its model num_rows" if self.own_rows else "--num_rows"
+      return f"root — sized by {sized_by}={self.rows:,}"
     keys = f"{self.parent_keys:,}" if self.parent_keys is not None else "?"
     mean = f"{self.mean_fanout:.4f}" if self.mean_fanout is not None else "?"
     basis = (f"driven by {self.parent} — {keys} distinct keys x {mean} "
@@ -235,21 +240,24 @@ def project_table(
     source_parent_tuples: int | None = None,
     adjusted: bool = False,
     repeat_share: float | None = None,
+    model_rows: int | None = None,
 ) -> TableProjection:
   """One table's projection, from figures the launcher already holds.
 
-    A table with no driving parent is a ROOT and lands ``launch_rows``.
-    A DRIVEN child lands ``round(parent_keys x mean fan-out)`` — the same
-    expression, over the same two numbers, that `preflight._derived_rows`
-    sized it with, so the block can never disagree with the count the run
-    actually requests.
+    A table with no driving parent is a ROOT and lands ``launch_rows`` —
+    or ``model_rows``, its model's own ``num_rows``, when the model sets
+    one (ADR 0045). A DRIVEN child lands ``round(parent_keys x mean
+    fan-out)`` — the same expression, over the same two numbers, that
+    `preflight._derived_rows` sized it with, so the block can never
+    disagree with the count the run actually requests.
     """
   if not parent:
     return TableProjection(
         table=table,
-        rows=max(0, int(launch_rows)),
+        rows=max(0, int(launch_rows if model_rows is None else model_rows)),
         adjusted=adjusted or repeat_share is not None,
         repeat_share=repeat_share,
+        own_rows=model_rows is not None,
     )
   mean = fanout_mean(histogram)
   keys = parent_keys if parent_keys is not None else parent_rows
@@ -345,24 +353,36 @@ def projection_warnings(
                            f"unmeasurable, so the mean is an UPPER bound. "
                            f"Check the edge names the columns you meant."),
           ))
-    if p.driven and p.rows is not None and launch_rows > 0:
-      factor = p.rows / launch_rows
+    if p.driven and p.rows is not None:
+      # The chain is measured against what its ROOT generates: before
+      # ADR 0045 every root projected exactly `launch_rows`; a root the
+      # model gives its own `num_rows` projects that instead.
+      chain = _chain(p, by_name)
+      root = by_name.get(chain[0])
+      base, own_root = launch_rows, ""
+      if root is not None and not root.driven and root.rows:
+        base = root.rows
+        own_root = root.table_name if root.own_rows else ""
+      factor = p.rows / base if base > 0 else 0.0
       if factor > factor_ceiling:
         share = p.rows / total if total else 0.0
+        sized_by = (f"root {own_root}'s model num_rows={base:,}"
+                    if own_root else f"launch's --num_rows={base:,}")
+        lower = (f"Lower {own_root}'s num_rows in the model"
+                 if own_root else "Lower --num_rows")
         out.append(
             ProjectionWarning(
                 code="projection_explodes",
                 table=p.table,
-                measurement=(
-                    f"{p.rows:,} projected rows is {factor:,.1f}x the "
-                    f"launch's --num_rows={launch_rows:,} (over the "
-                    f"{factor_ceiling:,.0f}x ceiling), down the chain " +
-                    " -> ".join(_chain(p, by_name))),
+                measurement=(f"{p.rows:,} projected rows is {factor:,.1f}x the "
+                             f"{sized_by} (over the "
+                             f"{factor_ceiling:,.0f}x ceiling), down the "
+                             f"chain " + " -> ".join(chain)),
                 consequence=(f"this one table is {share:.1%} of the run's "
                              f"{total:,} rows and sizes the whole job — GPU "
                              f"hours, shuffle and landing cost scale with it. "
                              f"It is not a defect: it is the measured "
-                             f"fan-out, compounded. Lower --num_rows, or "
+                             f"fan-out, compounded. {lower}, or "
                              f"take the table out of the launch, if that is "
                              f"not the run you meant to pay for."),
             ))

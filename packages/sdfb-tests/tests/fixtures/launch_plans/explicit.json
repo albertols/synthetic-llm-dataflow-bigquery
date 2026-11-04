@@ -1,0 +1,215 @@
+{
+  "diamond_bottom": {
+    "runs": [
+      {
+        "fk_parent_landing": "",
+        "landing_table": "p.land.top",
+        "run_id": "r1-00-top",
+        "source_table": "p.src.top"
+      },
+      {
+        "fk_parent_landing": "p.land",
+        "landing_table": "p.land.left",
+        "run_id": "r1-01-left",
+        "source_table": "p.src.left"
+      },
+      {
+        "fk_parent_landing": "p.land",
+        "landing_table": "p.land.right",
+        "run_id": "r1-02-right",
+        "source_table": "p.src.right"
+      },
+      {
+        "fk_parent_landing": "p.land",
+        "landing_table": "p.land.bottom",
+        "run_id": "r1-03-bottom",
+        "source_table": "p.src.bottom"
+      }
+    ],
+    "scenario": "relational_closure",
+    "warnings": [
+      "the relational model expanded this launch to ['p.land.top', 'p.land.left', 'p.land.right'] (declared in config/relationships; parents generate first)"
+    ]
+  },
+  "no_model": {
+    "runs": [
+      {
+        "fk_parent_landing": "",
+        "landing_table": "p.land.t",
+        "run_id": "r1",
+        "source_table": "p.src.t"
+      }
+    ],
+    "scenario": "isolated",
+    "warnings": []
+  },
+  "retail_closure_from_e": {
+    "runs": [
+      {
+        "fk_parent_landing": "p.land",
+        "landing_table": "p.land.E_TABLE",
+        "run_id": "r1",
+        "source_table": "p.src.E_TABLE"
+      }
+    ],
+    "scenario": "relational_closure",
+    "warnings": []
+  },
+  "retail_isolated": {
+    "runs": [
+      {
+        "fk_parent_landing": "",
+        "landing_table": "p.land.C_TABLE",
+        "run_id": "r1",
+        "source_table": "p.src.C_TABLE"
+      }
+    ],
+    "scenario": "isolated",
+    "warnings": [
+      "generate_fk_relationships=false ignores the enforced FK edges declared on ['p.land.C_TABLE'] \u2014 referential integrity UNVERIFIED for this run"
+    ]
+  },
+  "retail_multi_isolated": {
+    "runs": [
+      {
+        "fk_parent_landing": "",
+        "landing_table": "p.land.A_TABLE",
+        "run_id": "r1-00-A_TABLE",
+        "source_table": "p.src.A_TABLE"
+      },
+      {
+        "fk_parent_landing": "",
+        "landing_table": "p.land.B_TABLE",
+        "run_id": "r1-01-B_TABLE",
+        "source_table": "p.src.B_TABLE"
+      }
+    ],
+    "scenario": "multi_isolated",
+    "warnings": [
+      "generate_fk_relationships=false ignores the enforced FK edges declared on ['p.land.B_TABLE'] \u2014 referential integrity UNVERIFIED for this run"
+    ]
+  },
+  "retail_root_a": {
+    "runs": [
+      {
+        "fk_parent_landing": "",
+        "landing_table": "p.land.A_TABLE",
+        "run_id": "r1-00-A_TABLE",
+        "source_table": "p.src.A_TABLE"
+      },
+      {
+        "fk_parent_landing": "p.land",
+        "landing_table": "p.land.B_TABLE",
+        "run_id": "r1-01-B_TABLE",
+        "source_table": "p.src.B_TABLE"
+      },
+      {
+        "fk_parent_landing": "p.land",
+        "landing_table": "p.land.C_TABLE",
+        "run_id": "r1-02-C_TABLE",
+        "source_table": "p.src.C_TABLE"
+      }
+    ],
+    "scenario": "relational_closure",
+    "warnings": [
+      "the relational model expanded this launch to ['p.land.B_TABLE', 'p.land.C_TABLE'] (declared in config/relationships; parents generate first)"
+    ]
+  },
+  "retail_two_targets": {
+    "runs": [
+      {
+        "fk_parent_landing": "",
+        "landing_table": "p.land.A_TABLE",
+        "run_id": "r1-00-A_TABLE",
+        "source_table": "p.src.A_TABLE"
+      },
+      {
+        "fk_parent_landing": "",
+        "landing_table": "p.land.D_TABLE",
+        "run_id": "r1-01-D_TABLE",
+        "source_table": "p.src.D_TABLE"
+      },
+      {
+        "fk_parent_landing": "p.land",
+        "landing_table": "p.land.B_TABLE",
+        "run_id": "r1-02-B_TABLE",
+        "source_table": "p.src.B_TABLE"
+      },
+      {
+        "fk_parent_landing": "p.land",
+        "landing_table": "p.land.C_TABLE",
+        "run_id": "r1-03-C_TABLE",
+        "source_table": "p.src.C_TABLE"
+      }
+    ],
+    "scenario": "relational_closure",
+    "warnings": [
+      "the relational model expanded this launch to ['p.land.A_TABLE', 'p.land.C_TABLE'] (declared in config/relationships; parents generate first)",
+      "2 targets WITH relationships: the launch covers 4 tables in one job. Pass --generate_fk_relationships=false for independent concurrent generation instead."
+    ]
+  },
+  "star_fact": {
+    "runs": [
+      {
+        "fk_parent_landing": "",
+        "landing_table": "p.land.dim_a",
+        "run_id": "r1-00-dim_a",
+        "source_table": "p.src.dim_a"
+      },
+      {
+        "fk_parent_landing": "",
+        "landing_table": "p.land.dim_b",
+        "run_id": "r1-01-dim_b",
+        "source_table": "p.src.dim_b"
+      },
+      {
+        "fk_parent_landing": "p.land",
+        "landing_table": "p.land.fact",
+        "run_id": "r1-02-fact",
+        "source_table": "p.src.fact"
+      }
+    ],
+    "scenario": "relational_closure",
+    "warnings": [
+      "the relational model expanded this launch to ['p.land.dim_a', 'p.land.dim_b'] (declared in config/relationships; parents generate first)"
+    ]
+  },
+  "thelook_items": {
+    "runs": [
+      {
+        "fk_parent_landing": "",
+        "landing_table": "p.land.users",
+        "run_id": "r1-00-users",
+        "source_table": "p.src.users"
+      },
+      {
+        "fk_parent_landing": "p.land",
+        "landing_table": "p.land.orders",
+        "run_id": "r1-01-orders",
+        "source_table": "p.src.orders"
+      },
+      {
+        "fk_parent_landing": "p.land",
+        "landing_table": "p.land.order_items",
+        "run_id": "r1-02-order_items",
+        "source_table": "p.src.order_items"
+      }
+    ],
+    "scenario": "relational_closure",
+    "warnings": [
+      "the relational model expanded this launch to ['p.land.users', 'p.land.orders'] (declared in config/relationships; parents generate first)"
+    ]
+  },
+  "unknown_target": {
+    "runs": [
+      {
+        "fk_parent_landing": "",
+        "landing_table": "p.land.Z_TABLE",
+        "run_id": "r1",
+        "source_table": "p.src.Z_TABLE"
+      }
+    ],
+    "scenario": "isolated",
+    "warnings": []
+  }
+}

@@ -50,8 +50,9 @@ The model repositories are public, so step 2 needs no credentials. The
 [Terraform README](../../terraform/synthetic-llm-dataflow-bigquery/README.md)
 shows which tables come from `thelook_ecommerce`, the configuration files the
 job reads, how the weights reach the workers, and which GPU, machine type and
-vLLM dtype go together: an L4 on G2 runs either model with `vllm_dtype=auto`;
-a T4 on N1 runs only `qwen3-4b`, with `vllm_dtype=float16`. Workers use private IPs only
+vLLM dtype go together: an L4 on G2 runs either model in `bfloat16`; a T4 on
+N1 runs only `qwen3-4b`, in `float16`. The launch passes `gpu`, and the launcher
+derives the dtype from it. Workers use private IPs only
 and run as the dedicated service account created by Terraform.
 
 Local checks, the same ones the repository CI runs:

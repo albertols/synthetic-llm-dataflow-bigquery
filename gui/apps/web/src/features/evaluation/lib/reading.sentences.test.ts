@@ -12,11 +12,22 @@ import type { MetricRow } from "@contracts/api";
 import { catalogueById, type MetricId } from "@contracts/generated/catalogue";
 import golden from "@contracts/generated/golden/scoring.json";
 
-import { adjustedAdjustments, adjustedDetail, adjustmentOf, metric, pkRow, richDetail } from "../test/fixtures";
+import {
+  adjustedAdjustments,
+  adjustedDetail,
+  adjustmentOf,
+  evaluation,
+  forestDetail,
+  metric,
+  pkRow,
+  richDetail,
+  tableEntry,
+} from "../test/fixtures";
 import { readAdjustedPk } from "./adjustment";
 import { fmtCompared } from "./format";
 import { buildGraph } from "./graph";
 import { findings, headline, interpretRow } from "./interpret";
+import { worstRows } from "./model";
 import { explainStatus, isDocumentedEdge, readingOf, ruleStatus } from "./reading";
 
 /** The row the BFF would serve for golden case `id` (Python's to_metric_row output). */
@@ -354,5 +365,69 @@ describe("rule sentences print the digits the comparison needs", () => {
     expect(fmtCompared([0.99999, 0.95], "share")).toEqual(["99.999%", "95%"]);
     expect(fmtCompared([1, 0.95], "share")).toEqual(["100%", "95%"]);
     expect(fmtCompared([null, 0.1])).toEqual(["—", "0.1"]);
+  });
+});
+
+describe("key checks with no key declared read Not applicable (ADR 0042)", () => {
+  it("become one finding per kind, ranked last, instead of one not-evaluated finding per table", () => {
+    const list = findings(forestDetail());
+    expect(list.filter((f) => f.notApplicable)).toHaveLength(2);
+    expect(list.filter((f) => !f.notApplicable && f.severity === "not_evaluated")).toEqual([]);
+    // Ranked last (their tie breaks on the key: identity before pk).
+    expect(list.slice(-2).every((f) => f.notApplicable)).toBe(true);
+    const pk = list.find((f) => f.notApplicable?.key === "pk");
+    const identity = list.find((f) => f.notApplicable?.key === "identity");
+    expect(pk!.notApplicable!.key).toBe("pk");
+    expect(pk!.notApplicable!.tables).toContain("T_003");
+    expect(pk!.notApplicable!.tables).toContain("T_120");
+    expect(pk!.notApplicable!.tables).toHaveLength(40);
+    expect(pk!.text).toBe(
+      "40 tables declare no primary key (T_003, T_006, T_009, T_012, T_015 and 35 more): the uniqueness check is not applicable — nothing to check, not a gap. Integrity is scored over the units they have.",
+    );
+    expect(identity!.notApplicable!.key).toBe("identity");
+    expect(identity!.text).toMatch(
+      /^120 tables declare no identity columns \(T_001, T_002, T_003, T_004, T_005 and 115 more\)/,
+    );
+    // The real FAIL keeps its own finding, first.
+    expect(list[0]).toMatchObject({
+      severity: "fail",
+      metricId: "table.pk_duplicate_rate",
+      target: { table: "T_004" },
+    });
+  });
+
+  it("a sampled-mode PK row stays a not-evaluated finding", () => {
+    const detail = {
+      evaluation: evaluation({ tables: [tableEntry("users")] }),
+      metrics: [
+        metric("table.pk_duplicate_rate", {
+          value: null,
+          score: null,
+          status: "not_evaluated",
+          detail: { reason: "sampled mode cannot measure primary-key duplicates" },
+        }),
+      ],
+    };
+    const [only] = findings(detail);
+    expect(only!.notApplicable).toBeUndefined();
+    expect(only!.text).toMatch(
+      /was not evaluated: sampled mode cannot measure primary-key duplicates\. Not evaluated is not a pass\./,
+    );
+  });
+
+  it("an N/A row is the last thing to look at", () => {
+    const na = metric("table.identity_duplicate_rate", {
+      value: null,
+      score: null,
+      status: "not_evaluated",
+      detail: { reason: "no identity columns declared in the relationship model" },
+    });
+    const info = metric("relationship.orphan_rate_source", { value: 0.01, score: null, status: "info" });
+    const pass = metric("table.row_count_ratio", { value: 1, score: 1 });
+    expect(worstRows([na, info, pass], 3).map((r) => r.metric_id)).toEqual([
+      "table.row_count_ratio",
+      "relationship.orphan_rate_source",
+      "table.identity_duplicate_rate",
+    ]);
   });
 });

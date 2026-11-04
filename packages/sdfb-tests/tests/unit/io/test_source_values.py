@@ -25,6 +25,9 @@ warm run then REPLAYED those tainted pools because the launcher's
     is deleted and rebuilt instead of replayed.
 
 A fake client stands in for google.cloud.bigquery — nothing touches GCP.
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0043).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
@@ -39,7 +42,11 @@ from sdfb_beam.io.source_values import (
     BigQuerySourceValueStore,
     pool_source_overlap,
 )
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.pools import FreeTextPool, SourceValueStore
+
+# The launch-default cap (ADR 0043): the store has none of its own.
+_CAP = DEFAULT_CONFIG.free_text.source_domain_cap
 
 
 class _FakeBqClient:
@@ -58,7 +65,7 @@ class _FakeBqClient:
 
 def test_fetch_distinct_returns_string_values() -> None:
   client = _FakeBqClient([{"v": "alpha"}, {"v": "beta"}])
-  store = BigQuerySourceValueStore("p.d.source", client=client)
+  store = BigQuerySourceValueStore("p.d.source", cap=_CAP, client=client)
   assert store.fetch_distinct("notes") == frozenset({"alpha", "beta"})
   sql, _cfg = client.queries[0]
   assert "`p.d.source`" in sql
@@ -72,7 +79,8 @@ def test_fetch_distinct_over_cap_returns_none() -> None:
 
 
 def test_fetch_distinct_rejects_non_identifier_column() -> None:
-  store = BigQuerySourceValueStore("p.d.source", client=_FakeBqClient([]))
+  store = BigQuerySourceValueStore(
+      "p.d.source", cap=_CAP, client=_FakeBqClient([]))
   with pytest.raises(ValueError):
     store.fetch_distinct("notes`; DROP TABLE x")
 
@@ -81,7 +89,7 @@ def test_fetch_frequent_groups_by_kanon_floor() -> None:
   # Wave-4 v2: the numeric scrub's keep-set comes from SOURCE
   # frequencies (HAVING COUNT(*) >= k), not the sample's multi-knots.
   client = _FakeBqClient([{"v": "2000"}, {"v": "35"}])
-  store = BigQuerySourceValueStore("p.d.source", client=client)
+  store = BigQuerySourceValueStore("p.d.source", cap=_CAP, client=client)
   assert store.fetch_frequent("acct", 10) == frozenset({"2000", "35"})
   sql, _cfg = client.queries[0]
   assert "GROUP BY v HAVING COUNT(*) >= 10" in sql
@@ -94,7 +102,7 @@ def test_fetch_frequent_groups_by_kanon_floor() -> None:
 
 def test_count_overlap_binds_values_as_array_parameter() -> None:
   client = _FakeBqClient([{"n": 7}])
-  store = BigQuerySourceValueStore("p.d.source", client=client)
+  store = BigQuerySourceValueStore("p.d.source", cap=_CAP, client=client)
   assert store.count_overlap("notes", ["a", "b"]) == 7
   _sql, cfg = client.queries[0]
   (param,) = cfg.query_parameters
@@ -102,7 +110,8 @@ def test_count_overlap_binds_values_as_array_parameter() -> None:
 
 
 def test_satisfies_the_core_protocol_and_pickles_without_client() -> None:
-  store = BigQuerySourceValueStore("p.d.source", client=_FakeBqClient([]))
+  store = BigQuerySourceValueStore(
+      "p.d.source", cap=_CAP, client=_FakeBqClient([]))
   assert isinstance(store, SourceValueStore)
   revived = pickle.loads(pickle.dumps(store))
   assert revived.table_fqn == "p.d.source"
@@ -146,13 +155,21 @@ def test_pool_source_overlap_reports_tainted_columns_only() -> None:
       _pool("tainted_col", ("real-1", "real-2", "nov-3")),
   ]
   overlap = pool_source_overlap(
-      _FakePoolStore(pools), _FakeValueStore(), "d1", "gs://b/m")
+      _FakePoolStore(pools),
+      _FakeValueStore(),
+      "d1",
+      "gs://b/m",
+      config=DEFAULT_CONFIG)
   assert overlap == {"tainted_col": 2}
 
 
 def test_pool_source_overlap_empty_store_is_clean() -> None:
   overlap = pool_source_overlap(
-      _FakePoolStore([]), _FakeValueStore(), "d1", "gs://b/m")
+      _FakePoolStore([]),
+      _FakeValueStore(),
+      "d1",
+      "gs://b/m",
+      config=DEFAULT_CONFIG)
   assert overlap == {}
 
 
@@ -173,8 +190,8 @@ def _fresh_fetch_cache():
 def test_fetch_distinct_is_cached_per_process() -> None:
   client_a = _FakeBqClient([{"v": "alpha"}])
   client_b = _FakeBqClient([{"v": "SHOULD-NOT-BE-QUERIED"}])
-  store_a = BigQuerySourceValueStore("p.d.cachetest", client=client_a)
-  store_b = BigQuerySourceValueStore("p.d.cachetest", client=client_b)
+  store_a = BigQuerySourceValueStore("p.d.cachetest", cap=_CAP, client=client_a)
+  store_b = BigQuerySourceValueStore("p.d.cachetest", cap=_CAP, client=client_b)
   assert store_a.fetch_distinct("notes") == frozenset({"alpha"})
   assert store_b.fetch_distinct("notes") == frozenset({"alpha"})
   assert client_b.queries == []
