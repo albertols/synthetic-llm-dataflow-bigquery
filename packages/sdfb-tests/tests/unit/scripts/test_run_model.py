@@ -273,7 +273,9 @@ def test_an_interrupt_starts_no_further_batch(argv, monkeypatch):
   launchers = _Launchers(hang={0}, signal_after=(signal.SIGINT, 1))
   monkeypatch.setattr(RM.subprocess, "Popen", launchers)
   with pytest.raises(KeyboardInterrupt):
-    RM.main([*argv, "--max_tables_per_job=1"])
+    # One at a time: under the default cap (3) batches 1 and 2 start
+    # beside batch 0, before the interrupt.
+    RM.main([*argv, "--max_tables_per_job=1", "--max_parallel_jobs=1"])
   assert [p.index for p in launchers.procs] == [0]
   assert launchers.procs[0].terminated
 
