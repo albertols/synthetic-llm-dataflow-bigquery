@@ -116,10 +116,12 @@ master's generation DAG can run; the rest need the single DAG with
 with no trigger value (`all_from_overlay`), a table whose gate failed while
 every batch job reached DONE (`all_table_fails`), and a `validation_runs`
 table without the `status_reason` column (`all_old_validation_runs`). The
-next two run the launch gate at the cap of 1: fourteen batches, the size of
-the 2026-11-02 launch that lost 13 of them (`all_14_batches_cap_1`), and
-three whose middle one fails, after which the third still launches
-(`all_middle_batch_fails`). The last two are the capacity retry (ADR 0045
+next two run the launch gate at the cap of 1 (their trigger's
+`max_parallel_jobs`): fourteen batches, the size of the 2026-11-02 launch
+that lost 13 of them (`all_14_batches_cap_1`), and three whose middle one
+fails, after which the third still launches (`all_middle_batch_fails`);
+`all_14_batches_default_cap` runs the fourteen at generator.yaml's cap of
+3. The last two are the capacity retry (ADR 0045
 D10): the middle batch's job fails for capacity and is relaunched
 (`all_capacity_retry`), or fails after it ran and is not
 (`all_job_fails_not_capacity`).
@@ -153,7 +155,7 @@ generator.yaml copied, not linked:
       --markers packages/sdfb-tests/tests/fixtures/config_parity/dag_markers.json \\
       --out $S/dag_bodies.json
 
-Without `--scenario` all sixteen run. `SDFB_DAG_BODIES=$S/dag_bodies.json`
+Without `--scenario` all seventeen run. `SDFB_DAG_BODIES=$S/dag_bodies.json`
 then lets `packages/sdfb-tests/tests/unit/composer/test_generation_dag.py`
 and `test_launch_helpers.py` check that output against the plan and master.
 
@@ -214,7 +216,7 @@ GET_CONN_READ = "<GCSHook.get_conn>"
 _FILLED_SUFFIXES = (".py", ".yaml", ".yml", ".json")
 # The Airflow Variables the DAGs read (anonymised; DATAFLOW_NETWORK_TAGS
 # keeps its in-DAG default, and SDFB_MAX_PARALLEL_JOBS unset leaves the cap
-# to the overlaid yaml).
+# to the overlaid yaml, 3, or the trigger's max_parallel_jobs).
 AIRFLOW_VARIABLES = {
     "PROJECT_ID": "sdfb-proj",
     "REGION": "europe-west3",
@@ -435,7 +437,8 @@ SCENARIOS: dict[str, dict[str, Any]] = {
             {
                 "tables": "all",
                 "relationships_uri": _MODEL_URI,
-                "max_tables_per_job": "1"
+                "max_tables_per_job": "1",
+                "max_parallel_jobs": "1"
             },
             gcs_objects={_MODEL_URI: _FOURTEEN_MODEL_TEXT},
             verdict_rows=_FOURTEEN_PASSED),
@@ -446,11 +449,23 @@ SCENARIOS: dict[str, dict[str, Any]] = {
             {
                 "tables": "all",
                 "relationships_uri": _MODEL_URI,
-                "max_tables_per_job": "1"
+                "max_tables_per_job": "1",
+                "max_parallel_jobs": "1"
             },
             gcs_objects={_MODEL_URI: _THREE_MODEL_TEXT},
             fail_job_suffixes=("-b01",),
             verdict_rows=_MIDDLE_FAILS_ROWS),
+    # The same fourteen at generator.yaml's cap of 3 (ADR 0045 D5): five
+    # waves, each bundle launching once every bundle three below it ended.
+    "all_14_batches_default_cap":
+        _scenario(
+            {
+                "tables": "all",
+                "relationships_uri": _MODEL_URI,
+                "max_tables_per_job": "1"
+            },
+            gcs_objects={_MODEL_URI: _FOURTEEN_MODEL_TEXT},
+            verdict_rows=_FOURTEEN_PASSED),
     # ADR 0045 D10: b01's job fails for capacity before it runs anything;
     # the bundle is relaunched with the same run ids, and every table lands.
     "all_capacity_retry":

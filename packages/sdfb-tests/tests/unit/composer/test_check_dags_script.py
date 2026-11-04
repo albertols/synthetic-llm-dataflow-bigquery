@@ -45,7 +45,8 @@ _PLAN_SCENARIOS = [
     "explicit_param_file_says_all", "all_one_batch", "all_two_batches",
     "all_batch_fails", "all_plan_fails", "all_from_overlay", "all_table_fails",
     "all_old_validation_runs", "all_14_batches_cap_1", "all_middle_batch_fails",
-    "all_capacity_retry", "all_job_fails_not_capacity"
+    "all_14_batches_default_cap", "all_capacity_retry",
+    "all_job_fails_not_capacity"
 ]
 _EXPLICIT_TASKS = {
     "start_sdfb", "run_evaluation_gate", "wait_for_generation",
@@ -93,8 +94,11 @@ def test_scenarios_are_the_plans_list():
   # The size of the 2026-11-02 launch: fourteen one-table batches at K = 1.
   fourteen = M.SCENARIOS["all_14_batches_cap_1"]
   assert fourteen["run_conf"]["max_tables_per_job"] == "1"
+  assert fourteen["run_conf"]["max_parallel_jobs"] == "1"  # the trigger's
+  assert "max_parallel_jobs" not in M.SCENARIOS["all_14_batches_default_cap"][
+      "run_conf"]  # generator.yaml's 3
   assert len(fourteen["verdict_rows"]) == 14
-  assert "SDFB_MAX_PARALLEL_JOBS" not in M.AIRFLOW_VARIABLES  # yaml's cap 1
+  assert "SDFB_MAX_PARALLEL_JOBS" not in M.AIRFLOW_VARIABLES  # yaml's cap 3
   # The overlay's relationship model: no trigger value, no file.
   assert M.SCENARIOS["all_from_overlay"]["run_conf"] == {"tables": "all"}
   assert M.SCENARIOS["all_old_validation_runs"]["reason_column_missing"] is True

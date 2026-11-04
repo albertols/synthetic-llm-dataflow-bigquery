@@ -34,10 +34,10 @@ flowchart LR
   G -- "true, the default" --> W["⚙️ wait_for_generation<br/>until JOB_STATE_DONE"]:::cpu
   W --> T["🔀 trigger_evaluation<br/>same template<br/>sdfb_job=evaluation"]:::beam
   T --> L["⚙️ wait_for_evaluation_launch<br/>until the job runs"]:::cpu
-  R -- "all" --> BB["⚙️ batch_bodies"]:::cpu --> SB["🔀 start_batch[b00 … bNN]<br/>each waits for its job"]:::beam
-  SB --> C["⚙️ collect_landed<br/>the jobs that reached DONE"]:::cpu
-  C --> TB["🔀 trigger_evaluation_batches<br/>--run_id base, --generation_job_ids"]:::beam
-  TB --> LB["⚙️ wait_for_batch_evaluation_launch"]:::cpu
+  R -- "all" --> BB["⚙️ batch_bodies"]:::cpu --> SB["🔀 bundle[b00 … bNN]<br/>gate, launch, wait"]:::beam
+  SB --> C["⚙️ eval_body<br/>this bundle's job"]:::cpu
+  C --> TB["🔀 trigger_eval<br/>--run_id base, its job id"]:::beam
+  TB --> LB["⚙️ wait_eval_launch"]:::cpu
 ```
 
 Every default of the DAG comes from `generator.yaml` overlaid with the
@@ -107,18 +107,21 @@ states from the record (from the job's rows of those tables).
 ### A whole-model launch (`tables=all`)
 
 `route` plans the batches from the one model file `relationships_uri` names
-(a `config_uri` file's keys win, `launch.tables` included). Once every batch
-job has ended, `collect_landed` builds one evaluation over the jobs that
-reached `JOB_STATE_DONE`: `sdfb_job=evaluation`, `run_id` (the launch's base
-run id: the evaluator reads every `validation_runs` row of the launch),
-`generation_job_ids` (those jobs, in batch order), `relationships_uri` (the
-planned model, empty when `generate_fk_relationships` is false),
-`scope=manual`, `trigger=chained`, `mode`, `output_dataset` and
-`disk_size_gb=200`. A batch that failed is left out and fails the run
-(`fail_if_a_batch_failed`); with `run_evaluation` false, or nothing landed,
-the evaluation is skipped. `wait_for_batch_evaluation_launch` and its
-callback close a dead launch's `RUNNING` row as on the explicit branch, the
-row found by the base run id.
+(a `config_uri` file's keys win, `launch.tables` included), and runs one
+mapped `bundle` task group per batch (ADR 0045 D5, D7). Once a bundle's
+batch job reaches `JOB_STATE_DONE`, its `eval_body` builds that bundle's
+own evaluation: `sdfb_job=evaluation`, `run_id` (the launch's base run id),
+`generation_job_ids` (that one job: the evaluator reads only the
+`validation_runs` rows it wrote), `relationships_uri` (the planned model,
+empty when `generate_fk_relationships` is false), `scope=manual`,
+`trigger=chained`, `mode`, `output_dataset` and `disk_size_gb=200`, named
+`<evaluation name>-bNN-<ts>`. A launch of N batches writes N evaluations
+under one base run id. A bundle whose batch failed skips its own
+evaluation and fails the run (`fail_if_a_batch_failed`); with
+`run_evaluation` false every `eval_body` skips. A bundle's
+`wait_eval_launch` and its callback close a dead launch's `RUNNING` row as
+on the explicit branch, the row found by that bundle's generation job id,
+never by the base run id the bundles share.
 
 ## The standalone DAG
 
@@ -180,7 +183,7 @@ first, through the job id the launch pushed to XCom. Only a job that ended
 still running, done, or unreadable, and a launch with no job id in XCom, get
 one warning and no row. A launch whose only target is `tables` cannot be
 matched, so it is never closed this way. The generation DAG's
-`wait_for_evaluation_launch` and `wait_for_batch_evaluation_launch` carry a
+`wait_for_evaluation_launch` and each bundle's `wait_eval_launch` carry a
 copy of this callback each.
 
 ## The launcher

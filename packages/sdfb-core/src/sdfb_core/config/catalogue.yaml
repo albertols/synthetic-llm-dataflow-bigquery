@@ -850,10 +850,10 @@ settings:
     label: Parallel batch jobs
     group: Whole-model launch
     purpose: 'How many batch jobs run at once: scripts/launch/run_model.py reads it, and the Composer DAG''s
-      tables=all branch reads it at parse time, overlaid by sdfb_env.yaml; the Airflow Variable SDFB_MAX_PARALLEL_JOBS
-      wins when set.'
-    up: The batches finish sooner; each job holds its workers' GPUs, so stay inside the GPU quota.
-    down: 'One at a time (the default): never more GPUs than one job asks for.'
+      tables=all branch takes it, overlaid by sdfb_env.yaml, as its max_parallel_jobs param''s default; the
+      Airflow Variable SDFB_MAX_PARALLEL_JOBS wins when set.'
+    up: Each job holds up to 4 workers' GPUs; 3 (the default) needs 12 of the region's GPU quota.
+    down: 'One at a time: never more GPUs than one job asks for.'
     unit: jobs
     adrs:
     - '0045'

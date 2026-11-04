@@ -20,7 +20,7 @@ Airflow is not a laptop dependency, so the file is read with `ast`; what it
 computes is `composer/sdfb_batches.py`'s, run here on a deployed folder
 (conftest.py's `deployed`). The real-Airflow run of the same file is
 `scripts/composer/check_dags.py`: with `SDFB_DAG_BODIES` naming its output
-(all sixteen scenarios, on a folder of `composer/*.py`, `generator.yaml` and
+(all seventeen scenarios, on a folder of `composer/*.py`, `generator.yaml` and
 `sdfb_env.yaml`), `test_the_harness_run_is_the_plans` checks every scenario
 against the plan's expectations, and test_launch_helpers.py compares its
 explicit launches with master's.
@@ -860,7 +860,7 @@ def _harness_output() -> dict:
   path = os.environ.get(HARNESS_OUTPUT_ENV)
   if not path:
     pytest.skip(f"set {HARNESS_OUTPUT_ENV} to a check_dags.py output of all "
-                f"sixteen scenarios")
+                f"seventeen scenarios")
   return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
@@ -1019,6 +1019,13 @@ def test_the_harness_runs_the_launch_gate():
   assert len(fourteen["bundle_evaluation_bodies"]) == 14
   assert fourteen["task_states"]["fail_if_a_batch_failed"] == "skipped"
   assert fourteen["task_states"]["fail_if_a_table_failed"] == "success"
+  # The default cap, 3 (generator.yaml): the same fourteen, every bundle
+  # through; the harness checked each launched after the bundle three below
+  # it ended.
+  default = output["all_14_batches_default_cap"]
+  assert len(default["bodies"]) == 14
+  assert not [s for s in default["task_states"].values() if s == "failed"]
+  assert len(default["bundle_evaluation_bodies"]) == 14
   middle = output["all_middle_batch_fails"]
   assert _states(middle, "bundle.launch[") == {
       "bundle.launch[0]": "success",

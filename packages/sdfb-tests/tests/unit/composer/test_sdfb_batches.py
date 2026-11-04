@@ -749,7 +749,7 @@ def test_parallel_cap_reads_the_variable_then_the_overlaid_yaml(deployed):
   m = _load()
   folder = deployed()
   yaml_only = m.load_layers(folder)
-  assert m.parallel_cap(yaml_only, {}) == 1  # generator.yaml's 1
+  assert m.parallel_cap(yaml_only, {}) == 3  # generator.yaml's 3
   overlay = Path(folder) / "sdfb_env.yaml"
   overlay.write_text(
       overlay.read_text(encoding="utf-8") +

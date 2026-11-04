@@ -210,11 +210,18 @@ def test_at_most_max_parallel_jobs_run_at_once(argv, monkeypatch):
   assert len(launchers.commands) == 3 and launchers.peak == 2
 
 
-def test_one_at_a_time_by_default(argv, monkeypatch):
+def test_three_at_a_time_by_default(argv, monkeypatch):
+  """generator.yaml's launch.max_parallel_jobs is 3 (ADR 0045 D5, revised
+  2026-11-04); --max_parallel_jobs=1 runs one at a time."""
   launchers = _Launchers(pause=0.02)
   monkeypatch.setattr(RM.subprocess, "Popen", launchers)
   assert RM.main([*argv, "--max_tables_per_job=1"]) == 0
-  assert launchers.peak == 1
+  assert 1 <= launchers.peak <= 3
+  serial = _Launchers(pause=0.02)
+  monkeypatch.setattr(RM.subprocess, "Popen", serial)
+  assert RM.main([*argv, "--max_tables_per_job=1",
+                  "--max_parallel_jobs=1"]) == 0
+  assert serial.peak == 1
 
 
 def test_a_failed_batch_exits_1_and_the_rest_run(argv, monkeypatch, capsys):

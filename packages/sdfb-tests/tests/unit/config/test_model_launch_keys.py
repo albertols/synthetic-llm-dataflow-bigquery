@@ -32,7 +32,7 @@ _DEFAULTS = {
     "landing_dataset": "",
     "tables": "explicit",
     "max_tables_per_job": 10,
-    "max_parallel_jobs": 1,
+    "max_parallel_jobs": 3,
     "prep_workers": 8,
     "batch_index": None,
     "batch_count": None,
@@ -47,7 +47,7 @@ def test_the_excluded_namespace_attrs_are_exactly_the_new_keys():
 def test_the_defaults():
   launch, io = DEFAULT_CONFIG.launch, DEFAULT_CONFIG.io
   assert (launch.tables, launch.max_tables_per_job, launch.max_parallel_jobs,
-          launch.prep_workers) == ("explicit", 10, 1, 8)
+          launch.prep_workers) == ("explicit", 10, 3, 8)
   assert launch.batch_index is None and launch.batch_count is None
   assert io.source_dataset == "" and io.landing_dataset == ""
 

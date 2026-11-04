@@ -149,13 +149,13 @@ launch:
 
   # Parallel batch jobs — How many batch jobs run at once:
   # scripts/launch/run_model.py reads it, and the Composer DAG's tables=all
-  # branch reads it at parse time, overlaid by sdfb_env.yaml; the Airflow
-  # Variable SDFB_MAX_PARALLEL_JOBS wins when set. [--max_parallel_jobs ·
-  # ADR 0045]
-  # ↑ The batches finish sooner; each job holds its workers' GPUs, so stay
-  # inside the GPU quota. · ↓ One at a time (the default): never more GPUs
-  # than one job asks for.
-  max_parallel_jobs: 1
+  # branch takes it, overlaid by sdfb_env.yaml, as its max_parallel_jobs
+  # param's default; the Airflow Variable SDFB_MAX_PARALLEL_JOBS wins when
+  # set. [--max_parallel_jobs · ADR 0045]
+  # ↑ Each job holds up to 4 workers' GPUs; 3 (the default) needs 12 of the
+  # region's GPU quota. · ↓ One at a time: never more GPUs than one job asks
+  # for.
+  max_parallel_jobs: 3
 
   # Prep threads — Threads a multi-table launcher reads schemas, reference
   # samples and source stats on, before the cross-table steps run in plan

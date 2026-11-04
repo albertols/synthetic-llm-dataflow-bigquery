@@ -91,7 +91,7 @@ def test_values_hold_every_settable_key_and_no_launch_identity():
   assert values["launch"] == {
       "tables": "explicit",
       "max_tables_per_job": 10,
-      "max_parallel_jobs": 1,
+      "max_parallel_jobs": 3,
       "prep_workers": 8
   }
   for section, cls in SECTION_TYPES.items():

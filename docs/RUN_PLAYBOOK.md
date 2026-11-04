@@ -192,16 +192,44 @@ and the template file declares the parameters.
 
 The parallel cap, how many batch jobs of a `tables=all` launch run at once,
 has three layers (`sdfb_batches.parallel_cap`): `launch.max_parallel_jobs`
-of `generator.yaml` (`1`), overlaid by the same key in `sdfb_env.yaml` when
-the environment writes it there by hand (`config: launch:
-{max_parallel_jobs: "2"}`, a quoted string; it has no marker), and the
-Airflow Variable `SDFB_MAX_PARALLEL_JOBS`, which wins when it is set and not
-empty. Each batch job holds its workers' GPUs (up to `maxWorkers` 4 workers
-of one GPU each), so keep the cap within the regional GPU quota divided by
-4. It is read when Composer parses the file; a change to the Variable
+of `generator.yaml` (`3` since 2026-11-04; it was `1`), overlaid by the same
+key in `sdfb_env.yaml` when the environment writes it there (`config:
+launch: {max_parallel_jobs: "2"}`, a quoted string; it has no marker), and
+the Airflow Variable `SDFB_MAX_PARALLEL_JOBS`, which wins when it is set and
+not empty. Together they are the default of the DAG param
+`max_parallel_jobs`, which a trigger sets for its own run. Each batch job
+holds its workers' GPUs (up to `maxWorkers` 4 workers of one GPU each), so
+keep the cap within the regional GPU quota divided by 4 (3 needs 12 GPUs).
+The default is read when Composer parses the file; a change to the Variable
 applies at the next parse, without a re-import, and a change to the overlay
-with the next import. A value that is no integer fails the DAG's import.
-Each running batch also holds one Airflow worker slot until its job ends.
+with the next import. A value that is no integer fails the DAG's import. No
+batch holds an Airflow worker slot while its job runs: every wait of a
+bundle is a reschedule-mode sensor.
+
+**Optional workflow-3 input `max_parallel_jobs`** (default `3`; corp
+workflow `3_db_import_dag.yaml`, untracked): written into the overlay the
+way the workflow writes `initial_workers`, after the copy and before the
+`sed`. The diff to port:
+
+```yaml
+on:
+  workflow_dispatch:
+    inputs:
+      max_parallel_jobs:
+        description: "Batch jobs of a tables=all launch at once (the DAG param's default; ADR 0045 D5)"
+        required: false
+        default: "3"
+# in "Substitute build-time placeholders", beside initial_workers:
+#   the same insert_after '^  launch:$' helper, or the launch: block the
+#   workflow already appends under config:
+        MAX_PARALLEL_JOBS="${{ inputs.max_parallel_jobs || '3' }}"
+        insert_after '^  launch:$' "    max_parallel_jobs: \"${MAX_PARALLEL_JOBS}\"" "$OUT/sdfb_env.yaml"
+```
+
+The load check then prints it:
+`python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import sdfb_batches as b; print(b.param_defaults(b.load_layers(sys.argv[1]))["max_parallel_jobs"])' "$OUT"`.
+A bundle whose job failed for capacity is relaunched up to the DAG param
+`capacity_retries` times (default 3; ADR 0045 D10): no workflow input.
 
 The DAG's `route` task reads from GCS, as the Composer environment's own
 service account, only the config file of a launch with `config_uri` and the
@@ -966,7 +994,8 @@ prints), so steps 11 and 15 read the registry from `<quality_dataset>`.
 It closes AC-B-5 of
 [ADR 0045](adr/0045-whole-model-launches.md): a launch of the generation DAG
 with `tables=all` and at least two batches, each launched inside the Flex Template's 12-minute
-window, and one evaluation covering every landed table.
+window, and every landed table evaluated (one evaluation per bundle since
+the revision of 2026-11-04, D7).
 
 **Why a scratch landing dataset, overwritten.** The evaluation reads each
 landing table whole (`scope=manual`). A table that also holds rows of an
@@ -1133,8 +1162,7 @@ can show (mapped tasks on Composer 2, the provider's job-name suffix,
    the `client_type` the leaf judges with) and `mode` (`all`). `batch_bodies` returns the two bodies; `start_sdfb` and the rest
    of the explicit chain are skipped.
 
-8. **Each `start_batch` instance** (two, running together with the cap at
-   2). In each Flex launcher's log (the job's launcher log in the Dataflow
+8. **Each bundle's `launch`** (two, running together with the cap at 2). In each Flex launcher's log (the job's launcher log in the Dataflow
    console), expect:
 
    ```text
@@ -1161,25 +1189,32 @@ can show (mapped tasks on Composer 2, the provider's job-name suffix,
    just before it hands the job over: after `launched_at` by the graph's
    build.
 
-9. **The mapped-task behaviours the DAG relies on** (unverified until now):
-   each `start_batch` instance stays running until its Dataflow job is DONE;
-   `collect_landed` runs after both and returns the evaluation's launch body,
-   whose `generation_job_ids` parameter is `<b00's job id>,<b01's job id>` in
-   batch order; `trigger_evaluation_batches` and
-   `wait_for_batch_evaluation_launch` succeed; `fail_if_a_batch_failed` is
-   skipped; `fail_if_a_table_failed` succeeds and its log carries
+9. **The bundle behaviours the DAG relies on** (unverified until now;
+   [ADR 0045 D5, D7](adr/0045-whole-model-launches.md#the-gate-as-a-sensor-in-a-bundle-2026-11-04)):
+   the Grid view shows one mapped `bundle` group with two map indexes; each
+   bundle's `launch` succeeds within a minute of its job's creation and its
+   `wait_generation` stays up for reschedule (light blue) until the job is
+   DONE; then that bundle's `eval_body` returns an evaluation launch body
+   whose `generation_job_ids` parameter is that bundle's one job id and whose
+   `jobName` ends `-b0N-<ts>`, and its `trigger_eval` and `wait_eval_launch`
+   succeed, while the other bundle may still be generating;
+   `fail_if_a_batch_failed` is skipped; `fail_if_a_table_failed` succeeds and
+   its log carries
    `TABLE VERDICTS | 5 planned · 5 passed · 0 failed · 0 no row`; the run
-   ends success.
+   ends success. Two `evaluation_data_history` rows per event, one per
+   bundle, share `<base>` as `base_run_id`.
 
-   **The launch gate** ([ADR 0045 D5](adr/0045-whole-model-launches.md#the-launch-gate-2026-11-03)).
-   Every `start_batch` instance runs once within a minute of
-   `batch_bodies`, whatever the cap; at most `max_parallel_jobs` Dataflow
-   jobs run at once; a waiting instance shows up for reschedule (light
-   blue), its log reads `b0N waits for b0M to end (cap C)` once each poke,
-   two minutes apart, and every instance stays on try 1 until it launches. The scheduler's stale-DAG sweep
+   **The launch gate** ([ADR 0045 D5](adr/0045-whole-model-launches.md#the-gate-as-a-sensor-in-a-bundle-2026-11-04)).
+   Every bundle's `gate` starts within a minute of `batch_bodies`, whatever
+   the cap; at most `max_parallel_jobs` generation jobs run at once; a
+   waiting gate shows up for reschedule, its log reads
+   `b0N waits for b0M to end (cap C)` once each poke, **two minutes apart**
+   (the 2026-11-03 operator gate re-ran every 1 to 4 s: if the pokes are
+   seconds apart, the old DAG is still imported), and every gate stays on
+   try 1. The scheduler's stale-DAG sweep
    (`Found (N) stales dags not parsed after …`, naming this DAG) must fail no
    instance: no `not found in serialized_dag table` line for the DAG, and no
-   `start_batch` instance failed with no start date. If the environment
+   bundle task failed with no start date. If the environment
    shows the sweep (the DAG file's "Last Run" in the DAG processor's parse
    statistics more than 600 s apart), raise
    `[scheduler] dag_stale_not_seen_duration` (DEPLOYMENT_PREREQUISITES,
@@ -1210,7 +1245,7 @@ can show (mapped tasks on Composer 2, the provider's job-name suffix,
     every row (a table without the 36th column fails the query: run §2d step
     1's `validation_runs` `bq update`).
 
-11. **The registry** — one chained evaluation for the launch:
+11. **The registry** — one chained evaluation per bundle (ADR 0045 D7):
 
     ```sql
     SELECT evaluation_id, event, status, status_reason, base_run_id,
@@ -1222,12 +1257,13 @@ can show (mapped tasks on Composer 2, the provider's job-name suffix,
     WHERE base_run_id = '<base>';
     ```
 
-    Expect one row: `event` `FINAL`, `status` `SUCCEEDED` (or
-    `SUCCEEDED_WITH_WARNINGS`), `generation_job_ids` = both job ids in batch
-    order, `generation_job_id` = the first, `runs` = 5, `params_source` =
-    `validation_runs`; `sources` lists the five landed tables, the overridden
-    one with its `source_table`; no warning about rows of jobs not in
-    `generation_job_ids`. A `PARTIAL` names its cause in `status_reason`; a
+    Expect two rows, one per bundle: `event` `FINAL`, `status` `SUCCEEDED`
+    (or `SUCCEEDED_WITH_WARNINGS`), `generation_job_ids` = that bundle's one
+    job id, `generation_job_id` = the same, `runs` = 3 for b00 and 2 for
+    b01, `params_source` = `validation_runs`; together `sources` list the
+    five landed tables, the overridden one with its `source_table`; each row
+    may carry a note that the other bundle's rows (jobs not in
+    `generation_job_ids`) were not evaluated, which is expected. A `PARTIAL` names its cause in `status_reason`; a
     `scope count_mismatch` there means a table held rows of another launch
     (an `append` run, or a landing dataset that is not the scratch one).
 
@@ -1244,7 +1280,7 @@ can show (mapped tasks on Composer 2, the provider's job-name suffix,
     ([ADR 0045](adr/0045-whole-model-launches.md#the-table-is-the-unit-of-failure-2026-10-31)
     D6). Expect:
 
-    - both `start_batch` instances succeed: b00's job ends DONE;
+    - both bundles' `wait_generation` succeed: b00's job ends DONE;
     - b00's launcher log carries `table_skipped reason='[preflight P5] …'
       table=<the table>` (ERROR) and `model_batch_partial skipped=1
       skipped_tables=<the table> tables=3` (WARNING);
@@ -1260,8 +1296,8 @@ can show (mapped tasks on Composer 2, the provider's job-name suffix,
         <project>.<scratch_landing_dataset>.<the table> | FAILED_PREFLIGHT | [preflight P5] …
       ```
 
-    - the evaluation covers both batches (`generation_job_ids` = both job
-      ids in batch order) and its warnings carry one
+    - each bundle evaluates its own batch (`generation_job_ids` = that
+      bundle's job id), and b00's evaluation's warnings carry one
       `<project>.<scratch_landing_dataset>.<the table>: not generated by the
       launch (FAILED_PREFLIGHT: [preflight P5] …)`; that table's scratch copy
       keeps step 6's rows, which this evaluation does not read.
@@ -1310,8 +1346,8 @@ can show (mapped tasks on Composer 2, the provider's job-name suffix,
     Expect:
 
     - the launcher log's `Thresholds (env=<env>): blocker_failure_ratio=0.0000`;
-    - the batch job ends DONE (`start_batch` succeeds, `fail_if_a_batch_failed`
-      skipped);
+    - the batch job ends DONE (`bundle.wait_generation` succeeds,
+      `fail_if_a_batch_failed` skipped);
     - the worker log's `blocker_gate_recorded blocker_count=<n> gate=0.0
       observed=<ratio> run_id=<base>-b00-01-<the table> table=<the table>`
       (ERROR), and no `BlockerThresholdExceeded`;
@@ -1330,11 +1366,14 @@ can show (mapped tasks on Composer 2, the provider's job-name suffix,
     params, `tables` = `all`), or launch each fixed table explicitly
     (`tables` = `explicit`, its source as `table_fqn`, and a `config_uri`
     file whose `io.landing_table` names its scratch landing table). Clearing
-    a DONE batch's `start_batch` instance launches its whole batch again.
+    a DONE bundle's `launch` launches its whole batch again.
     A batch job that failed (a NO ROW in the banner) is still re-run by
-    clearing its `start_batch` instance with its downstream tasks (the
-    instances have no retries: a retry would launch the batch again under
-    the same base).
+    clearing its bundle's `launch` with its downstream tasks (and its
+    `gate` when the gate failed; a launch has no retries: a retry would
+    launch the batch again under the same base). A batch that FAILED for
+    capacity before it ran was already relaunched by its wait, up to
+    `capacity_retries` times (ADR 0045 D10): its log reads
+    `FAILED for capacity (…) before it ran a work item; relaunch N of M`.
 
 13. **The CLI path**, from a checkout on a machine with GCP credentials (not
     inside the image: the image sets `FLEX_TEMPLATE_PYTHON_PY_FILE`, so a
@@ -1421,7 +1460,11 @@ can show (mapped tasks on Composer 2, the provider's job-name suffix,
 | `model_batch_count_mismatch` (launcher, ERROR) | the model file or K changed between `route` and this batch's launch | trigger the DAG again |
 | `[model launch] … a Flex launch runs one Dataflow job` | a Flex launch of `tables=all` that plans several batches without `batch_index` (the template launched by hand; the DAG gives every batch its index) | the DAG with `tables=all`, `run_model.py`, or `max_tables_per_job` ≥ the enabled tables |
 | `launch_option_unused key=…` (launcher, WARNING) | a key the launch's `tables` mode does not read was given | drop it |
-| `collect_landed` skipped, no evaluation | `run_evaluation` is off, or no batch job reached DONE | the failed batches first |
+| a bundle's `eval_body` skipped | `run_evaluation` is off | — |
+| a bundle's `eval_body` upstream-failed | that bundle's generation failed; the other bundles still evaluate | the failed batch first |
+| a gate's log lines seconds apart, not two minutes | an import from before 2026-11-04 (the operator gate) is still loaded | re-import (§0b) |
+| `wait_generation` logs `relaunch N of M`, the job `-bNN-rN-…` | the batch job FAILED for capacity before it ran anything (ADR 0045 D10) | nothing; raise the quota or lower `max_parallel_jobs` if it keeps happening |
+| `wait_generation` fails `may have started job … without its id being recorded` | the worker died inside a relaunch call | find the job in Dataflow; cancel it or let it end, then clear the bundle |
 | a run failed with every batch job DONE | a table did not pass: read `fail_if_a_table_failed`'s log, whose `TABLE VERDICTS` banner names each table, its status and its reason | fix the table the reason names, then step 12's re-run recipe |
 | `fail_if_a_table_failed` lists a table as `NO ROW` | its batch job did not reach DONE (`fail_if_a_batch_failed` failed too; a one-table batch whose table stopped at preflight is one), or the record is off | the batch's launcher log first |
 | `fail_if_a_table_failed` skipped, `per-table verdicts are not recorded` (WARNING) | no `validation_runs_table` (the overlay's, or a config file's `io` key): the run's outcome is the batch jobs' alone | set the overlay's `SDFB_VALIDATION_RUNS_TABLE` |
@@ -1529,7 +1572,7 @@ flowchart LR
      it cannot read your model whole (by design);
    - **Primary key** "N declared" and "M none" = the enabled tables of your
      model file with and without a `pk:` (no "unknown"), of the batches the
-     evaluation covers: a batch that FAILED after writing its rows is not
+     evaluations cover: a batch that FAILED after writing its rows is not
      evaluated, and its tables are in neither count;
    - **Edges** = the `fk:` entries of the enabled tables (0 for a model of
      unrelated tables), and **Isolated** = the tables with no foreign key in or
@@ -2975,9 +3018,9 @@ folder (`gs://<bucket>/synthetic/relationships/<model>.yaml`), and a copy or
 a variant of it goes under a sub-prefix, e.g.
 `gs://<bucket>/synthetic/relationships/whole-model/<model>.yaml`.
 
-*The generation DAG with `tables=all` plans once, launches one Flex job per
-batch, at most the parallel cap at a time, evaluates the batches that landed
-once, and judges every table by its `validation_runs` row:*
+*The generation DAG with `tables=all` plans once, runs one bundle per batch
+(its Flex job, at most the parallel cap at a time, then that batch's own
+evaluation), and judges every table by its `validation_runs` row:*
 
 ```mermaid
 flowchart LR
@@ -2989,9 +3032,9 @@ flowchart LR
 
   M[("📄 gs:// model file")]:::store
   P["⚙️ route<br/>b00 … bNN"]:::cpu
-  J["🔀 one Flex job<br/>per batch"]:::beam
+  J["🔀 one Flex job<br/>per bundle"]:::beam
   V[("🗄️ validation_runs<br/>launch_run_id = base")]:::store
-  E["⚙️ one evaluation<br/>landed batches"]:::cpu
+  E["⚙️ one evaluation<br/>per bundle"]:::cpu
   T["🛡️ fail_if_a_table_failed<br/>TABLE VERDICTS"]:::cpu
   M --> P --> J --> V --> E
   V --> T
@@ -3025,14 +3068,20 @@ explicit chain, and one that says `all` runs the batches even when the
 trigger says `explicit`) and the usual generation params. The Composer
 environment's service account reads the model file and the config file
 (§0b). A trigger that sets only `tables` = `all` plans the overlay's
-model file (its 19th marker). At most the parallel cap's batches run at
-once (§0b: the Variable `SDFB_MAX_PARALLEL_JOBS` when set, else
-`launch.max_parallel_jobs` of `generator.yaml` overlaid by `sdfb_env.yaml`;
-a config file's `launch.max_parallel_jobs` does nothing here), and the DAG
-runs one launch at a time. With `run_evaluation` on, one evaluation covers
-the batches that landed. A failed batch fails its own `start_batch`
-instance and, through `fail_if_a_batch_failed`, the run; the other batches
-run on. A failed table fails the run through `fail_if_a_table_failed` while
+model file (its 19th marker). At most `max_parallel_jobs` batches run at
+once (the trigger's param; its default, §0b: the Variable
+`SDFB_MAX_PARALLEL_JOBS` when set, else `launch.max_parallel_jobs` of
+`generator.yaml`, 3, overlaid by `sdfb_env.yaml`; a config file's
+`launch.max_parallel_jobs` does nothing here), and the DAG runs one launch
+at a time. At cap 3, 14 batches of about half an hour run in five waves,
+about 2.5 hours. With `run_evaluation` on, each bundle evaluates its own
+batch job once it is DONE, on the CPU and outside the cap
+([ADR 0045 D7](adr/0045-whole-model-launches.md#d7--the-evaluator-one-evaluation-per-bundle)).
+A batch job that FAILED for capacity before it ran anything is relaunched
+with the same run ids, 10, 20 and 40 minutes later, up to the param
+`capacity_retries` (default 3; D10). Any other failed batch fails its
+bundle's `wait_generation` and, through `fail_if_a_batch_failed`, the run;
+the other bundles run on. A failed table fails the run through `fail_if_a_table_failed` while
 its batch ends DONE: under `tables=all` a table that stops at preflight is
 skipped with the rest of its component and gets a `FAILED_PREFLIGHT` row,
 and a tripped BLOCKER gate records `FAILED_BLOCKER` instead of failing the
@@ -3051,12 +3100,12 @@ row of a table the plan does not name (`UNPLANNED`, never fatal). It fails
 the run when any planned table is not `PASSED` or has no row; under
 `client_type=fake` a blocked table reads
 `FAILED_BLOCKER (informational: client_type=fake)` and fails nothing. With no `validation_runs_table` it
-skips with a WARNING, and the run's outcome is the batch jobs' alone. The
-instances have no retries: to run a failed batch again, fix the cause and
-clear its `start_batch` instance with its downstream tasks; to run failed
-tables of a DONE batch again, follow §2e step 12's re-run recipe. Killing a
-running instance (a Composer worker restart, marking it failed) cancels that
-batch's Dataflow job.
+skips with a WARNING, and the run's outcome is the batch jobs' alone. A
+bundle's `launch` has no retries: to run a failed batch again, fix the cause
+and clear its bundle's `launch` with its downstream tasks; to run failed
+tables of a DONE batch again, follow §2e step 12's re-run recipe. Marking a
+running `wait_generation` failed does not cancel its Dataflow job: cancel
+it in Dataflow.
 
 **2b. Launch from a checkout** (GCP credentials; from a checkout, not inside
 the image: the image sets `FLEX_TEMPLATE_PYTHON_PY_FILE` for every process,
@@ -3153,9 +3202,9 @@ launcher does not cancel its job.
 **The evaluation options.** Run the printed command from the repository
 root with `<BUCKET>` filled in (and `<REGION>`, printed only when the launch
 named no `--region`) and, appended, the options the
-DAG's batch evaluation launch gives its CPU workers
-(`composer/sdfb_batches.py::evaluation_body`, launched by
-`trigger_evaluation_batches`):
+DAG's bundle evaluation launch gives its CPU workers
+(`composer/sdfb_batches.py::evaluation_body`, launched by a bundle's
+`trigger_eval`):
 
 ```bash
   --sdk_container_image=<the image the template runs> --disk_size_gb=200 \

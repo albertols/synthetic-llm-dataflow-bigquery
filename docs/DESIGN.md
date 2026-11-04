@@ -414,8 +414,9 @@ table may name its own `source_table` and `num_rows`. The planner packs whole
 components first-fit-decreasing into batches of at most
 `launch.max_tables_per_job` tables, and every batch's launcher plans again and
 checks the count; the generation DAG's `tables=all` branch and
-`scripts/launch/run_model.py` run the batches, and one evaluation reads every landed batch's
-`validation_runs` rows by the launch's base run id
+`scripts/launch/run_model.py` run the batches (the DAG one mapped bundle per batch, each
+evaluating its own job once it is DONE; the CLI one evaluation over the landed batches), the
+evaluator reading the `validation_runs` rows of the listed jobs by the launch's base run id
 ([ADR 0045](adr/0045-whole-model-launches.md)). Code:
 [`launch/batches.py::plan_batches`](../packages/sdfb-core/src/sdfb_core/launch/batches.py),
 [`launch/tables.py::source_fqn`](../packages/sdfb-core/src/sdfb_core/launch/tables.py),

@@ -1,6 +1,6 @@
 # ADR 0045 — Whole-model launches: every enabled table of one model, in batch jobs
 
-**Status:** Accepted (2026-10-21). Built and tested on a laptop (DirectRunner, fake client; the generation DAG's `tables=all` branch run under Airflow 2.10.5's `dag.test()` with GCS and Dataflow stubbed, D6); the Dataflow acceptance (AC-B-5) is the corp run of [RUN_PLAYBOOK §2e](../RUN_PLAYBOOK.md#2e-corp-acceptance-of-whole-model-launches-b). Built in phase B of the config, record and model-launch work (the phase design is local to the branch and not committed). **Revised 2026-10-26** (unreleased, amended in place): D6's separate model DAG is deleted; the generation DAG launches `tables=all` on a second branch (see [D6](#d6--one-generation-dag-two-branches)). **Revised 2026-10-31** (unreleased, amended in place): under `tables=all` the table is the unit of failure ([D6](#the-table-is-the-unit-of-failure-2026-10-31)), the DAG's cap reads `launch.max_parallel_jobs` ([D5](#d5--the-parallel-cap)), and the overlay carries `relational.relationships_uri` ([D1](#d1--launchtables-explicit-or-all) note). **Revised 2026-11-03** (unreleased, amended in place): the DAG holds its cap with a launch gate, no longer with `max_active_tis_per_dag`, after the scheduler failed 13 of a launch's 14 batches before they ran ([D5](#the-launch-gate-2026-11-03)).
+**Status:** Accepted (2026-10-21). Built and tested on a laptop (DirectRunner, fake client; the generation DAG's `tables=all` branch run under Airflow 2.10.5's `dag.test()` with GCS and Dataflow stubbed, D6); the Dataflow acceptance (AC-B-5) is the corp run of [RUN_PLAYBOOK §2e](../RUN_PLAYBOOK.md#2e-corp-acceptance-of-whole-model-launches-b). Built in phase B of the config, record and model-launch work (the phase design is local to the branch and not committed). **Revised 2026-10-26** (unreleased, amended in place): D6's separate model DAG is deleted; the generation DAG launches `tables=all` on a second branch (see [D6](#d6--one-generation-dag-two-branches)). **Revised 2026-10-31** (unreleased, amended in place): under `tables=all` the table is the unit of failure ([D6](#the-table-is-the-unit-of-failure-2026-10-31)), the DAG's cap reads `launch.max_parallel_jobs` ([D5](#d5--the-parallel-cap)), and the overlay carries `relational.relationships_uri` ([D1](#d1--launchtables-explicit-or-all) note). **Revised 2026-11-03** (unreleased, amended in place): the DAG holds its cap with a launch gate, no longer with `max_active_tis_per_dag`, after the scheduler failed 13 of a launch's 14 batches before they ran ([D5](#the-launch-gate-2026-11-03)). **Revised 2026-11-04** (unreleased, amended in place), after the 2026-11-03 relaunch (132 tables, 14 batches, cap 1: 77 tables passed, 5 failed their gate, 50 had no row): a batch writes each shared BigQuery table once ([D9](#d9--one-load-job-per-shared-table-per-job-2026-11-04)); the gate is a reschedule-mode sensor in a mapped bundle group ([D5](#the-gate-as-a-sensor-in-a-bundle-2026-11-04)); each bundle is evaluated on its own ([D7](#d7--the-evaluator-one-evaluation-per-bundle)); a batch job that failed for capacity is relaunched ([D10](#d10--a-capacity-failure-is-relaunched-2026-11-04)); the default cap is 3 (D5).
 **Design:** [`docs/DESIGN.md` §4 Relational generation](../DESIGN.md#4-relational-generation) ([§4.5 Whole-model launches](../DESIGN.md#45-whole-model-launches))
 **Code:** [`sdfb_core/launch/tables.py`](../../packages/sdfb-core/src/sdfb_core/launch/tables.py) (the launch modes, a table's source and rows) · [`sdfb_core/launch/batches.py`](../../packages/sdfb-core/src/sdfb_core/launch/batches.py) (the planner) · `sdfb_beam/cli/run_pipeline.py` (`_run_model`, `chosen_batches`, `_run_batch`, `PrepReadAhead`, `_prep_relational_specs`) · `sdfb_beam/pipeline.py` (`_BlockerGateDoFn`, the recording gate) · [`sdfb_core/validation/summary.py`](../../packages/sdfb-core/src/sdfb_core/validation/summary.py) (`FAILED_PREFLIGHT`, `status_reason`) · [`composer/synthetic_beam_bigquery.py`](../../composer/synthetic_beam_bigquery.py) (the generation DAG, its `tables=all` branch) · [`composer/sdfb_batches.py`](../../composer/sdfb_batches.py) (its launch helpers and the planner mirror) · [`scripts/launch/run_model.py`](../../scripts/launch/run_model.py) (the CLI runner) · `sdfb_evaluation/context/runs.py` (`rows_of_jobs`), `sdfb_evaluation/context/launch.py` (`_launch_of`)
 **Builds on:** [ADR 0030](0030-single-job-relational-generation.md) (a component in one job) · [ADR 0032](0032-relationships-as-config.md) (relationships are configuration) · [ADR 0036](0036-parent-driven-fanout-generation.md) (a child's rows follow its parents) · [ADR 0043](0043-generator-config.md) (the config keys) · [ADR 0044](0044-generation-record.md) (the record each batch writes)
@@ -29,8 +29,8 @@ launch margin.
 ## Decision
 
 **Claim:** one launch generates every enabled table of a model, in batch jobs
-of at most K tables that never split a component, and one evaluation covers
-the batches that landed.
+of at most K tables that never split a component, and each batch that lands
+is evaluated on its own (D7, revised 2026-11-04).
 
 ### D1 — `launch.tables`: explicit or all
 
@@ -298,7 +298,7 @@ Three things run the batches (`run_pipeline.py::chosen_batches`):
 *The cap decides how many batch jobs hold GPUs at once, never what they
 generate.*
 
-*`max_parallel_jobs = 1` (the default).*
+*`max_parallel_jobs = 1` (the default until 2026-11-04; 3 since, below).*
 
 ```mermaid
 flowchart LR
@@ -331,11 +331,15 @@ to `maxWorkers` 4 workers of one GPU each), so the cap is bounded by the
 regional GPU quota. Ruling 13 says where each cap lives:
 
 - `scripts/launch/run_model.py` reads `launch.max_parallel_jobs`
-  (`--max_parallel_jobs`, default 1: the only value inside every GPU quota,
-  Ruling 12). The launcher accepts the key but never reads it, since a
+  (`--max_parallel_jobs`; default 1 until 2026-11-04, Ruling 12's "the only
+  value inside every GPU quota", and 3 since: three jobs of four one-GPU
+  workers need 12 GPUs, inside the corp region's 16 T4 and 32 L4; an
+  environment with less quota sets 1 or 2). The launcher accepts the key but never reads it, since a
   launcher runs one job or a sequence; the Flex Template does not declare it.
 - The DAG's cap is `sdfb_batches.parallel_cap` (*revised 2026-10-31*; it
-  was the Airflow Variable alone): the Variable `SDFB_MAX_PARALLEL_JOBS` when
+  was the Airflow Variable alone; *revised 2026-11-04*: a trigger's
+  `max_parallel_jobs` DAG param wins for its run, and the layers below are
+  that param's default): the Variable `SDFB_MAX_PARALLEL_JOBS` when
   it is set and not empty, else `launch.max_parallel_jobs` of
   `generator.yaml` overlaid by `sdfb_env.yaml`; never below 1. It is read
   when Composer parses the file, and the launch gate holds it (*revised
@@ -352,7 +356,7 @@ regional GPU quota. Ruling 13 says where each cap lives:
   re-import. A config file's `launch.max_parallel_jobs` does nothing in the
   DAG: the file is read when a run starts, after the cap is fixed.
 
-*The DAG's cap: the highest layer that sets it wins (revised 2026-10-31).*
+*The DAG's cap: the highest layer that sets it wins (revised 2026-10-31 and 2026-11-04).*
 
 ```mermaid
 flowchart LR
@@ -365,12 +369,14 @@ flowchart LR
   Y[("📄 generator.yaml<br/>launch.max_parallel_jobs")]:::store
   O[("📄 sdfb_env.yaml<br/>config.launch, optional")]:::store
   V["⚪ Variable<br/>SDFB_MAX_PARALLEL_JOBS<br/>optional"]:::data
-  C["⚙️ parallel_cap<br/>at parse time"]:::cpu
-  M["🛡️ start_batch<br/>launch gate cap"]:::cpu
-  V -->|"1st"| C
-  O -->|"2nd"| C
-  Y -->|"3rd"| C
-  C --> M
+  P["⚪ trigger's<br/>max_parallel_jobs<br/>optional"]:::data
+  C["⚙️ parallel_cap<br/>the param's default"]:::cpu
+  M["🛡️ bundle.gate<br/>the run's cap"]:::cpu
+  P -->|"1st"| M
+  V -->|"2nd"| C
+  O -->|"3rd"| C
+  Y -->|"4th"| C
+  C -->|"default"| M
 ```
 
 #### The launch gate (2026-11-03)
@@ -442,6 +448,10 @@ an instance up for reschedule is scheduled again without `try_number + 1`),
 so `retries=0` still means one launch; a mapped instance's reschedule date is
 honoured through its `task_reschedule` row
 ([`ReadyToRescheduleDep`](https://github.com/apache/airflow/blob/2.11.0/airflow/ti_deps/deps/ready_to_reschedule.py)).
+*Wrong, corrected 2026-11-04*: that dependency belongs to sensors only
+([`BaseSensorOperator.deps`](https://github.com/apache/airflow/blob/2.10.5/airflow/sensors/base.py#L170)),
+so an operator's reschedule date is never read and the instance is queued
+again at once ([the gate as a sensor](#the-gate-as-a-sensor-in-a-bundle-2026-11-04)).
 A pin keeps the flag off:
 `test_generation_dag.py::test_no_task_sets_a_task_level_concurrency_limit`.
 
@@ -520,6 +530,121 @@ Rejected:
   does not need today.
 - **Only raising `dag_stale_not_seen_duration`**: needed, but a DAG must
   not depend on a setting it cannot check.
+
+#### The gate as a sensor, in a bundle (2026-11-04)
+
+*Revised 2026-11-04 (unreleased, amended in place).* The 2026-11-03 relaunch
+ran its 14 batches one at a time, from 18:57 to 23:30 UTC, and the gate did
+not wait between pokes. Airflow honours a reschedule date only through
+`ReadyToRescheduleDep`, which only a sensor's task instances carry
+([`sensors/base.py`](https://github.com/apache/airflow/blob/2.10.5/airflow/sensors/base.py#L170);
+[`ready_to_reschedule.py`](https://github.com/apache/airflow/blob/2.10.5/airflow/ti_deps/deps/ready_to_reschedule.py)).
+A `DataflowStartFlexTemplateOperator` subclass raising
+`AirflowRescheduleException` went up for reschedule, scheduled, queued and
+running again within 1 to 4 s. Measured on Composer (`TaskInstance Finished`
+events per instance, 18:00 to 00:30 UTC):
+
+| instance | executor round trips |
+| :-- | --: |
+| b03 | 1,098 |
+| b06 | 2,392 |
+| b11 | 2,804 |
+| b13 | 4,949 |
+
+About 25,000 round trips for the launch. At 21:00:27 UTC the executor
+reported b11 "finished with state success" while its state read queued,
+and the scheduler marked it FAILED (`retries=0`): b11 launched no job, and
+its ten tables are part of the 50 with no row.
+
+**Decision.** The `tables=all` branch is one mapped task group per batch,
+`bundle[i]`
+([Airflow: mapping over a task group](https://airflow.apache.org/docs/apache-airflow/2.10.5/authoring-and-scheduling/dynamic-task-mapping.html#mapping-over-a-task-group);
+Airflow 2.5 and later, Composer runs 2.10). Every task of a bundle shares
+its batch's map index, so each one reads its own batch's XComs:
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  B["⚙️ batch_bodies"]:::cpu -->|"expand"| G
+  subgraph G["📦 bundle[i], one per batch"]
+    direction LR
+    GA["🛡️ gate<br/>sensor, reschedule"]:::cpu --> L["🔀 launch<br/>Flex, no wait"]:::beam
+    L --> W["🛡️ wait_generation<br/>sensor, reschedule"]:::cpu
+    W -.->|"capacity: D10"| W
+    W --> E["⚙️ eval_body"]:::cpu --> T["🔀 trigger_eval<br/>CPU job"]:::beam
+    T --> WE["🛡️ wait_eval_launch"]:::cpu
+  end
+  G --> F1["🛡️ fail_if_a_batch_failed"]:::cpu
+  G --> F2["🛡️ fail_if_a_table_failed"]:::cpu
+```
+
+- **`gate`** is `_LaunchGateSensor`, a `BaseSensorOperator` in reschedule
+  mode. Its poke reads the bundles' `wait_generation` states and returns
+  `sdfb_batches.may_launch(i, cap, states)`, `cap` being the run's
+  `max_parallel_jobs`. A bundle holds a slot of the cap from its launch
+  until its wait ends, so at most `cap` generation jobs run at once, and
+  the proof of `may_launch` is unchanged (a bundle waits only on lower
+  indexes). An evaluation holds no slot.
+- **`launch`** returns as soon as the job is queued (`wait_until_finished`
+  off, `retries=0`), and **`wait_generation`** waits in reschedule mode. No
+  task of a bundle holds a worker slot while it waits, where `start_batch`
+  held one Celery slot per running batch for its job's hours.
+- **No task-level limit**, as before: the cap is the gate alone (the pin
+  `test_no_task_sets_a_task_level_concurrency_limit` stays).
+- **The leaves** `fail_if_a_batch_failed` (one_failed) and
+  `fail_if_a_table_failed` (all_done) hang off every bundle's
+  `wait_generation` and print the same banners. The failure message names
+  each failed bundle and the task it failed in (`sdfb_batches.bundle_failures`).
+
+*At cap 3 (time runs right): a bundle launches when the bundle three below
+it has ended its generation; evaluations run beside the next jobs.*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  subgraph W1["⚡ wave 1"]
+    J0["🔀 b00"]:::beam
+    J1["🔀 b01"]:::beam
+    J2["🔀 b02"]:::beam
+  end
+  J0 -->|"ends"| J3["🔀 b03"]:::beam
+  J1 -->|"ends"| J4["🔀 b04"]:::beam
+  J2 -->|"ends"| J5["🔀 b05"]:::beam
+  J0 -->|"DONE"| E0["⚙️ b00's<br/>evaluation"]:::cpu
+```
+
+At cap 3, 14 batches of about 30 minutes run in five waves (3, 3, 3, 3, 2),
+about 2.5 hours where cap 1 took 4.5. The default is 3 since this revision:
+three jobs of four one-GPU workers need 12 GPUs of the regional quota.
+
+Laptop evidence, no Composer: the harness (`scripts/composer/check_dags.py`)
+runs the group under Airflow 2.10.5's `dag.test()`. Fourteen bundles at
+cap 1 (the trigger's `max_parallel_jobs`) and at the default 3, every
+bundle launched only after the bundles `cap` or more below it had ended
+their generation, and every bundle evaluated its own job. Unverified until
+the corp relaunch: the scheduler honouring the sensors' reschedule dates
+under Composer.
+
+Rejected:
+
+- **Keeping the operator and setting `reschedule = True`.** The dependency
+  comes from the class's `deps`, not the attribute, and the sensor base
+  class is what calls `poke` and raises the reschedule: the operator would
+  have to become a sensor anyway.
+- **Three separately mapped tasks** (a gate sensor, a launch, a wait, each
+  `.expand`ed over the bodies). Outside a task group a mapped task waits
+  for every instance of its mapped upstream, not for its own index: every
+  launch would wait for every gate.
 
 ### D6 — One generation DAG, two branches
 
@@ -820,7 +945,27 @@ copy of the model with every other table `enabled: false`, launched with
 `tables=all` (RUN_PLAYBOOK §2e step 12). The DAG has no "re-run the failed
 tables" option (ROADMAP).
 
-### D7 — The evaluator: one evaluation over the landed batches
+### D7 — The evaluator: one evaluation per bundle
+
+*Revised 2026-11-04 (unreleased, amended in place).* The 2026-11-03 relaunch
+evaluated its 77 landed tables as one job, and the Flex launcher failed after
+12 minutes with `Timeout in polling result file`: the planning of 77 tables
+did not fit its window. Each bundle now evaluates its own batch job once
+that job is DONE (`eval_body`, `trigger_eval`, `wait_eval_launch` in the
+bundle; `--run_id <base> --generation_job_ids <that job>`), at most K tables
+per evaluation by construction. A bundle whose generation failed skips its
+own evaluation and nothing else; `collect_landed` and the aggregated
+evaluation are gone. The evaluation job is CPU only, named
+`<evaluation name>-bNN-<ts>` (inside the same 63 characters), and holds no
+slot of the cap. Its failure callback, `_close_bundle_running_row`, finds
+the RUNNING row by that bundle's generation job id, which the registry
+records as `generation_job_id`, never by the base run id every bundle's
+evaluation shares: one dead launcher closes no other bundle's row.
+
+The evaluator is unchanged: it writes each `evaluation_*` table once per job
+already, so concurrent evaluations add one load per table each (D9's
+budget). `scripts/launch/run_model.py` still prints one evaluation command
+over the landed batches.
 
 A whole-model launch is evaluated as `sdfb-eval run --run_id <base>
 --generation_job_ids <id>,<id>`, the batch jobs that landed (Ruling 2), not
@@ -922,6 +1067,161 @@ flowchart LR
   anything. No spelled-out flag changes. *(Revised 2026-10-26: hidden aliases
   put every abbreviation master accepted back on its flag, so no launch that
   parsed on master stops here; see Ruling 25.)*
+
+### D9 — One load job per shared table per job (2026-11-04)
+
+*The 2026-11-03 relaunch lost four batch jobs to BigQuery's table update
+rate.* b02, b03, b08 and b12 failed after 16 to 19 minutes on
+`Exceeded rate limits: too many table update operations for this table`
+(`rateLimitExceeded`) in `<TABLE>/WriteRagChunks`, a FILE_LOADS append into
+`synthetic_rag.rag_chunks`. `build_relational_pipeline` applied each table's
+own write, so a batch of ten fired one load job per table into the same
+table, and the population branches finish together. BigQuery allows about
+five update operations per table per ten seconds
+([BigQuery quotas: table operations](https://cloud.google.com/bigquery/quotas#standard_tables)).
+Loads into `rag_chunks` per batch (`INFORMATION_SCHEMA.JOBS_BY_PROJECT`):
+
+| batch | loads | rate-limited | span of the burst |
+| :-- | --: | --: | --: |
+| b01 | 10 | 0 | 32 s |
+| b02 | 8 | 2 | 15 s |
+| b03 | 8 | 2 | 12 s |
+| b08 | 7 | 1 | 8 s |
+| b12 | 10 | 1 | 22 s |
+| the others | 10 | 0 | 24–68 s |
+
+Over the launch, per shared table:
+
+| table | loads | peak per 10 s |
+| :-- | --: | --: |
+| `rag_chunks` | 105 | 7 |
+| `source_table_stats` | 112 | 3 |
+| `validation_runs` | 82 | 3 |
+| `freetext_pools` | 17 | 1 |
+| `dlq` | 9 | 1 |
+
+Retries cannot heal it: Beam 2.76 names a load job deterministically
+(`…_pane<i>_partition<k>`, `bigquery_file_loads.py::TriggerLoadJobs`), its
+insert of an existing id returns that job, and `finish_bundle` polls it
+(`wait_for_bq_job`): each of Dataflow's four work-item retries read the same
+failed job. Parallel bundles would multiply the burst.
+
+**Decision.**
+
+- `build_relational_pipeline` writes the RAG chunks, the DLQ and the
+  `validation_runs` rows **once per sink**: the tables handed the same sink
+  object are flattened into one write (`RagChunks/Flatten` →
+  `WriteRagChunks`, `DLQ/Flatten` → `WriteDLQ`, `ValidationRuns/Flatten`
+  → `WriteValidationRun`), and a skipped table's `FAILED_PREFLIGHT` row
+  joins the same write. The launcher hands every table naming the same
+  destination table the same sink (`run_pipeline._share_sinks`). A table
+  alone on its sink keeps its own labelled write, so a single-table job's
+  graph is unchanged.
+- Each row still carries its own table and run id. Each table's pool trigger
+  still waits on its own embedded chunks (`AwaitRagPopulation`, ADR 0034
+  D8). Each table's BLOCKER gate waits on the shared write's load jobs, so
+  a tripped gate fails the job once every table's row has committed, and a
+  job that dies before that write lands no `validation_runs` row at all
+  (`fail_if_a_table_failed` reads its tables NO ROW, as for a failed job).
+- The blocking loads outside Beam's sinks (`freetext_pools`,
+  `source_table_stats`, `fanout_stats`) go through
+  `sdfb_beam.io.bq_load.load_json_rows`, which retries `rateLimitExceeded`
+  and `backendError` up to five times, 2 to 32 s apart with jitter, each
+  retry a new load job, and only when no row can have landed (the insert
+  was refused, or the job itself failed with that reason; a failed load
+  commits nothing). A poll error on a job whose outcome is unknown is raised.
+
+*Before, and after (one batch of three tables).*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  subgraph X["before: one load per table"]
+    A1["🔀 T00 chunks"]:::beam --> L1[("🗄️ rag_chunks")]:::store
+    A2["🔀 T01 chunks"]:::beam --> L1
+    A3["🔀 T02 chunks"]:::beam --> L1
+  end
+  subgraph Y["after: one load per job"]
+    B1["🔀 T00 chunks"]:::beam --> F["🔀 Flatten"]:::beam
+    B2["🔀 T01 chunks"]:::beam --> F
+    B3["🔀 T02 chunks"]:::beam --> F
+    F --> L2[("🗄️ rag_chunks")]:::store
+  end
+```
+
+Laptop evidence: `test_shared_writes.py` builds a ten-table job and finds
+one `WriteRagChunks`, one `WriteDLQ` and one `WriteValidationRun`, each
+table's `AwaitRagPopulation` reading its own `RagEmbedChunks` and each
+`BlockerGate` the shared write's load jobs; a DirectRunner job lands every
+table's row through the one sink. `test_bq_load.py` holds the back-off.
+
+### D10 — A capacity failure is relaunched (2026-11-04)
+
+A bundle whose batch job could not start for capacity (a zone out of GPUs,
+a regional quota used up by the other bundles) is relaunched after a
+back-off, without replaying a row. `wait_generation` is
+`_GenerationWaitSensor`, a reschedule-mode sensor that reads the job
+through `DataflowHook`. DONE ends it, returning the job id the bundle's
+evaluation reads. A FAILED job is relaunched only when **both** hold
+(`sdfb_batches.is_capacity_failure`):
+
+- one of its job messages names a capacity cause from a small tested
+  allowlist: `ZONE_RESOURCE_POOL_EXHAUSTED` (and `…_WITH_DETAILS`),
+  `QUOTA_EXCEEDED`, Compute's `Quota '<NAME>' exceeded`, `does not have
+  enough resources available`
+  ([Dataflow: worker pool failures](https://cloud.google.com/dataflow/docs/guides/common-errors#worker-pool-failure));
+  the wrapper "Startup of the worker pool … failed" alone is no cause,
+  since it also wraps subnetwork, permission and image failures that no
+  wait heals;
+- it ran no work item: no `ElementCount` metric above zero in its job
+  metrics (`sdfb_batches.ran_work`), so no row was written.
+
+The relaunch is the same body, so the run ids are the same (nothing
+landed), named `<job>-bNN-rN-<8 hex>`. It waits 10, then 20, then 40
+minutes after the failure (`capacity_backoff_seconds`), at most the run's
+`capacity_retries` times (a DAG param, default 3). The bundle keeps its slot
+of the cap meanwhile. Any other end fails the wait with
+`AirflowFailException`, never retried: `rateLimitExceeded`, BigQuery's own
+"Quota exceeded", a traceback, a cancelled job. The rationale for
+`retries=0` stands for those.
+
+*A bundle's generation wait.*
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef cpu   fill:#1baf7a,color:#fff,stroke:#127a55
+  classDef gpu   fill:#7a3fd1,color:#fff,stroke:#5a2f9d
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+  classDef data  fill:#6b7280,color:#fff,stroke:#4b5563
+
+  P["🛡️ poke"]:::cpu --> S{"job state"}
+  S -->|"DONE"| D["⚪ done<br/>its job id"]:::data
+  S -->|"running"| P
+  S -->|"FAILED"| C{"capacity cause<br/>and no element?"}
+  C -->|"yes, retries left"| B["⚙️ back-off<br/>10, 20, 40 min"]:::cpu
+  B --> R["🔀 relaunch<br/>-bNN-rN, same run ids"]:::beam
+  R --> P
+  C -->|"no"| X["∅ fails<br/>no retry"]:::data
+```
+
+The attempts are an XCom of the bundle's `launch` (`ATTEMPT_KEY`): a
+reschedule-mode sensor's own XComs are cleared at each poke
+(`TaskInstance._run_raw_task`, Airflow 2.10.5). A "launching" marker is
+written before each relaunch call, so a worker that dies inside the call
+fails the bundle rather than launch a second job beside a first that may
+run. The harness's `all_capacity_retry` relaunches b01 as `-b01-r1` with the
+same parameters, and b01's evaluation reads the relaunched job;
+`all_job_fails_not_capacity` does not relaunch, and b02 still runs.
+
+Rejected: a hint from the regional GPU quota before launching (Compute
+`regions.get`). It cannot be read atomically against the other bundles'
+launches, so the retry is the guarantee either way; not built.
 
 ### Rulings
 
@@ -1053,10 +1353,12 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
   ignore `source_table` overrides (D7).
 - **One evaluation per batch job**, the standalone evaluation DAG's fan-out.
   The acceptance wants one evaluation over every landed table; one evaluation
-  per batch would split the launch's scores and registry rows.
+  per batch would split the launch's scores and registry rows. *Reversed on
+  2026-11-04* (D7): one evaluation of 77 tables did not fit the Flex
+  launcher's window, and a bundle's evaluation of at most K tables does.
 - **A runtime DAG param for the parallel cap.** Not possible while the cap
-  was `max_active_tis_per_dag`, which Airflow fixes when it parses the file;
-  the launch gate (2026-11-03) could read one at run time, not done (D5).
+  was `max_active_tis_per_dag`, which Airflow fixes when it parses the file.
+  *Done on 2026-11-04*: the gate reads the run's `max_parallel_jobs` (D5).
 - **A Composer pool for the cap** ([Airflow: pools](https://airflow.apache.org/docs/apache-airflow/stable/administration-and-deployment/pools.html)).
   An Airflow admin setting outside the DAG file, which the DAG cannot check
   ([the launch gate](#the-launch-gate-2026-11-03)).
@@ -1066,7 +1368,8 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
 - **Splitting a component across jobs to fill bins.** It would break
   referential integrity (D3).
 - **Merging the per-table DLQ and `validation_runs` sinks per job.** Deferred
-  (Consequences: the load-job budget).
+  (Consequences: the load-job budget). *Done on 2026-11-04*, with the RAG
+  chunks (D9).
 
 ## Consequences
 
@@ -1097,12 +1400,12 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
   4. **IAM for the verdicts**: the Composer environment's service account
      reads `validation_runs` (`roles/bigquery.dataViewer` on its dataset).
 - **The load-job budget of the shared tables.** Each batch job writes its
-  tables' landing, DLQ and `validation_runs` rows with FILE_LOADS, at least
-  one load job per table into each. BigQuery limits load jobs per table per
-  day ([BigQuery quotas: load jobs](https://cloud.google.com/bigquery/quotas#load_jobs);
-  1,500 at the time of writing), so the shared `dlq` and `validation_runs`
-  tables take about 15 launches of 100 tables a day (the phase design's
-  estimate, 1,500 ÷ 100).
+  tables' landing rows with one load job per table, and (since D9) its DLQ,
+  `validation_runs` and RAG chunks with one load job per job. BigQuery
+  limits load jobs per table per day
+  ([BigQuery quotas: load jobs](https://cloud.google.com/bigquery/quotas#load_jobs);
+  1,500 at the time of writing), so a 14-batch launch now costs the shared
+  tables about 14 loads each, where it cost about 100.
 - **K = 10 is an estimate**, not a measurement: the corp run reads each
   batch's margin to the Flex launcher's 12 minutes
   ([Dataflow: troubleshoot Flex Templates](https://cloud.google.com/dataflow/docs/guides/troubleshoot-templates))
@@ -1111,8 +1414,14 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
   flag, `--t` → `--thresholds_uri` included (hidden aliases, Ruling 25's
   revision). A prefix master already refused as ambiguous (`--b`) still fails
   at parse time: spell the flag out.
-- **A held Airflow worker slot per running batch**, for the job's duration
-  (D6), at most the parallel cap's slots (D5).
+- **No held Airflow worker slot** (revised 2026-11-04): every wait of a
+  bundle is a reschedule-mode sensor; a poke holds a slot for seconds.
+- **One evaluation, and one registry row, per bundle** (D7, revised
+  2026-11-04): a 14-batch launch writes 14 evaluations under one base run
+  id, each listed under its own batch job in `evaluation_latest_per_job`.
+- **A validation_runs row lands only when its job's shared write does**
+  (D9): a job that dies before it leaves its tables NO ROW, where tables
+  written earlier in the job used to keep theirs.
 - **A run id ending in `-bNN`**, written without a record and evaluated by a
   shorter prefix, is read as a batch of that prefix (Ruling 3).
 - **`validation_runs` has 36 columns** (revised 2026-10-31): the one
@@ -1132,8 +1441,8 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
   explicit launch that leaves it unset in its trigger now loads the
   overlay's model, and a table that model declares takes its `pk:`,
   `identity:` and `enabled` flag from it.
-- **`evaluation_latest_per_job`** keeps one row per `generation_job_id`, so a
-  model evaluation is listed under its first batch job only.
+- **`evaluation_latest_per_job`** keeps one row per `generation_job_id`; with
+  one evaluation per bundle (D7) each batch job has its own.
 - **A CLI sequence repeats the record's schema read per batch** (D4).
 - **The Dataflow Solution Guides copy** has `--tables=all` (batches in
   sequence on the CLI) but no parallel runner and no Composer DAG (Ruling 26).
@@ -1153,7 +1462,10 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
 | AC-B-6 | Under `tables=all` a component that fails preflight is skipped with its `FAILED_PREFLIGHT` row and reason, and the rest of the batch lands | `packages/sdfb-tests/tests/unit/cli/test_model_launch_main.py::test_a_table_that_fails_preflight_is_skipped_and_the_rest_land` (and the component, parent-already-prepped, any-exception and every-table-fails tests beside it) |
 | AC-B-7 | Under `tables=all` a tripped gate ends the job DONE with a `FAILED_BLOCKER` row and its reason; the DAG fails the run naming every failed and missing table while evaluating every DONE batch | `packages/sdfb-tests/tests/integration/test_validation_runs.py::test_a_whole_model_batch_lands_a_failed_blocker_row_and_the_pipeline_completes`; `packages/sdfb-tests/tests/unit/composer/test_sdfb_batches.py::test_table_verdicts_names_passed_failed_missing_and_unplanned`; the harness scenario `all_table_fails` (`test_generation_dag.py::test_the_harness_run_is_the_plans`) |
 | AC-B-8 | A trigger with only `tables=all` plans the overlay's model file; an empty `relationships_uri` in the overlay stops the import | `packages/sdfb-tests/tests/unit/composer/test_launch_helpers.py::test_an_empty_relationships_uri_in_the_overlay_is_refused`; the harness scenario `all_from_overlay` |
-| AC-B-9 | No task of the DAG sets a task-level limit; the launch gate runs at most `cap` batch jobs at once, each after every batch `cap` or more below it ended, and a failed batch does not stop the later ones; the relaunch of the 2026-11-02 forest runs all 14 batches | `packages/sdfb-tests/tests/unit/composer/test_generation_dag.py::test_no_task_sets_a_task_level_concurrency_limit`; `test_sdfb_batches.py::test_the_gate_never_runs_more_than_cap_jobs`; the harness scenarios `all_14_batches_cap_1` and `all_middle_batch_fails`; the corp relaunch (RUN_PLAYBOOK §2e, pending) |
+| AC-B-9 | No task of the DAG sets a task-level limit; the launch gate, a reschedule-mode sensor over the bundles' `wait_generation` states, runs at most `cap` batch jobs at once, each after every bundle `cap` or more below it ended, and a failed batch does not stop the later ones; the relaunch of the 2026-11-02 forest runs all 14 batches | `packages/sdfb-tests/tests/unit/composer/test_generation_dag.py::test_no_task_sets_a_task_level_concurrency_limit`, `::test_the_gate_is_a_reschedule_mode_sensor_on_the_waits_states`, `::test_batches_are_one_mapped_bundle_group`; `test_sdfb_batches.py::test_the_gate_never_runs_more_than_cap_jobs`; the harness scenarios `all_14_batches_cap_1`, `all_14_batches_default_cap` and `all_middle_batch_fails`; the corp relaunch (RUN_PLAYBOOK §2e, pending) |
+| AC-B-10 | A ten-table job applies one `WriteRagChunks`, one `WriteDLQ` and one `WriteValidationRun`; each table's pool trigger waits on its own chunks; the blocking loads back off on `rateLimitExceeded` with a new job each time | `packages/sdfb-tests/tests/unit/test_shared_writes.py`; `packages/sdfb-tests/tests/unit/io/test_bq_load.py` |
+| AC-B-11 | Each bundle evaluates its own job once it is DONE; a failed bundle skips its own evaluation only | `test_generation_dag.py::test_each_bundle_evaluates_its_own_job_and_holds_no_slot`, `::test_the_harness_bundles_evaluate_their_own_jobs` |
+| AC-B-12 | A FAILED job that ran nothing for a capacity cause is relaunched with the same run ids; `rateLimitExceeded` and code errors are not | `test_sdfb_batches.py::test_is_capacity_failure`; `test_generation_dag.py::test_the_wait_relaunches_only_a_capacity_failure`, `::test_the_harness_relaunches_a_capacity_failure_only` |
 
 ## Figure provenance
 
@@ -1169,6 +1481,9 @@ The numbered decisions the code cites as "Ruling N" (or "ADR 0045 Ruling N").
 | M7, one DAG, two branches (D6; revised 2026-10-26 and 2026-10-31) | inline mermaid, this file | one evaluation covers what the launch landed; under `all` a failed batch or a failed table fails the run, not its neighbours |
 | M8, `prep_workers` = 1 and = W (D8) | inline mermaid, two panels, this file | threads read ahead; the cross-table steps keep the plan's order, so the outputs do not change |
 | M9, the unit of failure (D6, 2026-10-31; also in DESIGN.md §4.5) | inline mermaid, this file | a failed table fails itself; a component's members fail together; the job ends DONE. The statuses are those `test_model_launch_main.py` and `test_validation_runs.py` assert |
+| M10, the bundle group and the gate at cap 3 (D5, 2026-11-04) | inline mermaid, two panels, this file | each batch is a mapped group whose gate, a sensor, waits for the bundles `cap` below; each bundle evaluates its own job |
+| M11, one load per shared table (D9) | inline mermaid, two panels, this file | a job's tables share one write per shared table instead of one each |
+| M12, a bundle's generation wait (D10) | inline mermaid, this file | only a FAILED job that ran nothing for a capacity cause is relaunched, after a back-off |
 
 The figures use the repository's mermaid house style (node classes and icons
 as in `.claude/skills/visual-first-documentation/`) and carry no measured
@@ -1181,3 +1496,11 @@ panel is read from `sdfb_batches.parallel_cap`, M6b from Airflow 2.11.0's
 `scheduler_job_runner.py` (lines 486-541, 1788-1859, 2143-2165), `dag.py` (3300-3303), `dagrun.py` (1610-1621) and `ready_to_reschedule.py`,
 retrieved 2026-11-03, and from `sdfb_batches.may_launch`, M9 from
 `run_pipeline.py::_prep_relational_specs` and `pipeline.py::_BlockerGateDoFn`.
+M10 to M12 (2026-11-04) are read from `composer/synthetic_beam_bigquery.py`
+(`bundle`, `_LaunchGateSensor`, `_GenerationWaitSensor`),
+`pipeline.py::build_relational_pipeline` and `sdfb_batches.is_capacity_failure`;
+they carry no measured number. The 2026-11-03 numbers in D5, D7 and D9 are
+typed once, in their tables, from the corp run's `gcloud logging`,
+`gcloud dataflow` and `INFORMATION_SCHEMA.JOBS_BY_PROJECT` reads; Airflow's
+`sensors/base.py` and `ready_to_reschedule.py` (2.10.5) and Beam 2.76's
+`bigquery_file_loads.py` were read on 2026-11-04.
