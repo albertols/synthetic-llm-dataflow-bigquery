@@ -486,9 +486,9 @@
       "tip": "The default is an estimate; read each batch launch's margin to the 12-minute window and adjust."
     },
     "max_parallel_jobs": {
-      "purpose": "How many batch jobs run at once: scripts/launch/run_model.py reads it, and the Composer DAG's tables=all branch reads it at parse time, overlaid by sdfb_env.yaml; the Airflow Variable SDFB_MAX_PARALLEL_JOBS wins when set.",
-      "up": "The batches finish sooner; each job holds its workers' GPUs, so stay inside the GPU quota.",
-      "down": "One at a time (the default): never more GPUs than one job asks for."
+      "purpose": "How many batch jobs run at once: scripts/launch/run_model.py reads it, and the Composer DAG's tables=all branch takes it, overlaid by sdfb_env.yaml, as its max_parallel_jobs param's default; the Airflow Variable SDFB_MAX_PARALLEL_JOBS wins when set.",
+      "up": "Each job holds up to 4 workers' GPUs; 3 (the default) needs 12 of the region's GPU quota.",
+      "down": "One at a time: never more GPUs than one job asks for."
     },
     "prep_workers": {
       "purpose": "Threads a multi-table launcher reads schemas, reference samples and source stats on, before the cross-table steps run in plan order.",
@@ -606,7 +606,7 @@
     }
   },
   "exported_from": {
-    "commit": "333ff89a55bbbcf851c5abaed6b42c0182f278bf",
+    "commit": "6f0f286c831279dc5209d16a8e52fc9c92c64e40",
     "dirty": []
   }
 }

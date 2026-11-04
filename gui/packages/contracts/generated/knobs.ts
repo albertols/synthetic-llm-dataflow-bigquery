@@ -1946,7 +1946,7 @@ export const knobs: KnobsFile = {
       "channel": "launch",
       "group": "Whole-model launch",
       "label": "Parallel batch jobs",
-      "value": 1,
+      "value": 3,
       "unit": "jobs",
       "settable_via": [
         "cli",
@@ -1957,7 +1957,7 @@ export const knobs: KnobsFile = {
       "cli_flag": "--max_parallel_jobs",
       "composer_param": "max_parallel_jobs",
       "help": "Batch jobs scripts/launch/run_model.py runs at once (ADR 0045). A launcher runs one job; the Composer DAG's tables=all branch reads the Airflow Variable SDFB_MAX_PARALLEL_JOBS.",
-      "comment": "Batch jobs scripts/launch/run_model.py runs at once: each holds its workers' GPUs. The Composer DAG's tables=all branch reads launch.max_parallel_jobs from generator.yaml overlaid with sdfb_env.yaml, and the Airflow Variable SDFB_MAX_PARALLEL_JOBS wins when it is set (Airflow fixes a mapped task's concurrency when it parses the DAG file); a launcher runs one job.",
+      "comment": "Batch jobs scripts/launch/run_model.py runs at once: each holds its workers' GPUs. The Composer DAG's tables=all branch takes launch.max_parallel_jobs from generator.yaml overlaid with sdfb_env.yaml as its max_parallel_jobs param's default, and the Airflow Variable SDFB_MAX_PARALLEL_JOBS wins when it is set; a trigger's param wins for its run. A launcher runs one job.",
       "source": "packages/sdfb-core/src/sdfb_core/config/model.py:181",
       "source_token": "max_parallel_jobs",
       "related_adrs": [
@@ -3878,7 +3878,7 @@ export const knobs: KnobsFile = {
     }
   ],
   "exported_from": {
-    "commit": "333ff89a55bbbcf851c5abaed6b42c0182f278bf",
+    "commit": "6f0f286c831279dc5209d16a8e52fc9c92c64e40",
     "dirty": []
   }
 };
