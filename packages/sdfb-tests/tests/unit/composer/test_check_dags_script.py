@@ -103,12 +103,13 @@ def test_scenarios_are_the_plans_list():
 
 
 def test_output_schema_keys():
-  assert M.OUTPUT_KEYS == ("task_states", "bodies", "evaluation_body",
-                           "gcs_reads")
+  assert M.MASTER_OUTPUT_KEYS == ("task_states", "bodies", "evaluation_body",
+                                  "gcs_reads")
+  assert (*M.MASTER_OUTPUT_KEYS, "bundle_evaluation_bodies") == M.OUTPUT_KEYS
   golden = json.loads(_GOLDEN.read_text(encoding="utf-8"))
   assert sorted(golden) == sorted(M.MASTER_SCENARIOS)
   for name, result in golden.items():
-    assert tuple(sorted(result)) == tuple(sorted(M.OUTPUT_KEYS)), name
+    assert tuple(sorted(result)) == tuple(sorted(M.MASTER_OUTPUT_KEYS)), name
     assert set(result["task_states"]) == _EXPLICIT_TASKS, name
     assert len(result["bodies"]) == 1, name
     assert result["gcs_reads"] == [], name
@@ -248,11 +249,14 @@ def test_split_refuses_two_evaluation_launches():
   def body(job):
     return {"launchParameter": {"parameters": {"sdfb_job": job}}}
 
-  recorder.launches = [("start_batch", 1, body("generation")),
-                       ("start_batch", 0, body("generation")),
+  recorder.launches = [("bundle.launch", 1, body("generation")),
+                       ("bundle.launch", 0, body("generation")),
+                       ("bundle.trigger_eval", 1, body("evaluation")),
+                       ("bundle.trigger_eval", 0, body("evaluation")),
                        ("trigger_evaluation", -1, body("evaluation"))]
-  bodies, evaluation = recorder.split()
+  bodies, evaluation, bundles = recorder.split()
   assert len(bodies) == 2 and evaluation == body("evaluation")
+  assert bundles == [body("evaluation")] * 2  # one per bundle, any number
   recorder.launches.append(("trigger_evaluation_2", -1, body("evaluation")))
   with pytest.raises(M.HarnessError, match="2 evaluation launches"):
     recorder.split()

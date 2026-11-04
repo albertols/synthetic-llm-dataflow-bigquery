@@ -520,19 +520,6 @@ def test_the_plan_holds_one_body_per_batch(deployed):
   json.dumps(plan)  # an XCom value: plain JSON
 
 
-def test_landed_job_ids_skip_what_did_not_land():
-  assert M.landed_job_ids([{
-      "id": "j0"
-  }, None, {
-      "id": ""
-  }, {
-      "id": "j2"
-  }, "junk", {
-      "id": "j0"
-  }]) == ["j0", "j2"]
-  assert M.landed_job_ids(None) == []
-
-
 def test_the_module_needs_only_the_standard_library_and_yaml():
   tree = ast.parse(_MIRROR.read_text(encoding="utf-8"))
   imported = {
@@ -777,6 +764,18 @@ def test_parallel_cap_reads_the_variable_then_the_overlaid_yaml(deployed):
   assert m.parallel_cap(layers, {"SDFB_MAX_PARALLEL_JOBS": "0"}) == 1  # floor
   with pytest.raises(ValueError, match="SDFB_MAX_PARALLEL_JOBS"):
     m.parallel_cap(layers, {"SDFB_MAX_PARALLEL_JOBS": "two"})
+  # The trigger's max_parallel_jobs param wins over both (ADR 0045 D5).
+  variable = {"SDFB_MAX_PARALLEL_JOBS": "3"}
+  assert m.parallel_cap(layers, variable, 5) == 5
+  assert m.parallel_cap(layers, variable, "4") == 4
+  assert m.parallel_cap(layers, variable, None) == 3  # no param: the Variable
+  assert m.parallel_cap(layers, variable, "") == 3
+  assert m.parallel_cap(layers, variable, 0) == 1  # floor
+  with pytest.raises(ValueError, match="max_parallel_jobs param"):
+    m.parallel_cap(layers, variable, "many")
+  # The DAG param's default: the cap without a param, as text.
+  assert m.param_defaults(layers)["max_parallel_jobs"] == "2"
+  assert m.param_defaults(layers, variable)["max_parallel_jobs"] == "3"
   overlay.write_text(
       overlay.read_text(encoding="utf-8").replace('max_parallel_jobs: "2"',
                                                   'max_parallel_jobs: "two"'),
@@ -891,18 +890,19 @@ class _State(enum.StrEnum):
 
 
 def test_ti_states_and_never_started_read_only_the_task():
+  wait = "bundle.wait_generation"
   tis = [
-      _Ti("start_batch", 0, _State.SUCCESS, "2026-11-02T18:36:09"),
-      _Ti("start_batch", 1, _State.FAILED),  # failed by the scheduler
-      _Ti("start_batch", 2, "failed", "2026-11-02T19:00:00",
+      _Ti(wait, 0, _State.SUCCESS, "2026-11-02T18:36:09"),
+      _Ti(wait, 1, _State.FAILED),  # failed by the scheduler
+      _Ti(wait, 2, "failed", "2026-11-02T19:00:00",
           "2026-11-02T19:30:00"),  # ran, failed
       # dag.test sets no start date on a task that ran: its end date tells
-      _Ti("start_batch", 5, "failed", None, "2026-11-02T19:31:00"),
-      _Ti("start_batch", 3, None),
-      _Ti("start_batch", 4, "failed"),
-      _Ti("collect_landed", -1, "failed"),
+      _Ti(wait, 5, "failed", None, "2026-11-02T19:31:00"),
+      _Ti(wait, 3, None),
+      _Ti(wait, 4, "failed"),
+      _Ti("bundle.eval_body", 0, "failed"),
   ]
-  states = M.ti_states(tis, "start_batch")
+  states = M.ti_states(tis, wait)
   assert states == {
       0: "success",
       1: "failed",
@@ -912,17 +912,52 @@ def test_ti_states_and_never_started_read_only_the_task():
       4: "failed"
   }
   assert not any(isinstance(s, enum.Enum) for s in states.values())
-  assert M.never_started(tis, "start_batch") == [1, 4]
-  assert M.never_started(tis[:1], "start_batch") == []
-  message = M.batch_failure_message(tis, "start_batch")
-  assert message.startswith("start_batch failed for b01, b02, b04, b05: ")
-  assert ("2 instance(s) failed without starting (b01, b04): the scheduler "
-          "failed them") in message
+  assert M.never_started(tis, wait) == [1, 4]
+  assert M.never_started(tis[:1], wait) == []
+
+
+def test_a_failed_bundle_is_named_with_the_task_it_failed_in():
+  """b01's launch failed (its wait is upstream-failed), b02's job failed,
+  b03's gate was failed by the scheduler before it ran, b04's evaluation
+  failed (no generation failure), b00 passed."""
+  tis = [
+      _Ti("bundle.gate", i, "success", "2026-11-03T19:00:00",
+          "2026-11-03T19:00:01") for i in (0, 1, 2, 4)
+  ] + [
+      _Ti("bundle.gate", 3, "failed"),
+      _Ti("bundle.launch", 0, "success"),
+      _Ti("bundle.launch", 1, "failed", "2026-11-03T19:01:00",
+          "2026-11-03T19:01:05"),
+      _Ti("bundle.launch", 2, "success"),
+      _Ti("bundle.launch", 3, "upstream_failed"),
+      _Ti("bundle.launch", 4, "success"),
+      _Ti("bundle.wait_generation", 0, "success"),
+      _Ti("bundle.wait_generation", 1, "upstream_failed"),
+      _Ti("bundle.wait_generation", 2, "failed", "2026-11-03T19:02:00",
+          "2026-11-03T19:20:00"),
+      _Ti("bundle.wait_generation", 3, "upstream_failed"),
+      _Ti("bundle.wait_generation", 4, "success"),
+      _Ti("bundle.trigger_eval", 4, "failed"),
+  ]
+  assert M.bundle_failures(tis) == {
+      1: "launch",
+      2: "wait_generation",
+      3: "gate"
+  }
+  message = M.batch_failure_message(tis)
+  assert message.startswith(
+      "bundle generation failed for b01 (launch), b02 (wait_generation), "
+      "b03 (gate): those batch jobs did not reach JOB_STATE_DONE")
+  assert ("1 bundle(s) failed without starting (b03): the scheduler failed "
+          "them") in message
   assert "dag_stale_not_seen_duration" in message
   assert "clear them to launch those batches" in message
-  ran = M.batch_failure_message(tis[2:3], "start_batch")
-  assert ran == ("start_batch failed for b02: those batch jobs did not reach "
-                 "JOB_STATE_DONE; the batches that landed were evaluated")
+  ran = M.batch_failure_message(tis[5:7] + tis[10:12])
+  assert ran == ("bundle generation failed for b01 (launch): those batch jobs "
+                 "did not reach JOB_STATE_DONE, and their evaluations did not "
+                 "run; every other bundle ran on and was evaluated")
+  assert M.GENERATION_TASKS == ("gate", "launch", "wait_generation")
+  assert M.BUNDLE_WAIT == "bundle.wait_generation"
 
 
 def test_verdict_inputs_read_the_overlay_then_the_file(deployed):

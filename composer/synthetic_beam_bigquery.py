@@ -13,7 +13,7 @@
 #  limitations under the License.
 """Airflow DAG — the synthetic-dataflow-bigquery generation launch: one
 table (`tables=explicit`) or every enabled table of a relationships model
-(`tables=all`), each followed by its evaluation (ADR 0043, 0045 D6).
+(`tables=all`), each followed by its evaluation (ADR 0043, 0045 D5-D7).
 
 The DAG file carries no deploy marker and no default of its own. Workflow
 `3_import_dag.yaml` imports it with three files beside it in the DAGs
@@ -33,12 +33,13 @@ sdfb_env.yaml < the trigger's values < a `config_uri` file.
 Runtime infra comes from Composer Variables, read at parse time:
 PROJECT_ID, REGION, DATAFLOW_SUBNET, SA_DATAFLOW, the optional
 DATAFLOW_NETWORK_TAGS (semicolon-separated VPC network tags for the launcher
-VM and the workers) and the optional SDFB_MAX_PARALLEL_JOBS (how many
-batch jobs of a `tables=all` launch run at once: the Variable when it is
-set, else launch.max_parallel_jobs of generator.yaml overlaid by
-sdfb_env.yaml, 1 by default; never below 1, `sdfb_batches.parallel_cap`).
-The cap is read when the file is parsed, so a change to either takes effect
-at the next parse, without a re-import.
+VM and the workers) and the optional SDFB_MAX_PARALLEL_JOBS (the default of
+the `max_parallel_jobs` param, how many batch jobs of a `tables=all` launch
+run at once: the Variable when it is set, else launch.max_parallel_jobs of
+generator.yaml overlaid by sdfb_env.yaml; never below 1,
+`sdfb_batches.parallel_cap`). That default is read when the file is parsed,
+so a change to either takes effect at the next parse, without a re-import;
+a trigger's `max_parallel_jobs` wins for its run.
 
 The two branches::
 
@@ -47,17 +48,17 @@ The two branches::
            │    no wait)      run_evaluation is off)  sensor on the job)
            │       ─► trigger_evaluation ─► wait_for_evaluation_launch
            │
-           └─► batch_bodies ─► start_batch[b00 … bNN] ─┬─► collect_landed
-               (all: the       mapped: one Flex launch │   (all_done)
-                planned         per batch, at most     │       │
-                bodies)         max_parallel_jobs at   │       ▼
-                                once, each waiting     │  trigger_evaluation_batches
-                                for its own job        │       ▼
-                                                       │  wait_for_batch_evaluation_launch
-                                                       ├─► fail_if_a_batch_failed
-                                                       └─► fail_if_a_table_failed
-                                                           (all_done: the launch's
-                                                            validation_runs rows)
+           └─► batch_bodies ─► bundle[b00 … bNN] ─┬─► fail_if_a_batch_failed
+               (all: the       (mapped task group, │   (one_failed)
+                planned         one per batch)     └─► fail_if_a_table_failed
+                bodies)                                (all_done: the launch's
+                                                        validation_runs rows)
+
+    bundle[i]:  gate ─► launch ─► wait_generation ─► eval_body ─► trigger_eval
+                (sensor,  (Flex,   (sensor, the job   (skips with    (the
+                 waits     no      DONE; ends the     the evaluation  bundle's
+                 for the   wait)   bundle's slot)     off)            evaluation)
+                 cap)                          ─► wait_eval_launch
 
 `route` (a `@task.branch`) resolves the launch's shape with
 `sdfb_batches.resolve_tables_mode`: a `config_uri` file's `launch.tables`
@@ -112,20 +113,27 @@ triggered. Neither sensor is deferrable, so no triggerer is needed:
 `deferrable` is not passed, and the provider's default is off unless the
 environment sets `[operators] default_deferrable`.
 
-The `all` branch launches one Flex Template job per batch: `tables=all`,
-`batch_index`, `batch_count`, `run_id=<base>`, the job named
+The `all` branch runs one bundle per batch, a mapped task group (ADR 0045
+D5, D7): every task of `bundle[i]` shares the batch's map index. Its `gate`
+waits for the cap (below), its `launch` starts one Flex Template job:
+`tables=all`, `batch_index`, `batch_count`, `run_id=<base>`, the job named
 `<job name>-bNN`, to which the provider appends `-<8 hex>` (its
-`append_job_name`). A batch job that ends in any state but DONE fails its own
-mapped instance; the other batches run on. `collect_landed` runs after every
-batch and builds the evaluation of the jobs that landed: the evaluator reads
-those jobs' rows of `validation_runs` by the base run id, so every table is
-compared with the source its row names. With `run_evaluation` off, or no
-batch landed, the evaluation is skipped.
+`append_job_name`), and returns at once; its `wait_generation` waits for the
+job in reschedule mode, holding no worker slot. A batch job that ends in any
+state but DONE fails its bundle's wait; the other bundles run on. Once its
+job is DONE, the bundle evaluates it: `eval_body` builds the evaluation of
+that one job (`--run_id <base> --generation_job_ids <the job>`: the
+evaluator reads that job's rows of `validation_runs`, so every table is
+compared with the source its row names), named `<evaluation name>-bNN-<ts>`;
+`trigger_eval` launches it on the CPU, outside the cap; `wait_eval_launch`
+waits for its launch. A bundle whose generation failed never evaluates (its
+evaluation tasks are upstream-failed), and no other bundle waits for it.
+With `run_evaluation` off, `eval_body` skips and the evaluation with it.
 
 A batch job ends DONE whatever its tables' gates found: each table's
 verdict is its `validation_runs` row (PASSED, FAILED_BLOCKER or
 FAILED_PREFLIGHT, with a `status_reason`). So `fail_if_a_table_failed`, once
-every batch has ended, reads the launch's rows by the base run id
+every bundle's generation has ended, reads the launch's rows by the base run id
 (`sdfb_batches.verdicts_query`, through `BigQueryHook`) and fails the run
 with `sdfb_batches.verdict_banner`, naming each planned table whose newest
 row is not PASSED or that has no row (its batch did not reach DONE). A
@@ -137,7 +145,7 @@ table without the `status_reason` column is read without it; a
 without a retry, and any other read error is retried. With no
 `validation_runs_table` (the overlay's, or a config file's io key) nothing
 is recorded: the leaf skips with a warning, and the run's outcome is the
-batch jobs' alone. The evaluation of the DONE batches runs either way.
+batch jobs' alone. The evaluation of each DONE batch runs either way.
 
 Trigger rules, and why::
 
@@ -148,27 +156,28 @@ Trigger rules, and why::
                                                     not taken, and every
                                                     all_success task after it
     the explicit chain                all_success   skipped with start_sdfb
-    start_batch[i]                    all_success   mapped instances run on
-                                                    their own: one that fails
-                                                    stops no other (the DAG
-                                                    sets no fail_stop)
-    collect_landed                    all_done      runs once every instance
-                                                    has ended, the failed ones
-                                                    too; skips itself when
-                                                    `route` planned no batch
-                                                    (an explicit launch, or a
-                                                    failed route), so the
+    bundle[i], every task             all_success   a bundle runs on its own,
+                                                    each task after the one
+                                                    before it in the same
+                                                    bundle: one that fails
+                                                    stops no other bundle
+                                                    (the DAG sets no
+                                                    fail_stop); skipped with
+                                                    batch_bodies, so the
                                                     skipped branch never
-                                                    evaluates
-    trigger_evaluation_batches,       all_success   skipped with
-    wait_for_batch_evaluation_launch                collect_landed
-    fail_if_a_batch_failed            one_failed    fails once an instance
-                                                    has failed; skipped when
-                                                    every instance succeeded,
-                                                    the explicit branch ran,
-                                                    or `route` failed (which
+                                                    launches or evaluates
+    fail_if_a_batch_failed            one_failed    over every bundle's
+                                                    wait_generation: fails
+                                                    once a bundle's gate,
+                                                    launch or wait failed;
+                                                    skipped when every
+                                                    generation succeeded, the
+                                                    explicit branch ran, or
+                                                    `route` failed (which
                                                     fails the run itself)
-    fail_if_a_table_failed            all_done      fails when a planned
+    fail_if_a_table_failed            all_done      over every bundle's
+                                                    wait_generation; fails
+                                                    when a planned
                                                     table's newest
                                                     validation_runs row is not
                                                     PASSED, or has no row;
@@ -178,14 +187,21 @@ Trigger rules, and why::
                                                     informational with
                                                     client_type=fake
 
-The launch gate (ADR 0045 D5). Every `start_batch` instance starts at once,
-and in `pre_execute` reads its siblings' states: until every instance `cap`
-or more indexes below it has ended (`sdfb_batches.may_launch`) it is
-rescheduled two minutes later (`GATE_POKE_SECONDS`) and waits up for
-reschedule, holding no worker slot; then it launches its job and waits for
-it. So at most `cap` batch jobs run at once, and an instance waits only on
-lower ones. A reschedule keeps the try. The DAG
-sets no task-level limit (`max_active_tis_per_dag`,
+The launch gate (ADR 0045 D5). Every bundle's `gate` starts at once: a
+sensor in reschedule mode (`_LaunchGateSensor`) that reads the bundles'
+`wait_generation` states every two minutes (`GATE_POKE_SECONDS`) and is done
+once the wait of every bundle `cap` or more indexes below it has ended
+(`sdfb_batches.may_launch`; `cap` is the run's `max_parallel_jobs` param).
+Between two reads Airflow keeps it up for reschedule and it holds no worker
+slot. So at most `cap` generation jobs run at once, a bundle waits only on
+lower ones, and an evaluation holds no slot. It has to be a sensor: only a
+sensor's task instances carry `ReadyToRescheduleDep`, so only a sensor's
+reschedule date is honoured. The operator gate it replaces raised
+AirflowRescheduleException from `pre_execute` and was queued again within
+1 to 4 seconds, about 25,000 times over the 2026-11-03 launch; once the
+executor reported such an instance finished while its state read queued,
+and the scheduler failed it (b11, no job). A reschedule keeps the try. The
+DAG sets no task-level limit (`max_active_tis_per_dag`,
 `max_active_tis_per_dagrun`) on any task, and must not: with one, the
 scheduler checks the serialized DAG for every instance it queues, and when
 the DAG is missing from `serialized_dag` (the stale-DAG sweep of a standalone
@@ -205,7 +221,8 @@ sensor waits for it, hours) and then until the evaluation's launch is over
 (the second sensor): at most the launcher's twelve minutes and one 60-second
 poke; on the failure path, plus the task's retries (below); and one hour, the
 sensor's timeout, for a job that stays queued. A `tables=all` run holds it
-until every batch job has ended. The DAG has `max_active_runs=1`, so every
+until every bundle has ended: its generation job, then its evaluation's
+launch. The DAG has `max_active_runs=1`, so every
 later trigger queues behind it: launches run one at a time. `max_active_runs`
 is the knob; raising it lets several launches run at once (mind the GPU
 quota).
@@ -218,20 +235,24 @@ callback runs after the task's last retry: under that default about ten
 minutes after the sensor first saw the dead job, with the registry row still
 RUNNING meanwhile. That is kept on purpose (a transient error in one poke
 must not end the watch). A sensor that ends on its timeout is not retried.
-The same default launches a failed `trigger_evaluation` again. `start_batch`
-passes `retries=0`: a batch instance waits for its job, so a retry would
-launch the whole batch again under the same base run id, which replays the
-same rows, and after a BLOCKER, which fails the job once its rows have
-loaded, an append launch would land them twice. To run a failed batch
-again, fix the cause and clear its `start_batch` instance with its
-downstream tasks; its lower siblings have ended, so it launches at once.
-Clear it only once the run has ended: cleared while a higher instance's job
-runs, it launches beside it, one job over the cap. An instance that has
-launched holds an Airflow worker slot until its job ends (the operator is
-not deferrable); a waiting one holds a slot only for each poke's few
-seconds. Killing an instance that launched (a Composer worker restart, or
-marking it failed) cancels its Dataflow job, and with `retries=0` the
-instance then stays failed.
+The same default launches a failed `trigger_evaluation` (and a bundle's
+`trigger_eval`) again. A bundle's `launch` passes `retries=0`: a launch call
+that was accepted and then failed (its status read raised) would launch the
+whole batch again under the same base run id, which replays the same rows,
+and an append launch would land them twice. Its `gate` and
+`wait_generation` take the environment's retries: a poke that fails on a
+transient error is tried again, and a retried wait reads the same job. A
+job that ends in any state but DONE fails the wait (the provider's sensor
+raises, after the task's retries). To run a failed batch again, fix the
+cause and clear its bundle's `launch` with its downstream tasks (and its
+`gate`, if the gate failed); its lower siblings have ended, so it
+launches at once. Clear it only once the run has ended: cleared while a
+higher bundle's job runs, it launches beside it, one job over the cap. No
+task of a bundle holds an Airflow worker slot while it waits: the gate and
+both waits are reschedule-mode sensors, holding a slot only for each poke's
+few seconds, and the launch returns once the job is queued. Marking a
+running `wait_generation` failed does not cancel its Dataflow job: cancel
+it in Dataflow.
 
 The explicit evaluation (`sdfb_batches.evaluation_body`, master's
 parameters) evaluates what the launch generated: the launched table
@@ -315,9 +336,10 @@ in those seconds): a launcher then runs and writes RUNNING while the sensor
 is upstream-failed, and no callback runs for it. And the last line is wider
 than it looks: a Dataflow job reports running when it starts, before any
 worker is up, so a job that dies while its workers start is one nobody
-closes here. The `all` branch's evaluation is closed the same way by
-`wait_for_batch_evaluation_launch` and `_close_batch_running_row`, which
-find the row by the launch's base run id instead of a generation job id.
+closes here. A bundle's evaluation is closed the same way by its
+`wait_eval_launch` and `_close_bundle_running_row`, which find the row by
+that bundle's generation job id (the one id its evaluation names), never by
+the launch's base run id, which every bundle's evaluation shares.
 
 Why a fifth task. `trigger_evaluation` cannot see a launcher die: with
 `wait_until_finished=False` the operator returns as soon as the job it
@@ -411,10 +433,8 @@ from __future__ import annotations
 import os
 
 from airflow import models
-from airflow.decorators import task
-from airflow.exceptions import (AirflowFailException,
-                                AirflowRescheduleException,
-                                AirflowSkipException)
+from airflow.decorators import task, task_group
+from airflow.exceptions import AirflowFailException, AirflowSkipException
 from airflow.models import Variable
 from airflow.models.param import Param
 from airflow.models.xcom_arg import XComArg
@@ -423,8 +443,8 @@ from airflow.providers.google.cloud.operators.dataflow import (
     DataflowStartFlexTemplateOperator,)
 from airflow.providers.google.cloud.sensors.dataflow import (
     DataflowJobStatusSensor,)
+from airflow.sensors.base import BaseSensorOperator
 from airflow.utils.dates import days_ago
-from airflow.utils import timezone
 from airflow.utils.trigger_rule import TriggerRule
 
 # The launch helpers, imported from beside this file in the DAGs folder.
@@ -456,18 +476,17 @@ VARIABLES = {
     "DATAFLOW_NETWORK_TAGS": network_tags,
     "SDFB_MAX_PARALLEL_JOBS": max_parallel_jobs,
 }
-# ADR 0045: at most this many batch jobs at once. Each holds its workers'
-# GPUs, so the regional GPU quota bounds it. Parse-time (see the header).
-MAX_PARALLEL_JOBS = sdfb_batches.parallel_cap(LAYERS, VARIABLES)
-# How often a batch instance waiting at the launch gate reads its siblings'
-# states (ADR 0045 D5): a launch starts at most this long after the batch it
-# waited for ended. Rescheduled between reads, it holds no worker slot.
+# How often a bundle waiting at the launch gate reads its siblings' states
+# (ADR 0045 D5): a launch starts at most this long after the bundle it
+# waited for ended. Rescheduled between reads, it holds no worker slot. The
+# gate gives up after a week (a sensor's timeout), far past any launch.
 GATE_POKE_SECONDS = 120
+GATE_TIMEOUT_SECONDS = 7 * 86400
 
 # The DAG's id, template, buckets, labels and job names (the overlay's
 # `dag:` and `infra:`, and the Variables above), and every param's default.
 CONSTANTS = sdfb_batches.dag_constants(LAYERS, VARIABLES)
-DEFAULTS = sdfb_batches.param_defaults(LAYERS)
+DEFAULTS = sdfb_batches.param_defaults(LAYERS, VARIABLES)
 dag_id = CONSTANTS["dag_id"]
 env_name = CONSTANTS["labels"]["env"]
 
@@ -485,9 +504,13 @@ GENERATION_TIMEOUT_SECONDS = 86400
 # The evaluation job's id, the same way: `trigger_evaluation` does not wait
 # either, so its XCom holds the id of the job it launched.
 evaluation_job_id = "{{ ti.xcom_pull(task_ids='trigger_evaluation')['id'] }}"
-# ... and the `all` branch's.
-batch_evaluation_job_id = (
-    "{{ ti.xcom_pull(task_ids='trigger_evaluation_batches')['id'] }}")
+# ... and a bundle's (ADR 0045 D7): the job its own trigger launched, the
+# XCom of the same map index.
+bundle_evaluation_job_id = ("{{ ti.xcom_pull(task_ids='bundle.trigger_eval', "
+                            "map_indexes=ti.map_index)['id'] }}")
+# A bundle's generation job, while its wait reads it: the launch's XCom.
+bundle_generation_job_id = ("{{ ti.xcom_pull(task_ids='bundle.launch', "
+                            "map_indexes=ti.map_index)['id'] }}")
 # How the second sensor waits for the evaluation's LAUNCH to be over (the job
 # running): one status read a minute, for at most an hour. The launcher gives
 # up after about 12 minutes; the hour bounds a job that stays queued.
@@ -997,6 +1020,19 @@ default_dag_params = {
             "pulls faster. The limit itself cannot be set from a DAG. "
             "Default e2-standard-8.",
         ),
+    "max_parallel_jobs":
+        Param(
+            default=DEFAULTS["max_parallel_jobs"],
+            type="string",
+            pattern=r"^\s*[1-9][0-9]*\s*$",
+            description="Only with tables=all. How many batch jobs run at "
+            "once (ADR 0045 D5); each holds up to 4 workers' GPUs, so stay "
+            "inside the regional GPU quota divided by 4. Default: the "
+            "Variable SDFB_MAX_PARALLEL_JOBS when set, else "
+            "launch.max_parallel_jobs of generator.yaml overlaid by "
+            "sdfb_env.yaml, read when the DAG file was parsed. A bundle's "
+            "evaluation does not count against it.",
+        ),
     "evaluation_max_workers":
         Param(
             default=DEFAULTS["evaluation_max_workers"],
@@ -1114,102 +1150,87 @@ def route(**context) -> str:
 @task(task_id="batch_bodies")
 def batch_bodies(**context) -> list:
   """The batch launch bodies `route` planned, as this task's return value:
-  Airflow maps `start_batch` only over a return value (never a custom key),
+  Airflow maps `bundle` only over a return value (never a custom key),
   and `route`'s is the branch it took. `-> list` keeps multiple_outputs
   off."""
   return context["ti"].xcom_pull(task_ids="route", key="bodies")
 
 
-@task(
-    task_id="collect_landed",
-    trigger_rule=TriggerRule.ALL_DONE,
-    multiple_outputs=False)
-def collect_landed(**context) -> dict:
-  """After every batch: the evaluation's launch body over the jobs that
-  reached DONE.
+class _LaunchGateSensor(BaseSensorOperator):
+  """A bundle's launch gate (ADR 0045 D5): done once the `wait_generation`
+  of every bundle `cap` or more indexes below it has ended
+  (`sdfb_batches.may_launch`); `cap` is the run's `max_parallel_jobs`.
 
-  all_done, so it runs after a failed batch too, and so also when the whole
-  branch was skipped: then `route` planned no batch and it skips itself, as
-  it does with the evaluation off or nothing landed. A failed mapped
-  instance returned nothing, so its job is not listed. The launch reads the
-  return value whole, so multiple_outputs is off, said here because the
-  `dict` annotation would turn it on.
+  A sensor, in reschedule mode: between two reads Airflow keeps it up for
+  reschedule for `poke_interval` and it holds no worker slot. Only a
+  sensor's task instances carry `ReadyToRescheduleDep`, so only a sensor's
+  reschedule date is honoured: the AirflowRescheduleException of the
+  operator this replaces was queued again within seconds, 25,000 times in
+  the 2026-11-03 launch. `DagRun.get_task_instances` opens its own session,
+  so each read sees the waits' states afresh.
+  """
+
+  def poke(self, context) -> bool:
+    import logging
+
+    map_index = context["ti"].map_index
+    cap = sdfb_batches.parallel_cap(LAYERS, VARIABLES,
+                                    context["params"]["max_parallel_jobs"])
+    blocking = sdfb_batches.launch_blocker(
+        map_index, cap,
+        sdfb_batches.ti_states(context["dag_run"].get_task_instances(),
+                               sdfb_batches.BUNDLE_WAIT))
+    if blocking is None:
+      return True
+    logging.info("%s", sdfb_batches.gate_wait_line(map_index, blocking, cap))
+    return False
+
+
+@task(task_id="eval_body", multiple_outputs=False)
+def bundle_evaluation_body(generation: dict, **context) -> dict:
+  """After a bundle's generation job is DONE: the launch body of that
+  bundle's evaluation, over its one job (ADR 0045 D7).
+
+  Skips with the evaluation off. A bundle whose generation failed never
+  gets here (upstream failed), and no other bundle waits for it. The
+  launch reads the return value whole, so multiple_outputs is off, said
+  here because the `dict` annotation would turn it on.
   """
   ti, params = context["ti"], context["params"]
-  base_run_id = ti.xcom_pull(task_ids="route", key="base_run_id")
-  if not base_run_id:
-    raise AirflowSkipException("route planned no batch: nothing to evaluate")
   if not params["run_evaluation"]:
     raise AirflowSkipException("run_evaluation is off")
-  ids = sdfb_batches.landed_job_ids(ti.xcom_pull(task_ids="start_batch"))
-  if not ids:
-    raise AirflowSkipException("no batch job reached JOB_STATE_DONE: nothing "
-                               "to evaluate")
   return sdfb_batches.evaluation_body(
       {
           **params, "run_id":
-              base_run_id,
+              ti.xcom_pull(task_ids="route", key="base_run_id"),
           "relationships_uri":
               ti.xcom_pull(task_ids="route", key="relationships_uri")
       },
       LAYERS,
       mode=ti.xcom_pull(task_ids="route", key="mode"),
-      generation_job_ids=ids,
+      generation_job_ids=[generation["id"]],
       variables=VARIABLES,
-      ts_nodash=context["ts_nodash"])
-
-
-class _GatedFlexTemplateOperator(DataflowStartFlexTemplateOperator):
-  """A batch's Flex launch that launches only once every batch `cap` or
-  more indexes below it has ended (`sdfb_batches.may_launch`, ADR 0045 D5).
-
-  Until then `pre_execute` reschedules the instance a poke later: it waits
-  up for reschedule and holds no worker slot. A reschedule keeps the try
-  (`retries=0` stays one launch). The gate is in `pre_execute`, not
-  `execute`: an `execute` that called the provider's would make Airflow's
-  execute guard log, for every batch, that the operator ran outside a task
-  instance. `DagRun.get_task_instances` opens its own session, so each poke
-  reads the siblings' states afresh.
-  """
-
-  def __init__(self, *, cap: int, gate_poke_seconds: float, **kwargs):
-    super().__init__(**kwargs)
-    self.cap = cap
-    self.gate_poke_seconds = gate_poke_seconds
-
-  def pre_execute(self, context):
-    import datetime
-    import logging
-
-    super().pre_execute(context)
-    map_index = context["ti"].map_index
-    blocking = sdfb_batches.launch_blocker(
-        map_index, self.cap,
-        sdfb_batches.ti_states(context["dag_run"].get_task_instances(),
-                               self.task_id))
-    if blocking is None:
-      return
-    logging.info("%s", sdfb_batches.gate_wait_line(map_index, blocking,
-                                                   self.cap))
-    raise AirflowRescheduleException(timezone.utcnow() + datetime.timedelta(
-        seconds=self.gate_poke_seconds))
+      ts_nodash=context["ts_nodash"],
+      batch_index=ti.map_index)
 
 
 @task(task_id="fail_if_a_batch_failed", trigger_rule=TriggerRule.ONE_FAILED)
 def fail_if_a_batch_failed(**context) -> None:
-  """A leaf that fails the run when a batch did.
+  """A leaf that fails the run when a bundle's generation did.
 
-  The evaluation after `collect_landed` may succeed, and Airflow fails a run
-  only by a failed leaf. A failed `route` also reaches here (start_batch is
-  then upstream-failed): nothing was launched, and route's own failure
-  already fails the run, so this one skips. An instance that failed with no
-  start date never ran: the message names those, the ones to clear.
+  one_failed over every bundle's `wait_generation`: a failed gate, launch
+  or wait fails the wait or leaves it upstream-failed. A failed `route`
+  also reaches here (the bundles are then upstream-failed): nothing was
+  launched, and route's own failure already fails the run, so this one
+  skips. The message names each failed bundle and the task it failed in,
+  and an instance that failed with no start date never ran: the ones to
+  clear.
   """
   if not context["ti"].xcom_pull(task_ids="route", key="base_run_id"):
     raise AirflowSkipException("route planned no batch: no batch failed")
   raise AirflowFailException(
       sdfb_batches.batch_failure_message(
-          context["dag_run"].get_task_instances(), "start_batch"))
+          context["dag_run"].get_task_instances()))
 
 
 def _verdict_rows(table: str, base: str) -> tuple[list[dict], bool]:
@@ -1350,6 +1371,16 @@ def _launched_job_id(launched, job_config):
   return ""
 
 
+def _bundle_generation_job_id(body):
+  """The generation job id a bundle's evaluation body names (one id: its
+  `generation_job_ids`), or "" when `eval_body` left no body."""
+  if not isinstance(body, dict):
+    return ""
+  parameters = body.get("launchParameter", {}).get("parameters", {})
+  value = parameters.get("generation_job_ids")
+  return value if isinstance(value, str) and "," not in value else ""
+
+
 def _job_state(job_id):
   """The Dataflow job's current state, or None when it cannot be read."""
   import logging
@@ -1485,14 +1516,17 @@ def _close_running_row(context):
         "it had not yet been loaded", target, EVALUATION_TRIGGER)
 
 
-def _close_batch_running_row(context):
-  """on_failure_callback of `wait_for_batch_evaluation_launch`: the `all`
-  branch's `_close_running_row`, with the row found by the launch's base
-  run id (the evaluation's `base_run_id`) instead of a generation job id.
+def _close_bundle_running_row(context):
+  """on_failure_callback of a bundle's `wait_eval_launch`: the `all`
+  branch's `_close_running_row`, for the evaluation of this bundle only.
 
-  The ids it needs are pulled from `route` and `trigger_evaluation_batches`
-  by name. Nothing is written without a job id, nor while the launched job
-  may still write its own FINAL row (`_callback_closes_row`).
+  The row is found by the bundle's generation job id, the one id its
+  evaluation was launched with (`eval_body`'s body), which the registry
+  records as `generation_job_id`: never by the launch's base run id, which
+  every bundle's evaluation shares, so one dead launcher closes no other
+  bundle's row. The ids are pulled from this map index's `eval_body` and
+  `trigger_eval`. Nothing is written without a job id, nor while the
+  launched job may still write its own FINAL row (`_callback_closes_row`).
   """
   import logging
   import re
@@ -1509,18 +1543,21 @@ def _close_batch_running_row(context):
   registry = (f"{dataset}.{_REGISTRY_TABLE}" if "." in dataset else
               f"{project_id}.{dataset}.{_REGISTRY_TABLE}")
   ti = context["ti"]
-  # The launch target: the base run id `route` minted, which the evaluation
-  # was launched with (a callback has no Jinja to render).
-  target = str(ti.xcom_pull(task_ids="route", key="base_run_id") or "")
+  # The launch target: the bundle's generation job id, the one id its
+  # evaluation was launched with (a callback has no Jinja to render).
+  target = _bundle_generation_job_id(
+      ti.xcom_pull(task_ids="bundle.eval_body", map_indexes=ti.map_index))
   if not target:
     logging.warning(
-        "evaluation registry not updated: route left no base run id in XCom "
-        "to find the launch's RUNNING row by")
+        "evaluation registry not updated: eval_body left no generation job "
+        "id in XCom to find the bundle's RUNNING row by")
     return
   job_id = _launched_job_id(
-      ti.xcom_pull(task_ids="trigger_evaluation_batches"),
+      ti.xcom_pull(task_ids="bundle.trigger_eval", map_indexes=ti.map_index),
       ti.xcom_pull(
-          task_ids="trigger_evaluation_batches", key="dataflow_job_config"))
+          task_ids="bundle.trigger_eval",
+          key="dataflow_job_config",
+          map_indexes=ti.map_index))
   if not job_id:
     logging.warning(
         "evaluation registry not updated: no Dataflow job id in XCom for the "
@@ -1536,7 +1573,7 @@ def _close_batch_running_row(context):
     return
   exception = context.get("exception")
   ended = f" (job state {state})" if state else ""
-  reason = (f"Whole-model evaluation job ended while its launch was "
+  reason = (f"Bundle evaluation job ended while its launch was "
             f"awaited{ended}: "
             f"{str(exception)[:500] or type(exception).__name__}")
 
@@ -1587,19 +1624,20 @@ def _close_batch_running_row(context):
   if not isinstance(written, int):
     logging.info(
         "evaluation registry: the close statement ran for Dataflow job %s "
-        "(launch %s); how many rows it wrote is unknown", job_id, target)
+        "(generation job %s); how many rows it wrote is unknown", job_id,
+        target)
   elif written:
     logging.info(
         "evaluation registry: closed %d RUNNING row(s) as FAILED for Dataflow "
-        "job %s (launch %s)", written, job_id, target)
+        "job %s (generation job %s)", written, job_id, target)
   else:
     logging.warning(
         "evaluation registry not updated: the close statement matched no "
-        "open RUNNING row for launch %s, trigger %s, recorded since this DAG "
-        "run's start. Either there was nothing to close (the launcher wrote "
-        "its own FINAL row, or died before it wrote RUNNING), or the row is "
-        "older than the run's start (the run was cleared), or it had not yet "
-        "been loaded", target, EVALUATION_TRIGGER)
+        "open RUNNING row for generation job %s, trigger %s, recorded since "
+        "this DAG run's start. Either there was nothing to close (the "
+        "launcher wrote its own FINAL row, or died before it wrote RUNNING), "
+        "or the row is older than the run's start (the run was cleared), or "
+        "it had not yet been loaded", target, EVALUATION_TRIGGER)
 
 
 with models.DAG(
@@ -1683,51 +1721,76 @@ with models.DAG(
   start_sdfb >> run_evaluation_gate >> wait_for_generation >> trigger_evaluation  # pylint: disable=pointless-statement  # Airflow chain
   trigger_evaluation >> wait_for_evaluation_launch  # pylint: disable=pointless-statement  # Airflow dependency operator
 
-  # -- all: one mapped launch per batch -------------------------------------
+  # -- all: one mapped bundle per batch (ADR 0045 D5, D7) -----------------
   planned = batch_bodies()
-  # Each instance waits for its own job once it launched it, and the launch
-  # gate (rescheduling the instance until it may launch) caps the jobs that
-  # run at once. Never `max_active_tis_per_dag` (or any task-level
-  # limit): it makes the scheduler fail every waiting instance whenever the
-  # DAG is swept as stale (ADR 0045 D5). No retries: a retry would launch the
-  # whole batch again (see Retries in the header).
-  start_batch = _GatedFlexTemplateOperator.partial(
-      task_id="start_batch",
-      project_id=project_id,
-      location=region,
-      wait_until_finished=True,
-      do_xcom_push=True,
-      retries=0,
-      cap=MAX_PARALLEL_JOBS,
-      gate_poke_seconds=GATE_POKE_SECONDS,
-  ).expand(body=planned)
-  landed = collect_landed()
 
-  # The evaluation of the batches that landed: `collect_landed`'s body.
-  trigger_evaluation_batches = DataflowStartFlexTemplateOperator(
-      task_id="trigger_evaluation_batches",
-      project_id=project_id,
-      location=region,
-      body=landed,
-      do_xcom_push=True,
-      wait_until_finished=False,
-  )
-  wait_for_batch_evaluation_launch = DataflowJobStatusSensor(
-      task_id="wait_for_batch_evaluation_launch",
-      job_id=batch_evaluation_job_id,
-      expected_statuses={"JOB_STATE_RUNNING", "JOB_STATE_DONE"},
-      project_id=project_id,
-      location=region,
-      mode="reschedule",
-      poke_interval=EVALUATION_LAUNCH_POKE_SECONDS,
-      timeout=EVALUATION_LAUNCH_TIMEOUT_SECONDS,
-      on_failure_callback=_close_batch_running_row,
-  )
+  @task_group(group_id=sdfb_batches.BUNDLE_GROUP)
+  def bundle(body):
+    """One batch: the gate, its generation job, then its own evaluation.
+    Every task of the group shares the batch's map index."""
+    # Done once every bundle `cap` or more below has ended its generation:
+    # at most `cap` generation jobs run at once. Never `max_active_tis_*`
+    # (or any task-level limit): it makes the scheduler fail every waiting
+    # instance whenever the DAG is swept as stale (ADR 0045 D5).
+    gate = _LaunchGateSensor(
+        task_id="gate",
+        mode="reschedule",
+        poke_interval=GATE_POKE_SECONDS,
+        timeout=GATE_TIMEOUT_SECONDS,
+    )
+    # Not waited for: the job id is the XCom the wait reads. No retries: a
+    # launch call that was accepted and then failed would launch the batch
+    # twice under the same run ids (see Retries in the header).
+    launch = DataflowStartFlexTemplateOperator(
+        task_id="launch",
+        project_id=project_id,
+        location=region,
+        body=body,
+        do_xcom_push=True,
+        wait_until_finished=False,
+        retries=0,
+    )
+    # The generation's wait: rescheduled between reads, holding no worker
+    # slot for the job's hours; it ends the bundle's slot of the cap.
+    wait = DataflowJobStatusSensor(
+        task_id="wait_generation",
+        job_id=bundle_generation_job_id,
+        expected_statuses={"JOB_STATE_DONE"},
+        project_id=project_id,
+        location=region,
+        mode="reschedule",
+        poke_interval=GENERATION_POKE_SECONDS,
+        timeout=GENERATION_TIMEOUT_SECONDS,
+    )
+    # The bundle's evaluation: CPU only, outside the cap.
+    evaluation = bundle_evaluation_body(launch.output)
+    trigger = DataflowStartFlexTemplateOperator(
+        task_id="trigger_eval",
+        project_id=project_id,
+        location=region,
+        body=evaluation,
+        do_xcom_push=True,
+        wait_until_finished=False,
+    )
+    launched = DataflowJobStatusSensor(
+        task_id="wait_eval_launch",
+        job_id=bundle_evaluation_job_id,
+        expected_statuses={"JOB_STATE_RUNNING", "JOB_STATE_DONE"},
+        project_id=project_id,
+        location=region,
+        mode="reschedule",
+        poke_interval=EVALUATION_LAUNCH_POKE_SECONDS,
+        timeout=EVALUATION_LAUNCH_TIMEOUT_SECONDS,
+        on_failure_callback=_close_bundle_running_row,
+    )
+    gate >> launch >> wait >> evaluation >> trigger >> launched  # pylint: disable=pointless-statement  # Airflow chain
+    # The group's value is its generation wait: the leaves below read it.
+    return wait
+
+  bundles = bundle.expand(body=planned)
   failed = fail_if_a_batch_failed()
   table_failed = fail_if_a_table_failed()
 
   routed >> planned  # pylint: disable=pointless-statement  # Airflow dependency operator
-  start_batch >> landed  # pylint: disable=pointless-statement  # Airflow dependency operator
-  trigger_evaluation_batches >> wait_for_batch_evaluation_launch  # pylint: disable=pointless-statement  # Airflow dependency operator
-  start_batch >> failed  # pylint: disable=pointless-statement  # Airflow dependency operator
-  start_batch >> table_failed  # pylint: disable=pointless-statement  # Airflow dependency operator
+  bundles >> failed  # pylint: disable=pointless-statement  # Airflow dependency operator
+  bundles >> table_failed  # pylint: disable=pointless-statement  # Airflow dependency operator

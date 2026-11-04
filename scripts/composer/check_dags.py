@@ -40,17 +40,18 @@ The patches:
   and returns a fake job `{"id": "fakejob-<task_id>[-<map_index>]"}`; a
   launch whose `jobName` ends with one of the scenario's `fail_job_suffixes`
   raises instead (a batch job that fails).
-- `DataflowJobStatusSensor.poke`: returns True (the job reached the state).
-- `sdfb_batches.launch_blocker` (the batch launch gate, ADR 0045 D5): the
+- `DataflowJobStatusSensor.poke`: returns True (the job reached the state),
+  and a bundle's `wait_generation` records its bundle's end.
+- `sdfb_batches.launch_blocker` (the bundle launch gate, ADR 0045 D5): the
   real gate on the real task instances' states, each read recorded; the
-  mapped task's `gate_poke_seconds` is set to 0, so a waiting instance is
-  rescheduled for now and pokes again in `dag.test`'s next pass. `dag.test`
-  runs one task instance at a time, in no fixed order, so the check is the
-  launch order: after the run every `start_batch` launch must have read the
-  gate, and each batch must have launched only once every batch `cap` or
-  more below it had launched (and so ended), or it is a harness failure
-  (exit 1). How many jobs run at once cannot be seen here, one task running
-  at a time: `test_sdfb_batches.py` holds that property.
+  bundle's sensors poke every 0 s, so a waiting gate is rescheduled for now
+  and pokes again in `dag.test`'s next pass. `dag.test` runs one task
+  instance at a time, in no fixed order, so the check is the launch order:
+  after the run every `bundle.launch` must have passed the gate, and each
+  bundle must have launched only once every bundle `cap` or more below it
+  had ended (its wait done, or its launch failed), or it is a harness
+  failure (exit 1). How many jobs run at once cannot be seen here, one task
+  running at a time: `test_sdfb_batches.py` holds that property.
 - `BigQueryHook.__init__` / `BigQueryHook.insert_job`: no connection; each
   query is recorded (its text and parameters) and answered with the
   scenario's `verdict_rows` (the launch's `validation_runs` rows). A
@@ -66,11 +67,14 @@ Output (`--out`), one entry per scenario, keys `OUTPUT_KEYS`:
     {scenario: {"task_states": {task_id[ "[map_index]"]: state},
                 "bodies": [generation launch body, ...],
                 "evaluation_body": {...} | null,
+                "bundle_evaluation_bodies": [a bundle's evaluation, ...],
                 "gcs_reads": ["gs://bucket/object", ...]}}
 
-A launch is the evaluation when its parameters carry `sdfb_job=evaluation`;
-every other launch is a generation body. Bodies are sorted by (task_id,
-map_index). The file is written with sorted keys, so two runs of the same
+A launch is an evaluation when its parameters carry `sdfb_job=evaluation`:
+the explicit chain's (`evaluation_body`, at most one) or a bundle's (one per
+bundle that ran it, ADR 0045 D7); every other launch is a generation body.
+Bodies are sorted by (task_id, map_index). Master's golden has the first
+four keys (`MASTER_OUTPUT_KEYS`). The file is written with sorted keys, so two runs of the same
 folder give the same bytes.
 
 Normalised (time- and run-dependent values; a later comparison must apply
@@ -190,7 +194,9 @@ from unittest import mock
 # The generation DAG's file; the folder's other DAGs are imported (an import
 # error in any of them is exit 2) but not run.
 GENERATION_DAG_FILE = "synthetic_beam_bigquery.py"
-OUTPUT_KEYS = ("task_states", "bodies", "evaluation_body", "gcs_reads")
+# The keys of master's golden; this DAG's output adds a bundle's evaluations.
+MASTER_OUTPUT_KEYS = ("task_states", "bodies", "evaluation_body", "gcs_reads")
+OUTPUT_KEYS = (*MASTER_OUTPUT_KEYS, "bundle_evaluation_bodies")
 MARKER = re.compile(r"\{\{([A-Z_]+)\}\}")
 EXIT_FORBIDDEN_GCS = 3
 GET_CONN_READ = "<GCSHook.get_conn>"
@@ -434,6 +440,13 @@ SCENARIOS: dict[str, dict[str, Any]] = {
 MASTER_SCENARIOS = ("explicit_l4", "explicit_t4", "explicit_fk_group",
                     "explicit_eval_off")
 
+# The bundle's tasks the harness watches (the DAG's mapped task group).
+_BUNDLE_LAUNCH = "bundle.launch"
+_BUNDLE_WAIT = "bundle.wait_generation"
+_BUNDLE_TRIGGER_EVAL = "bundle.trigger_eval"
+# The bundle's sensors: each pokes every 0 s here.
+_BUNDLE_SENSORS = ("bundle.gate", _BUNDLE_WAIT, "bundle.wait_eval_launch")
+
 
 class HarnessError(Exception):
   """A failure of the harness itself, not of a DAG run."""
@@ -510,6 +523,9 @@ class Recorder:
     self.bq_queries: list[tuple[str, list]] = []
     # The launch gate: (map index, cap, the states it read), each read.
     self.gate_reads: list[tuple[int, int, dict[int, str | None]]] = []
+    # The bundles' launches and ends, in the order they happened:
+    # ("launch" | "end", map index).
+    self.events: list[tuple[str, int]] = []
 
   def download(self, bucket_name: str, object_name: str, *_: Any,
                **__: Any) -> bytes:
@@ -565,10 +581,21 @@ class Recorder:
     body = json.loads(json.dumps(task.body, default=str))
     self.launches.append((task.task_id, map_index, body))
     job_name = str(body.get("launchParameter", {}).get("jobName", ""))
+    if task.task_id == _BUNDLE_LAUNCH:
+      self.events.append(("launch", map_index))
     if any(job_name.endswith(s) for s in self.scenario["fail_job_suffixes"]):
+      if task.task_id == _BUNDLE_LAUNCH:
+        self.events.append(("end", map_index))  # its wait never runs
       raise RuntimeError(f"check_dags: job {job_name} fails (scenario)")
     suffix = f"-{map_index}" if map_index >= 0 else ""
     return {"id": f"fakejob-{task.task_id}{suffix}", "name": job_name}
+
+  def poke(self, sensor: Any, context: Mapping[str, Any]) -> bool:
+    """A Dataflow status sensor's poke: the job reached the state. A
+    bundle's generation wait records its bundle's end."""
+    if sensor.task_id == _BUNDLE_WAIT:
+      self.events.append(("end", int(context["ti"].map_index)))
+    return True
 
   def gate(self, real_gate: Any) -> Any:
     """`sdfb_batches.launch_blocker`, recording each read."""
@@ -580,37 +607,45 @@ class Recorder:
     return gate
 
   def check_gate(self, name: str) -> None:
-    """HarnessError unless every batch launch read the gate and came in an
-    order it allows."""
-    order = [i for task_id, i, _ in self.launches if task_id == "start_batch"]
+    """HarnessError unless every bundle launch passed the gate and came in
+    an order it allows."""
+    order = [i for event, i in self.events if event == "launch"]
     if not order:
       return
     caps = {cap for _, cap, _ in self.gate_reads}
     if len(caps) != 1:
       raise HarnessError(f"{name}: gate caps {sorted(caps)}")
     (cap,) = caps
-    for position, index in enumerate(order):
-      # Launches end before the next starts here: a batch may launch once
-      # every batch `cap` or more below it has launched (and so ended).
-      if not set(range(index - cap + 1)) <= set(order[:position]):
+    ended: set[int] = set()
+    for event, index in self.events:
+      if event == "end":
+        ended.add(index)
+      elif not set(range(index - cap + 1)) <= ended:
+        # A bundle may launch once every bundle `cap` or more below it has
+        # ended its generation.
         raise HarnessError(f"{name}: b{index:02d} launched before the gate "
-                           f"allowed it (launch order {order}, cap {cap})")
+                           f"allowed it (events {self.events}, cap {cap})")
     if set(order) - {i for i, _, _ in self.gate_reads}:
-      raise HarnessError(f"{name}: a batch launched without the gate")
+      raise HarnessError(f"{name}: a bundle launched without the gate")
 
-  def split(self) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
-    """(generation bodies, the evaluation body or None)."""
-    bodies, evaluations = [], []
+  def split(
+      self
+  ) -> tuple[list[dict[str, Any]], dict[str, Any] | None, list[dict[str, Any]]]:
+    """(generation bodies, the explicit evaluation body or None, the
+    bundles' evaluation bodies)."""
+    bodies, evaluations, bundle_evaluations = [], [], []
     for launch in sorted(self.launches, key=lambda x: (x[0], x[1])):
       body = launch[2]
       parameters = body.get("launchParameter", {}).get("parameters", {})
-      if parameters.get("sdfb_job") == "evaluation":
-        evaluations.append(body)
-      else:
+      if parameters.get("sdfb_job") != "evaluation":
         bodies.append(body)
+      elif launch[0] == _BUNDLE_TRIGGER_EVAL:
+        bundle_evaluations.append(body)
+      else:
+        evaluations.append(body)
     if len(evaluations) > 1:
       raise HarnessError(f"{len(evaluations)} evaluation launches in one run")
-    return bodies, (evaluations[0] if evaluations else None)
+    return bodies, (evaluations[0] if evaluations else None), bundle_evaluations
 
 
 def forbidden_gcs_reads(scenario: Mapping[str, Any],
@@ -663,8 +698,14 @@ def run_scenario(dag: Any, name: str) -> dict[str, Any]:
     return recorder.insert_job(*args[1:], **kwargs)
 
   batches = sys.modules["sdfb_batches"]  # the DAG imported it
-  # The gate's poke: now, so dag.test's next pass pokes again.
-  dag.get_task("start_batch").partial_kwargs["gate_poke_seconds"] = 0
+  # The bundle's pokes: now, so dag.test's next pass pokes again.
+  for task_id in _BUNDLE_SENSORS:
+    dag.get_task(task_id).poke_interval = 0
+
+  def poke(*args: Any, **kwargs: Any) -> bool:  # args[0]: the sensor
+    return recorder.poke(args[0],
+                         args[1] if len(args) > 1 else kwargs["context"])
+
   when = logical_date(name)
   with mock.patch.object(batches, "launch_blocker",
                          recorder.gate(batches.launch_blocker)), \
@@ -673,8 +714,7 @@ def run_scenario(dag: Any, name: str) -> dict[str, Any]:
       mock.patch.object(gcs, "get_conn", lambda *_, **__: recorder.get_conn()), \
       mock.patch.object(operators.DataflowStartFlexTemplateOperator,
                         "execute", execute), \
-      mock.patch.object(sensors.DataflowJobStatusSensor, "poke",
-                        lambda *_, **__: True), \
+      mock.patch.object(sensors.DataflowJobStatusSensor, "poke", poke), \
       mock.patch.object(bigquery, "__init__", lambda *_, **__: None), \
       mock.patch.object(bigquery, "insert_job", insert_job):
     dag_run = dag.test(
@@ -688,11 +728,12 @@ def run_scenario(dag: Any, name: str) -> dict[str, Any]:
     raise HarnessError(f"{name}: the DAG run created no task instance")
   recorder.check_fallback(name)
   recorder.check_gate(name)
-  bodies, evaluation = recorder.split()
+  bodies, evaluation, bundle_evaluations = recorder.split()
   result = {
       "task_states": dict(sorted(states.items())),
       "bodies": bodies,
       "evaluation_body": evaluation,
+      "bundle_evaluation_bodies": bundle_evaluations,
       "gcs_reads": recorder.gcs_reads,
   }
   return normalise(result, run_id=dag_run.run_id, when=when)
@@ -803,8 +844,10 @@ def main(argv: list[str] | None = None) -> int:
   for name, result in output.items():
     launches, reads = len(result["bodies"]), len(result["gcs_reads"])
     evaluation = "yes" if result["evaluation_body"] else "no"
+    bundles = len(result["bundle_evaluation_bodies"])
     print(f"{name}: {launches} generation launch(es), evaluation "
-          f"{evaluation}, {reads} GCS read(s)")
+          f"{evaluation}, {bundles} bundle evaluation(s), {reads} GCS "
+          f"read(s)")
   return status
 
 

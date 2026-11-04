@@ -22,8 +22,8 @@ the RAG chunks, the DLQ and the validation_runs rows alike. Each table's
 pool trigger still waits on its OWN chunks (ADR 0034 D8), and each table's
 BLOCKER gate on the shared write's load jobs.
 
-Design: docs/DESIGN.md §4 Relational generation
-(ADR 0030, 0045).
+Design: docs/DESIGN.md §4 Relational generation; §6 Throughput
+(ADR 0034, 0045).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

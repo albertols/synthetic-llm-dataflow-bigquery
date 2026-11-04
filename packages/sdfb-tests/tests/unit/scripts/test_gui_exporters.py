@@ -615,8 +615,9 @@ def test_the_model_launch_knobs(outputs):
   """ADR 0045: the six settable keys are flags and config keys; the two
     batch keys are launch identity; the generation DAG's `tables=all`
     branch passes `source_dataset`, `landing_dataset`, `tables`,
-    `max_tables_per_job` and `prep_workers` (D6), its cap on parallel jobs
-    is an Airflow Variable."""
+    `max_tables_per_job` and `prep_workers` (D6), and its cap on parallel
+    jobs is the DAG param `max_parallel_jobs` (D5, revised 2026-11-04),
+    which the launcher never reads."""
   knobs = _by_id(outputs["knobs.json"])
   assert knobs["tables"]["channel"] == "launch"
   assert knobs["tables"]["choices"] == ["explicit", "all"]
@@ -625,12 +626,9 @@ def test_the_model_launch_knobs(outputs):
   assert "flex" not in knobs["max_parallel_jobs"]["settable_via"]
   assert knobs["source_dataset"]["channel"] == "io"
   for key in ("source_dataset", "landing_dataset", "tables",
-              "max_tables_per_job", "prep_workers"):
+              "max_tables_per_job", "prep_workers", "max_parallel_jobs"):
     assert "composer" in knobs[key]["settable_via"], key
     assert knobs[key]["composer_param"] == key
-  assert "composer" not in knobs["max_parallel_jobs"]["settable_via"]
-  assert "composer_param" not in knobs[
-      "max_parallel_jobs"]  # `_knob` drops empties
   for key in ("batch_index", "batch_count"):
     assert "config_key" not in knobs[key]
     assert knobs[key]["settable_via"] == ["cli", "flex"]

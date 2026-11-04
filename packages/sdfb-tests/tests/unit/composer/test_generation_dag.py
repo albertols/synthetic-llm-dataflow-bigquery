@@ -56,10 +56,13 @@ HARNESS_OUTPUT_ENV = "SDFB_DAG_BODIES"
 # Master's explicit chain, in order.
 _EXPLICIT_CHAIN = ("start_sdfb", "run_evaluation_gate", "wait_for_generation",
                    "trigger_evaluation", "wait_for_evaluation_launch")
+# The `all` branch's bundle, a mapped task group (ADR 0045 D5, D7), in order.
+_BUNDLE = ("gate", "launch", "wait_generation", "eval_body", "trigger_eval",
+           "wait_eval_launch")
 # The `all` branch's tasks.
-_ALL_TASKS = ("batch_bodies", "start_batch", "collect_landed",
-              "trigger_evaluation_batches", "wait_for_batch_evaluation_launch",
+_ALL_TASKS = ("batch_bodies", *(f"bundle.{t}" for t in _BUNDLE),
               "fail_if_a_batch_failed", "fail_if_a_table_failed")
+
 # What `route` pushes; every pull of a `route` key names one of them.
 _ROUTE_KEYS = {
     "body", "bodies", "base_run_id", "batch_count", "relationships_uri",
@@ -148,7 +151,8 @@ def _task(task_id: str) -> ast.AST:
   for call in (_calls(DAG, "partial") +
                _calls(DAG, "DataflowStartFlexTemplateOperator") +
                _calls(DAG, "DataflowJobStatusSensor") +
-               _calls(DAG, "ShortCircuitOperator")):
+               _calls(DAG, "ShortCircuitOperator") +
+               _calls(DAG, "_LaunchGateSensor")):
     ids = [k.value for k in call.keywords if k.arg == "task_id"]
     if ids and isinstance(ids[0], ast.Constant) and ids[0].value == task_id:
       return call
@@ -228,8 +232,8 @@ def test_model_dag_is_gone():
 def test_param_defaults_come_from_the_layers(deployed):
   """No param writes its default: each is `DEFAULTS[<its name>]`, the
   helpers' `param_defaults`, and the DAG declares exactly those params."""
-  assert ast.unparse(
-      _assignments()["DEFAULTS"]) == ("sdfb_batches.param_defaults(LAYERS)")
+  assert ast.unparse(_assignments()["DEFAULTS"]) == (
+      "sdfb_batches.param_defaults(LAYERS, VARIABLES)")
   assert ast.unparse(_assignments()["LAYERS"]) == (
       "sdfb_batches.load_layers(os.path.dirname(os.path.abspath(__file__)))")
   params = _params()
@@ -465,12 +469,11 @@ def test_the_launches_take_their_bodies_from_xcom():
   assert ast.unparse(
       _kw(_task("trigger_evaluation"),
           "body")) == ("XComArg(run_evaluation_gate, key='evaluation_body')")
-  assert ast.unparse(_kw(_task("trigger_evaluation_batches"),
-                         "body")) == "landed"
-  assert _variable_of("collect_landed") == "landed"
+  assert ast.unparse(_kw(_task("trigger_eval"), "body")) == "evaluation"
+  assert ast.unparse(_kw(_task("launch"), "body")) == "body"
   assert _variable_of("route") == "routed"
   # Both evaluations take the branch route resolved, never the param.
-  for function in ("_run_evaluation_gate", "collect_landed"):
+  for function in ("_run_evaluation_gate", "bundle_evaluation_body"):
     (call,) = _calls(_functions()[function], "evaluation_body")
     assert ast.unparse(
         _kw(call,
@@ -487,36 +490,89 @@ def _class(name: str) -> ast.ClassDef:
   return found
 
 
-def test_batches_are_one_mapped_launch_capped_by_the_gate():
-  start = _task("start_batch")
-  assert _name(start.func) == "partial"
-  assert _name(start.func.value) == "_GatedFlexTemplateOperator"
-  assert ast.literal_eval(_kw(start, "wait_until_finished")) is True
-  # No retries: a relaunch replays the same base run id, and after a BLOCKER
-  # an append launch would land the rows twice.
-  assert ast.literal_eval(_kw(start, "retries")) == 0
-  assert ast.unparse(_kw(start, "cap")) == "MAX_PARALLEL_JOBS"
-  assert ast.unparse(_assignments()["MAX_PARALLEL_JOBS"]) == (
-      "sdfb_batches.parallel_cap(LAYERS, VARIABLES)")
+def _bundle_function() -> ast.FunctionDef:
+  (found,) = [
+      n for n in ast.walk(DAG)
+      if isinstance(n, ast.FunctionDef) and n.name == "bundle"
+  ]
+  return found
+
+
+def test_batches_are_one_mapped_bundle_group():
+  """ADR 0045 D5, D7: one mapped task group per batch, gate -> launch ->
+  wait_generation -> eval_body -> trigger_eval -> wait_eval_launch, every
+  task sharing the batch's map index; the group's value is its wait."""
+  group = _bundle_function()
+  (decorator,) = group.decorator_list
+  assert ast.unparse(decorator) == (
+      "task_group(group_id=sdfb_batches.BUNDLE_GROUP)")
+  assert M.BUNDLE_GROUP == "bundle"
+  assert [a.arg for a in group.args.args] == ["body"]
+  names = ("gate", "launch", "wait", "evaluation", "trigger", "launched")
+  assert set(itertools.pairwise(names)) <= _edges()
+  for name, task_id in zip(names, _BUNDLE, strict=True):
+    assert _variable_of(task_id) == name, task_id
+  assert ast.unparse(group.body[-1]) == "return wait"
+  (expand,) = _calls(DAG, "expand")
+  assert ast.unparse(expand) == "bundle.expand(body=planned)"
+  assert _variable_of("batch_bodies") == "planned"
+  assert ("routed", "planned") in _edges()
+  for leaf in ("failed", "table_failed"):
+    assert ("bundles", leaf) in _edges(), leaf
+  launch = _task("launch")
+  # Not waited for: the wait is a reschedule-mode sensor, holding no
+  # worker slot for the job's hours. No retries: a relaunch replays the
+  # same base run id, and after a BLOCKER an append launch would land the
+  # rows twice.
+  assert ast.literal_eval(_kw(launch, "wait_until_finished")) is False
+  assert ast.literal_eval(_kw(launch, "retries")) == 0
+  assert ast.unparse(_kw(launch, "body")) == "body"
+  for task_id in ("wait_generation", "wait_eval_launch"):
+    assert ast.literal_eval(_kw(_task(task_id), "mode")) == "reschedule"
+  assert ast.unparse(_kw(_task("wait_generation"),
+                         "job_id")) == ("bundle_generation_job_id")
+  assert ast.literal_eval(_assignments()["bundle_generation_job_id"]) == (
+      "{{ ti.xcom_pull(task_ids='bundle.launch', "
+      "map_indexes=ti.map_index)['id'] }}")
+
+
+def test_the_gate_is_a_reschedule_mode_sensor_on_the_waits_states():
+  """ADR 0045 D5 (revised 2026-11-04): only a sensor's task instances carry
+  ReadyToRescheduleDep, so only a sensor's reschedule date holds. The gate
+  is one, in reschedule mode, and reads the bundles' wait_generation states,
+  with the run's max_parallel_jobs as the cap."""
+  gate = _task("gate")
+  assert _name(gate.func) == "_LaunchGateSensor"
+  assert ast.literal_eval(_kw(gate, "mode")) == "reschedule"
+  assert ast.unparse(_kw(gate, "poke_interval")) == "GATE_POKE_SECONDS"
   assert ast.literal_eval(_assignments()["GATE_POKE_SECONDS"]) == 120
-  assert ast.unparse(_kw(start, "gate_poke_seconds")) == "GATE_POKE_SECONDS"
-  gated = _class("_GatedFlexTemplateOperator")
-  assert [ast.unparse(b) for b in gated.bases
-         ] == ["DataflowStartFlexTemplateOperator"]
-  methods = {n.name: n for n in gated.body if isinstance(n, ast.FunctionDef)}
-  # The gate is before the launch, and never overrides execute (Airflow's
-  # execute guard would log each nested call).
-  assert set(methods) == {"__init__", "pre_execute"}
-  pre = ast.unparse(methods["pre_execute"])
-  assert "super().pre_execute(context)" in pre
+  assert ast.unparse(_kw(gate, "timeout")) == "GATE_TIMEOUT_SECONDS"
+  sensor = _class("_LaunchGateSensor")
+  assert [ast.unparse(b) for b in sensor.bases] == ["BaseSensorOperator"]
+  methods = {n.name: n for n in sensor.body if isinstance(n, ast.FunctionDef)}
+  assert set(methods) == {"poke"}
+  poke = ast.unparse(methods["poke"])
   assert ("sdfb_batches.ti_states(context['dag_run'].get_task_instances(), "
-          "self.task_id)") in pre
-  assert "sdfb_batches.launch_blocker(" in pre
-  # A waiting instance is rescheduled a poke later, never sleeps: it must
-  # hold no worker slot while it waits.
-  assert "raise AirflowRescheduleException(" in pre
-  assert "seconds=self.gate_poke_seconds" in pre
-  assert "sleep" not in ast.unparse(gated)
+          "sdfb_batches.BUNDLE_WAIT)") in poke
+  assert "sdfb_batches.launch_blocker(" in poke
+  assert ("sdfb_batches.parallel_cap(LAYERS, VARIABLES, "
+          "context['params']['max_parallel_jobs'])") in poke
+  assert M.BUNDLE_WAIT == "bundle.wait_generation"
+  # Waits by returning False, never by raising or sleeping.
+  assert not _calls(DAG, "AirflowRescheduleException")
+  assert not [
+      a for n in DAG.body if isinstance(n, ast.ImportFrom)
+      for a in n.names if a.name == "AirflowRescheduleException"
+  ]
+  assert "sleep" not in ast.unparse(sensor)
+  # The cap: a DAG param, its default the parse-time cap (the Variable,
+  # else the overlaid yaml), as text like every generator param.
+  param = _params()["max_parallel_jobs"]
+  assert ast.unparse(_kw(param, "default")) == "DEFAULTS['max_parallel_jobs']"
+  assert ast.literal_eval(_kw(param, "type")) == "string"
+  pattern = re.compile(ast.literal_eval(_kw(param, "pattern")))
+  assert pattern.match("3") and pattern.match(" 12 ")
+  assert not (pattern.match("0") or pattern.match("two") or pattern.match(""))
 
 
 def test_no_task_sets_a_task_level_concurrency_limit():
@@ -534,7 +590,7 @@ def test_no_task_sets_a_task_level_concurrency_limit():
 def test_a_batch_that_never_started_is_named():
   watcher = ast.unparse(_task("fail_if_a_batch_failed"))
   assert ("sdfb_batches.batch_failure_message("
-          "context['dag_run'].get_task_instances(), 'start_batch')") in watcher
+          "context['dag_run'].get_task_instances())") in watcher
   (expand,) = _calls(DAG, "expand")
   # A task's plain return value: Airflow refuses to map over a custom key.
   assert ast.unparse(_kw(expand, "body")) == "planned"
@@ -545,31 +601,35 @@ def test_a_batch_that_never_started_is_named():
   assert ("routed", "planned") in _edges()
 
 
-def test_the_skipped_branch_never_evaluates():
-  """collect_landed is all_done (it must run after a failed batch), so it
-  skips itself when route planned no batch: an explicit launch, or a route
-  that failed."""
-  decorator = _decorator("collect_landed")
-  assert "TriggerRule.ALL_DONE" in ast.unparse(decorator)
-  assert ast.literal_eval(_kw(decorator, "multiple_outputs")) is False
-  collect = _task("collect_landed")
-  first = next(n for n in collect.body if isinstance(n, ast.If))
-  assert ast.unparse(first.test) == "not base_run_id"
-  assert "AirflowSkipException" in ast.unparse(first.body[0])
-  assert "sdfb_batches.landed_job_ids" in ast.unparse(collect)
-  for task_id in ("trigger_evaluation_batches",
-                  "wait_for_batch_evaluation_launch"):
+def test_each_bundle_evaluates_its_own_job_and_holds_no_slot():
+  """ADR 0045 D7: a bundle's evaluation runs after its generation is DONE,
+  over that one job; with the evaluation off it skips. The explicit and the
+  skipped branch never reach it (the group is skipped with batch_bodies)."""
+  body = _task("eval_body")
+  assert ast.unparse(body.decorator_list[0]) == (
+      "task(task_id='eval_body', multiple_outputs=False)")
+  text = ast.unparse(body)
+  assert "raise AirflowSkipException('run_evaluation is off')" in text
+  (call,) = _calls(body, "evaluation_body")
+  assert ast.unparse(_kw(call, "generation_job_ids")) == "[generation['id']]"
+  assert ast.unparse(_kw(call, "batch_index")) == "ti.map_index"
+  assert "xcom_pull(task_ids='route', key='base_run_id')" in text
+  assert "trigger_rule" not in _keywords(body.decorator_list[0])
+  for task_id in ("trigger_eval", "wait_eval_launch"):
     assert "trigger_rule" not in _keywords(_task(task_id)), task_id
-  assert ("start_batch", "landed") in _edges()
-  assert ("trigger_evaluation_batches",
-          "wait_for_batch_evaluation_launch") in _edges()
+  assert ast.literal_eval(_assignments()["bundle_evaluation_job_id"]) == (
+      "{{ ti.xcom_pull(task_ids='bundle.trigger_eval', "
+      "map_indexes=ti.map_index)['id'] }}")
+  # The gate reads the generation waits only: an evaluation holds no slot.
+  assert "BUNDLE_WAIT" in ast.unparse(_class("_LaunchGateSensor"))
 
 
 def test_a_failed_batch_fails_the_run_and_the_rest_are_evaluated():
   watcher = _task("fail_if_a_batch_failed")
   assert "TriggerRule.ONE_FAILED" in ast.unparse(watcher.decorator_list[0])
   assert "AirflowFailException" in ast.unparse(watcher)
-  assert ("start_batch", "failed") in _edges()
+  assert "TriggerRule.ONE_FAILED" in ast.unparse(watcher.decorator_list[0])
+  assert ("bundles", "failed") in _edges()
   assert _variable_of("fail_if_a_batch_failed") == "failed"
 
 
@@ -586,24 +646,37 @@ def test_the_batch_callback_is_the_explicit_ones_with_its_own_target():
   """The two callbacks are the same statements, string literals masked, but
   for where the target and the evaluation job come from."""
   functions = _functions()
-  ours = _masked(functions["_close_batch_running_row"])
+  ours = _masked(functions["_close_bundle_running_row"])
   theirs = _masked(functions["_close_running_row"])
   changed = [
       line[1:].strip()
       for line in difflib.unified_diff(theirs, ours, lineterm="", n=0)
       if line.startswith(("-", "+")) and not line.startswith(("---", "+++"))
   ]
-  # The job id lines read alike once masked: the task ids differ.
+  # The target is the bundle's generation job (never the base run id every
+  # bundle shares), and both pulls are this map index's.
   assert changed == [
       "target = _launched_job_id(ti.xcom_pull(task_ids='…'), None)",
-      "target = str(ti.xcom_pull(task_ids='…', key='…') or '…')",
+      "target = _bundle_generation_job_id(ti.xcom_pull(task_ids='…', "
+      "map_indexes=ti.map_index))",
+      "job_id = _launched_job_id(ti.xcom_pull(task_ids='…'), "
+      "ti.xcom_pull(task_ids='…', key='…'))",
+      "job_id = _launched_job_id(ti.xcom_pull(task_ids='…', "
+      "map_indexes=ti.map_index), ti.xcom_pull(task_ids='…', key='…', "
+      "map_indexes=ti.map_index))",
   ]
-  batch = ast.unparse(functions["_close_batch_running_row"])
-  assert "xcom_pull(task_ids='route', key='base_run_id')" in batch
-  assert "xcom_pull(task_ids='trigger_evaluation_batches')" in batch
-  sensor = _task("wait_for_batch_evaluation_launch")
-  assert ast.unparse(_kw(sensor,
-                         "on_failure_callback")) == ("_close_batch_running_row")
+  batch = ast.unparse(functions["_close_bundle_running_row"])
+  assert ("xcom_pull(task_ids='bundle.eval_body', "
+          "map_indexes=ti.map_index)") in batch
+  assert ("xcom_pull(task_ids='bundle.trigger_eval', "
+          "map_indexes=ti.map_index)") in batch
+  assert "base_run_id" not in ast.unparse(
+      ast.Module(
+          body=functions["_close_bundle_running_row"].body[1:],
+          type_ignores=[]))
+  sensor = _task("wait_eval_launch")
+  assert ast.unparse(_kw(
+      sensor, "on_failure_callback")) == ("_close_bundle_running_row")
   explicit = _task("wait_for_evaluation_launch")
   for keyword in _keywords(explicit) - {
       "task_id", "job_id", "on_failure_callback"
@@ -611,8 +684,8 @@ def test_the_batch_callback_is_the_explicit_ones_with_its_own_target():
     assert ast.unparse(_kw(sensor,
                            keyword)) == ast.unparse(_kw(explicit,
                                                         keyword)), keyword
-  assert ast.literal_eval(_assignments()["batch_evaluation_job_id"]) == (
-      "{{ ti.xcom_pull(task_ids='trigger_evaluation_batches')['id'] }}")
+  # A bundle's evaluation body names one generation job: the target.
+  assert M.evaluation_body is not None
 
 
 # -- note 5: never an empty gpu, sdk_containers or launcher machine ---------
@@ -710,7 +783,7 @@ def test_a_failed_table_fails_the_run_from_the_rows():
   assert ("sdfb_batches.verdict_banner" in text and
           "AirflowFailException" in text)
   assert "xcom_pull(task_ids='route', key='verdict_inputs')" in text
-  assert ("start_batch", "table_failed") in _edges()
+  assert ("bundles", "table_failed") in _edges()
   assert _variable_of("fail_if_a_table_failed") == "table_failed"
 
 
@@ -778,40 +851,28 @@ def test_the_harness_run_is_the_plans():
     assert len(result["bodies"]) == 1, name
     assert (result["evaluation_body"]
             is None) == (golden[name]["evaluation_body"] is None), name
+    assert result["bundle_evaluation_bodies"] == [], name
   # Review Focus 2: the file's `all` wins over the trigger's `explicit`.
   says_all = output["explicit_param_file_says_all"]
   assert says_all["task_states"]["start_sdfb"] == "skipped"
-  assert says_all["task_states"]["start_batch[0]"] == "success"
-  assert says_all["task_states"]["trigger_evaluation_batches"] == "success"
+  assert says_all["task_states"]["bundle.launch[0]"] == "success"
+  assert says_all["task_states"]["bundle.trigger_eval[0]"] == "success"
   assert says_all["gcs_reads"] == [
       "gs://sdfb-bucket/synthetic/config/launch_all.yaml",
       "gs://sdfb-bucket/synthetic/relationships/model.yaml"
   ]
   for body in says_all["bodies"]:
     assert body["launchParameter"]["parameters"]["tables"] == "all"
-  two = output["all_two_batches"]
-  names = [b["launchParameter"]["jobName"] for b in two["bodies"]]
-  assert len(names) == 2
-  assert [n[-4:] for n in names] == ["-b00", "-b01"]
-  evaluation = two["evaluation_body"]["launchParameter"]["parameters"]
-  assert evaluation["generation_job_ids"] == (
-      "fakejob-start_batch-0,fakejob-start_batch-1")
-  assert evaluation["run_id"] == "<DAG_RUN_ID>-<SALT8>"
-  fails = output["all_batch_fails"]
-  assert fails["task_states"]["fail_if_a_batch_failed"] == "failed"
-  assert fails["task_states"]["start_batch[1]"] == "failed"
-  assert fails["evaluation_body"]["launchParameter"]["parameters"][
-      "generation_job_ids"] == "fakejob-start_batch-0"
   # The table verdicts: the rows decide, after every DONE batch was
   # evaluated.
   table_fails = output["all_table_fails"]["task_states"]
   assert table_fails["fail_if_a_table_failed"] == "failed"
   assert table_fails["fail_if_a_batch_failed"] == "skipped"
-  assert table_fails["trigger_evaluation_batches"] == "success"
-  assert output["all_table_fails"]["evaluation_body"]["launchParameter"][
-      "parameters"]["generation_job_ids"] == (
-          "fakejob-start_batch-0,fakejob-start_batch-1")
-  assert fails["task_states"]["fail_if_a_table_failed"] == "failed"
+  assert table_fails["bundle.trigger_eval[0]"] == "success"
+  assert table_fails["bundle.trigger_eval[1]"] == "success"
+  assert len(output["all_table_fails"]["bundle_evaluation_bodies"]) == 2
+  assert output["all_batch_fails"]["task_states"][
+      "fail_if_a_table_failed"] == "failed"
   assert output["all_old_validation_runs"]["task_states"][
       "fail_if_a_table_failed"] == "failed"
   for name in ("all_one_batch", "all_two_batches", "all_from_overlay",
@@ -829,6 +890,7 @@ def test_the_harness_run_is_the_plans():
   plan_fails = output["all_plan_fails"]
   assert plan_fails["task_states"]["route"] == "failed"
   assert plan_fails["bodies"] == [] and plan_fails["evaluation_body"] is None
+  assert plan_fails["bundle_evaluation_bodies"] == []
   assert not [s for s in plan_fails["task_states"].values() if s == "success"]
   for name in ("all_one_batch", "all_two_batches", "all_batch_fails",
                "explicit_param_file_says_all", "all_from_overlay",
@@ -843,6 +905,36 @@ def test_the_harness_run_is_the_plans():
   assert MARKERS["DAG_VERSION"] in json.dumps(output)
 
 
+def test_the_harness_bundles_evaluate_their_own_jobs():
+  """ADR 0045 D7 on the harness's output: each bundle's batch job, named
+  -bNN, then that bundle's evaluation, over its one job."""
+  output = _harness_output()
+  two = output["all_two_batches"]
+  names = [b["launchParameter"]["jobName"] for b in two["bodies"]]
+  assert len(names) == 2
+  assert [n[-4:] for n in names] == ["-b00", "-b01"]
+  # ADR 0045 D7: one evaluation per bundle, over that bundle's job only.
+  assert two["evaluation_body"] is None
+  evaluations = [b["launchParameter"] for b in two["bundle_evaluation_bodies"]]
+  assert [e["parameters"]["generation_job_ids"] for e in evaluations
+         ] == ["fakejob-bundle.launch-0", "fakejob-bundle.launch-1"]
+  assert [e["jobName"][-16:] for e in evaluations
+         ] == ["-b00-<TS_NODASH>", "-b01-<TS_NODASH>"]
+  for e in evaluations:
+    assert e["parameters"]["run_id"] == "<DAG_RUN_ID>-<SALT8>"
+    assert _DATAFLOW_NAME.fullmatch(
+        e["jobName"].replace("<TS_NODASH>", "20261104t000000") + "-12345678")
+  fails = output["all_batch_fails"]
+  assert fails["task_states"]["fail_if_a_batch_failed"] == "failed"
+  assert fails["task_states"]["bundle.launch[1]"] == "failed"
+  # A failed bundle skips its own evaluation and nothing else.
+  assert fails["task_states"]["bundle.eval_body[1]"] == "upstream_failed"
+  assert [
+      b["launchParameter"]["parameters"]["generation_job_ids"]
+      for b in fails["bundle_evaluation_bodies"]
+  ] == ["fakejob-bundle.launch-0"]
+
+
 def test_the_harness_runs_the_launch_gate():
   """ADR 0045 D5: the launch gate at the cap of 1. dag.test starts the
   instances in any order; the harness fails the run unless they launched in
@@ -850,17 +942,21 @@ def test_the_harness_runs_the_launch_gate():
   output = _harness_output()
   fourteen = output["all_14_batches_cap_1"]
   assert len(fourteen["bodies"]) == 14
-  assert _states(fourteen, "start_batch[") == {
-      f"start_batch[{i}]": "success" for i in range(14)
-  }
+  for task in _BUNDLE:
+    assert _states(fourteen, f"bundle.{task}[") == {
+        f"bundle.{task}[{i}]": "success" for i in range(14)
+    }, task
+  assert len(fourteen["bundle_evaluation_bodies"]) == 14
   assert fourteen["task_states"]["fail_if_a_batch_failed"] == "skipped"
   assert fourteen["task_states"]["fail_if_a_table_failed"] == "success"
   middle = output["all_middle_batch_fails"]
-  assert _states(middle, "start_batch[") == {
-      "start_batch[0]": "success",
-      "start_batch[1]": "failed",
-      "start_batch[2]": "success"  # a failed sibling has ended
+  assert _states(middle, "bundle.launch[") == {
+      "bundle.launch[0]": "success",
+      "bundle.launch[1]": "failed",
+      "bundle.launch[2]": "success"  # a failed sibling has ended
   }
   assert middle["task_states"]["fail_if_a_batch_failed"] == "failed"
-  assert middle["evaluation_body"]["launchParameter"]["parameters"][
-      "generation_job_ids"] == ("fakejob-start_batch-0,fakejob-start_batch-2")
+  assert [
+      b["launchParameter"]["parameters"]["generation_job_ids"]
+      for b in middle["bundle_evaluation_bodies"]
+  ] == ["fakejob-bundle.launch-0", "fakejob-bundle.launch-2"]

@@ -43,17 +43,19 @@ PyYAML only, what the DAG needs:
     whole_model_params the `all` branch's params: an empty source or
                        landing dataset from the overlay's default tables
     launch_plan        the `all` branch's batch launch bodies
-    parallel_cap       how many batch jobs run at once: the Variable
+    parallel_cap       how many batch jobs run at once: the trigger's
+                       max_parallel_jobs param, else the Variable
                        SDFB_MAX_PARALLEL_JOBS when set, else the yaml's
                        launch.max_parallel_jobs overlaid
-    may_launch         whether a batch instance may launch its job: every
-                       sibling `cap` or more indexes below it has ended
-    launch_blocker     the sibling a batch instance still waits for, if any
+    may_launch         whether a bundle may launch its job: the generation
+                       wait of every sibling `cap` or more indexes below it
+                       has ended
+    launch_blocker     the sibling a bundle still waits for, if any
                        (ti_states reads the siblings' states; gate_wait_line
-                       is the waiting instance's log line)
-    never_started      the batch instances the scheduler failed before they
-                       ran
-    batch_failure_message  the failed batches, for fail_if_a_batch_failed
+                       is the waiting bundle's log line)
+    never_started      the instances the scheduler failed before they ran
+    bundle_failures    the bundles whose generation failed, and where
+    batch_failure_message  the failed bundles, for fail_if_a_batch_failed
     verdicts_query     the launch's validation_runs rows, by its base run id
     table_verdicts     each planned table's newest row: its status and reason
     failed_tables      the tables that fail the run
@@ -97,14 +99,15 @@ from typing import Any, Literal
 import yaml
 
 __all__ = [
-    "DEFAULT_MAX_TABLES_PER_JOB", "FILE_HARDWARE_KEYS", "L4_ACCELERATOR",
-    "MISSING_REASON_COLUMN", "T4_ACCELERATOR", "TERMINAL_TI_STATES",
-    "VERDICT_FAILED_BLOCKER", "VERDICT_FAILED_PREFLIGHT", "VERDICT_NO_ROW",
-    "VERDICT_PASSED", "ConfigInput", "Layers", "PlanError", "TablesMode",
-    "batch_failure_message", "batch_job_name", "batch_parameters", "cli_text",
-    "common_parameters", "dag_constants", "decode_object", "evaluation_body",
-    "explicit_body", "failed_tables", "gate_wait_line",
-    "is_missing_reason_column", "landed_job_ids", "launch_blocker",
+    "BUNDLE_GROUP", "BUNDLE_LAUNCH", "BUNDLE_WAIT",
+    "DEFAULT_MAX_TABLES_PER_JOB", "FILE_HARDWARE_KEYS", "GENERATION_TASKS",
+    "L4_ACCELERATOR", "MISSING_REASON_COLUMN", "T4_ACCELERATOR",
+    "TERMINAL_TI_STATES", "VERDICT_FAILED_BLOCKER", "VERDICT_FAILED_PREFLIGHT",
+    "VERDICT_NO_ROW", "VERDICT_PASSED", "ConfigInput", "Layers", "PlanError",
+    "TablesMode", "batch_failure_message", "batch_job_name", "batch_parameters",
+    "bundle_failures", "cli_text", "common_parameters", "dag_constants",
+    "decode_object", "evaluation_body", "explicit_body", "failed_tables",
+    "gate_wait_line", "is_missing_reason_column", "launch_blocker",
     "launch_environment", "launch_overrides", "launch_plan", "load_layers",
     "may_launch", "model_slug", "never_started", "parallel_cap",
     "param_defaults", "parse_config", "plan_banner", "plan_batches",
@@ -289,10 +292,14 @@ def _dataset(fqn: str, default: str = "") -> str:
   return parts[1] if len(parts) == _QUALIFIED_TABLE_PARTS else default
 
 
-def param_defaults(layers: Layers) -> dict[str, object]:
+def param_defaults(
+    layers: Layers,
+    variables: Mapping[str, str] | None = None) -> dict[str, object]:
   """Every DAG param's default. A generator param is generator.yaml
   overlaid with the overlay's `config:`, as text (null is empty); the DAG's
-  own params keep theirs."""
+  own params keep theirs. `max_parallel_jobs` is `parallel_cap`'s, as
+  text: with `variables` the Variable SDFB_MAX_PARALLEL_JOBS wins over the
+  overlaid yaml (ADR 0045 D5)."""
   values = _overlaid(layers)
   out: dict[str, object] = {
       _TABLE_PARAM: cli_text(values[_PARAM_KEYS[_TABLE_PARAM]])
@@ -300,6 +307,7 @@ def param_defaults(layers: Layers) -> dict[str, object]:
   for name in GENERATOR_PARAMS:
     out[name] = cli_text(values[name])
   out.update(_DAG_PARAM_DEFAULTS)
+  out["max_parallel_jobs"] = str(parallel_cap(layers, variables or {}))
   out["evaluation_output_dataset"] = _dataset(
       cli_text(values["validation_runs_table"]), _EVALUATION_OUTPUT_DATASET)
   return out
@@ -566,10 +574,14 @@ def _evaluation_parameters(params: Mapping[str, object], layers: Layers,
   }
 
 
-def evaluation_body(params: Mapping[str, object], layers: Layers, *,
-                    mode: TablesMode, generation_job_ids: list[str] | None,
-                    variables: Mapping[str,
-                                       str], ts_nodash: str) -> dict[str, Any]:
+def evaluation_body(params: Mapping[str, object],
+                    layers: Layers,
+                    *,
+                    mode: TablesMode,
+                    generation_job_ids: list[str] | None,
+                    variables: Mapping[str, str],
+                    ts_nodash: str,
+                    batch_index: int | None = None) -> dict[str, Any]:
   """The chained evaluation's Flex launch body: a CPU-only job from the
   generation's template, master's for an explicit launch.
 
@@ -579,10 +591,14 @@ def evaluation_body(params: Mapping[str, object], layers: Layers, *,
   is the launch's base run id, the `relationships_uri` param the planned
   model, and `generation_job_ids` the batch jobs that landed (None: every
   row of the launch). The job is named after the DAG
-  run's `ts_nodash`; `variables` are the Composer Variables
-  (`dag_constants`)."""
+  run's `ts_nodash`, and a bundle's evaluation (`batch_index`, ADR 0045
+  D7) after its bundle too, `<name>-bNN-<ts>`, inside the same length;
+  `variables` are the Composer Variables (`dag_constants`)."""
   constants = dag_constants(layers, variables)
   bucket, name = constants["bucket_path"], constants["evaluation_job_name"]
+  if batch_index is not None:
+    label = f"-b{batch_index:02d}"
+    name = name[:_EVALUATION_NAME_MAX - len(label)].rstrip("-") + label
   return {
       "launchParameter": {
           "containerSpecGcsPath":
@@ -956,17 +972,6 @@ def launch_plan(params: Mapping[str, Any], *, model_text: str,
   }
 
 
-def landed_job_ids(launched: Iterable[Any] | None) -> list[str]:
-  """The Dataflow job ids of the batch launches that returned (a launch
-  that failed returns nothing), in batch order, each once."""
-  ids: list[str] = []
-  for entry in launched or ():
-    value = entry.get("id") if isinstance(entry, Mapping) else None
-    if isinstance(value, str) and value and value not in ids:
-      ids.append(value)
-  return ids
-
-
 # -- the launch's table verdicts (ADR 0045) -----------------------------------
 # A validation_runs row's status (sdfb_core's run status), and the banner's
 # word for a planned table no row names.
@@ -982,13 +987,20 @@ _PARALLEL_KEY = "launch.max_parallel_jobs"
 _TABLE_NAME = re.compile(r"^[A-Za-z0-9_-]+[.:][A-Za-z0-9_]+\.[A-Za-z0-9_$-]+$")
 
 
-def parallel_cap(layers: Layers, variables: Mapping[str, str]) -> int:
-  """How many batch jobs run at once: the Variable SDFB_MAX_PARALLEL_JOBS
-  when its text is non-empty, else launch.max_parallel_jobs of generator.yaml
-  overlaid by sdfb_env.yaml; never below 1. A non-integer raises ValueError
-  naming where it came from."""
-  text = str(variables.get(_PARALLEL_VARIABLE) or "").strip()
-  source = _PARALLEL_VARIABLE
+def parallel_cap(layers: Layers,
+                 variables: Mapping[str, str],
+                 param: object = None) -> int:
+  """How many batch jobs run at once: the trigger's `max_parallel_jobs`
+  param when it is given (the DAG param's default is this function's value
+  without it), else the Variable SDFB_MAX_PARALLEL_JOBS when its text is
+  non-empty, else launch.max_parallel_jobs of generator.yaml overlaid by
+  sdfb_env.yaml; never below 1. A non-integer raises ValueError naming where
+  it came from."""
+  text = "" if param is None else str(param).strip()
+  source = "the max_parallel_jobs param"
+  if text == "":
+    text = str(variables.get(_PARALLEL_VARIABLE) or "").strip()
+    source = _PARALLEL_VARIABLE
   if text == "":
     text = cli_text(_overlaid(layers)["max_parallel_jobs"])
     source = _PARALLEL_KEY
@@ -998,18 +1010,26 @@ def parallel_cap(layers: Layers, variables: Mapping[str, str]) -> int:
     raise ValueError(f"{source} must be an integer, got {text!r}") from err
 
 
-# -- the launch gate (ADR 0045 D5) -------------------------------------------
+# -- the bundle: one mapped task group per batch (ADR 0045 D5, D7) ----------
+# The group's id, and its generation tasks in order: the gate, the launch
+# and the wait. A bundle holds a slot of the cap from its launch until its
+# wait has ended; its evaluation (eval_body, trigger_eval,
+# wait_eval_launch) holds none.
+BUNDLE_GROUP = "bundle"
+GENERATION_TASKS = ("gate", "launch", "wait_generation")
+BUNDLE_LAUNCH = f"{BUNDLE_GROUP}.launch"
+BUNDLE_WAIT = f"{BUNDLE_GROUP}.wait_generation"
 # The states that end a task instance (TaskInstanceState's values):
-# a batch instance in one of them holds no running batch job.
+# a bundle whose wait is in one of them holds no running batch job.
 TERMINAL_TI_STATES = frozenset(
     {"success", "failed", "skipped", "upstream_failed", "removed"})
 
 
 def launch_blocker(map_index: int, cap: int,
                    states: Mapping[int, str | None]) -> int | None:
-  """The lowest sibling batch instance `map_index` still waits for (one at
-  index `map_index - cap` or below that has not ended; a missing index has
-  not), or None when it may launch its job."""
+  """The lowest sibling bundle `map_index` still waits for (one at index
+  `map_index - cap` or below whose `wait_generation` has not ended; a
+  missing index has not), or None when it may launch its job."""
   for j in range(map_index - cap + 1):
     if states.get(j) not in TERMINAL_TI_STATES:
       return j
@@ -1018,12 +1038,13 @@ def launch_blocker(map_index: int, cap: int,
 
 def may_launch(map_index: int, cap: int, states: Mapping[int,
                                                          str | None]) -> bool:
-  """Whether batch instance `map_index` may launch its job: every sibling
-  at index `map_index - cap` or below has ended (a missing index has not).
+  """Whether bundle `map_index` may launch its job: the `wait_generation` of
+  every sibling at index `map_index - cap` or below has ended (a missing
+  index has not). `states` are those waits' (`ti_states(..., BUNDLE_WAIT)`).
 
-  The instances past the gate and not ended are then a subset of the `cap`
+  The bundles past the gate and not ended are then a subset of the `cap`
   indices up to the highest of them, so at most `cap` jobs run at once; and
-  an instance waits only on lower indices, so no two wait on each other."""
+  a bundle waits only on lower indices, so no two wait on each other."""
   return launch_blocker(map_index, cap, states) is None
 
 
@@ -1041,7 +1062,7 @@ def ti_states(task_instances: Iterable[Any],
 
 
 def gate_wait_line(map_index: int, blocking: int, cap: int) -> str:
-  """The log line of a batch instance that waits at the gate."""
+  """The log line of a bundle that waits at the gate."""
   return f"b{map_index:02d} waits for b{blocking:02d} to end (cap {cap})"
 
 
@@ -1056,25 +1077,46 @@ def never_started(task_instances: Iterable[Any], task_id: str) -> list[int]:
       and str(getattr(ti.state, "value", ti.state)) == "failed")
 
 
-def batch_failure_message(task_instances: Sequence[Any], task_id: str) -> str:
-  """Why the run fails when a batch instance did: the failed batches, and
-  the ones among them that never started (to clear)."""
-  failed = [
-      i for i, state in sorted(ti_states(task_instances, task_id).items())
-      if state == "failed"
-  ]
-  labels = ", ".join(f"b{i:02d}" for i in failed) or "?"
-  message = (f"{task_id} failed for {labels}: those batch jobs did not reach "
-             f"JOB_STATE_DONE; the batches that landed were evaluated")
-  unstarted = never_started(task_instances, task_id)
+def bundle_failures(task_instances: Sequence[Any]) -> dict[int, str]:
+  """Each bundle whose generation failed, by map index: the first of its
+  generation tasks (`GENERATION_TASKS`, in order) that failed. The tasks
+  after it are upstream-failed and not named."""
+  states = {
+      name: ti_states(task_instances, f"{BUNDLE_GROUP}.{name}")
+      for name in GENERATION_TASKS
+  }
+  failures: dict[int, str] = {}
+  for name in GENERATION_TASKS:
+    for index, state in states[name].items():
+      if state == "failed":
+        failures.setdefault(index, name)
+  return dict(sorted(failures.items()))
+
+
+def batch_failure_message(task_instances: Sequence[Any]) -> str:
+  """Why the run fails when a bundle's generation did: each failed bundle
+  and the task it failed in, and the instances among them that never
+  started (to clear)."""
+  failures = bundle_failures(task_instances)
+  labels = ", ".join(
+      f"b{i:02d} ({name})" for i, name in failures.items()) or "?"
+  message = (f"bundle generation failed for {labels}: those batch jobs "
+             f"did not reach JOB_STATE_DONE, and their evaluations did not "
+             f"run; every other bundle ran on and was evaluated")
+  unstarted = sorted({
+      i for name in GENERATION_TASKS
+      for i in never_started(task_instances, f"{BUNDLE_GROUP}.{name}")
+  })
   if unstarted:
     names = ", ".join(f"b{i:02d}" for i in unstarted)
     message += (
-        f". {len(unstarted)} instance(s) failed without starting ({names}): "
+        f". {len(unstarted)} bundle(s) failed without starting ({names}): "
         f"the scheduler failed them, which it does to a DAG with a "
         f"task-level concurrency limit while the DAG is missing from "
         f"serialized_dag (stale-DAG sweep, [scheduler] "
-        f"dag_stale_not_seen_duration); clear them to launch those batches")
+        f"dag_stale_not_seen_duration), or to an instance whose executor "
+        f"report disagreed with its state; clear them to launch those "
+        f"batches")
   return message
 
 
