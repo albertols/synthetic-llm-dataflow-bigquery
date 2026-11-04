@@ -53,6 +53,10 @@ PyYAML only, what the DAG needs:
     launch_blocker     the sibling a bundle still waits for, if any
                        (ti_states reads the siblings' states; gate_wait_line
                        is the waiting bundle's log line)
+    is_capacity_failure  whether a FAILED batch job may be relaunched: a
+                       capacity cause in its messages (capacity_reason) and
+                       no work item run (ran_work); capacity_backoff_seconds
+                       and relaunch_body make the relaunch
     never_started      the instances the scheduler failed before they ran
     bundle_failures    the bundles whose generation failed, and where
     batch_failure_message  the failed bundles, for fail_if_a_batch_failed
@@ -100,20 +104,22 @@ import yaml
 
 __all__ = [
     "BUNDLE_GROUP", "BUNDLE_LAUNCH", "BUNDLE_WAIT",
-    "DEFAULT_MAX_TABLES_PER_JOB", "FILE_HARDWARE_KEYS", "GENERATION_TASKS",
-    "L4_ACCELERATOR", "MISSING_REASON_COLUMN", "T4_ACCELERATOR",
-    "TERMINAL_TI_STATES", "VERDICT_FAILED_BLOCKER", "VERDICT_FAILED_PREFLIGHT",
-    "VERDICT_NO_ROW", "VERDICT_PASSED", "ConfigInput", "Layers", "PlanError",
-    "TablesMode", "batch_failure_message", "batch_job_name", "batch_parameters",
-    "bundle_failures", "cli_text", "common_parameters", "dag_constants",
-    "decode_object", "evaluation_body", "explicit_body", "failed_tables",
-    "gate_wait_line", "is_missing_reason_column", "launch_blocker",
+    "CAPACITY_FIRST_BACKOFF_SECONDS", "DEFAULT_MAX_TABLES_PER_JOB",
+    "FILE_HARDWARE_KEYS", "GENERATION_TASKS", "L4_ACCELERATOR",
+    "MISSING_REASON_COLUMN", "T4_ACCELERATOR", "TERMINAL_TI_STATES",
+    "VERDICT_FAILED_BLOCKER", "VERDICT_FAILED_PREFLIGHT", "VERDICT_NO_ROW",
+    "VERDICT_PASSED", "ConfigInput", "Layers", "PlanError", "TablesMode",
+    "batch_failure_message", "batch_job_name", "batch_parameters",
+    "bundle_failures", "capacity_backoff_seconds", "capacity_reason",
+    "cli_text", "common_parameters", "dag_constants", "decode_object",
+    "evaluation_body", "explicit_body", "failed_tables", "gate_wait_line",
+    "is_capacity_failure", "is_missing_reason_column", "launch_blocker",
     "launch_environment", "launch_overrides", "launch_plan", "load_layers",
     "may_launch", "model_slug", "never_started", "parallel_cap",
     "param_defaults", "parse_config", "plan_banner", "plan_batches",
-    "planning_inputs", "resolve_tables_mode", "table_verdicts", "ti_states",
-    "verdict_banner", "verdicts_query", "whole_model_params",
-    "with_file_hardware"
+    "planning_inputs", "ran_work", "relaunch_body", "resolve_tables_mode",
+    "table_verdicts", "ti_states", "verdict_banner", "verdicts_query",
+    "whole_model_params", "with_file_hardware"
 ]
 
 DEFAULT_MAX_TABLES_PER_JOB = 10
@@ -161,6 +167,9 @@ _DAG_PARAM_DEFAULTS: dict[str, Any] = {
     "evaluation_machine_type": "e2-standard-8",
     "evaluation_launcher_machine_type": "e2-standard-8",
     "evaluation_max_workers": 8,
+    # ADR 0045 D10: how often a bundle whose job failed for capacity is
+    # relaunched.
+    "capacity_retries": 3,
 }
 _EVALUATION_OUTPUT_DATASET = "synthetic_data_quality"
 # Keys a launch mode does not read (the launcher's launch_option_unused):
@@ -853,12 +862,13 @@ def model_slug(uri: str, max_len: int = 24) -> str:
   return slug.strip("-")[:max_len].rstrip("-")
 
 
-def batch_job_name(job_name: str, index: int) -> str:
+def batch_job_name(job_name: str, index: int, attempt: int = 0) -> str:
   """A batch job's Dataflow name, `<job_name>-bNN`, inside Dataflow's 63
   characters: parallel jobs need distinct names. The launcher names a CLI
   batch job by the same rule (`run_pipeline.batch_job_name`, pinned equal by
-  test)."""
-  suffix = f"-b{index:02d}"
+  test). Attempt N > 0 of a bundle the DAG relaunched after a capacity
+  failure is `<job_name>-bNN-rN` (ADR 0045 D10; the DAG's only)."""
+  suffix = f"-b{index:02d}" + (f"-r{attempt}" if attempt else "")
   return job_name[:_JOB_NAME_MAX - len(suffix)].rstrip("-") + suffix
 
 
@@ -1010,7 +1020,7 @@ def parallel_cap(layers: Layers,
     raise ValueError(f"{source} must be an integer, got {text!r}") from err
 
 
-# -- the bundle: one mapped task group per batch (ADR 0045 D5, D7) ----------
+# -- the bundle: one mapped task group per batch (ADR 0045 D5, D7, D10) ------
 # The group's id, and its generation tasks in order: the gate, the launch
 # and the wait. A bundle holds a slot of the cap from its launch until its
 # wait has ended; its evaluation (eval_body, trigger_eval,
@@ -1118,6 +1128,82 @@ def batch_failure_message(task_instances: Sequence[Any]) -> str:
         f"report disagreed with its state; clear them to launch those "
         f"batches")
   return message
+
+
+# -- the capacity retry (ADR 0045 D10) ----------------------------------------
+# A FAILED batch job is relaunched only when one of its messages names a
+# capacity cause and it never ran a work item (`is_capacity_failure`). The
+# worker-pool wrapper ("Startup of the worker pool in zone … failed to bring
+# up any of the desired N workers") is no cause on its own: it also wraps a
+# subnetwork, permission or image failure, which no wait heals. Its cause
+# follows it in the same message, and is matched there.
+_CAPACITY_CAUSES = (
+    re.compile(r"ZONE_RESOURCE_POOL_EXHAUSTED(_WITH_DETAILS)?"),
+    re.compile(r"\bQUOTA_EXCEEDED\b"),
+    re.compile(r"Quota '[A-Z0-9_]+' exceeded"),
+    re.compile(r"does not have enough resources available"),
+)
+# The first relaunch waits ten minutes, then twice as long each time.
+CAPACITY_FIRST_BACKOFF_SECONDS = 600
+
+
+def capacity_reason(messages: Iterable[str]) -> str | None:
+  """The first capacity cause the job's messages name (the matched text),
+  or None."""
+  for text in messages:
+    for pattern in _CAPACITY_CAUSES:
+      match = pattern.search(str(text))
+      if match:
+        return match.group(0)
+  return None
+
+
+def ran_work(job_metrics: Mapping[str, Any] | None) -> bool:
+  """Whether a job processed any element: an `ElementCount` metric above
+  zero in its JobMetrics (`projects.locations.jobs.getMetrics`). A job whose
+  workers never started has none, so no row was written."""
+  for update in (job_metrics or {}).get("metrics") or ():
+    name = (update.get("name") or {}).get("name") if isinstance(
+        update, Mapping) else None
+    scalar = update.get("scalar") if isinstance(update, Mapping) else None
+    if name == "ElementCount" and isinstance(scalar, (int, float, str)):
+      try:
+        if float(scalar) > 0:
+          return True
+      except ValueError:
+        continue
+  return False
+
+
+# pylint: disable-next=redefined-outer-name  # the flag is what ran_work says
+def is_capacity_failure(messages: Iterable[str], ran_work: bool) -> bool:
+  """Whether a FAILED batch job may be relaunched with the same run ids: a
+  message names a capacity cause and the job ran no work item (so nothing
+  landed). Any other failure (a traceback, `rateLimitExceeded`, a worker
+  pool that failed for another reason) is not."""
+  return not ran_work and capacity_reason(messages) is not None
+
+
+def capacity_backoff_seconds(attempt: int) -> int:
+  """How long relaunch `attempt` (1-based) waits after the failure: 10, 20,
+  40 … minutes."""
+  return CAPACITY_FIRST_BACKOFF_SECONDS * 2**(attempt - 1)
+
+
+def relaunch_body(body: Mapping[str, Any], *, job_name: str, attempt: int,
+                  salt: str) -> dict[str, Any]:
+  """Relaunch `attempt` of a bundle: its body, the same parameters (the
+  same run ids: nothing of the failed attempt landed), named
+  `<job_name>-bNN-rN-<salt>` (`salt` is what the provider's
+  `append_job_name` would add)."""
+  launch = body["launchParameter"]
+  index = int(launch["parameters"]["batch_index"])
+  return {
+      **body, "launchParameter": {
+          **launch, "parameters": dict(launch["parameters"]),
+          "jobName": f"{batch_job_name(job_name, index, attempt)}-{salt}"
+      }
+  }
 
 
 def _dotted(fqn: str) -> str:

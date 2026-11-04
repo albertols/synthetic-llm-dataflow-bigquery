@@ -44,7 +44,8 @@ _PLAN_SCENARIOS = [
     "explicit_l4", "explicit_t4", "explicit_fk_group", "explicit_eval_off",
     "explicit_param_file_says_all", "all_one_batch", "all_two_batches",
     "all_batch_fails", "all_plan_fails", "all_from_overlay", "all_table_fails",
-    "all_old_validation_runs", "all_14_batches_cap_1", "all_middle_batch_fails"
+    "all_old_validation_runs", "all_14_batches_cap_1", "all_middle_batch_fails",
+    "all_capacity_retry", "all_job_fails_not_capacity"
 ]
 _EXPLICIT_TASKS = {
     "start_sdfb", "run_evaluation_gate", "wait_for_generation",
@@ -84,6 +85,11 @@ def test_scenarios_are_the_plans_list():
       "tables"] == "explicit"
   assert M.SCENARIOS["all_batch_fails"]["fail_job_suffixes"] == ("-b01",)
   assert M.SCENARIOS["all_middle_batch_fails"]["fail_job_suffixes"] == ("-b01",)
+  # ADR 0045 D10: the middle batch's job fails for capacity, or for its code.
+  assert M.SCENARIOS["all_capacity_retry"]["capacity_fail_suffixes"] == (
+      "-b01",)
+  assert M.SCENARIOS["all_job_fails_not_capacity"]["job_fail_suffixes"] == (
+      "-b01",)
   # The size of the 2026-11-02 launch: fourteen one-table batches at K = 1.
   fourteen = M.SCENARIOS["all_14_batches_cap_1"]
   assert fourteen["run_conf"]["max_tables_per_job"] == "1"

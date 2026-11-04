@@ -20,7 +20,7 @@ Airflow is not a laptop dependency, so the file is read with `ast`; what it
 computes is `composer/sdfb_batches.py`'s, run here on a deployed folder
 (conftest.py's `deployed`). The real-Airflow run of the same file is
 `scripts/composer/check_dags.py`: with `SDFB_DAG_BODIES` naming its output
-(all fourteen scenarios, on a folder of `composer/*.py`, `generator.yaml` and
+(all sixteen scenarios, on a folder of `composer/*.py`, `generator.yaml` and
 `sdfb_env.yaml`), `test_the_harness_run_is_the_plans` checks every scenario
 against the plan's expectations, and test_launch_helpers.py compares its
 explicit launches with master's.
@@ -152,7 +152,8 @@ def _task(task_id: str) -> ast.AST:
                _calls(DAG, "DataflowStartFlexTemplateOperator") +
                _calls(DAG, "DataflowJobStatusSensor") +
                _calls(DAG, "ShortCircuitOperator") +
-               _calls(DAG, "_LaunchGateSensor")):
+               _calls(DAG, "_LaunchGateSensor") +
+               _calls(DAG, "_GenerationWaitSensor")):
     ids = [k.value for k in call.keywords if k.arg == "task_id"]
     if ids and isinstance(ids[0], ast.Constant) and ids[0].value == task_id:
       return call
@@ -529,11 +530,7 @@ def test_batches_are_one_mapped_bundle_group():
   assert ast.unparse(_kw(launch, "body")) == "body"
   for task_id in ("wait_generation", "wait_eval_launch"):
     assert ast.literal_eval(_kw(_task(task_id), "mode")) == "reschedule"
-  assert ast.unparse(_kw(_task("wait_generation"),
-                         "job_id")) == ("bundle_generation_job_id")
-  assert ast.literal_eval(_assignments()["bundle_generation_job_id"]) == (
-      "{{ ti.xcom_pull(task_ids='bundle.launch', "
-      "map_indexes=ti.map_index)['id'] }}")
+  assert ast.unparse(_kw(_task("wait_generation"), "body")) == "body"
 
 
 def test_the_gate_is_a_reschedule_mode_sensor_on_the_waits_states():
@@ -601,6 +598,43 @@ def test_a_batch_that_never_started_is_named():
   assert ("routed", "planned") in _edges()
 
 
+def test_the_wait_relaunches_only_a_capacity_failure(deployed):
+  """ADR 0045 D10: the generation wait is a reschedule-mode sensor that
+  relaunches a FAILED job only through sdfb_batches.is_capacity_failure, at
+  most capacity_retries times, with capacity_backoff_seconds between, the
+  relaunch body sdfb_batches.relaunch_body's (the same run ids). Every
+  other end fails the task without a retry."""
+  wait = _task("wait_generation")
+  assert _name(wait.func) == "_GenerationWaitSensor"
+  assert ast.literal_eval(_kw(wait, "mode")) == "reschedule"
+  sensor = _class("_GenerationWaitSensor")
+  assert [ast.unparse(b) for b in sensor.bases] == ["BaseSensorOperator"]
+  text = ast.unparse(sensor)
+  assert "template_fields = ('body',)" in text
+  for needed in ("sdfb_batches.is_capacity_failure(messages, ran)",
+                 "sdfb_batches.ran_work(", "sdfb_batches.capacity_reason(",
+                 "sdfb_batches.capacity_backoff_seconds(number)",
+                 "sdfb_batches.relaunch_body(",
+                 "attempt['attempt'] < int(params['capacity_retries'])",
+                 "state == 'JOB_STATE_FAILED'",
+                 "hook.launch_job_with_flex_template("):
+    assert needed in text, needed
+  # A terminal state that is not relaunched fails without a retry; a
+  # relaunch with no recorded id is never launched again.
+  assert text.count("raise AirflowFailException(") == 2
+  assert "'launching': True" in text
+  # The attempts live on the launch's XCom: a reschedule-mode sensor's own
+  # XComs are cleared at each poke.
+  assert "task_id=sdfb_batches.BUNDLE_LAUNCH" in text
+  assert ast.literal_eval(_assignments()["ATTEMPT_KEY"]) == "generation_attempt"
+  assert "PokeReturnValue(is_done=True" in text
+  assert "sleep" not in text
+  param = _params()["capacity_retries"]
+  assert ast.literal_eval(_kw(param, "type")) == "integer"
+  assert ast.literal_eval(_kw(param, "minimum")) == 0
+  assert M.param_defaults(M.load_layers(deployed()))["capacity_retries"] == 3
+
+
 def test_each_bundle_evaluates_its_own_job_and_holds_no_slot():
   """ADR 0045 D7: a bundle's evaluation runs after its generation is DONE,
   over that one job; with the evaluation off it skips. The explicit and the
@@ -612,6 +646,12 @@ def test_each_bundle_evaluates_its_own_job_and_holds_no_slot():
   assert "raise AirflowSkipException('run_evaluation is off')" in text
   (call,) = _calls(body, "evaluation_body")
   assert ast.unparse(_kw(call, "generation_job_ids")) == "[generation['id']]"
+  # The attempt that was DONE, after any relaunch.
+  (evaluation,) = [
+      n for n in ast.walk(_bundle_function())
+      if isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == "evaluation"
+  ]
+  assert ast.unparse(evaluation.value) == "bundle_evaluation_body(wait.output)"
   assert ast.unparse(_kw(call, "batch_index")) == "ti.map_index"
   assert "xcom_pull(task_ids='route', key='base_run_id')" in text
   assert "trigger_rule" not in _keywords(body.decorator_list[0])
@@ -820,7 +860,7 @@ def _harness_output() -> dict:
   path = os.environ.get(HARNESS_OUTPUT_ENV)
   if not path:
     pytest.skip(f"set {HARNESS_OUTPUT_ENV} to a check_dags.py output of all "
-                f"fourteen scenarios")
+                f"sixteen scenarios")
   return json.loads(Path(path).read_text(encoding="utf-8"))
 
 
@@ -933,6 +973,36 @@ def test_the_harness_bundles_evaluate_their_own_jobs():
       b["launchParameter"]["parameters"]["generation_job_ids"]
       for b in fails["bundle_evaluation_bodies"]
   ] == ["fakejob-bundle.launch-0"]
+
+
+def test_the_harness_relaunches_a_capacity_failure_only():
+  """ADR 0045 D10 under Airflow: b01's job fails for capacity before it
+  ran, its bundle relaunches it as -b01-r1 with the same run ids, and the
+  bundle's evaluation reads the relaunched job; a job that failed after it
+  ran is not relaunched, and the bundle after it still runs."""
+  output = _harness_output()
+  retry = output["all_capacity_retry"]
+  assert not [s for s in retry["task_states"].values() if s == "failed"]
+  names = [b["launchParameter"]["jobName"] for b in retry["bodies"]]
+  assert [n[-4:] for n in names[:3]] == ["-b00", "-b01", "-b02"]
+  assert names[3].endswith("-b01-r1-<SALT8>")
+  assert retry["bodies"][3]["launchParameter"]["parameters"] == (
+      retry["bodies"][1]["launchParameter"]["parameters"])
+  assert [
+      b["launchParameter"]["parameters"]["generation_job_ids"]
+      for b in retry["bundle_evaluation_bodies"]
+  ] == [
+      "fakejob-bundle.launch-0", "fakejob-relaunch-1-r1",
+      "fakejob-bundle.launch-2"
+  ]
+  fails = output["all_job_fails_not_capacity"]
+  assert len(fails["bodies"]) == 3  # no relaunch
+  states = fails["task_states"]
+  assert states["bundle.wait_generation[1]"] == "failed"
+  assert states["bundle.eval_body[1]"] == "upstream_failed"
+  assert states["bundle.wait_generation[2]"] == "success"
+  assert states["fail_if_a_batch_failed"] == "failed"
+  assert len(fails["bundle_evaluation_bodies"]) == 2
 
 
 def test_the_harness_runs_the_launch_gate():

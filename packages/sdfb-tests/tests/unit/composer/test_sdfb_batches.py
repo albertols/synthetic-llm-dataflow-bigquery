@@ -1023,3 +1023,140 @@ def test_verdict_inputs_follow_a_files_landing_dataset(deployed):
   for bad in ("", "  ", 7, ["p.d"]):
     with pytest.raises(m.PlanError, match=r"io\.landing_dataset"):
       m.verdict_inputs(params, {"io": {"landing_dataset": bad}}, layers)
+
+
+# -- the capacity retry (ADR 0045 D10) ----------------------------------------
+_POOL = ("Startup of the worker pool in zone europe-west3-b failed to bring up "
+         "any of the desired 4 workers. Please refer to "
+         "https://cloud.google.com/dataflow/docs/guides/common-errors"
+         "#worker-pool-failure for help troubleshooting. ")
+
+
+@pytest.mark.parametrize(
+    "messages, ran, expected",
+    [
+        # The zone had no T4 left: retried.
+        ([
+            _POOL + "ZONE_RESOURCE_POOL_EXHAUSTED: Instance 'w-1' creation "
+            "failed: The zone 'projects/p/zones/europe-west3-b' does not have "
+            "enough resources available to fulfill the request."
+        ], False, True),
+        ([_POOL + "ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS: ..."
+         ], False, True),
+        # The regional GPU quota was used up by the other bundles: retried.
+        ([
+            _POOL + "QUOTA_EXCEEDED: Instance 'w-1' creation failed: Quota "
+            "'NVIDIA_T4_GPUS' exceeded. Limit: 16.0 in region europe-west3."
+        ], False, True),
+        (["Quota 'CPUS' exceeded. Limit: 5000.0 in region europe-west3."
+         ], False, True),
+        # Worked first, then lost capacity: rows may have landed.
+        ([_POOL + "ZONE_RESOURCE_POOL_EXHAUSTED: ..."], True, False),
+        # The worker pool failed for a cause no wait heals.
+        ([
+            _POOL + "SUBNETWORK_NOT_READY: The resource "
+            "'projects/p/regions/r/subnetworks/s' is not ready"
+        ], False, False),
+        ([_POOL + "Permission denied on the service account."], False, False),
+        # A table's update rate (F1): never a relaunch, the rows replay.
+        ([
+            "Traceback (most recent call last): RuntimeError: BigQuery job "
+            "beam_bq_job_LOAD_x failed. Error Result: <ErrorProto message: "
+            "'Exceeded rate limits: too many table update operations for this "
+            "table.' reason: 'rateLimitExceeded'>"
+        ], True, False),
+        ([
+            "Quota exceeded: Your table exceeded quota for imports or query "
+            "appends per table"
+        ], False, False),  # BigQuery's, not Compute's
+        # The code failed.
+        ([
+            "Traceback (most recent call last):\n  File \"run_pipeline.py\", "
+            "line 1, in <module>\nKeyError: 'COL_001'"
+        ], False, False),
+        ([], False, False),
+    ])
+def test_is_capacity_failure(messages, ran, expected):
+  assert M.is_capacity_failure(messages, ran) is expected
+
+
+def test_the_capacity_reason_is_the_first_cause_named():
+  assert M.capacity_reason(
+      ["a", "x QUOTA_EXCEEDED y", "ZONE_RESOURCE"
+       "_POOL_EXHAUSTED"]) == "QUOTA_EXCEEDED"
+  assert M.capacity_reason([_POOL]) is None  # the wrapper alone
+
+
+@pytest.mark.parametrize("metrics, ran", [
+    (None, False),
+    ({}, False),
+    ({
+        "metrics": []
+    }, False),
+    ({
+        "metrics": [{
+            "name": {
+                "name": "ElementCount"
+            },
+            "scalar": 0
+        }]
+    }, False),
+    ({
+        "metrics": [{
+            "name": {
+                "name": "TotalVcpuTime"
+            },
+            "scalar": 120
+        }]
+    }, False),
+    ({
+        "metrics": [{
+            "name": {
+                "name": "ElementCount"
+            },
+            "scalar": 0
+        }, {
+            "name": {
+                "name": "ElementCount"
+            },
+            "scalar": "12"
+        }]
+    }, True),
+    ({
+        "metrics": [{
+            "name": {
+                "name": "ElementCount"
+            },
+            "scalar": 3.0
+        }]
+    }, True),
+])
+def test_ran_work_reads_element_counts_only(metrics, ran):
+  assert M.ran_work(metrics) is ran
+
+
+def test_the_relaunch_waits_10_20_40_minutes_with_the_same_run_ids():
+  assert [M.capacity_backoff_seconds(a) for a in (1, 2, 3)] == [600, 1200, 2400]
+  body = {
+      "launchParameter": {
+          "jobName": "synthetic-sdfb-v0-7-0-b03",
+          "parameters": {
+              "run_id": "manual__x-0a1b2c3d",
+              "batch_index": "3",
+              "batch_count": "14"
+          },
+          "environment": {
+              "maxWorkers": 4
+          }
+      }
+  }
+  out = M.relaunch_body(
+      body, job_name="synthetic-sdfb-v0-7-0", attempt=2, salt="abcd1234")
+  assert out["launchParameter"]["jobName"] == (
+      "synthetic-sdfb-v0-7-0-b03-r2-abcd1234")
+  assert out["launchParameter"]["parameters"] == body["launchParameter"][
+      "parameters"]  # nothing landed: the same run ids
+  assert body["launchParameter"]["jobName"] == "synthetic-sdfb-v0-7-0-b03"
+  assert M.batch_job_name("x" * 70, 3, 2).endswith("-b03-r2")
+  assert len(M.batch_job_name("x" * 70, 3, 2)) == 63
+  assert M.batch_job_name("n", 3) == M.batch_job_name("n", 3, 0) == "n-b03"

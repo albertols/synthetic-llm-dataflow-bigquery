@@ -40,8 +40,16 @@ The patches:
   and returns a fake job `{"id": "fakejob-<task_id>[-<map_index>]"}`; a
   launch whose `jobName` ends with one of the scenario's `fail_job_suffixes`
   raises instead (a batch job that fails).
-- `DataflowJobStatusSensor.poke`: returns True (the job reached the state),
-  and a bundle's `wait_generation` records its bundle's end.
+- `DataflowJobStatusSensor.poke`: returns True (the job reached the state).
+- `DataflowHook` (a bundle's `wait_generation`, ADR 0045 D10): no
+  connection; `get_job` answers JOB_STATE_DONE, or JOB_STATE_FAILED for a
+  job whose name ends with one of the scenario's `capacity_fail_suffixes`
+  (its messages name ZONE_RESOURCE_POOL_EXHAUSTED and it ran no element)
+  or `job_fail_suffixes` (a traceback naming rateLimitExceeded, after
+  elements ran); `launch_job_with_flex_template` records the relaunch body
+  (its job name's salt normalised to `<SALT8>`) and returns a fake job;
+  `sdfb_batches.capacity_backoff_seconds` is 0. A job read DONE, or failed
+  for no capacity cause, is its bundle's end.
 - `sdfb_batches.launch_blocker` (the bundle launch gate, ADR 0045 D5): the
   real gate on the real task instances' states, each read recorded; the
   bundle's sensors poke every 0 s, so a waiting gate is rescheduled for now
@@ -108,10 +116,13 @@ master's generation DAG can run; the rest need the single DAG with
 with no trigger value (`all_from_overlay`), a table whose gate failed while
 every batch job reached DONE (`all_table_fails`), and a `validation_runs`
 table without the `status_reason` column (`all_old_validation_runs`). The
-last two run the launch gate at the cap of 1: fourteen batches, the size of
+next two run the launch gate at the cap of 1: fourteen batches, the size of
 the 2026-11-02 launch that lost 13 of them (`all_14_batches_cap_1`), and
 three whose middle one fails, after which the third still launches
-(`all_middle_batch_fails`).
+(`all_middle_batch_fails`). The last two are the capacity retry (ADR 0045
+D10): the middle batch's job fails for capacity and is relaunched
+(`all_capacity_retry`), or fails after it ran and is not
+(`all_job_fails_not_capacity`).
 
 Venv recipe (macOS 12 x86_64; this is what ran on 2026-10-27). Python 3.11:
 3.12 and 3.14 with the latest providers fail, there is no `google-re2`
@@ -142,7 +153,7 @@ generator.yaml copied, not linked:
       --markers packages/sdfb-tests/tests/fixtures/config_parity/dag_markers.json \\
       --out $S/dag_bodies.json
 
-Without `--scenario` all fourteen run. `SDFB_DAG_BODIES=$S/dag_bodies.json`
+Without `--scenario` all sixteen run. `SDFB_DAG_BODIES=$S/dag_bodies.json`
 then lets `packages/sdfb-tests/tests/unit/composer/test_generation_dag.py`
 and `test_launch_helpers.py` check that output against the plan and master.
 
@@ -279,6 +290,8 @@ def _scenario(run_conf: Mapping[str, Any],
               markers: Mapping[str, str] | None = None,
               gcs_objects: Mapping[str, str] | None = None,
               fail_job_suffixes: Iterable[str] = (),
+              capacity_fail_suffixes: Iterable[str] = (),
+              job_fail_suffixes: Iterable[str] = (),
               verdict_rows: Sequence[Mapping[str, Any]] | None = None,
               reason_column_missing: bool = False) -> dict[str, Any]:
   return {
@@ -286,6 +299,8 @@ def _scenario(run_conf: Mapping[str, Any],
       "markers": dict(markers or {}),
       "gcs_objects": dict(gcs_objects or {}),
       "fail_job_suffixes": tuple(fail_job_suffixes),
+      "capacity_fail_suffixes": tuple(capacity_fail_suffixes),
+      "job_fail_suffixes": tuple(job_fail_suffixes),
       "verdict_rows": (None if verdict_rows is None else tuple(
           dict(r) for r in verdict_rows)),
       "reason_column_missing": reason_column_missing,
@@ -436,10 +451,49 @@ SCENARIOS: dict[str, dict[str, Any]] = {
             gcs_objects={_MODEL_URI: _THREE_MODEL_TEXT},
             fail_job_suffixes=("-b01",),
             verdict_rows=_MIDDLE_FAILS_ROWS),
+    # ADR 0045 D10: b01's job fails for capacity before it runs anything;
+    # the bundle is relaunched with the same run ids, and every table lands.
+    "all_capacity_retry":
+        _scenario(
+            {
+                "tables": "all",
+                "relationships_uri": _MODEL_URI,
+                "max_tables_per_job": "1"
+            },
+            gcs_objects={_MODEL_URI: _THREE_MODEL_TEXT},
+            capacity_fail_suffixes=("-b01",),
+            verdict_rows=_FOURTEEN_PASSED[:3]),
+    # b01's job fails after it ran (a rateLimitExceeded traceback): never
+    # relaunched; its bundle fails, b02 still launches and is evaluated.
+    "all_job_fails_not_capacity":
+        _scenario(
+            {
+                "tables": "all",
+                "relationships_uri": _MODEL_URI,
+                "max_tables_per_job": "1"
+            },
+            gcs_objects={_MODEL_URI: _THREE_MODEL_TEXT},
+            job_fail_suffixes=("-b01",),
+            verdict_rows=_MIDDLE_FAILS_ROWS),
 }
 MASTER_SCENARIOS = ("explicit_l4", "explicit_t4", "explicit_fk_group",
                     "explicit_eval_off")
 
+# What a job that failed for capacity, or for its code, says (the job
+# messages a bundle's wait reads, ADR 0045 D10).
+_CAPACITY_MESSAGE = (
+    "Startup of the worker pool in zone europe-west3-b failed to bring up "
+    "any of the desired 4 workers. ZONE_RESOURCE_POOL_EXHAUSTED: Instance "
+    "'sdfb-harness-worker' creation failed: The zone "
+    "'projects/sdfb-proj/zones/europe-west3-b' does not have enough "
+    "resources available to fulfill the request.")
+_CODE_MESSAGE = (
+    "Traceback (most recent call last): RuntimeError: BigQuery job "
+    "beam_bq_job_LOAD_x failed. Error Result: <ErrorProto message: 'Exceeded "
+    "rate limits: too many table update operations for this table.' reason: "
+    "'rateLimitExceeded'>")
+_RELAUNCH_SALT = re.compile(r"(-r\d+)-[0-9a-f]{8}$")
+_RELAUNCH_ATTEMPT = re.compile(r"-r(\d+)-<SALT8>$")
 # The bundle's tasks the harness watches (the DAG's mapped task group).
 _BUNDLE_LAUNCH = "bundle.launch"
 _BUNDLE_WAIT = "bundle.wait_generation"
@@ -526,6 +580,8 @@ class Recorder:
     # The bundles' launches and ends, in the order they happened:
     # ("launch" | "end", map index).
     self.events: list[tuple[str, int]] = []
+    # Every generation job: id -> (its name, its bundle's map index).
+    self.jobs: dict[str, tuple[str, int]] = {}
 
   def download(self, bucket_name: str, object_name: str, *_: Any,
                **__: Any) -> bytes:
@@ -588,14 +644,53 @@ class Recorder:
         self.events.append(("end", map_index))  # its wait never runs
       raise RuntimeError(f"check_dags: job {job_name} fails (scenario)")
     suffix = f"-{map_index}" if map_index >= 0 else ""
-    return {"id": f"fakejob-{task.task_id}{suffix}", "name": job_name}
+    job_id = f"fakejob-{task.task_id}{suffix}"
+    if task.task_id == _BUNDLE_LAUNCH:
+      self.jobs[job_id] = (job_name, map_index)
+    return {"id": job_id, "name": job_name}
 
-  def poke(self, sensor: Any, context: Mapping[str, Any]) -> bool:
-    """A Dataflow status sensor's poke: the job reached the state. A
-    bundle's generation wait records its bundle's end."""
-    if sensor.task_id == _BUNDLE_WAIT:
-      self.events.append(("end", int(context["ti"].map_index)))
-    return True
+  def _fails(self, name: str, key: str) -> bool:
+    return any(name.endswith(s) for s in self.scenario[key])
+
+  def get_job(self, job_id: str, **_: Any) -> dict[str, Any]:
+    """A bundle's generation job: DONE, or FAILED (the scenario's)."""
+    name, index = self.jobs[job_id]
+    if self._fails(name, "capacity_fail_suffixes"):
+      return {"id": job_id, "currentState": "JOB_STATE_FAILED"}
+    self.events.append(("end", index))
+    if self._fails(name, "job_fail_suffixes"):
+      return {"id": job_id, "currentState": "JOB_STATE_FAILED"}
+    return {"id": job_id, "currentState": "JOB_STATE_DONE"}
+
+  def job_messages(self, job_id: str, **_: Any) -> list[dict[str, Any]]:
+    name = self.jobs[job_id][0]
+    if self._fails(name, "capacity_fail_suffixes"):
+      return [{
+          "messageImportance": "JOB_MESSAGE_ERROR",
+          "messageText": _CAPACITY_MESSAGE
+      }]
+    return [{
+        "messageImportance": "JOB_MESSAGE_ERROR",
+        "messageText": _CODE_MESSAGE
+    }]
+
+  def job_metrics(self, job_id: str, **_: Any) -> dict[str, Any]:
+    name = self.jobs[job_id][0]
+    if self._fails(name, "capacity_fail_suffixes"):
+      return {"metrics": []}
+    return {"metrics": [{"name": {"name": "ElementCount"}, "scalar": 40}]}
+
+  def relaunch(self, body: Mapping[str, Any], **_: Any) -> dict[str, Any]:
+    """A bundle's relaunch: recorded as a generation launch of its wait."""
+    body = json.loads(json.dumps(body, default=str))
+    launch = body["launchParameter"]
+    launch["jobName"] = _RELAUNCH_SALT.sub(r"\1-<SALT8>", launch["jobName"])
+    index = int(launch["parameters"]["batch_index"])
+    self.launches.append((_BUNDLE_WAIT, index, body))
+    attempt = _RELAUNCH_ATTEMPT.search(launch["jobName"]).group(1)
+    job_id = f"fakejob-relaunch-{index}-r{attempt}"
+    self.jobs[job_id] = (launch["jobName"], index)
+    return {"id": job_id, "name": launch["jobName"]}
 
   def gate(self, real_gate: Any) -> Any:
     """`sdfb_batches.launch_blocker`, recording each read."""
@@ -702,9 +797,10 @@ def run_scenario(dag: Any, name: str) -> dict[str, Any]:
   for task_id in _BUNDLE_SENSORS:
     dag.get_task(task_id).poke_interval = 0
 
-  def poke(*args: Any, **kwargs: Any) -> bool:  # args[0]: the sensor
-    return recorder.poke(args[0],
-                         args[1] if len(args) > 1 else kwargs["context"])
+  hooks = _airflow("airflow.providers.google.cloud.hooks.dataflow")
+
+  def hook_call(method: Any) -> Any:  # args[0]: the hook
+    return lambda *args, **kwargs: method(*args[1:], **kwargs)
 
   when = logical_date(name)
   with mock.patch.object(batches, "launch_blocker",
@@ -714,7 +810,18 @@ def run_scenario(dag: Any, name: str) -> dict[str, Any]:
       mock.patch.object(gcs, "get_conn", lambda *_, **__: recorder.get_conn()), \
       mock.patch.object(operators.DataflowStartFlexTemplateOperator,
                         "execute", execute), \
-      mock.patch.object(sensors.DataflowJobStatusSensor, "poke", poke), \
+      mock.patch.object(sensors.DataflowJobStatusSensor, "poke",
+                        lambda *_, **__: True), \
+      mock.patch.object(hooks.DataflowHook, "__init__", lambda *_, **__: None), \
+      mock.patch.object(hooks.DataflowHook, "get_job",
+                        hook_call(recorder.get_job)), \
+      mock.patch.object(hooks.DataflowHook, "fetch_job_messages_by_id",
+                        hook_call(recorder.job_messages)), \
+      mock.patch.object(hooks.DataflowHook, "fetch_job_metrics_by_id",
+                        hook_call(recorder.job_metrics)), \
+      mock.patch.object(hooks.DataflowHook, "launch_job_with_flex_template",
+                        hook_call(recorder.relaunch)), \
+      mock.patch.object(batches, "capacity_backoff_seconds", lambda _: 0), \
       mock.patch.object(bigquery, "__init__", lambda *_, **__: None), \
       mock.patch.object(bigquery, "insert_job", insert_job):
     dag_run = dag.test(

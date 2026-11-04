@@ -118,9 +118,18 @@ D5, D7): every task of `bundle[i]` shares the batch's map index. Its `gate`
 waits for the cap (below), its `launch` starts one Flex Template job:
 `tables=all`, `batch_index`, `batch_count`, `run_id=<base>`, the job named
 `<job name>-bNN`, to which the provider appends `-<8 hex>` (its
-`append_job_name`), and returns at once; its `wait_generation` waits for the
-job in reschedule mode, holding no worker slot. A batch job that ends in any
-state but DONE fails its bundle's wait; the other bundles run on. Once its
+`append_job_name`), and returns at once; its `wait_generation`
+(`_GenerationWaitSensor`) waits for the job in reschedule mode, holding no
+worker slot. A batch job that ends in any state but DONE fails its bundle's
+wait, without a retry, and the other bundles run on; except a FAILED job
+that ran no work item and whose messages name a capacity cause (a zone out
+of GPUs, a quota exceeded: `sdfb_batches.is_capacity_failure`), which the
+wait relaunches, the same body and run ids (nothing landed), named
+`<job name>-bNN-rN-<8 hex>`, 10, 20, then 40 minutes after the failure, at
+most the run's `capacity_retries` times (ADR 0045 D10). The bundle keeps its
+slot of the cap meanwhile. The attempts are an XCom of the bundle's
+`launch` (`ATTEMPT_KEY`): a reschedule-mode sensor's own XComs are cleared
+at each poke. Once its
 job is DONE, the bundle evaluates it: `eval_body` builds the evaluation of
 that one job (`--run_id <base> --generation_job_ids <the job>`: the
 evaluator reads that job's rows of `validation_runs`, so every table is
@@ -241,9 +250,11 @@ that was accepted and then failed (its status read raised) would launch the
 whole batch again under the same base run id, which replays the same rows,
 and an append launch would land them twice. Its `gate` and
 `wait_generation` take the environment's retries: a poke that fails on a
-transient error is tried again, and a retried wait reads the same job. A
-job that ends in any state but DONE fails the wait (the provider's sensor
-raises, after the task's retries). To run a failed batch again, fix the
+transient error is tried again, and a retried wait reads the same job (its
+attempts are the launch's XCom). A job that ends in any state but DONE fails
+the wait with AirflowFailException, which is never retried, unless it is a
+capacity failure the wait relaunches (above): that is the one relaunch the
+DAG makes on its own, and only when no row can have landed. To run a failed batch again, fix the
 cause and clear its bundle's `launch` with its downstream tasks (and its
 `gate`, if the gate failed); its lower siblings have ended, so it
 launches at once. Clear it only once the run has ended: cleared while a
@@ -508,9 +519,10 @@ evaluation_job_id = "{{ ti.xcom_pull(task_ids='trigger_evaluation')['id'] }}"
 # XCom of the same map index.
 bundle_evaluation_job_id = ("{{ ti.xcom_pull(task_ids='bundle.trigger_eval', "
                             "map_indexes=ti.map_index)['id'] }}")
-# A bundle's generation job, while its wait reads it: the launch's XCom.
-bundle_generation_job_id = ("{{ ti.xcom_pull(task_ids='bundle.launch', "
-                            "map_indexes=ti.map_index)['id'] }}")
+# Where a bundle's wait keeps its attempts (ADR 0045 D10): an XCom of the
+# bundle's `launch`, the one task of the bundle that never runs again. A
+# reschedule-mode sensor's own XComs are cleared at each poke.
+ATTEMPT_KEY = "generation_attempt"
 # How the second sensor waits for the evaluation's LAUNCH to be over (the job
 # running): one status read a minute, for at most an hour. The launcher gives
 # up after about 12 minutes; the hour bounds a job that stays queued.
@@ -1033,6 +1045,18 @@ default_dag_params = {
             "sdfb_env.yaml, read when the DAG file was parsed. A bundle's "
             "evaluation does not count against it.",
         ),
+    "capacity_retries":
+        Param(
+            default=DEFAULTS["capacity_retries"],
+            type="integer",
+            minimum=0,
+            description="Only with tables=all. How many times a bundle "
+            "whose batch job FAILED for capacity (a zone out of GPUs, a "
+            "quota exceeded) and ran no work item is relaunched with the "
+            "same run ids, 10, 20, 40 … minutes after the failure "
+            "(ADR 0045 D10). Any other failure is never relaunched. 0 "
+            "turns it off.",
+        ),
     "evaluation_max_workers":
         Param(
             default=DEFAULTS["evaluation_max_workers"],
@@ -1184,6 +1208,153 @@ class _LaunchGateSensor(BaseSensorOperator):
       return True
     logging.info("%s", sdfb_batches.gate_wait_line(map_index, blocking, cap))
     return False
+
+
+class _GenerationWaitSensor(BaseSensorOperator):
+  """A bundle's wait for its generation job (ADR 0045 D7, D10), in
+  reschedule mode: done, returning `{"id", "attempt"}`, once the job is
+  JOB_STATE_DONE.
+
+  A job that ends any other way fails the task without a retry (the same
+  job fails the same way), except a FAILED job that ran no work item and
+  whose messages name a capacity cause (`sdfb_batches.is_capacity_failure`):
+  while the run's `capacity_retries` allows, the bundle is relaunched, the
+  same body with the same run ids (nothing landed), named
+  `<job>-bNN-rN-<8 hex>`, `capacity_backoff_seconds` after the failure, and
+  the wait reads the new job. The attempts live in the bundle's `launch`
+  XCom (`ATTEMPT_KEY`): this sensor's own are cleared at each poke. A
+  relaunch whose job id was never recorded (the worker died during the
+  call) fails the task rather than launch a second job beside a first that
+  may run.
+  """
+
+  template_fields = ("body",)
+
+  def __init__(self, *, body, **kwargs):
+    super().__init__(**kwargs)
+    self.body = body
+
+  def poke(self, context):
+    import datetime
+    import logging
+
+    from airflow.providers.google.cloud.hooks.dataflow import DataflowHook
+    from airflow.sensors.base import PokeReturnValue
+    from airflow.utils import timezone
+
+    ti, params = context["ti"], context["params"]
+    label = f"b{ti.map_index:02d}"
+    attempt = self._attempt(ti)
+    if attempt.get("launching"):
+      raise AirflowFailException(
+          f"{label}: relaunch {attempt['attempt']} may have started job "
+          f"{attempt.get('job_name')} without its id being recorded; it is "
+          f"not launched again (find it in Dataflow, then clear the bundle)")
+    hook = DataflowHook()
+    now = timezone.utcnow()
+    if not attempt.get("id"):
+      if now < datetime.datetime.fromisoformat(attempt["not_before"]):
+        logging.info("%s: relaunch %d at %s (%s)", label, attempt["attempt"],
+                     attempt["not_before"], attempt.get("reason"))
+        return False
+      self._relaunch(ti, attempt, hook)
+      return False
+    job = hook.get_job(
+        job_id=attempt["id"], project_id=project_id, location=region)
+    state = job.get("currentState") if isinstance(job, dict) else None
+    if state == "JOB_STATE_DONE":
+      return PokeReturnValue(
+          is_done=True,
+          xcom_value={
+              "id": attempt["id"],
+              "attempt": attempt["attempt"]
+          })
+    if state not in _ENDED_NOT_DONE:
+      return False
+    if (state == "JOB_STATE_FAILED" and
+        attempt["attempt"] < int(params["capacity_retries"])):
+      messages = [
+          str(m.get("messageText", "")) for m in hook.fetch_job_messages_by_id(
+              job_id=attempt["id"], project_id=project_id, location=region) or
+          ()
+      ]
+      ran = sdfb_batches.ran_work(
+          hook.fetch_job_metrics_by_id(
+              job_id=attempt["id"], project_id=project_id, location=region))
+      if sdfb_batches.is_capacity_failure(messages, ran):
+        reason = sdfb_batches.capacity_reason(messages)
+        number = attempt["attempt"] + 1
+        wait_s = sdfb_batches.capacity_backoff_seconds(number)
+        self._record(
+            ti, {
+                "attempt":
+                    number,
+                "id":
+                    None,
+                "not_before":
+                    (now + datetime.timedelta(seconds=wait_s)).isoformat(),
+                "reason":
+                    reason,
+                "failed": [*attempt.get("failed", []), attempt["id"]],
+            })
+        logging.warning(
+            "%s: Dataflow job %s FAILED for capacity (%s) before it ran a "
+            "work item; relaunch %d of %s in %d s, the same run ids", label,
+            attempt["id"], reason, number, params["capacity_retries"], wait_s)
+        return False
+    raise AirflowFailException(
+        f"{label}: Dataflow job {attempt['id']} ended {state} (attempt "
+        f"{attempt['attempt']}); not relaunched: only a FAILED job that ran "
+        f"no work item for a capacity cause is, at most capacity_retries "
+        f"times")
+
+  @staticmethod
+  def _attempt(ti) -> dict:
+    """The bundle's current attempt: the recorded one, else the launch's."""
+    recorded = ti.xcom_pull(
+        task_ids=sdfb_batches.BUNDLE_LAUNCH,
+        key=ATTEMPT_KEY,
+        map_indexes=ti.map_index)
+    if isinstance(recorded, dict):
+      return recorded
+    launched = ti.xcom_pull(
+        task_ids=sdfb_batches.BUNDLE_LAUNCH, map_indexes=ti.map_index)
+    return {"attempt": 0, "id": _launched_job_id(launched, None)}
+
+  @staticmethod
+  def _record(ti, attempt: dict) -> None:
+    from airflow.models.xcom import XCom
+
+    XCom.set(
+        key=ATTEMPT_KEY,
+        value=attempt,
+        dag_id=ti.dag_id,
+        task_id=sdfb_batches.BUNDLE_LAUNCH,
+        run_id=ti.run_id,
+        map_index=ti.map_index)
+
+  def _relaunch(self, ti, attempt: dict, hook) -> None:
+    import logging
+    import uuid
+
+    body = sdfb_batches.relaunch_body(
+        self.body,
+        job_name=CONSTANTS["job_name"],
+        attempt=attempt["attempt"],
+        salt=uuid.uuid4().hex[:8])
+    name = body["launchParameter"]["jobName"]
+    # Recorded before the call: a worker that dies inside it leaves
+    # `launching`, and the next poke fails instead of launching twice.
+    self._record(ti, {**attempt, "launching": True, "job_name": name})
+    job = hook.launch_job_with_flex_template(
+        body=body, location=region, project_id=project_id)
+    self._record(ti, {
+        **attempt, "id": job["id"],
+        "launching": False,
+        "job_name": name
+    })
+    logging.warning("b%02d: relaunched as Dataflow job %s (%s)", ti.map_index,
+                    job["id"], name)
 
 
 @task(task_id="eval_body", multiple_outputs=False)
@@ -1751,19 +1922,18 @@ with models.DAG(
         retries=0,
     )
     # The generation's wait: rescheduled between reads, holding no worker
-    # slot for the job's hours; it ends the bundle's slot of the cap.
-    wait = DataflowJobStatusSensor(
+    # slot for the job's hours; it relaunches a job that failed for
+    # capacity (ADR 0045 D10) and ends the bundle's slot of the cap.
+    wait = _GenerationWaitSensor(
         task_id="wait_generation",
-        job_id=bundle_generation_job_id,
-        expected_statuses={"JOB_STATE_DONE"},
-        project_id=project_id,
-        location=region,
+        body=body,
         mode="reschedule",
         poke_interval=GENERATION_POKE_SECONDS,
         timeout=GENERATION_TIMEOUT_SECONDS,
     )
-    # The bundle's evaluation: CPU only, outside the cap.
-    evaluation = bundle_evaluation_body(launch.output)
+    # The bundle's evaluation, of the attempt that was DONE: CPU only,
+    # outside the cap.
+    evaluation = bundle_evaluation_body(wait.output)
     trigger = DataflowStartFlexTemplateOperator(
         task_id="trigger_eval",
         project_id=project_id,
