@@ -30,6 +30,14 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# uv-managed CPython only. With `python-version: "3.14"` uv took the runner
+# image's /usr/bin/python3.14 once the image shipped one (3.14.4 on
+# 2026-11-13), whose argparse prints `choose from a, b` where 3.14.5+ prints
+# `choose from 'a', 'b'` — failing the master parser goldens
+# (test_master_goldens.py) on a change that was not ours.
+env:
+  UV_PYTHON_PREFERENCE: only-managed
+
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
