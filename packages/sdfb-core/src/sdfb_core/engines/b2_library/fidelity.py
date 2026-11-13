@@ -264,18 +264,23 @@ def _classify(  # noqa: PLR0911 — type classifier; sequential returns read cle
     if field.bq_type == "JSON":
       return ColumnKind.FREE_TEXT
     strs = [str(v) for v in non_null_values]
-    cardinality_ratio = distinct / max(len(strs), 1)
-    mean_len = sum(len(s) for s in strs) / max(len(strs), 1)
-    if cardinality_ratio >= _HIGH_CARDINALITY_RATIO or mean_len >= _FREE_TEXT_MIN_LEN:
-      return ColumnKind.FREE_TEXT
     # Date-shaped strings follow the (stricter) temporal cap: ≤20
     # distinct is an enum-in-disguise (load-date partitions); above it
     # they jitter as TEMPORAL — the 2026-07-20 memorization defect was
-    # resampling them verbatim.
+    # resampling them verbatim. Checked BEFORE the free-text heuristics,
+    # as B.1 does: a sparse date column's few values are near-unique in
+    # the sample, and the cardinality rule turned them into a per-digit
+    # identifier template ('2847-46-81') that failed the BigQuery load
+    # into a DATE landing column (2026-11-12 corp b2 run, COL_DATE_1).
+    # All-or-nothing: only columns whose values ALL parse change route.
     if classify_temporal_values(strs) is not None:
       if distinct <= _TEMPORAL_MAX_CATEGORIES:
         return ColumnKind.CATEGORICAL
       return ColumnKind.TEMPORAL
+    cardinality_ratio = distinct / max(len(strs), 1)
+    mean_len = sum(len(s) for s in strs) / max(len(strs), 1)
+    if cardinality_ratio >= _HIGH_CARDINALITY_RATIO or mean_len >= _FREE_TEXT_MIN_LEN:
+      return ColumnKind.FREE_TEXT
     if distinct <= _CATEGORICAL_MAX_CATEGORIES:
       return ColumnKind.CATEGORICAL
     # Above the string cap: high-cardinality discrete text the LLM must
