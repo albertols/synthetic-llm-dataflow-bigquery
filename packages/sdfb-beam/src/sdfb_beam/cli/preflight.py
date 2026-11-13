@@ -596,6 +596,36 @@ _NO_REST: Mapping[str, tuple[str, ...]] = MappingProxyType({})
 # Parent landing name -> DISTINCT key values it lands (fix H3). Empty =
 # no parent was adjusted, so rows and distinct keys coincide everywhere.
 _NO_PARENT_KEYS: Mapping[str, int] = MappingProxyType({})
+KEY_SET_PARENT_PK = "parent_pk"
+KEY_SET_INHERITED = "inherited"
+
+
+@dataclass(frozen=True)
+class DrivingKeys:
+  """The distinct values a driven child's DRIVING edge can fan out over
+    on its parent (ADR 0036, 2026-11-13 amendment), and which key set
+    bounded them.
+
+    ``key_set`` is ``parent_pk`` when the edge's ``ref_cols`` contain the
+    parent's declared PK — ``keys`` is then the parent's landed distinct
+    PK count (fix H3), or ``None`` when none was recorded, exactly as
+    before. It is ``inherited`` when the parent copies those columns from
+    an upstream ``owner`` (`RelationshipRegistry.key_lineage`): ``keys``
+    is then the owner's landed rows (its distinct keys when the columns
+    cover ITS PK), capped at every table's rows on the way down."""
+
+  keys: int | None
+  key_set: str = KEY_SET_PARENT_PK
+  ref_cols: tuple[str, ...] = ()
+  owner: str = ""
+  owner_cols: tuple[str, ...] = ()
+  owner_rows: int | None = None
+
+
+# Parent ref -> the key set that bounded its driving edge's distinct
+# values, when it is NOT the parent's declared PK (2026-11-13): the
+# owner of inherited columns. Empty = every child sized off the PK.
+_NO_KEY_SETS: Mapping[str, DrivingKeys] = MappingProxyType({})
 
 
 def pk_cell_columns(
@@ -1130,6 +1160,7 @@ def _derived_rows(
     edge_roles: Mapping[FkEdge, str] | None,
     fk_parent_rows: Mapping[str, int],
     fk_parent_distinct_keys: Mapping[str, int] = _NO_PARENT_KEYS,
+    fk_parent_key_sets: Mapping[str, DrivingKeys] = _NO_KEY_SETS,
 ) -> int | None:
   """A DRIVEN child's row count (ADR 0036): ``round(driving parent's
     DISTINCT landed keys x mean fan-out)``. ``None`` when the histogram
@@ -1147,6 +1178,14 @@ def _derived_rows(
     requested against ~109,556 producible on the 2026-09-12 shape,
     written to `validation_runs` as a missed request with no milestone
     naming the cause. Hence the milestone.
+
+    More precisely it is the distinct values of the driving edge's
+    ``ref_cols`` on the parent, which is the parent's PK count only when
+    those columns contain the PK. When the parent INHERITED them
+    (``fk_parent_key_sets``, 2026-11-13) the launcher bounds them by the
+    table that owns them and the milestone names that owner: the corp
+    launch asked 713,173,103 rows of a ~356.5M maximum by multiplying a
+    20.0M-distinct PK whose child fans out over a 10M-row root's triple.
     """
   hist = {int(k): int(n) for k, n in (fanout.get("histogram") or {}).items()}
   total = sum(hist.values())
@@ -1160,7 +1199,30 @@ def _derived_rows(
   mean_fanout = sum(k * n for k, n in hist.items()) / total
   keys = fk_parent_distinct_keys.get(driving_ref) or parent_rows
   derived = round(keys * mean_fanout)
-  if keys < parent_rows:
+  key_set = fk_parent_key_sets.get(driving_ref)
+  if keys < parent_rows and key_set is not None:
+    log_milestone(
+        "model_adjustment_descendant_rows",
+        level=logging.WARNING,
+        table=fqn,
+        parent=driving_ref,
+        parent_rows=parent_rows,
+        parent_distinct_keys=keys,
+        mean_fanout=round(mean_fanout, 4),
+        derived_rows=derived,
+        unadjusted_rows=round(parent_rows * mean_fanout),
+        key_set="inherited",
+        ref_cols=",".join(key_set.ref_cols),
+        key_owner=key_set.owner,
+        owner_cols=",".join(key_set.owner_cols),
+        owner_rows=key_set.owner_rows,
+        note="the driving edge's ref_cols are NOT the parent's declared "
+        "PK: the parent inherits them from key_owner, so it holds at "
+        "most that table's landed distinct values of them (capped at "
+        "its own rows) — sizing this table off the parent's PK "
+        "distinct count would request rows the fan-out cannot produce",
+    )
+  elif keys < parent_rows:
     log_milestone(
         "model_adjustment_descendant_rows",
         level=logging.WARNING,
@@ -1222,6 +1284,7 @@ def _driven_child_rows(
     candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
     on_conflict: str = ON_CONFLICT_ADJUST,
     fk_parent_distinct_keys: Mapping[str, int] = _NO_PARENT_KEYS,
+    fk_parent_key_sets: Mapping[str, DrivingKeys] = _NO_KEY_SETS,
     gate: float = 1.0,
     config: GeneratorConfig,
 ) -> tuple[int | None, dict[tuple[str, ...], int], ModelAdjustment | None]:
@@ -1245,6 +1308,7 @@ def _driven_child_rows(
       edge_roles,
       parent_rows,
       fk_parent_distinct_keys,
+      fk_parent_key_sets,
   )
   supply = edge_supplied_members(effective_pk, edge_roles, conditional_rest)
   caps = _independent_pool_caps(
@@ -1297,6 +1361,7 @@ def _run_p4(
     candidate_cap: int | None,
     on_model_conflict: str,
     fk_parent_distinct_keys: Mapping[str, int] | None = None,
+    fk_parent_key_sets: Mapping[str, DrivingKeys] | None = None,
     config: GeneratorConfig,
 ) -> tuple[
     tuple[str, ...],
@@ -1345,6 +1410,7 @@ def _run_p4(
       candidate_cap=candidate_cap,
       on_conflict=on_model_conflict,
       fk_parent_distinct_keys=fk_parent_distinct_keys or _NO_PARENT_KEYS,
+      fk_parent_key_sets=fk_parent_key_sets or _NO_KEY_SETS,
       gate=blocker_failure_ratio,
       config=config,
   )
@@ -1378,6 +1444,7 @@ def preflight(
     candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
     on_model_conflict: str = ON_CONFLICT_ADJUST,
     fk_parent_distinct_keys: Mapping[str, int] | None = None,
+    fk_parent_key_sets: Mapping[str, DrivingKeys] | None = None,
     config: GeneratorConfig = DEFAULT_CONFIG,
 ) -> PreflightResult:
   """Run P1-P5 + P4; returns the effective pk/identity columns.
@@ -1429,7 +1496,12 @@ def preflight(
     over. It equals the parent's rows whenever the parent's PK is
     enforced, and ``rows x (1 - source_repeat_share)`` when the parent's
     own `pk:` was adjusted away — omit it and an adjusted parent's child
-    is asked for roughly twice the rows it can produce.
+    is asked for roughly twice the rows it can produce. Strictly it is
+    the distinct values of the DRIVING edge's ``ref_cols``: when those
+    are columns the parent INHERITED, the launcher passes the owner's
+    bound instead and names it in ``fk_parent_key_sets`` (ref →
+    `DrivingKeys`), which the ``model_adjustment_descendant_rows``
+    milestone reports (2026-11-13).
 
     ``on_model_conflict`` (ADR 0038, ``--on_model_conflict``) decides
     what a MEASURED contradiction does. ``adjust`` (default): a declared
@@ -1590,6 +1662,7 @@ def preflight(
       candidate_cap=candidate_cap,
       on_model_conflict=on_model_conflict,
       fk_parent_distinct_keys=fk_parent_distinct_keys,
+      fk_parent_key_sets=fk_parent_key_sets,
       config=config,
   )
 

@@ -84,7 +84,7 @@ Design: docs/DESIGN.md §4 Relational generation; §8 Configuration;
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -673,6 +673,35 @@ class RelationshipRegistry:
         driving edge's columns, in ``edge.cols`` order. Empty for the
         driving edge itself, and when ``table`` has no driving edge."""
     return self._overlap_with_driving(table, edge) or ()
+
+  def key_lineage(
+      self, table: str,
+      cols: Sequence[str]) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Where ``table``'s ``cols`` come from: ``((table, cols), (its
+        parent, the same columns under the parent's names), …)``, ending
+        at the table that OWNS them — the first one no enforced edge
+        copies ALL of them into (ADR 0036, 2026-11-13 amendment).
+
+        Each hop follows an enforced (widened, non-external) edge whose
+        ``cols`` cover every column, so by referential integrity the
+        values on a later hop are a superset of the earlier one's: the
+        distinct count at any hop bounds the distinct count at ``table``.
+        A partly carried set is NOT followed (its other columns are
+        ``table``'s own). With several carrying edges the first declared
+        wins — any one is a valid bound. Cycle-safe."""
+    current, names = _name(table), tuple(cols)
+    hops = [(current, names)]
+    seen = {current}
+    while True:
+      up = next((e for e in self.enforced_edges(current) if not e.external and
+                 set(names) <= set(e.cols) and _name(e.ref) not in seen), None)
+      if up is None:
+        return tuple(hops)
+      pos = {c: i for i, c in enumerate(up.cols)}
+      names = tuple(up.ref_cols[pos[c]] for c in names)
+      current = _name(up.ref)
+      seen.add(current)
+      hops.append((current, names))
 
   def edge_rest(self, table: str, edge: FkEdge) -> tuple[str, ...]:
     """``edge.cols`` outside :meth:`edge_overlap`. Empty for the

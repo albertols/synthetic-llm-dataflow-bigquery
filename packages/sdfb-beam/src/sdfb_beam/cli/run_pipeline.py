@@ -164,8 +164,10 @@ from sdfb_core.version import generator_version
 
 from sdfb_beam.cli.preflight import (
     DEFAULT_FK_CANDIDATE_CAP,
+    KEY_SET_INHERITED,
     ON_CONFLICT_ADJUST,
     ON_MODEL_CONFLICT_MODES,
+    DrivingKeys,
     edge_supplied_members,
     pk_cell_columns,
     preflight,
@@ -1549,6 +1551,69 @@ def distinct_keys_landed(num_rows: int,
   return landed_distinct_keys(num_rows, share)
 
 
+def driving_key_bound(
+    registry: RelationshipRegistry,
+    ref: str,
+    ref_cols: Sequence[str],
+    *,
+    landing_dataset: str,
+    parent_rows: int | None,
+    rows_by_landing: Mapping[str, int],
+    keys_by_landing: Mapping[str, int],
+) -> DrivingKeys:
+  """How many DISTINCT values of ``ref_cols`` the parent ``ref`` can hand
+    a child it DRIVES — the number that child's row count is derived from
+    (ADR 0036, 2026-11-13 amendment).
+
+    The composer fans the child out over the parent's distinct
+    ``ref_cols`` tuples, which is the parent's distinct PK count only when
+    ``ref_cols`` contain that PK. Then this returns exactly what fix H3
+    did — ``keys_by_landing``'s entry, the parent's rows when absent.
+    Otherwise the columns are followed up `RelationshipRegistry.key_lineage`
+    to the table that OWNS them, and the bound is the smallest landed row
+    count on the way (the owner's distinct keys when the columns cover
+    the owner's PK): a child cannot see more distinct values than the
+    table they were copied from holds. No owner landed in this job means
+    nothing better is known, and the parent's PK figure stands as before.
+
+    The corp launch this fixes: TABLE_D driven by TABLE_B's inherited
+    (COL_P, COL_Q, COL_R) was sized off TABLE_B's 20,005,378 distinct PKs
+    — 713,173,103 rows — where the triple's owner, TABLE_A, landed 10M.
+    """
+  parent = parent_landing_fqn(ref, landing_dataset)
+  if parent_rows is None:
+    parent_rows = rows_by_landing.get(parent)
+  pk_figure = keys_by_landing.get(parent) or parent_rows
+  relations = registry.relations(ref)
+  parent_pk = set(relations.pk) if relations is not None else set()
+  if parent_pk and parent_pk <= set(ref_cols):
+    return DrivingKeys(keys=pk_figure)
+  bound = parent_rows
+  owner: tuple[str, tuple[str, ...], int] | None = None
+  for name, cols in registry.key_lineage(ref, ref_cols)[1:]:
+    landing = parent_landing_fqn(name, landing_dataset)
+    rows = rows_by_landing.get(landing)
+    if rows is None:
+      break  # not landed in this job: nothing to bound by from here up
+    candidates = [rows] if bound is None else [bound, rows]
+    owner_rel = registry.relations(name)
+    owner_pk = set(owner_rel.pk) if owner_rel is not None else set()
+    if owner_pk and owner_pk <= set(cols):
+      candidates.append(keys_by_landing.get(landing) or rows)
+    bound = min(candidates)
+    owner = (name, tuple(cols), rows)
+  if owner is None:
+    return DrivingKeys(keys=pk_figure)
+  return DrivingKeys(
+      keys=bound,
+      key_set=KEY_SET_INHERITED,
+      ref_cols=tuple(ref_cols),
+      owner=owner[0],
+      owner_cols=owner[1],
+      owner_rows=owner[2],
+  )
+
+
 def resolve_table_rows(landing_table: str, *, driven: bool,
                        derived_rows: int | None, launch_rows: int) -> int:
   """This table's ``num_rows`` (ADR 0036): a DRIVEN child's row count is
@@ -2149,6 +2214,7 @@ def table_projections(
     rows_by_landing: Mapping[str, int] | None = None,
     keys_by_landing: Mapping[str, int] | None = None,
     root_rows: Mapping[str, int] | None = None,
+    registry: RelationshipRegistry | None = None,
 ) -> tuple[TableProjection, ...]:
   """Each resolved spec's projected record count, in generation order
     (ADR 0039).
@@ -2158,7 +2224,10 @@ def table_projections(
     the source parent count from the fan-out payload the preflight
     already paid for, the parent's landed rows and DISTINCT keys from the
     two dicts `_run_relational_job` fills in plan order — the very
-    numbers `preflight._derived_rows` sized the child with.
+    numbers `preflight._derived_rows` sized the child with. With the
+    ``registry``, a driving edge over columns the parent INHERITED reads
+    the same `driving_key_bound` the preflight did (2026-11-13); without
+    it, the parent's PK figure, as before.
     """
   rows_by_landing = rows_by_landing or {}
   keys_by_landing = keys_by_landing or {}
@@ -2186,6 +2255,18 @@ def table_projections(
     fanout = spec.config.fanout or {}
     parent_rows = rows_by_landing.get(driving.parent_landing)
     parent_keys = keys_by_landing.get(driving.parent_landing)
+    if registry is not None:
+      bound = driving_key_bound(
+          registry,
+          driving.parent_table or driving.parent_landing.rsplit(".", 1)[-1],
+          driving.ref_cols,
+          landing_dataset=derive_fk_parent_landing(driving.parent_landing),
+          parent_rows=parent_rows,
+          rows_by_landing=rows_by_landing,
+          keys_by_landing=keys_by_landing,
+      )
+      if bound.key_set == KEY_SET_INHERITED and bound.keys:
+        parent_keys = bound.keys
     projections.append(
         project_table(
             spec.config.landing_table,
@@ -2212,6 +2293,7 @@ def report_row_projection(
     rows_by_landing: Mapping[str, int] | None = None,
     keys_by_landing: Mapping[str, int] | None = None,
     root_rows: Mapping[str, int] | None = None,
+    registry: RelationshipRegistry | None = None,
 ) -> tuple[TableProjection, ...]:
   """How many rows this launch will generate, announced ONCE, before
     the graph is built (ADR 0039).
@@ -2231,6 +2313,7 @@ def report_row_projection(
       rows_by_landing=rows_by_landing,
       keys_by_landing=keys_by_landing,
       root_rows=root_rows,
+      registry=registry,
   )
   if not projections:
     return ()
@@ -3001,6 +3084,24 @@ def _load_reference_and_preflight(
       landing_schema=landing_schema,
   )
   _log_edge_role_warnings(args.landing_table, registry, edge_roles)
+  # 2026-11-13: the DRIVING edge fans out over the parent's distinct
+  # `ref_cols`, which are not its PK when the parent inherited them —
+  # then the bound comes from the table that owns them.
+  fk_parent_key_sets: dict[str, DrivingKeys] = {}
+  driving = next((e for e, r in edge_roles.items() if r == "driving"), None)
+  if driving is not None and driving.ref in fk_parent_rows:
+    bound = driving_key_bound(
+        registry,
+        driving.ref,
+        driving.ref_cols,
+        landing_dataset=parent_landing,
+        parent_rows=fk_parent_rows[driving.ref],
+        rows_by_landing=rows_by_landing,
+        keys_by_landing=keys_by_landing,
+    )
+    if bound.key_set == KEY_SET_INHERITED and bound.keys:
+      fk_parent_distinct_keys[driving.ref] = bound.keys
+      fk_parent_key_sets[driving.ref] = bound
   pf = preflight(
       table_schema,
       tuple(c.strip() for c in args.pk_cols.split(",") if c.strip()),
@@ -3016,6 +3117,7 @@ def _load_reference_and_preflight(
       # Fix H3: a driven child is sized off its parent's DISTINCT
       # landed keys — an adjusted parent lands fewer than it has rows.
       fk_parent_distinct_keys=fk_parent_distinct_keys,
+      fk_parent_key_sets=fk_parent_key_sets,
       config=config_of(args),
       blocker_failure_ratio=thresholds.blocker_failure_ratio,
       fanout=fanout,
@@ -4557,6 +4659,9 @@ def _run_relational_job(
           for r in plan.runs
           if r.num_rows is not None
       },
+      # The same driving-edge key bound the preflight sized each child
+      # with (2026-11-13), so the block prints the count it requests.
+      registry=registry,
   )
   total_edges = sum(len(s.parent_edges) for s in specs)
   log_milestone(

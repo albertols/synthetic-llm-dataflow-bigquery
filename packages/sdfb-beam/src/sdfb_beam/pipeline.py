@@ -32,7 +32,7 @@ REFs:
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
 §6 Throughput; §7 Validation and the dead-letter queue; §8 Configuration
 (ADR 0019, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0034, 0036, 0037, 0038,
-0043, 0044, 0045).
+0039, 0043, 0044, 0045).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -1528,6 +1528,41 @@ def _dlq_rule_weight(envelope: dict) -> tuple[str, int]:
   return (rule_id, 1)
 
 
+# A table whose valid rows fall below this share of its request logs
+# `row_projection_shortfall` (2026-11-13). A WARNING, never a gate: the
+# corp TABLE_D shape landed 12.6% of a 713M request under PASSED, and
+# nothing compared `valid_count` against `num_rows_requested`.
+ROW_SHORTFALL_TOLERANCE = 0.9
+
+
+def _log_row_shortfall(summary, *, tolerance: float) -> None:
+  """`row_projection_shortfall` when ``valid_count / num_rows_requested``
+    is under ``tolerance`` — the run produced materially fewer rows than
+    the launch projected (ADR 0039), whatever the BLOCKER gate said."""
+  requested = summary.num_rows_requested
+  if requested <= 0:
+    return
+  ratio = summary.valid_count / requested
+  if ratio >= tolerance:
+    return
+  log_milestone(
+      "row_projection_shortfall",
+      level=logging.WARNING,
+      table=summary.landing_table,
+      requested=requested,
+      valid_count=summary.valid_count,
+      dlq_count=summary.dlq_count,
+      ratio=round(ratio, 4),
+      tolerance=tolerance,
+      status=summary.status,
+      note="the table landed materially fewer valid rows than the "
+      "launch requested; the status is unchanged (this is not a gate). "
+      "Read the launch's row_projection block and "
+      "model_adjustment_descendant_rows for the sizing, and dlq_by_rule "
+      "for the rows that diverted",
+  )
+
+
 def _build_validation_run_row(
     unused_seed,
     *,
@@ -1588,6 +1623,7 @@ def _build_validation_run_row(
         within_tolerance=summary.repeat_share_within_tolerance,
         excluded_blocker_rules=summary.excluded_blocker_rules,
     )
+  _log_row_shortfall(summary, tolerance=ROW_SHORTFALL_TOLERANCE)
   return summary.to_bq_row(with_status_reason=write_status_reason)
 
 
