@@ -2709,7 +2709,7 @@ export const knobs: KnobsFile = {
           "excerpt": "return round(2.0 * (1.0 - s), 4)"
         },
         {
-          "source": "packages/sdfb-core/src/sdfb_core/engines/b2_library/freetext.py:89",
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b2_library/freetext.py:90",
           "role": "code",
           "excerpt": "return round(1.3 - 1.2 * s, 4)"
         }
@@ -3878,7 +3878,7 @@ export const knobs: KnobsFile = {
     }
   ],
   "exported_from": {
-    "commit": "6f0f286c831279dc5209d16a8e52fc9c92c64e40",
+    "commit": "7e7e78fa315c73d15a0a23e2ed08ed0fe54d3928",
     "dirty": []
   }
 };
