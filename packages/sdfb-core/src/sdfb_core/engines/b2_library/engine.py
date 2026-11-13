@@ -35,7 +35,7 @@ torch) are imported lazily inside the backend's ``fit()`` so importing this
 module works on a laptop with only base deps installed.
 
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity
-(ADR 0013, 0023, 0030, 0031, 0036, 0037).
+(ADR 0013, 0023, 0030, 0031, 0036, 0037, 0046).
 """
 
 from __future__ import annotations
@@ -63,6 +63,10 @@ from sdfb_core.engines.base import (
     ModelClient,
     apply_conditional_overrides,
     conditional_draws,
+)
+from sdfb_core.engines.candidate_keys import (
+    apply_candidate_keys,
+    bind_candidate_keys,
 )
 from sdfb_core.engines.fanout import FanoutPlan, expand_keys
 from sdfb_core.engines.fk_keys import bind_fk_key_pools
@@ -104,6 +108,8 @@ class B2LibraryEngine(GenerationEngine):
     # A DRIVEN child's recipe (ADR 0036), bound in setup() from
     # ``ctx.fanout``; None keeps generate_batch's num_rows-driven path.
     self._fanout: FanoutPlan | None = None
+    # Adopted candidate keys (ADR 0046), bound in setup().
+    self._candidate_keys: list = []
 
   # -- lifecycle ----------------------------------------------------------
 
@@ -137,6 +143,7 @@ class B2LibraryEngine(GenerationEngine):
             categories=values,
             weights=tuple(1.0 / len(values) for _ in values),
         )
+    self._candidate_keys = bind_candidate_keys(ctx)
     payload = getattr(ctx, "fanout", None)
     self._fanout = FanoutPlan.from_payload(payload) if payload else None
     if payload:
@@ -260,6 +267,7 @@ class B2LibraryEngine(GenerationEngine):
     self._record_model = None
     self._profiles = {}
     self._free_text_cols = []
+    self._candidate_keys = []
     self._ctx = None
     self._fitted = False
 
@@ -294,10 +302,15 @@ class B2LibraryEngine(GenerationEngine):
       for i, name in enumerate(pool.cols):
         columns[name] = [t[i] for t in drawn]
 
+    # 2c. Adopted candidate keys (ADR 0046): the discriminator from the
+    # row ordinal, passed through `enforce_value` untouched (a range
+    # clamp would fold a widened value back onto another row's).
+    keyed = apply_candidate_keys(self._candidate_keys, columns, cfg, n)
+
     # 3. Assemble rows, enforce fidelity, validate, yield.
     col_order = [c.name for c in self._ctx.table_schema.columns]
     for i in range(n):
-      row = self._assemble_row(columns, col_order, i)
+      row = self._assemble_row(columns, col_order, i, passthrough=keyed)
       try:
         yield self._record_model.model_validate(row)
       except Exception:  # pylint: disable=broad-exception-caught

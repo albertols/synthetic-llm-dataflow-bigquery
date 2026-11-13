@@ -74,7 +74,7 @@ the column it steers.
 
 Design: docs/DESIGN.md §4 Relational generation; §8 Configuration;
 §11 Evaluation (sdfb-evaluation)
-(ADR 0032, 0036, 0037, 0041, 0045).
+(ADR 0032, 0036, 0037, 0041, 0045, 0046).
 """
 
 # f-string fields keep single quotes: yapf 0.43 cannot parse PEP 701
@@ -743,6 +743,109 @@ class RelationshipRegistry:
       if self._carries(up.ref, target, upstream, seen):
         return True
     return False
+
+  # -- candidate keys (ADR 0046) -----------------------------------------
+
+  def _trace_owner(
+      self, table: str,
+      cols: tuple[str, ...]) -> tuple[str, tuple[str, ...], list[FkEdge]]:
+    """Follow ``cols`` of ``table`` up the enforced edges that carry them
+        (a widened edge whose columns cover them, the table's driving
+        edge first) to the table that GENERATES them. Returns that owner,
+        the columns under the owner's names, and the edges walked."""
+    path: list[FkEdge] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    while (table, cols) not in seen:
+      seen.add((table, cols))
+      try:
+        driving = self.driving_edge(table)
+      except RelationshipError:
+        driving = None
+      ups = [
+          e for e in self.enforced_edges(table)
+          if not e.external and set(cols) <= set(e.cols)
+      ]
+      ups.sort(key=lambda e: e != driving)
+      if not ups:
+        break
+      up = ups[0]
+      pos = {c: i for i, c in enumerate(up.cols)}
+      cols = tuple(up.ref_cols[pos[c]] for c in cols)
+      path.append(up)
+      table = up.ref
+    return table, cols, path
+
+  @staticmethod
+  def _pk_image(pk: tuple[str, ...], path: list[FkEdge]) -> tuple[str, ...]:
+    """``pk`` (on the owner) under the names of the table the walk
+        started from — or ``()`` when an edge on the way does not carry
+        every PK column."""
+    cols = pk
+    for edge in reversed(path):
+      pos = {r: i for i, r in enumerate(edge.ref_cols)}
+      if not all(c in pos for c in cols):
+        return ()
+      cols = tuple(edge.cols[pos[c]] for c in cols)
+    return cols
+
+  def driving_key_anchor(self, table: str) -> tuple[str, ...]:
+    """The columns of ``table``'s DRIVING PARENT that hold the PK of the
+        table its driving tuple comes from — what the parent's distinct
+        driving keys should number (`fk_parent_key_collapse`, ADR 0046).
+        ``()`` for a table with no in-model driving edge, or when the
+        tuple's owner has no PK the walk can carry back."""
+    try:
+      driving = self.driving_edge(table)
+    except RelationshipError:
+      return ()
+    if driving is None or driving.external:
+      return ()
+    owner, _, path = self._trace_owner(driving.ref, tuple(driving.ref_cols))
+    relations = self.relations(owner)
+    pk = tuple(relations.pk) if relations else ()
+    return self._pk_image(pk, path) if pk else ()
+
+  def implied_candidate_keys(self) -> list[dict]:
+    """Every tuple the model implies is a candidate key (ADR 0046): the
+        ``ref_cols`` of each enabled table's DRIVING edge, traced to the
+        table that generates them, when that owner has a PK the tuple
+        does not already contain. One record per (owner, cols), the
+        first driving child naming it; ``owner_driven`` says the owner
+        is itself generated from parent keys (no dense row ordinal, so
+        the launcher can only report it). Nothing here is measured — the
+        launcher adopts a record only when the source says it is 1:1."""
+    out: dict[tuple[str, tuple[str, ...]], dict] = {}
+    for model in self.models:
+      for child, relations in model.tables.items():
+        if not relations.enabled:
+          continue
+        try:
+          driving = self.driving_edge(child)
+        except RelationshipError:
+          continue
+        if driving is None or driving.external:
+          continue
+        owner, cols, path = self._trace_owner(driving.ref,
+                                              tuple(driving.ref_cols))
+        owner_relations = self.relations(owner)
+        pk = tuple(owner_relations.pk) if owner_relations else ()
+        if not pk or set(pk) <= set(cols) or (owner, cols) in out:
+          continue
+        try:
+          owner_driven = self.driving_edge(owner) is not None
+        except RelationshipError:
+          owner_driven = True
+        out[(owner, cols)] = {
+            "owner": owner,
+            "cols": cols,
+            "pk": pk,
+            "child": child,
+            "parent": driving.ref,
+            "parent_cols": tuple(driving.ref_cols),
+            "anchor": self._pk_image(pk, path),
+            "owner_driven": owner_driven,
+        }
+    return list(out.values())
 
   # -- graph -------------------------------------------------------------
 

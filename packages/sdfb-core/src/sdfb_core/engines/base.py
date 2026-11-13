@@ -25,7 +25,7 @@ REF: https://beam.apache.org/releases/pydoc/current/apache_beam.ml.inference.bas
 Design: docs/DESIGN.md §3 Serving; §4 Relational generation; §5 Fidelity;
 §7 Validation and the dead-letter queue; §8 Configuration
 (ADR 0011, 0014, 0018, 0021, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0033,
-0036, 0037, 0043, 0044).
+0036, 0037, 0043, 0044, 0046).
 """
 
 from __future__ import annotations
@@ -276,6 +276,12 @@ class GenerationContext(BaseModel):
   # profiling/plan metadata and for single-column edges arriving from
   # the legacy driver-side loader; sampling truth is fk_key_pools.
   fk_pools: dict[str, tuple] = Field(default_factory=dict)
+  # ADR 0046 — the candidate keys the launcher adopted for THIS table: a
+  # non-PK tuple that drives a grandchild and that the source measured
+  # 1:1 with the PK, as ``[{"cols": [...], "pk": [...]}, …]``. Both
+  # engines bind them (`candidate_keys.bind_candidate_keys`) and set the
+  # tuple's discriminator from the row ordinal. Empty = per-column draws.
+  candidate_keys: list[dict] = Field(default_factory=list)
   # Relational E2E metadata for the once-per-plan `relational_e2e`
   # worker log entry (ADR 0028 follow-up): where this run lands, and
   # each declared FK edge as {"cols": [...], "ref": "ds.parent",

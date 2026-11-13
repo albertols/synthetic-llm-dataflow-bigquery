@@ -49,7 +49,7 @@ imports at module scope. Heavy deps are deferred into the seams.
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
 §6 Throughput; §8 Configuration
 (ADR 0013, 0018, 0019, 0020, 0022, 0023, 0024, 0028, 0030, 0031, 0033, 0034,
-0036, 0037, 0043).
+0036, 0037, 0043, 0046).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -85,6 +85,10 @@ from sdfb_core.engines.base import (
 from sdfb_core.engines.constraint_sampler import (
     ByteTemplateSampler,
     compile_pattern_sampler,
+)
+from sdfb_core.engines.candidate_keys import (
+    apply_candidate_keys,
+    bind_candidate_keys,
 )
 from sdfb_core.engines.fanout import FanoutPlan, expand_keys
 from sdfb_core.engines.fk_keys import bind_fk_key_pools
@@ -239,6 +243,8 @@ class B1RagEngine(GenerationEngine):
     # A DRIVEN child's recipe (ADR 0036), bound in setup() from
     # ``ctx.fanout``; None keeps generate_batch's num_rows-driven path.
     self._fanout: FanoutPlan | None = None
+    # Adopted candidate keys (ADR 0046), bound in setup().
+    self._candidate_keys: list = []
     self._index: ExactIPIndex | None = None
     self._embedder: Embedder | None = None
     self._ref_vectors: list[list[float]] = []
@@ -297,6 +303,7 @@ class B1RagEngine(GenerationEngine):
     # samplers; `_draw_fk_columns` owns their values.
     self._bind_fk_key_pools(ctx)
     self._bind_fanout(ctx)
+    self._candidate_keys = bind_candidate_keys(ctx)
     self._samplers = {
         name: ColumnSampler(prof) for name, prof in self._profiles.items()
     }
@@ -624,6 +631,7 @@ class B1RagEngine(GenerationEngine):
     self._routed = {}
     self._routed_forbidden = {}
     self._routed_emitted = {}
+    self._candidate_keys = []
     self._column_order = []
     self._ready = False
 
@@ -685,6 +693,9 @@ class B1RagEngine(GenerationEngine):
     columns = self._sample_columns(n, cfg, similarity)
     free_text = self._sample_free_text(n, cfg, similarity)
     columns.update(free_text)
+    # Adopted candidate keys (ADR 0046): the discriminator from the row
+    # ordinal, after every sampler (and the numeric scrub) has run.
+    apply_candidate_keys(self._candidate_keys, columns, cfg, n)
 
     for i in range(n):
       raw = {name: columns[name][i] for name in self._column_order}

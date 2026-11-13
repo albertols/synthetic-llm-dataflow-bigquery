@@ -637,6 +637,29 @@ edges both `drives: true`, two edges writing one child column, an
 ambiguous role — stop under BOTH settings, because no measurement can
 resolve a model that contradicts itself.
 
+## A tuple that drives a grandchild is a key of its owner (ADR 0046)
+
+There is no `unique:` key, and you do not need one. When a driving edge's
+`ref_cols` are NOT the parent's PK — `D` driven by `B` on
+`(COL_P, COL_Q, COL_R)`, which `B` inherits from `A` on a widened edge — the
+grandchild fans out over the DISTINCT tuples `B` offers. The registry traces
+that tuple to the table that generates it (`A`) and treats it as an implied
+**candidate key** of `A`'s `pk:`. The launch then measures it on `A`'s
+source, in one scan:
+
+| the source says | the launch does | log line |
+|---|---|---|
+| distinct tuples = distinct PK values = distinct (PK, tuple) pairs, within 0.1 % | both engines generate the tuple 1:1 with `A`'s rows: one column of it (the widest integral one) is derived from the row's position, inside its observed support and never a source value | `candidate_key_adopted owner= cols= pk= … discriminator= widened=` |
+| anything else (keys share a tuple, or one key has several) | nothing changes: the tuple's columns are drawn one by one, as before | `candidate_key_rejected reason=not_one_to_one …` |
+| 1:1, but the column cannot hold the rows even widened to its digit count | as above, per column | `candidate_key_rejected reason=capacity needed= available=` |
+
+Either way the job reports what the grandchild got, for every driving edge:
+`fk_parent_key_collapse table=B cols=COL_P,COL_Q,COL_R child=D expected=
+landed= share=` — `landed` is the distinct tuples `B` offered, `expected`
+the distinct `A` keys behind them. A share well below 1 is a WARNING. A
+tuple owned by a table that is itself driven is reported
+`reason=owner_is_driven` and stays per column.
+
 ## Rules the loader enforces at launch
 
 - every `fk.ref` names a table in the model, or is `dataset.table`

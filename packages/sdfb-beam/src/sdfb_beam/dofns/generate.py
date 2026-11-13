@@ -30,7 +30,7 @@ REF: .claude/skills/engine-contract.md
 REF: .claude/skills/beam-dofn.md
 
 Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §6 Throughput
-(ADR 0023, 0030, 0034, 0037).
+(ADR 0023, 0030, 0034, 0037, 0046).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -624,6 +624,12 @@ class GenerateRecordsDoFn(beam.DoFn):
                 getattr(self.ctx, "prompt_constraints", True),
             "prompt_debug":
                 getattr(self.ctx, "prompt_debug", "off"),
+            # ADR 0046: a root's batch carries its first row ordinal
+            # when a candidate key was adopted; the engines derive the
+            # tuple from it. Absent everywhere else.
+            **({
+                "row_offset": int(request["row_offset"])
+            } if request.get("row_offset") is not None else {}),
         },
     )
     dropped_field = {"keys_dropped": keys_dropped} if keys_dropped else {}

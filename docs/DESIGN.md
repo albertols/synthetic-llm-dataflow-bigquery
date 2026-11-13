@@ -467,6 +467,25 @@ DONE. An explicit launch keeps failing its job
 [`pipeline.py::_BlockerGateDoFn`](../packages/sdfb-beam/src/sdfb_beam/pipeline.py),
 [`composer/sdfb_batches.py::verdict_banner`](../composer/sdfb_batches.py).
 
+### 4.6 A tuple that drives a grandchild keeps one value per key
+
+**Claim: a grandchild driven by a non-key tuple of its parent is driven by
+one distinct tuple per key of the table that generates the tuple, in both
+engines.** A grandchild fans out over the DISTINCT driving tuples its parent
+offers, so a tuple sampled column by column collides and the grandchild loses
+parent keys at an engine-dependent rate. The model already names such tuples
+(a driving edge's `ref_cols`); traced through widened edges to the table that
+generates them, each is a candidate key of that table when the source measures
+it 1:1 with its primary key. The launch measures it, says `candidate_key_adopted`
+or `candidate_key_rejected`, and on adoption both engines set ONE column of the
+tuple from the row's dense ordinal through a keyed permutation and a banded
+allocation over its observed support — never a source value, no barrier — so
+distinct tuples equal landed rows. `fk_parent_key_collapse` reports, per
+driving edge, the distinct keys a parent offered against how many it should
+have ([ADR 0046](adr/0046-driving-key-candidate-keys.md)). Code:
+[`engines/candidate_keys.py::CandidateKeyEncoder`](../packages/sdfb-core/src/sdfb_core/engines/candidate_keys.py),
+[`contracts/relationships.py::RelationshipRegistry.implied_candidate_keys`](../packages/sdfb-core/src/sdfb_core/contracts/relationships.py).
+
 ## 5. Fidelity, value pools and constraints
 
 **Claim: numeric and temporal values are drawn where the source is dense, not
@@ -802,6 +821,7 @@ record; the section is where this document summarizes it.
 | 0043 | [§8 Configuration](#8-configuration) | [Generator config: a typed model, a catalogue, file wins](adr/0043-generator-config.md) |
 | 0044 | [§7 Validation and the dead-letter queue](#7-validation-and-the-dead-letter-queue) | [The generation record](adr/0044-generation-record.md) |
 | 0045 | [§4 Relational generation](#4-relational-generation) | [Whole-model launches](adr/0045-whole-model-launches.md) |
+| 0046 | [§4 Relational generation](#4-relational-generation) | [A driving tuple is a candidate key of its owner](adr/0046-driving-key-candidate-keys.md) |
 <!-- adr-map:end -->
 
 ## 10. Figure provenance

@@ -36,7 +36,7 @@ REFs:
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
 §6 Throughput; §7 Validation and the dead-letter queue; §8 Configuration
 (ADR 0019, 0022, 0023, 0024, 0027, 0028, 0029, 0030, 0031, 0032, 0034, 0035,
-0036, 0037, 0038, 0039, 0043, 0044, 0045).
+0036, 0037, 0038, 0039, 0043, 0044, 0045, 0046).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -114,6 +114,13 @@ from sdfb_core.contracts.row_projection import (
 )
 from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.engines.base import escalating_temperatures
+from sdfb_core.engines.candidate_keys import (
+    CANDIDATE_KEY_TOLERANCE,
+    CandidateKeyEncoder,
+    CandidateKeyUnfitError,
+    KeyCounts,
+    count_keys,
+)
 from sdfb_core.engines.fanout import conditional_edge_id
 from sdfb_core.launch.batches import (
     ModelLaunch,
@@ -182,6 +189,7 @@ from sdfb_beam.io.fanout_stats import (
     fanout_payload,
     log_fanout_measured,
     log_pk_measured,
+    measure_candidate_key,
     measure_fanout,
     measure_pk_uniqueness,
 )
@@ -1884,6 +1892,126 @@ def resolve_pk_measurement(
                      f"{type(exc).__name__}: {exc}") from exc
   log_pk_measured(landing_table, measured["pk"], source="measured")
   return True
+
+
+def resolve_candidate_keys(
+    registry: RelationshipRegistry,
+    landing_table: str,
+    source_table: str,
+    *,
+    in_set_names: set[str],
+    reference_rows: list[dict],
+    table_schema,
+    num_rows: int,
+    driven: bool,
+) -> tuple[dict, ...]:
+  """The candidate keys this table generates 1:1 with its PK (ADR 0046):
+    every tuple the model implies (`implied_candidate_keys` — a driving
+    edge's ``ref_cols`` traced to this table) whose driven child is in
+    the launch, ADOPTED only when the SOURCE measures it 1:1 with the PK
+    (`KeyCounts.one_to_one`, ±`CANDIDATE_KEY_TOLERANCE`) and the
+    encoder can lay ``num_rows`` over its discriminator. One
+    ``candidate_key_adopted`` or ``candidate_key_rejected`` milestone per
+    implied key, with the measured numbers — a rejection never stops the
+    launch: the tuple generates per column, as before (ADR 0038's
+    measure-adjust-announce, applied to a property the model implies).
+
+    The measurement is one BigQuery scan of the owner's source
+    (`measure_candidate_key`); when it fails the reference sample decides
+    and ``candidate_key_measure_fallback`` says so."""
+  name = landing_table.rsplit(".", 1)[-1]
+  types = {c.name: c.bq_type for c in table_schema.columns}
+  adopted: list[dict] = []
+  for record in registry.implied_candidate_keys():
+    if record["owner"] != name or record["child"] not in in_set_names:
+      continue
+    cols, pk = tuple(record["cols"]), tuple(record["pk"])
+    fields: dict[str, Any] = {
+        "owner": name,
+        "cols": ",".join(cols),
+        "pk": ",".join(pk),
+        "child": record["child"],
+        "parent": record["parent"],
+    }
+    if driven or record["owner_driven"]:
+      log_milestone(
+          "candidate_key_rejected",
+          level=logging.WARNING,
+          reason="owner_is_driven",
+          note="the tuple's owner generates from parent keys and has no "
+          "dense row ordinal; it generates per column (ADR 0046)",
+          **fields)
+      continue
+    counts, source = _candidate_key_counts(landing_table, source_table, pk,
+                                           cols, reference_rows)
+    fields.update(
+        rows=counts.rows,
+        pk_values=counts.pk_values,
+        tuples=counts.tuples,
+        pairs=counts.pairs,
+        source=source,
+    )
+    if not counts.one_to_one():
+      log_milestone(
+          "candidate_key_rejected",
+          reason="not_one_to_one",
+          tolerance=CANDIDATE_KEY_TOLERANCE,
+          note="the source does not hold this tuple 1:1 with the PK; it "
+          "generates per column (ADR 0046)",
+          **fields)
+      continue
+    try:
+      encoder = CandidateKeyEncoder.build(
+          cols=cols,
+          rows=reference_rows,
+          column_types=types,
+          num_rows=num_rows,
+          key=f"launch:{landing_table}",
+      )
+    except CandidateKeyUnfitError as exc:
+      log_milestone(
+          "candidate_key_rejected",
+          level=logging.WARNING,
+          reason=exc.reason,
+          **fields,
+          **exc.fields)
+      continue
+    log_milestone(
+        "candidate_key_adopted",
+        discriminator=encoder.discriminator,
+        capacity=encoder.capacity,
+        widened=encoder.widened,
+        **fields)
+    adopted.append({"cols": list(cols), "pk": list(pk)})
+  return tuple(adopted)
+
+
+def _candidate_key_counts(landing_table: str, source_table: str,
+                          pk: tuple[str, ...], cols: tuple[str, ...],
+                          reference_rows: list[dict]) -> tuple[KeyCounts, str]:
+  """``(KeyCounts, "measured"|"sample")`` for one implied candidate key:
+    the source scan, else the reference sample, loudly."""
+  try:
+    measured = measure_candidate_key(
+        source_table=source_table, pk_cols=pk, cols=cols)
+  except Exception as exc:  # pylint: disable=broad-exception-caught
+    log_milestone(
+        "candidate_key_measure_fallback",
+        level=logging.WARNING,
+        table=landing_table,
+        cols=",".join(cols),
+        error=f"{type(exc).__name__}: {exc}"[:200],
+        note="the source could not be measured; the reference sample "
+        "decides, and a sample sees a shared tuple only when it holds both "
+        "of its keys (ADR 0046)",
+    )
+    return count_keys(reference_rows, pk, cols), "sample"
+  return KeyCounts(
+      rows=measured["rows"],
+      pk_values=measured["pk_values"],
+      tuples=measured["tuples"],
+      pairs=measured["pairs"],
+  ), "measured"
 
 
 def _mean_k(hist: Mapping[str, int]) -> float:
@@ -3832,6 +3960,10 @@ def in_set_parent_edges(
                 warn=False,
                 effective_pk=effective_pk,
             ) if role == "conditional" else False,
+            # ADR 0046: what the parent's distinct driving keys should
+            # number, for `fk_parent_key_collapse`.
+            anchor_cols=(registry.driving_key_anchor(landing_table)
+                         if role == "driving" else ()),
         ))
   return tuple(specs)
 
@@ -4131,6 +4263,20 @@ def _prepare_table_spec(
 
   freetext_pools_store, source_value_store = resolve_pool_layer(
       args, reference_rows)
+  # ADR 0046 — tuples that drive a grandchild and that the source holds
+  # 1:1 with this table's PK generate 1:1 by construction.
+  candidate_keys = (
+      resolve_candidate_keys(
+          registry,
+          args.landing_table,
+          args.reference_table,
+          in_set_names=in_set_names,
+          reference_rows=reference_rows,
+          table_schema=table_schema,
+          num_rows=num_rows,
+          driven=driven,
+      ) if in_set_names and parse_bool_flag(args.generate_fk_relationships) else
+      ())
 
   config = PipelineConfig(
       table_schema=table_schema,
@@ -4178,6 +4324,7 @@ def _prepare_table_spec(
       pool_seed_strategy=validate_seed_strategy(args.pool_seed_strategy),
       uniqueness_mode=uniqueness_mode,
       fanout=fanout,
+      candidate_keys=candidate_keys,
       rag_embed_device=resolve_rag_embed_device(model_client),
       freetext_expansion=args.freetext_expansion,
       prompt_constraints=args.prompt_constraints == "on",

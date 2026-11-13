@@ -22,7 +22,7 @@ re-launch pays nothing. A 5k-row sample cannot measure this: it almost
 never holds two rows of one parent (design §10).
 
 Design: docs/DESIGN.md §4 Relational generation
-(ADR 0036, 0038, 0039, 0045).
+(ADR 0036, 0038, 0039, 0045, 0046).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -214,6 +214,47 @@ def measure_pk_uniqueness(
       "rows": int(row["row_count"] or 0),
       "key_tuples": int(row["key_tuples"] or 0),
       "max_rows_per_key": int(row["max_rows_per_key"] or 0),
+  }
+
+
+def measure_candidate_key(
+    *,
+    source_table: str,
+    pk_cols: tuple[str, ...],
+    cols: tuple[str, ...],
+    client: Any = None,
+) -> dict:
+  """``{"rows", "pk_values", "tuples", "pairs"}`` — whether ``cols`` is
+    1:1 with ``pk_cols`` on the SOURCE owner table (ADR 0046), in one scan:
+
+    ``SELECT COUNT(*), COUNT(DISTINCT TO_JSON_STRING(STRUCT(<pk>))),
+    COUNT(DISTINCT TO_JSON_STRING(STRUCT(<cols>))),
+    COUNT(DISTINCT TO_JSON_STRING(STRUCT(<pk>, <cols - pk>))) FROM <owner>``
+
+    ``TO_JSON_STRING(STRUCT(...))`` rather than ``CONCAT``: a NULL member
+    is a VALUE of the tuple here, as in ``measure_pk_uniqueness``'s GROUP
+    BY, where CONCAT would drop every NULL-bearing tuple from the count.
+    """
+  if client is None:  # pragma: no cover - GCP-only path
+    from google.cloud import bigquery
+
+    client = bigquery.Client()
+  pk = _validated(pk_cols)
+  tup = _validated(cols)
+  rest = tuple(c for c in tup if c not in pk)
+
+  def _key(columns: tuple[str, ...]) -> str:
+    return f"COUNT(DISTINCT TO_JSON_STRING(STRUCT({_cols(columns)})))"
+
+  sql = (f"SELECT COUNT(*) AS row_count, {_key(pk)} AS pk_values, "
+         f"{_key(tup)} AS tuples, {_key(pk + rest)} AS pairs "
+         f"FROM `{source_table}`")
+  (row,) = _rows(client.query(sql))
+  return {
+      "rows": int(row["row_count"] or 0),
+      "pk_values": int(row["pk_values"] or 0),
+      "tuples": int(row["tuples"] or 0),
+      "pairs": int(row["pairs"] or 0),
   }
 
 

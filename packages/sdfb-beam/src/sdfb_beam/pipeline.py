@@ -32,7 +32,7 @@ REFs:
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity;
 §6 Throughput; §7 Validation and the dead-letter queue; §8 Configuration
 (ADR 0019, 0022, 0023, 0024, 0028, 0030, 0031, 0032, 0034, 0036, 0037, 0038,
-0039, 0043, 0044, 0045).
+0039, 0043, 0044, 0045, 0046).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -235,6 +235,11 @@ class PipelineConfig:
   # None = this table generates from `--num_rows` batch requests as
   # before.
   fanout: dict | None = None
+  # ADR 0046 — the candidate keys the launcher adopted for this table
+  # (``{"cols", "pk"}`` dicts), threaded to `GenerationContext`. Non-empty
+  # also makes `_default_requests` stamp each batch's `row_offset`, the
+  # dense row ordinal the engines derive the tuple from.
+  candidate_keys: tuple = ()
   # ADR 0043: the launch's resolved generator config, copied into the
   # worker `GenerationContext`.
   generator_config: GeneratorConfig = field(
@@ -257,7 +262,14 @@ def _default_requests(p: beam.Pipeline, config: PipelineConfig,
   batch_id = 0
   while remaining > 0:
     n = min(config.batch_size, remaining)
-    request_specs.append({"batch_id": batch_id, "n": n})
+    spec = {"batch_id": batch_id, "n": n}
+    if config.candidate_keys:
+      # ADR 0046: the batch's first row ordinal — dense and disjoint
+      # across batches, so the engines can derive a candidate key's
+      # tuple from it without a barrier. Only stamped when one was
+      # adopted, so every other table's requests stay byte-identical.
+      spec["row_offset"] = config.num_rows - remaining
+    request_specs.append(spec)
     remaining -= n
     batch_id += 1
   return p | f"{label_prefix}CreateRequests" >> beam.Create(request_specs)
@@ -345,6 +357,7 @@ def build_pipeline(
       source_distinct=config.source_distinct,
       source_values_table=config.source_values_table,
       fanout=config.fanout,
+      candidate_keys=[dict(e) for e in config.candidate_keys],
       generator_config=config.generator_config,
       pool_store_key=config.pool_store_key,
   )
@@ -644,6 +657,13 @@ class FkEdgeSpec:
   overlap: tuple[str, ...] = ()
   candidate_cap: int = DEFAULT_CONFIG.relational.fk_candidate_cap
   nullable: bool = False
+  # ADR 0046 — fanout edges only: the PARENT columns holding the PK of
+  # the table the driving tuple comes from
+  # (`RelationshipRegistry.driving_key_anchor`). Their distinct count is
+  # how many driving keys the parent SHOULD offer; the
+  # `fk_parent_key_collapse` milestone compares it with the distinct
+  # tuples it did. Empty = compare with the parent's landed rows.
+  anchor_cols: tuple[str, ...] = ()
 
   @property
   def edge_id(self) -> str:
@@ -933,6 +953,7 @@ def _fanout_requests(
       edge.ref_cols)
   if not pk_in_tuple:
     keys = keys | f"{prefix}FanoutDistinct" >> beam.Distinct()
+  _log_parent_key_collapse(parent_valid, keys, edge, prefix, pk_in_tuple)
   # One CoGroupByKey per conditional edge, BEFORE the Reshuffle: the
   # candidates ride with their key into the batch, so generation stays
   # a pure per-request function (no second side input, no lookup).
@@ -953,6 +974,68 @@ def _fanout_requests(
           max_batch_size=edge.keys_per_batch))
   return batches | f"{prefix}FanoutRequests" >> beam.Map(
       _fanout_request_payload, mean_fanout=mean_fanout, paired=paired)
+
+
+# `ApproximateUnique` sample size for an anchor that is not the parent
+# PK: exact up to this many distinct values, ~2/sqrt(size) ≈ 0.8% above.
+_ANCHOR_SKETCH_SIZE = 65_536
+# Below this share of the expected driving keys the milestone is a
+# WARNING: 1% absorbs the sketch's error and anchor values whose driving
+# tuple is NULL, and still flags b1's 2.4M-of-10M collapse.
+_COLLAPSE_WARN_SHARE = 0.99
+
+
+def _log_parent_key_collapse(parent_valid, keys, edge: FkEdgeSpec, prefix: str,
+                             pk_in_tuple: bool) -> None:
+  """One ``fk_parent_key_collapse`` milestone per driving edge (ADR
+    0046): the distinct driving tuples the parent OFFERED its child
+    (``landed``) against how many it should have (``expected``) — the
+    distinct values of the anchor (the PK of the table the tuple comes
+    from, under the parent's names), or the parent's rows when the tuple
+    holds the parent's own PK. Two combiners and no shuffle beyond the
+    `FanoutDistinct` the request stream already pays for; the anchor
+    count is a KMV sketch past 65,536 values (`expected_method=`)."""
+  landed = keys | f"{prefix}CollapseLanded" >> beam.combiners.Count.Globally()
+  anchor = tuple(edge.anchor_cols)
+  if not anchor or pk_in_tuple or set(anchor) == set(edge.parent_pk):
+    expected = (
+        parent_valid
+        | f"{prefix}CollapseExpected" >> beam.combiners.Count.Globally())
+    method = "parent_rows"
+  else:
+    expected = (
+        parent_valid
+        | f"{prefix}CollapseAnchor" >>
+        beam.Map(lambda r, cols=anchor: repr(tuple(r.get(c) for c in cols)))
+        | f"{prefix}CollapseExpected" >>
+        beam.ApproximateUnique.Globally(size=_ANCHOR_SKETCH_SIZE))
+    method = "anchor_distinct"
+  _ = landed | f"{prefix}CollapseLog" >> beam.Map(
+      _emit_parent_key_collapse,
+      expected=beam.pvalue.AsSingleton(expected),
+      parent=edge.parent_table or edge.parent_landing,
+      cols=",".join(edge.ref_cols),
+      anchor=",".join(anchor),
+      child=prefix.rstrip("/"),
+      method=method)
+
+
+def _emit_parent_key_collapse(landed: int, expected: int, *, parent: str,
+                              cols: str, anchor: str, child: str,
+                              method: str) -> None:
+  share = landed / expected if expected else 1.0
+  log_milestone(
+      "fk_parent_key_collapse",
+      level=logging.WARNING if share < _COLLAPSE_WARN_SHARE else logging.INFO,
+      table=parent,
+      cols=cols,
+      child=child,
+      expected=int(expected),
+      landed=int(landed),
+      share=round(share, 4),
+      anchor=anchor,
+      expected_method=method,
+  )
 
 
 def _fanout_request_payload(ks: list, mean_fanout: float, *,
