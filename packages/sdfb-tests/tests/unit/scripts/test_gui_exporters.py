@@ -389,6 +389,7 @@ def test_dlq_rule_export_matches_the_code(knobs_module):
       "schema.batch": ("pandera", "PanderaValidateBatchDoFn"),
       "schema.column": ("pandera", "PanderaValidateBatchDoFn"),
       "schema.non_finite": ("load_safety", None),
+      "schema.landing_type": ("load_safety", "ValidateRecordDoFn"),
       "row.duplicate": ("uniqueness", "EnforceUniqueness"),
       "pk.duplicate": ("uniqueness", "EnforceUniqueness"),
       "identity.unique": ("uniqueness", "EnforceUniqueness"),

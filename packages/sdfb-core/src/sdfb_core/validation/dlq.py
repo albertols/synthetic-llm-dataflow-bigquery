@@ -51,6 +51,8 @@ _STEP_BY_ERROR_TYPE = {
 _STEP_BY_RULE_ID = {
     "fk.orphan": "EnforceFkIntegrityDoFn",
     "fk.unmatched": "GenerateRecordsDoFn",
+    # error_type="load_safety", from the record line.
+    "schema.landing_type": "ValidateRecordDoFn",
 }
 
 

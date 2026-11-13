@@ -4158,6 +4158,8 @@ def _prepare_table_spec(
       embedder_uri=args.embedder_uri,
       reference_table=args.reference_table,
       landing_table=args.landing_table,
+      # A value its landing type cannot hold goes to the DLQ, not the load.
+      landing_schema=landing_schema,
       thresholds=thresholds,
       # A fake-client (CPU smoke) run produces fake data, so failing the job
       # on the BLOCKER gate is meaningless — keep it informational (the

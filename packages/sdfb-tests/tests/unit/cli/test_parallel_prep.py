@@ -49,6 +49,7 @@ class _Reads:
     self.threads: dict[tuple[str, str], str] = {}
     self.fail_schema_of: str | None = None
     self.stop_preflight_of: str | None = None
+    self.landing_readable = False
     self._lock = threading.Lock()
     self._schema = load_ddl("customers")
     self._rows = load_reference("customers")
@@ -76,7 +77,13 @@ class _Reads:
     self.note("schema", landing_table)
     if landing_table.endswith(self.fail_schema_of or "\0"):
       raise RuntimeError(f"schema read failed for {landing_table}")
-    return self.schema_of(landing_table), None
+    landing = self.landing_of(landing_table) if self.landing_readable else None
+    return self.schema_of(landing_table), landing
+
+  def landing_of(self, table: str):
+    """`table`'s landing schema: the fixture, under the landing id."""
+    info = self._schema.table_info.model_copy(update={"table_id": table})
+    return self._schema.model_copy(update={"table_info": info})
 
   def reference(self, table, limit):
     del limit
@@ -189,6 +196,21 @@ def test_each_spec_is_built_from_its_own_tables_reads(reads, monkeypatch,
   for spec, table in zip(specs, _TABLES, strict=True):
     assert spec.reference_rows == reads.rows_of(table)
     assert spec.config.table_schema == reads.schema_of(table)
+
+
+@pytest.mark.parametrize("workers", [1, 4])
+def test_each_config_carries_its_own_landing_schema(reads, monkeypatch,
+                                                    workers):
+  """`ValidateRecordDoFn` checks a STRING source column against its
+  landing type (`schema.landing_type`), so the launcher must hand each
+  table's landing schema to its config; an unreadable landing table
+  hands None, and nothing is checked."""
+  assert [s.config.landing_schema for s in _run(monkeypatch, workers)
+         ] == [None] * len(_TABLES)
+  reads.landing_readable = True
+  specs = _run(monkeypatch, workers)
+  assert [s.config.landing_schema for s in specs
+         ] == [reads.landing_of(f"proj.land.{t}") for t in _TABLES]
 
 
 @pytest.mark.parametrize("workers", [1, 4])

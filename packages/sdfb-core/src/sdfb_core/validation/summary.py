@@ -52,6 +52,9 @@ BLOCKER_RULE_IDS = frozenset({
     "identity.unique",
     # A column that fails its contract dtype fails every row of its batch.
     "schema.column",
+    # A value the LANDING type cannot hold (a STRING source column landed
+    # as DATE, INT64, ...): a type failure, caught before the load.
+    "schema.landing_type",
     # An engine crash (incl. strict_freetext re-raise reaching the DoFn)
     # loses the whole batch — that must count toward the gate, not PASS
     # with fewer rows. The pipeline layer (`sdfb_beam.pipeline._dlq_rule_weight`)

@@ -142,6 +142,11 @@ class PipelineConfig:
   # §12 — Mode-A run-level gate + provenance for synthetic_data_quality.
   reference_table: str = ""
   landing_table: str = ""
+  # The LANDING table's schema (`resolve_schemas`), None when it is
+  # absent or unreachable. A STRING source column it types otherwise is
+  # checked against the landing type before the load
+  # (`schema.landing_type`, `ValidateRecordDoFn`).
+  landing_schema: TableSchema | None = None
   thresholds: Thresholds | None = None
   fail_on_blocker: bool = True
   # A whole-model batch records the BLOCKER verdict in validation_runs
@@ -409,8 +414,10 @@ def build_pipeline(
   record_validated = (
       generated_main
       | f"{label_prefix}ValidateRecord" >> beam.ParDo(
-          ValidateRecordDoFn(table_schema=config.table_schema)).with_outputs(
-              "invalid", main="main"))
+          ValidateRecordDoFn(
+              table_schema=config.table_schema,
+              landing_schema=config.landing_schema)).with_outputs(
+                  "invalid", main="main"))
 
   batched = (
       record_validated.main

@@ -526,7 +526,7 @@ flowchart LR
   classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
 
   G["🔀 generated rows"]:::beam
-  P1["🛡️ Pydantic<br/>per record"]:::beam
+  P1["🛡️ Pydantic per record<br/>+ landing types"]:::beam
   P2["🛡️ Pandera<br/>per frame"]:::beam
   P3["🛡️ uniqueness<br/>run-scoped"]:::beam
   FK["🛡️ FK integrity"]:::beam
@@ -545,12 +545,36 @@ flowchart LR
 ```
 
 The record model, the dataframe schema and the BigQuery schema are all derived
-from the table's DDL, so they cannot disagree. Findings carry a severity; the
+from the source table's DDL, so they cannot disagree. The landing table can:
+it is Terraformed on its own and may type a source STRING column as DATE,
+INT64 and the like. The record line reads such a column the way BigQuery's JSON
+load reads it, and a value the landing type cannot hold goes to the DLQ as
+`schema.landing_type`, a BLOCKER, instead of reaching the load, where one bad
+row fails the whole job:
+
+```mermaid
+flowchart LR
+  classDef beam  fill:#eb6834,color:#fff,stroke:#b44f26
+  classDef store fill:#2a78d6,color:#fff,stroke:#1d5599
+
+  V["COL_DATE_1 = '2847-46-81'<br/>source STRING, landing DATE"]:::beam
+  P1["🛡️ record model<br/>STRING: passes"]:::beam
+  LT["🛡️ landing type<br/>DATE: month 46"]:::beam
+  OK[("🗄️ landing table")]:::store
+  DLQ[("🗄️ dlq<br/>schema.landing_type")]:::store
+
+  V --> P1 --> LT
+  LT -->|"'2024-05-01'"| OK
+  LT -.->|"'2847-46-81'"| DLQ
+```
+
+Findings carry a severity; the
 observed blocker ratio is checked against a per-environment budget in
 [`config/thresholds.yml`](../config/thresholds.yml). A memorization gate fails a run
 on any identical real/synthetic row. Code:
 [`dofns/validate_record.py`](../packages/sdfb-beam/src/sdfb_beam/dofns/validate_record.py),
 [`dofns/pandera_batch.py`](../packages/sdfb-beam/src/sdfb_beam/dofns/pandera_batch.py),
+[`validation/landing_type.py`](../packages/sdfb-core/src/sdfb_core/validation/landing_type.py),
 [`validation/summary.py`](../packages/sdfb-core/src/sdfb_core/validation/summary.py).
 
 ### 7.1 The generation record
