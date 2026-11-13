@@ -30,6 +30,7 @@ from apache_beam.testing.util import assert_that
 from sdfb_beam.dofns.generate import GenerateRecordsDoFn
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationContext
+from sdfb_core.observability import parse_milestone
 from sdfb_tests.fakes import FakeModelClient
 
 _SCHEMA = TableSchema.model_validate({
@@ -102,6 +103,113 @@ def test_keys_request_yields_two_children_per_key(caplog):
         "failed", main="main")
     assert_that(out.main, _check)
   assert "name=batch_done" in caplog.text and "keys=3" in caplog.text
+
+
+def _milestones(caplog, name: str, count: int) -> list[dict]:
+  """The `name` milestones logged, parsed; exactly `count` of them."""
+  out = []
+  for record in caplog.records:
+    parsed = parse_milestone(record.getMessage())
+    if parsed and parsed["name"] == name:
+      out.append(parsed)
+  assert len(out) == count, out
+  return out
+
+
+class TestBatchAttemptFields:
+  """2026-11 b2 relational run: a re-executed Reshuffle -> BatchElements
+    regroups keys, so a retried batch can carry a NEW `batch_id` (it
+    hashes only `keys[0]`) and milestone counts could not tell a retry
+    from new work. Every key-batch milestone now carries `attempt=` (this
+    DoFn instance + bundle) and `keys_digest=` (the batch's key SET)."""
+
+  @staticmethod
+  def _dofn() -> GenerateRecordsDoFn:
+    dofn = GenerateRecordsDoFn(
+        engine_name="b1_rag",
+        model_client=FakeModelClient(reference_pool=_ROWS),
+        ctx=_ctx(),
+    )
+    dofn._engine = _RecordingEngine()
+    return dofn
+
+  def test_start_and_done_carry_attempt_and_keys_digest(self, caplog):
+    dofn = self._dofn()
+    request = {"batch_id": 3, "keys": [("K1",), ("K2",)]}
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+      list(dofn.process(request))
+    start = _milestones(caplog, "batch_start", 1)[0]
+    done = _milestones(caplog, "batch_done", 1)[0]
+    assert start["attempt"] and start["attempt"] == done["attempt"]
+    assert len(start["keys_digest"]) == 16
+    assert start["keys_digest"] == done["keys_digest"]
+    assert start["batch_id"] == "3"  # unchanged
+
+  def test_keys_digest_is_order_free_and_container_free(self, caplog):
+    """A regrouped retry of the same keys may arrive in another order
+        (and a coder may hand back lists for tuples): same set, same
+        digest, whatever the batch_id."""
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+      list(self._dofn().process({"batch_id": 1, "keys": [("A",), ("B",)]}))
+      list(self._dofn().process({"batch_id": 2, "keys": [["B"], ["A"]]}))
+      list(self._dofn().process({"batch_id": 1, "keys": [("A",), ("C",)]}))
+    digests = [m["keys_digest"] for m in _milestones(caplog, "batch_start", 3)]
+    assert digests[0] == digests[1]
+    assert digests[0] != digests[2]
+
+  def test_two_instances_log_different_attempts(self, caplog):
+    request = {"batch_id": 4, "keys": [("K1",)]}
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+      list(self._dofn().process(request))
+      list(self._dofn().process(request))
+    attempts = [m["attempt"] for m in _milestones(caplog, "batch_start", 2)]
+    assert len(set(attempts)) == 2
+
+  def test_digest_covers_the_request_keys_before_the_null_policy_drop(
+      self, caplog):
+    """The digest names the REQUEST (what a retry replays); `keys=` keeps
+        reporting the surviving keys."""
+    dofn = GenerateRecordsDoFn(
+        engine_name="b1_rag",
+        model_client=FakeModelClient(reference_pool=_ROWS),
+        ctx=_ctx_with_conditional(nullable=False),
+    )
+    dofn._engine = _RecordingEngine()
+    dofn._keys_unmatched = _CounterSpy()
+    keys = [("K1",), ("K2",)]
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+      list(
+          dofn.process({
+              "batch_id": 6,
+              "keys": keys,
+              "matches": {
+                  "(T,R)->right": [[("r1",)], []]
+              },
+          }))
+      list(self._dofn().process({"batch_id": 6, "keys": keys}))
+    starts = _milestones(caplog, "batch_start", 2)
+    dropped, plain = starts[0], starts[1]
+    assert dropped["keys"] == "1" and dropped["keys_dropped"] == "1"
+    assert dropped["keys_digest"] == plain["keys_digest"]
+    # `batch_unmatched keys_dropped=` is summed by the FK/PK validator,
+    # so it carries the same attempt identity as its batch.
+    unmatched = _milestones(caplog, "batch_unmatched", 1)[0]
+    assert unmatched["attempt"] == dropped["attempt"]
+    assert unmatched["keys_digest"] == dropped["keys_digest"]
+
+  def test_an_n_request_carries_attempt_but_no_digest(self, caplog):
+
+    class _Engine:
+
+      def generate_batch(self, n, cfg):
+        return iter(())
+
+    dofn = self._dofn()
+    dofn._engine = _Engine()
+    with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+      list(dofn.process({"batch_id": 8, "n": 3}))
+    start = _milestones(caplog, "batch_start", 1)[0]
+    assert start["attempt"] and "keys_digest" not in start
 
 
 class _RaisingEngine:

@@ -167,6 +167,196 @@ def test_worker_log_milestones_attributes_pool_ladder_per_column(probe_module):
   assert ladder["REF_CODE"]["freetext_pool_built"] == "2026-07-06T00:02:00Z"
 
 
+# --------------------------------------------------------------------------
+# Step 2b: batch ledger — re-executed batches counted once
+# --------------------------------------------------------------------------
+def _batch_entry(name: str, ts: str, **fields) -> dict:
+  from sdfb_core.observability import format_milestone
+
+  return {"textPayload": format_milestone(name, **fields), "timestamp": ts}
+
+
+def test_batch_ledger_dedupes_a_re_executed_batch(probe_module):
+  """2026-11 b2 relational run: control-plane 503s re-executed the fused
+    Generate stage, so TABLE_E logged 13.49M keys against a 10M-key
+    parent. A batch seen under two attempt tokens is ONE batch: counted
+    once, flagged re-executed; an attempt with no `batch_done` is
+    unfinished. The retry here carries a NEW batch_id (the regroup moved
+    `keys[0]`) but the same key set — `keys_digest` still matches it."""
+  t = "TABLE_E"
+  entries = [
+      _batch_entry(
+          "batch_start",
+          "T1",
+          table=t,
+          batch_id=1,
+          keys=10,
+          attempt="aaa.1",
+          keys_digest="d1"),
+      _batch_entry(
+          "batch_done",
+          "T2",
+          table=t,
+          batch_id=1,
+          keys=10,
+          rows=40,
+          seconds=1.0,
+          attempt="aaa.1",
+          keys_digest="d1"),
+      _batch_entry(
+          "batch_start",
+          "T3",
+          table=t,
+          batch_id=2,
+          keys=10,
+          attempt="aaa.1",
+          keys_digest="d2"),
+      _batch_entry(
+          "batch_done",
+          "T4",
+          table=t,
+          batch_id=2,
+          keys=10,
+          rows=30,
+          seconds=1.0,
+          attempt="aaa.1",
+          keys_digest="d2"),
+      # Re-execution of d1 under a new batch_id, two hours later.
+      _batch_entry(
+          "batch_start",
+          "T5",
+          table=t,
+          batch_id=7,
+          keys=10,
+          attempt="bbb.1",
+          keys_digest="d1"),
+      _batch_entry(
+          "batch_done",
+          "T6",
+          table=t,
+          batch_id=7,
+          keys=10,
+          rows=40,
+          seconds=1.0,
+          attempt="bbb.1",
+          keys_digest="d1"),
+      # A third attempt of d2 that never finished.
+      _batch_entry(
+          "batch_start",
+          "T7",
+          table=t,
+          batch_id=2,
+          keys=10,
+          attempt="ccc.3",
+          keys_digest="d2"),
+      _batch_entry(
+          "batch_start",
+          "T8",
+          table="TABLE_D",
+          batch_id=5,
+          n=4,
+          attempt="ddd.1"),
+      _batch_entry(
+          "batch_done",
+          "T9",
+          table="TABLE_D",
+          batch_id=5,
+          rows=4,
+          seconds=0.1,
+          attempt="ddd.1"),
+  ]
+  result = probe_module._worker_log_milestones(
+      _FakeLogSession(entries), "proj", "job-1", [], {})
+  e = result["batch_ledger"]["TABLE_E"]
+  assert e["batches"] == 2
+  assert e["reexecuted_batches"] == 2
+  assert e["unfinished_attempts"] == 1
+  assert e["keys_started_raw"] == 40 and e["keys_done_raw"] == 30
+  assert e["rows_raw"] == 110
+  assert e["keys_once"] == 20 and e["rows_once"] == 70
+  assert e["dedupe_by"] == "keys_digest"
+  d = result["batch_ledger"]["TABLE_D"]
+  assert d["batches"] == 1 and d["reexecuted_batches"] == 0
+  assert d["rows_raw"] == d["rows_once"] == 4
+  assert d["dedupe_by"] == "batch_id"
+  assert result["truncated"] is False
+
+
+def test_batch_ledger_reads_pre_attempt_logs_by_batch_id(probe_module):
+  """Logs from an image before `attempt=` / `keys_digest=`: a batch_id
+    started twice is a re-execution, a start with no done unfinished,
+    and the counts dedupe on batch_id."""
+  entries = [
+      _batch_entry("batch_start", "T1", batch_id=1, keys=5),
+      _batch_entry(
+          "batch_done", "T2", batch_id=1, keys=5, rows=10, seconds=1.0),
+      _batch_entry("batch_start", "T3", batch_id=1, keys=5),
+      _batch_entry(
+          "batch_done", "T4", batch_id=1, keys=5, rows=10, seconds=1.0),
+      _batch_entry("batch_start", "T5", batch_id=2, keys=5),
+  ]
+  result = probe_module._worker_log_milestones(
+      _FakeLogSession(entries), "proj", "job-1", [], {})
+  ledger = result["batch_ledger"]["(untagged)"]
+  assert ledger["batches"] == 2
+  assert ledger["reexecuted_batches"] == 1
+  assert ledger["unfinished_attempts"] == 1
+  assert ledger["keys_done_raw"] == 10 and ledger["keys_once"] == 5
+  assert ledger["rows_raw"] == 20 and ledger["rows_once"] == 10
+  assert ledger["dedupe_by"] == "batch_id"
+
+
+def test_batch_ledger_reads_the_dofn_s_real_milestones(probe_module, caplog):
+  """Two sides of one contract: the ledger parses what
+    `GenerateRecordsDoFn` actually logs."""
+  import logging
+
+  from sdfb_beam.dofns.generate import GenerateRecordsDoFn
+  from sdfb_beam.handlers.fake_client import FakeModelClient
+
+  class _Engine:
+
+    def generate_for_keys(self, keys, cfg):
+      return iter(())
+
+  request = {"batch_id": 3, "keys": [("K1",), ("K2",)]}
+  with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+    for _ in range(2):  # the same batch on two DoFn instances
+      dofn = GenerateRecordsDoFn("b1_rag",
+                                 FakeModelClient(reference_pool=[{
+                                     "PID": "x"
+                                 }]), _ledger_ctx())
+      dofn._engine = _Engine()
+      list(dofn.process(request))
+  entries = [{
+      "textPayload": r.getMessage(),
+      "timestamp": f"T{i}"
+  } for i, r in enumerate(caplog.records)]
+  result = probe_module._worker_log_milestones(
+      _FakeLogSession(entries), "proj", "job-1", [], {})
+  (ledger,) = result["batch_ledger"].values()
+  assert ledger["batches"] == 1 and ledger["reexecuted_batches"] == 1
+  assert ledger["keys_done_raw"] == 4 and ledger["keys_once"] == 2
+  assert ledger["unfinished_attempts"] == 0
+
+
+def _ledger_ctx():
+  from sdfb_core.contracts import TableSchema
+  from sdfb_core.engines import GenerationContext
+
+  schema = TableSchema.model_validate({
+      "table_info": {
+          "table_id": "p.src.t"
+      },
+      "schema": [{
+          "name": "PID",
+          "type": "STRING",
+          "mode": "REQUIRED"
+      }],
+  })
+  return GenerationContext(table_schema=schema, pipeline_run_id="r")
+
+
 def test_job_params_sanitizes_infra_identifiers(probe_module):
   """2026-08-21 four-run cycle: the Dataflow environment dump leaked
     staging-bucket names, the KMS key ring, subnetwork projects, network

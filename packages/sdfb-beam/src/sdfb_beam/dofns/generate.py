@@ -38,9 +38,11 @@ Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §6 Throughput
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import time
+import uuid
 from contextlib import nullcontext
 
 import apache_beam as beam
@@ -167,6 +169,19 @@ def _release_shared_engine(key: tuple, engine):
 _DLQ_KEY_SAMPLE = 10
 
 
+def keys_digest(keys) -> str:
+  """A stable fingerprint of a key batch's key SET: 16 hex chars of
+    blake2b over the sorted key reprs.
+
+    ``batch_id`` hashes ``keys[0]`` only, and a re-executed Reshuffle ->
+    BatchElements may regroup keys, so a retried batch can carry a new
+    ``batch_id``. The digest is order-free and container-free (a coder
+    may hand a tuple key back as a list), so a retry of the same keys is
+    recognisable whatever its id."""
+  reprs = sorted(repr(tuple(k)) for k in keys)
+  return hashlib.blake2b("\n".join(reprs).encode(), digest_size=8).hexdigest()
+
+
 def _failed_request(request: dict, keys, n: int) -> dict:
   """The `raw_request` an ``engine_failure`` envelope carries.
 
@@ -217,6 +232,13 @@ class GenerateRecordsDoFn(beam.DoFn):
     self.chunk_rows = chunk_rows
     self._engine = None  # built in setup() (or first process())
     self._engine_key_held: tuple = ()
+    # Attempt token on every batch milestone: Beam has no portable
+    # attempt id, and a re-executed bundle runs on a fresh (unpickled,
+    # set-up) DoFn — or on a cached one, hence the bundle counter. Minted
+    # in setup(), never here: __init__ state rides the pickle, so every
+    # worker would share it.
+    self._attempt_token: str | None = None
+    self._bundle_seq = 0
     # Identity columns this DoFn synthesizes — resolved once the
     # engine exists, since a constraint-routed column owns itself.
     self._identity_columns: list[str] = list(ctx.identity_columns or ())
@@ -236,8 +258,20 @@ class GenerateRecordsDoFn(beam.DoFn):
     return milestone_scope(prefix) if prefix else nullcontext()
 
   def setup(self):
+    self._attempt_token = uuid.uuid4().hex[:12]
     with self._scope():
       self._setup_with_scope()
+
+  def start_bundle(self):
+    self._bundle_seq += 1
+
+  def _attempt(self) -> str:
+    """``<instance token>.<bundle>``: two DoFn instances never share the
+        prefix, and a cached instance re-running a lease-lost work item
+        moves the bundle number."""
+    if self._attempt_token is None:  # process() without setup() (tests)
+      self._attempt_token = uuid.uuid4().hex[:12]
+    return f"{self._attempt_token}.{self._bundle_seq}"
 
   def _setup_with_scope(self):
     t0 = time.monotonic()
@@ -431,7 +465,12 @@ class GenerateRecordsDoFn(beam.DoFn):
     with self._scope():
       yield from self._process_with_scope(request, fk_side)
 
-  def _filter_unmatched_keys(self, keys, request, batch_id: int, n: int):
+  def _filter_unmatched_keys(self,
+                             keys,
+                             request,
+                             batch_id: int,
+                             n: int,
+                             attempt_fields: dict | None = None):
     """NULL policy (ruling B, design 2026-09-11 §4 / ADR 0037): a key
         with no candidate on a NON-nullable `ctx.fanout["conditional"]`
         edge never reaches the engine — a nullable edge's NULL-fill is
@@ -495,7 +534,11 @@ class GenerateRecordsDoFn(beam.DoFn):
     }
     self._keys_unmatched.inc(len(offenders))
     log_milestone(
-        "batch_unmatched", batch_id=batch_id, keys_dropped=len(offenders))
+        "batch_unmatched",
+        batch_id=batch_id,
+        keys_dropped=len(offenders),
+        **(attempt_fields or {}),
+    )
     return (
         filtered_keys,
         filtered_matches,
@@ -543,11 +586,16 @@ class GenerateRecordsDoFn(beam.DoFn):
     keys = request.get("keys")
     n = len(keys) if keys is not None else int(request["n"])
     batch_id = int(request["batch_id"])
+    # Who ran this batch, and which keys it was (before the NULL-policy
+    # drop below — the digest names what a retry would replay).
+    attempt_fields = {"attempt": self._attempt()}
+    if keys is not None:
+      attempt_fields["keys_digest"] = keys_digest(keys)
     matches = None
     keys_dropped = 0
     if keys is not None and "matches" in request:
       kept, matches, envelopes, expected_rows = self._filter_unmatched_keys(
-          keys, request, batch_id, n)
+          keys, request, batch_id, n, attempt_fields)
       keys_dropped = len(keys) - len(kept)
       keys = kept
       if keys_dropped:
@@ -580,9 +628,15 @@ class GenerateRecordsDoFn(beam.DoFn):
     )
     dropped_field = {"keys_dropped": keys_dropped} if keys_dropped else {}
     if keys is not None:
-      log_milestone("batch_start", batch_id=batch_id, keys=n, **dropped_field)
+      log_milestone(
+          "batch_start",
+          batch_id=batch_id,
+          keys=n,
+          **dropped_field,
+          **attempt_fields,
+      )
     else:
-      log_milestone("batch_start", batch_id=batch_id, n=n)
+      log_milestone("batch_start", batch_id=batch_id, n=n, **attempt_fields)
     t0 = time.monotonic()
     count = 0
     try:
@@ -613,6 +667,7 @@ class GenerateRecordsDoFn(beam.DoFn):
             rows=count,
             seconds=round(time.monotonic() - t0, 1),
             **dropped_field,
+            **attempt_fields,
         )
       else:
         log_milestone(
@@ -620,6 +675,7 @@ class GenerateRecordsDoFn(beam.DoFn):
             batch_id=batch_id,
             rows=count,
             seconds=round(time.monotonic() - t0, 1),
+            **attempt_fields,
         )
       self._batch_seconds.update(int((time.monotonic() - t0) * 1000))
     except Exception as e:  # pylint: disable=broad-exception-caught

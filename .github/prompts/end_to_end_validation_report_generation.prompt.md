@@ -253,6 +253,15 @@ It uses ADC to compute, generically (schema introspected from
   on the 2026-08-29 R6 cold run it was `_fetch_identifier_domains`
   paging 944k source values, ADR 0034) — with chronological durations between them,
   plus the worker image package versions (vllm/torch/transformers/faiss/sdgx).
+- **Batch ledger** — `engine_milestones.batch_ledger` per table: `batches`,
+  `reexecuted_batches` (a `keys_digest` or `batch_id` seen under more than
+  one `attempt=`), `unfinished_attempts` (a `batch_start` with no
+  `batch_done` for its attempt), and `keys_once`/`rows_once` next to the raw
+  sums. Dataflow re-executes a fused stage after a lease loss, so the raw
+  sums can exceed the parent's key count while the landed counts stay
+  exact; quote the `*_once` figures and report re-execution as an
+  infrastructure finding, never as over-generation. `truncated: true` means
+  the probe stopped paging and every ledger figure is partial.
 
 ### LLM-lifecycle forensics (mandatory)
 
