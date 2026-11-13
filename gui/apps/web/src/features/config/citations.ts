@@ -9,22 +9,22 @@ export type Citation = { source: string; excerpt: string };
 const PIPELINE = "packages/sdfb-beam/src/sdfb_beam/pipeline.py";
 
 export const CITES = {
-  fkIntegrityLine: { source: `${PIPELINE}:403`, excerpt: "# Line 4 of defense (ADR 0031)" },
-  panderaBatch: { source: `${PIPELINE}:423`, excerpt: "beam.BatchElements(" },
-  uniquenessLine: { source: `${PIPELINE}:431`, excerpt: "# Line 3 of defense" },
-  gateAfterLoad: { source: `${PIPELINE}:537`, excerpt: "# Order the gate AFTER the FILE_LOADS load jobs commit" },
+  fkIntegrityLine: { source: `${PIPELINE}:421`, excerpt: "# Line 4 of defense (ADR 0031)" },
+  panderaBatch: { source: `${PIPELINE}:443`, excerpt: "beam.BatchElements(" },
+  uniquenessLine: { source: `${PIPELINE}:451`, excerpt: "# Line 3 of defense" },
+  gateAfterLoad: { source: `${PIPELINE}:557`, excerpt: "# Order the gate AFTER the FILE_LOADS load jobs commit" },
   loadSafety: {
-    source: "packages/sdfb-beam/src/sdfb_beam/dofns/validate_record.py:50",
+    source: "packages/sdfb-beam/src/sdfb_beam/dofns/validate_record.py:66",
     excerpt: "# Load-safety bound",
   },
   article1LineThree: {
     source: "docs/articles/01-building-banking-synthetic-data-intro.md:154",
     excerpt: "BigQuery itself refuses at load time",
   },
-  skillLineThree: { source: ".claude/skills/validation-mode-a.md:28", excerpt: "## Line 3 — BigQueryIO `FailedRows`" },
+  skillLineThree: { source: ".claude/skills/validation-mode-a.md:37", excerpt: "## Line 3 — BigQueryIO `FailedRows`" },
   readmeUniqueness: { source: "README.md:204", excerpt: "3. **Uniqueness**" },
   gateRatio: {
-    source: "packages/sdfb-core/src/sdfb_core/validation/summary.py:203",
+    source: "packages/sdfb-core/src/sdfb_core/validation/summary.py:206",
     excerpt: "observed = (blocker_count / total)",
   },
   adr0033D2: {
@@ -32,7 +32,7 @@ export const CITES = {
     excerpt: "**D2 — The source filter's cardinality sizes the pool target",
   },
   poolTarget: {
-    source: "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py:1552",
+    source: "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py:1563",
     excerpt: "def _pool_target(",
   },
   article2Honest: {

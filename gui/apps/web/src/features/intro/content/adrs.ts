@@ -237,6 +237,12 @@ export const ADRS: readonly AdrRef[] = [
     title: "Whole-model launches",
     file: "0045-whole-model-launches.md",
   },
+  {
+    number: "0046",
+    section: 4,
+    title: "A driving tuple is a candidate key of its owner",
+    file: "0046-driving-key-candidate-keys.md",
+  },
 ];
 
 const BY_NUMBER = new Map(ADRS.map((adr) => [adr.number, adr]));

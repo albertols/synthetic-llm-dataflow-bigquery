@@ -1447,7 +1447,7 @@ export const knobs: KnobsFile = {
         "throughput",
         "fixed"
       ],
-      "help": "auto (default) = a fleet sized by --initial_workers stays that size (autoscaling_algorithm=NONE), otherwise Dataflow's THROUGHPUT_BASED. fixed = same pin, and --initial_workers is required. throughput = always let Dataflow scale (the 2026-09-07/08 multi runs lost ~4 min per job to mid-job scale-downs between the parent and child stages, ADR 0034 D9).",
+      "help": "auto (default) = a fleet sized by --initial_workers stays that size (THROUGHPUT_BASED with min = max = that size, so it also drains to 0 at the end), otherwise Dataflow's THROUGHPUT_BASED. fixed = same pin, and --initial_workers is required. throughput = always let Dataflow scale (the 2026-09-07/08 multi runs lost ~4 min per job to mid-job scale-downs between the parent and child stages, ADR 0034 D9).",
       "source": "packages/sdfb-core/src/sdfb_core/config/model.py:416",
       "source_token": "autoscaling",
       "related_adrs": [
@@ -2312,6 +2312,7 @@ export const knobs: KnobsFile = {
         "pk.duplicate",
         "row.duplicate",
         "schema.column",
+        "schema.landing_type",
         "schema.types"
       ],
       "unit": null,
@@ -2335,6 +2336,7 @@ export const knobs: KnobsFile = {
         "pk.duplicate",
         "row.duplicate",
         "schema.column",
+        "schema.landing_type",
         "schema.types"
       ],
       "unit": null,
@@ -2699,12 +2701,12 @@ export const knobs: KnobsFile = {
           "excerpt": "in-range and novel-by-interpolation; `similarity` is unused here."
         },
         {
-          "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py:888",
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b1_rag/engine.py:899",
           "role": "code",
           "excerpt": "del similarity  # Unused: pool, routed and expansion draws ignore it."
         },
         {
-          "source": "packages/sdfb-core/src/sdfb_core/engines/b2_library/engine.py:409",
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b2_library/engine.py:423",
           "role": "code",
           "excerpt": "return round(2.0 * (1.0 - s), 4)"
         },
@@ -2740,7 +2742,7 @@ export const knobs: KnobsFile = {
           "excerpt": "return tuple(ordered[round(i * last / 10)] for i in range(11))"
         },
         {
-          "source": "packages/sdfb-core/src/sdfb_core/engines/b2_library/backends.py:164",
+          "source": "packages/sdfb-core/src/sdfb_core/engines/b2_library/backends.py:171",
           "role": "code",
           "excerpt": "draws = np.interp(rng.random(n), grid, np.asarray(p.quantiles))"
         }
@@ -3878,7 +3880,7 @@ export const knobs: KnobsFile = {
     }
   ],
   "exported_from": {
-    "commit": "7e7e78fa315c73d15a0a23e2ed08ed0fe54d3928",
+    "commit": "ebd3eb9aa02f0edbca906ba232f2d26bb450b389",
     "dirty": []
   }
 };
