@@ -15,7 +15,7 @@
 measures it 1:1 with the owner's PK, and says so either way (ADR 0046).
 
 Design: docs/DESIGN.md §4 Relational generation
-(ADR 0038, 0046).
+(ADR 0046).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

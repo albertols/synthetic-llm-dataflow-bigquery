@@ -19,7 +19,7 @@ BOTH engines; without it the per-column triple collides and TABLE_D loses
 parent keys — the corp b1-vs-b2 gap in miniature.
 
 Design: docs/DESIGN.md §4 Relational generation
-(ADR 0036, 0046).
+(ADR 0046).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

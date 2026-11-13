@@ -20,7 +20,7 @@ column the triple collides; with the launcher's ``candidate_keys`` entry
 and the root request's ``row_offset`` it cannot.
 
 Design: docs/DESIGN.md §4 Relational generation
-(ADR 0036, 0046).
+(ADR 0046).
 """
 
 from __future__ import annotations

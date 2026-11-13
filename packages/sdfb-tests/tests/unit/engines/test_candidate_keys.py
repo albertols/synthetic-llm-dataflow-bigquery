@@ -24,7 +24,7 @@ by the run, shaped by the reference sample, and never landing a source
 value.
 
 Design: docs/DESIGN.md §4 Relational generation
-(ADR 0036, 0046).
+(ADR 0046).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.

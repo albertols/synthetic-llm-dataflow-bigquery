@@ -16,7 +16,7 @@ no YAML key, the ``ref_cols`` of every driving edge traced back through
 widened edges to the table that generates them.
 
 Design: docs/DESIGN.md §4 Relational generation
-(ADR 0036, 0046).
+(ADR 0046).
 """
 
 from __future__ import annotations

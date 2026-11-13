@@ -46,8 +46,8 @@ This module turns that entry into a generator that cannot collide:
 
 Pure Python; no Beam, no GCP, no NumPy.
 
-Design: docs/DESIGN.md §4 Relational generation
-(ADR 0036, 0046).
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity
+(ADR 0023, 0036, 0046).
 """
 
 from __future__ import annotations
