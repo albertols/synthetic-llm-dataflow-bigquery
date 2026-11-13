@@ -17,7 +17,7 @@ Implements the shared FASTGEN spine (ADR 0013, design §2/§4):
 
   setup(model_client, ctx):       # once per Beam worker, idempotent
       profile reference_rows → per-column ColumnProfile
-      fit the statistical backend (sdgx CTGAN, NumPy-empirical fallback) ONCE
+      fit the statistical backend ONCE (NumPy-empirical; sdgx never fits today)
   generate_batch(n, cfg):         # many times; cheap
       vectorized-sample n rows from the fitted backend (seeded)
       enforce fidelity (constant/range/enum clamps, LOCAL to b2_library)
@@ -80,11 +80,12 @@ class B2LibraryEngine(GenerationEngine):
   """Library-wrapper engine: fit-once statistical model + free-text LLM hook.
 
     The backend is chosen at ``setup`` time. ``use_sdgx`` (default ``True``)
-    attempts the production ``sdgx`` CTGAN fit and transparently falls back
-    to the pure-NumPy :class:`EmpiricalBackend` when ``sdgx`` is not
-    installed (the laptop / offline case). Set ``use_sdgx=False`` to force
-    the deterministic NumPy backend — this is what the ABC contract tests
-    use so reproducibility is bit-for-bit.
+    picks :class:`SdgxBackend`, which fits ``sdgx`` CTGAN only when its
+    compatibility probe passes and otherwise samples with the pure-NumPy
+    :class:`EmpiricalBackend` — every run so far: the locked sdgx 0.2.0
+    has no ``DataFrameConnector`` (b2 README). Set ``use_sdgx=False`` to
+    force the deterministic NumPy backend — this is what the ABC contract
+    tests use so reproducibility is bit-for-bit.
     """
 
   name = "b2_library"

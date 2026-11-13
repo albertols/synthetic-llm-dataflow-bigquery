@@ -104,8 +104,12 @@ flowchart TB
   `rag_row_docs_limit` (default 1,024, the former constant
   `MAX_ROW_DOC_ROWS`); the writer and the reader slice the same prefix with
   it (diagram below).
-- **`b2_library`** wraps an open-source tabular synthesizer fitted once per
-  worker; the model only fills free-text columns.
+- **`b2_library`** fits a tabular backend once per worker; the model only
+  fills free-text columns. It is built to wrap the open-source `sdgx`
+  (CTGAN), but the locked sdgx 0.2.0 lacks the in-memory connector it needs
+  and the releases that have it pin numpy<2, so every b2 table is sampled
+  by the NumPy empirical backend; a once-per-process probe says so in the
+  worker log (`b2_backend_fallback reason=sdgx_incompatible`).
 - Each run logs one `generation_plan` line naming the strategy chosen for every
   column, so the synthesis is auditable from worker logs.
 

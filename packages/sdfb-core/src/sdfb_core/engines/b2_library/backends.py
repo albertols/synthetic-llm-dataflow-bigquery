@@ -25,9 +25,14 @@ Two backends sit behind one interface:
 * :class:`SdgxBackend` — wraps ``sdgx`` (hitsz-ids, Apache-2.0, CTGAN
   family). The ``sdgx`` import is **deferred** to ``fit()`` because it is
   heavy (pulls torch); importing this module must succeed with only
-  ``sdfb-core``'s base deps. Used in production on the M4 / GPU workers.
-  Falls back to :class:`EmpiricalBackend` if ``sdgx`` is not importable so
-  the engine never hard-fails on the laptop.
+  ``sdfb-core``'s base deps. **It has never generated in production**:
+  the locked sdgx 0.2.0 has no ``DataFrameConnector`` and the releases
+  that have it (0.2.1-0.2.4) pin ``numpy<2``, which cannot install beside
+  the workspace's Python 3.14 / numpy 2. A cheap probe
+  (:func:`sdgx_incompatibility`) detects that once per process and the
+  backend delegates to :class:`EmpiricalBackend`, with ONE
+  ``b2_backend_fallback reason=sdgx_incompatible`` milestone per process
+  instead of a failed import per table.
 
 Both fitted backends pickle across the Beam worker boundary: the engine is
 built once in ``DoFn.setup()`` and must survive serialization. NumPy state
@@ -47,6 +52,8 @@ Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity
 from __future__ import annotations
 
 import logging
+import threading
+from importlib.util import find_spec
 from typing import TYPE_CHECKING, Protocol, cast
 
 import numpy as np
@@ -282,6 +289,64 @@ def _sample_categorical(
   return [cats[int(i)] for i in picks]
 
 
+# The connector `_fit_sdgx` needs: absent from the locked sdgx 0.2.0.
+_SDGX_CONNECTOR = "sdgx.data_connectors.dataframe_connector"
+# The probe's verdict, computed once per process ({"reason": str | None}).
+_SDGX_PROBE: dict[str, str | None] = {}
+_SDGX_PROBE_LOCK = threading.Lock()
+
+
+def _sdgx_version() -> str:
+  from importlib.metadata import PackageNotFoundError, version
+
+  try:
+    return version("sdgx")
+  except PackageNotFoundError:
+    return "unknown"
+
+
+def _probe_sdgx() -> tuple[str | None, str]:
+  """(reason, detail): reason None when `_fit_sdgx` can import what it
+    needs. ``find_spec`` on the dotted name imports ``sdgx`` and
+    ``sdgx.data_connectors`` (pandas + pluggy in 0.2.0, no torch) but not
+    the connector."""
+  try:
+    if find_spec("sdgx") is None:
+      return "sdgx_not_installed", "no module named 'sdgx'"
+    if find_spec(_SDGX_CONNECTOR) is None:
+      return ("sdgx_incompatible",
+              f"sdgx {_sdgx_version()} has no {_SDGX_CONNECTOR}")
+  # The probe must never fail the engine: any error importing the parent
+  # packages is an incompatibility, like the import failures fit() caught.
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    return "sdgx_incompatible", f"{type(e).__name__}: {e}"[:160]
+  return None, ""
+
+
+def sdgx_incompatibility() -> str | None:
+  """Why ``sdgx`` cannot be fitted in this process, or None when it can.
+
+    Probed once per process; the first caller logs the one
+    ``b2_backend_fallback`` milestone, so a job with many b2 tables says
+    it once instead of failing the same import per table (2026-11-13:
+    every b2 table logged ``No module named
+    sdgx.data_connectors.dataframe_connector``)."""
+  with _SDGX_PROBE_LOCK:
+    if "reason" not in _SDGX_PROBE:
+      reason, detail = _probe_sdgx()
+      _SDGX_PROBE["reason"] = reason
+      if reason is not None:
+        log_milestone(
+            "b2_backend_fallback",
+            level=logging.WARNING,
+            backend="empirical",
+            reason=reason,
+            scope="process",
+            detail=detail,
+        )
+    return _SDGX_PROBE["reason"]
+
+
 class SdgxBackend:
   """Production backend wrapping ``sdgx`` CTGAN. Deferred heavy import.
 
@@ -291,10 +356,12 @@ class SdgxBackend:
     through the engine's fidelity clamps afterward, and free-text columns
     are dropped here (the LLM hook owns them).
 
-    On any failure to import or fit ``sdgx`` (e.g. the laptop, where the
-    ``[library]`` extra is not installed), this backend transparently
-    delegates to :class:`EmpiricalBackend` so the engine still runs. The
-    fact of the fallback is recorded on ``self.used_fallback``.
+    When :func:`sdgx_incompatibility` says ``sdgx`` cannot be fitted here
+    (not installed, or the locked 0.2.0 with no ``DataFrameConnector`` —
+    every production run so far), the fit is not attempted and this
+    backend delegates to :class:`EmpiricalBackend`. A fit that fails on a
+    compatible ``sdgx`` falls back the same way, with a milestone per
+    table. Either way ``self.used_fallback`` records it.
     """
 
   def __init__(self, *, epochs: int = 100) -> None:
@@ -311,13 +378,15 @@ class SdgxBackend:
     self._free_text_cols = {
         name for name, p in profiles.items() if p.kind is ColumnKind.FREE_TEXT
     }
+    if sdgx_incompatibility() is not None:
+      # Said once per process by the probe; per table, the engine's
+      # generation_plan reports backend=sdgx_fallback_empirical.
+      self._fall_back(reference_rows, profiles)
+      return
     try:
       self._fit_sdgx(reference_rows)
     except Exception as e:  # pylint: disable=broad-exception-caught
-      self._synthesizer = None
-      self._fallback = EmpiricalBackend()
-      self._fallback.fit(reference_rows, profiles)
-      self.used_fallback = True
+      self._fall_back(reference_rows, profiles)
       # Loud, like every other fallback: the 2026-07-22 b2 E2E run's
       # worker logs could not tell which backend actually generated
       # (a 3 s "fit" is the fallback, but nothing said so).
@@ -325,6 +394,7 @@ class SdgxBackend:
           "b2_backend_fallback",
           level=logging.WARNING,
           backend="empirical",
+          reason="sdgx_fit_failed",
           error=type(e).__name__,
           # The message names WHAT failed (e.g. the missing module) —
           # the 2026-07-22 re-run logged only the type, leaving the
@@ -333,6 +403,13 @@ class SdgxBackend:
       )
     else:
       log_milestone("b2_backend_fitted", backend="sdgx")
+
+  def _fall_back(self, reference_rows: list[dict],
+                 profiles: dict[str, ColumnProfile]) -> None:
+    self._synthesizer = None
+    self._fallback = EmpiricalBackend()
+    self._fallback.fit(reference_rows, profiles)
+    self.used_fallback = True
 
   def _fit_sdgx(self, reference_rows: list[dict]) -> None:
     # Deferred heavy imports — only here, never at module load. ANY

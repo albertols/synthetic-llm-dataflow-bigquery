@@ -20,19 +20,22 @@ seeded uniform sampler that stays inside the observed [min, max].
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
-# pylint: disable=protected-access
+# pylint: disable=protected-access,redefined-outer-name,unused-argument
 
 from __future__ import annotations
 
 import logging
 from datetime import UTC, date, datetime, time, timedelta
+from importlib.machinery import ModuleSpec
 
 import numpy as np
 import pandas as pd
+import pytest
 from sdfb_beam.handlers.fake_client import FakeModelClient
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationConfig, GenerationContext
 from sdfb_core.engines.b2_library import B2LibraryEngine
+from sdfb_core.engines.b2_library import backends as b2_backends
 from sdfb_core.engines.b2_library.backends import (
     EmpiricalBackend,
     SdgxBackend,
@@ -302,10 +305,133 @@ def test_sdgx_backend_temporal_branch_injects_nulls():
   assert any(v is not None for v in out["ts"])  # and real values sampled
 
 
-def test_sdgx_fit_failure_falls_back_with_milestone(caplog, monkeypatch):
+# --- sdgx compatibility probe (option 1, 2026-11-13) -----------------------
+# Every b2 table of the corp campaign logged `b2_backend_fallback
+# detail='No module named sdgx.data_connectors.dataframe_connector'`: the
+# locked sdgx 0.2.0 has no DataFrameConnector, and 0.2.1-0.2.4 (which do)
+# pin numpy<2. The empirical backend has always generated; the probe says
+# so once per process instead of failing an import per table.
+
+
+@pytest.fixture
+def sdgx_probe(monkeypatch):
+  """A fresh per-process probe cache, and a seam for what is installed."""
+  monkeypatch.setattr(b2_backends, "_SDGX_PROBE", {})
+  installed: set[str] = set()
+
+  def _find_spec(name):
+    if name not in installed:
+      if "." in name and name.rsplit(".", 1)[0] not in installed:
+        root = name.split(".", 1)[0]
+        raise ModuleNotFoundError(f"No module named {root!r}")
+      return None
+    return ModuleSpec(name, None)
+
+  monkeypatch.setattr(b2_backends, "find_spec", _find_spec)
+  monkeypatch.setattr(b2_backends, "_sdgx_version", lambda: "0.2.0")
+  return installed
+
+
+_COMPATIBLE = {
+    "sdgx", "sdgx.data_connectors", "sdgx.data_connectors.dataframe_connector"
+}
+
+
+def _fallback_lines(caplog) -> list[str]:
+  return [
+      r.getMessage()
+      for r in caplog.records
+      if "name=b2_backend_fallback" in r.getMessage()
+  ]
+
+
+def test_sdgx_probe_reports_a_missing_install(sdgx_probe):
+  assert b2_backends.sdgx_incompatibility() == "sdgx_not_installed"
+
+
+def test_sdgx_probe_runs_against_the_real_environment(monkeypatch):
+  """No seam: the real `find_spec` on this machine. The laptop has no
+  `[library]` extra; the GPU image has sdgx 0.2.0. Neither can fit."""
+  monkeypatch.setattr(b2_backends, "_SDGX_PROBE", {})
+  assert b2_backends.sdgx_incompatibility() in ("sdgx_not_installed",
+                                                "sdgx_incompatible")
+
+
+def test_sdgx_probe_reports_the_locked_release_as_incompatible(sdgx_probe):
+  sdgx_probe.update({"sdgx", "sdgx.data_connectors"})
+  assert b2_backends.sdgx_incompatibility() == "sdgx_incompatible"
+
+
+def test_sdgx_probe_treats_a_broken_parent_import_as_incompatible(
+    sdgx_probe, monkeypatch):
+  """`find_spec` on the dotted name imports `sdgx.data_connectors`; a
+  release whose import breaks (e.g. on pandas 3) must not fail the engine."""
+
+  def _broken(name):
+    if name == "sdgx":
+      return ModuleSpec(name, None)
+    raise AttributeError("module 'pandas' has no attribute 'x'")
+
+  monkeypatch.setattr(b2_backends, "find_spec", _broken)
+  assert b2_backends.sdgx_incompatibility() == "sdgx_incompatible"
+
+
+def test_sdgx_probe_passes_a_release_with_the_dataframe_connector(sdgx_probe):
+  sdgx_probe.update(_COMPATIBLE)
+  assert b2_backends.sdgx_incompatibility() is None
+
+
+def test_sdgx_incompatible_falls_back_once_per_process_without_importing(
+    sdgx_probe, caplog, monkeypatch):
+  sdgx_probe.update({"sdgx", "sdgx.data_connectors"})
+  schema = TableSchema.model_validate(_SCHEMA)
+  rows = _reference_rows()
+  profiles = profile_table(schema, rows)
+
+  def _never(self, reference_rows):
+    raise AssertionError("the doomed sdgx import must not be attempted")
+
+  monkeypatch.setattr(SdgxBackend, "_fit_sdgx", _never)
+  backends = [SdgxBackend(), SdgxBackend(), SdgxBackend()]
+  with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+    for backend in backends:
+      backend.fit(rows, profiles)
+  assert all(b.used_fallback for b in backends)
+  (line,) = _fallback_lines(caplog)  # one per process, not one per table
+  assert "backend=empirical" in line
+  assert "reason=sdgx_incompatible" in line
+  assert "scope=process" in line
+  assert "0.2.0" in line and "dataframe_connector" in line
+  assert all(r.levelno == logging.WARNING
+             for r in caplog.records
+             if "name=b2_backend_fallback" in r.getMessage())
+  assert not any(
+      "name=b2_backend_fitted" in r.getMessage() for r in caplog.records)
+
+
+def test_sdgx_incompatible_samples_exactly_what_the_empirical_backend_does(
+    sdgx_probe):
+  sdgx_probe.update({"sdgx", "sdgx.data_connectors"})
+  schema = TableSchema.model_validate(_SCHEMA)
+  rows = _reference_rows()
+  profiles = profile_table(schema, rows)
+  sdgx = SdgxBackend()
+  sdgx.fit(rows, profiles)
+  empirical = EmpiricalBackend()
+  empirical.fit(rows, profiles)
+  assert sdgx.sample_columns(
+      300, np.random.default_rng(11), temperature=0.7) == (
+          empirical.sample_columns(
+              300, np.random.default_rng(11), temperature=0.7))
+
+
+def test_sdgx_fit_failure_falls_back_with_milestone(sdgx_probe, caplog,
+                                                    monkeypatch):
   # The 2026-07-22 b2 E2E run left no trace of WHICH backend actually ran
   # (setup finished in 3 s — no CTGAN fit is that fast). The fallback must
-  # be loud, like every other fallback in the engine.
+  # be loud, like every other fallback in the engine. A compatible sdgx
+  # whose fit fails keeps that per-table path.
+  sdgx_probe.update(_COMPATIBLE)
   schema = TableSchema.model_validate(_SCHEMA)
   rows = _reference_rows()
   profiles = profile_table(schema, rows)
@@ -314,20 +440,24 @@ def test_sdgx_fit_failure_falls_back_with_milestone(caplog, monkeypatch):
     raise ModuleNotFoundError("No module named 'dask'")
 
   monkeypatch.setattr(SdgxBackend, "_fit_sdgx", _boom)
-  backend = SdgxBackend()
   with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
-    backend.fit(rows, profiles)
-  assert backend.used_fallback
-  text = "\n".join(r.getMessage() for r in caplog.records)
-  assert "SDFB_MILESTONE name=b2_backend_fallback" in text
+    for backend in (SdgxBackend(), SdgxBackend()):
+      backend.fit(rows, profiles)
+      assert backend.used_fallback
+  lines = _fallback_lines(caplog)
+  assert len(lines) == 2  # a real fit failure is per table
+  text = "\n".join(lines)
   assert "error=ModuleNotFoundError" in text
+  assert "reason=sdgx_fit_failed" in text
   # The 2026-07-22 re-run logged only the exception TYPE — which module
   # was missing stayed unknowable from worker logs. The message must ride
   # along.
   assert "No module named" in text and "dask" in text
 
 
-def test_sdgx_fit_success_emits_backend_milestone(caplog, monkeypatch):
+def test_sdgx_fit_success_emits_backend_milestone(sdgx_probe, caplog,
+                                                  monkeypatch):
+  sdgx_probe.update(_COMPATIBLE)
   schema = TableSchema.model_validate(_SCHEMA)
   rows = _reference_rows()
   profiles = profile_table(schema, rows)
@@ -340,6 +470,7 @@ def test_sdgx_fit_success_emits_backend_milestone(caplog, monkeypatch):
   text = "\n".join(r.getMessage() for r in caplog.records)
   assert "SDFB_MILESTONE name=b2_backend_fitted" in text
   assert "backend=sdgx" in text
+  assert "b2_backend_fallback" not in text
 
 
 # ---------------------------------------------------------------------------
