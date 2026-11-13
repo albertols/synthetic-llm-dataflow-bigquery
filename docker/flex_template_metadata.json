@@ -74,7 +74,7 @@
     {
       "name": "autoscaling",
       "label": "Worker autoscaling mode",
-      "helpText": "auto (default): a fleet sized by initial_workers stays that size (autoscaling NONE), otherwise Dataflow's THROUGHPUT_BASED. fixed: same pin, initial_workers required. throughput: always scale. The 2026-09-07/08 multi runs lost ~4 min per job to mid-job scale-downs between the parent and child stages (ADR 0034 D9).",
+      "helpText": "auto (default): a fleet sized by initial_workers stays that size (THROUGHPUT_BASED bounded to min = max = initial_workers, so it also drains to 0 at the end), otherwise Dataflow's THROUGHPUT_BASED. fixed: same pin, initial_workers required. throughput: always scale. The 2026-09-07/08 multi runs lost ~4 min per job to mid-job scale-downs between the parent and child stages (ADR 0034 D9).",
       "isOptional": true,
       "regexes": [
         "^(auto|throughput|fixed)?$"

@@ -713,32 +713,99 @@ def test_configure_options_explicit_state_cache_wins():
 # dropped to 1-2 workers during the parent's load / FK-pool phase and
 # re-provisioned VMs for the child stage — A_TABLE ran its first 3-8 min on
 # 1-2 workers (10.3 / ~11 min vs 6.7 on the run that kept 4).
-def test_autoscaling_auto_pins_none_when_initial_workers_is_given():
+# D9 amendment (2026-11-13): the pin is THROUGHPUT_BASED inside [N, N], not
+# NONE — a corp b1 job on NONE stayed Running 20 min after "Stopping worker
+# pool..." (2 of 4 VMs signalled), while autoscaled jobs drained to 0 in
+# 1.5-2.2 min.
+def _min_workers(opts) -> list[str]:
+  return [
+      o
+      for o in (opts.view_as(GoogleCloudOptions).dataflow_service_options or [])
+      if o.startswith("min_num_workers")
+  ]
+
+
+def test_autoscaling_auto_pins_a_bounded_fleet_when_initial_workers_is_given():
   opts = PipelineOptions(["--runner=DataflowRunner"])
   configure_pipeline_options(opts, "DataflowRunner", "r1", num_workers=4)
   w = opts.view_as(WorkerOptions)
   assert w.num_workers == 4
-  assert w.autoscaling_algorithm == "NONE"
+  assert w.autoscaling_algorithm == "THROUGHPUT_BASED"
+  assert w.max_num_workers == 4
+  assert _min_workers(opts) == ["min_num_workers=4"]
+
+
+def test_autoscaling_fixed_pins_the_same_bounded_fleet():
+  opts = PipelineOptions(["--runner=DataflowRunner"])
+  configure_pipeline_options(
+      opts, "DataflowRunner", "r1", num_workers=3, autoscaling="fixed")
+  w = opts.view_as(WorkerOptions)
+  assert (w.autoscaling_algorithm, w.max_num_workers,
+          w.num_workers) == ("THROUGHPUT_BASED", 3, 3)
+  assert _min_workers(opts) == ["min_num_workers=3"]
+
+
+def test_autoscaling_bounds_follow_an_explicit_beam_num_workers():
+  """The fleet is what the job starts with: an explicit --num_workers wins
+  over initial_workers, and the bounds follow it."""
+  opts = PipelineOptions(["--runner=DataflowRunner", "--num_workers=2"])
+  configure_pipeline_options(opts, "DataflowRunner", "r1", num_workers=4)
+  w = opts.view_as(WorkerOptions)
+  assert (w.num_workers, w.max_num_workers) == (2, 2)
+  assert _min_workers(opts) == ["min_num_workers=2"]
+
+
+def test_explicit_beam_max_num_workers_wins_over_the_fleet_bound():
+  opts = PipelineOptions(["--runner=DataflowRunner", "--max_num_workers=6"])
+  configure_pipeline_options(opts, "DataflowRunner", "r1", num_workers=4)
+  w = opts.view_as(WorkerOptions)
+  assert (w.autoscaling_algorithm, w.max_num_workers) == ("THROUGHPUT_BASED", 6)
+  assert _min_workers(opts) == ["min_num_workers=4"]
+
+
+def test_explicit_min_num_workers_service_option_wins_and_others_are_kept():
+  opts = PipelineOptions([
+      "--runner=DataflowRunner",
+      "--dataflow_service_options=min_num_workers=1,enable_prime"
+  ])
+  configure_pipeline_options(opts, "DataflowRunner", "r1", num_workers=4)
+  service = opts.view_as(GoogleCloudOptions).dataflow_service_options
+  assert _min_workers(opts) == ["min_num_workers=1"]
+  assert "enable_prime" in service
+
+
+def test_other_service_options_survive_the_min_workers_pin():
+  opts = PipelineOptions(
+      ["--runner=DataflowRunner", "--dataflow_service_options=enable_prime"])
+  configure_pipeline_options(opts, "DataflowRunner", "r1", num_workers=4)
+  service = opts.view_as(GoogleCloudOptions).dataflow_service_options
+  assert service == ["enable_prime", "min_num_workers=4"]
 
 
 def test_autoscaling_auto_without_initial_workers_leaves_dataflow_default():
   opts = PipelineOptions(["--runner=DataflowRunner"])
   configure_pipeline_options(opts, "DataflowRunner", "r1")
-  assert opts.view_as(WorkerOptions).autoscaling_algorithm is None
+  w = opts.view_as(WorkerOptions)
+  assert w.autoscaling_algorithm is None
+  assert w.max_num_workers is None
+  assert _min_workers(opts) == []
 
 
 def test_autoscaling_throughput_keeps_scaling_even_with_initial_workers():
   opts = PipelineOptions(["--runner=DataflowRunner"])
   configure_pipeline_options(
       opts, "DataflowRunner", "r1", num_workers=4, autoscaling="throughput")
-  assert opts.view_as(WorkerOptions).autoscaling_algorithm is None
+  w = opts.view_as(WorkerOptions)
+  assert w.autoscaling_algorithm is None
+  assert w.max_num_workers is None
+  assert _min_workers(opts) == []
 
 
 def test_autoscaling_fixed_without_initial_workers_is_a_launch_error():
   from sdfb_beam.cli.run_pipeline import resolve_autoscaling
 
-  assert resolve_autoscaling("fixed", 4) == "NONE"
-  assert resolve_autoscaling("auto", 4) == "NONE"
+  assert resolve_autoscaling("fixed", 4) == "THROUGHPUT_BASED"
+  assert resolve_autoscaling("auto", 4) == "THROUGHPUT_BASED"
   assert resolve_autoscaling("auto", None) is None
   assert resolve_autoscaling("throughput", 4) is None
   with pytest.raises(ValueError, match="autoscaling"):
@@ -751,7 +818,21 @@ def test_explicit_beam_autoscaling_flag_wins():
   opts = PipelineOptions(
       ["--runner=DataflowRunner", "--autoscaling_algorithm=THROUGHPUT_BASED"])
   configure_pipeline_options(opts, "DataflowRunner", "r1", num_workers=4)
-  assert opts.view_as(WorkerOptions).autoscaling_algorithm == "THROUGHPUT_BASED"
+  w = opts.view_as(WorkerOptions)
+  assert w.autoscaling_algorithm == "THROUGHPUT_BASED"
+  assert w.max_num_workers is None
+  assert _min_workers(opts) == []
+
+
+def test_explicit_beam_none_still_wins_and_gets_no_bounds():
+  """The pre-amendment behaviour stays one flag away."""
+  opts = PipelineOptions(
+      ["--runner=DataflowRunner", "--autoscaling_algorithm=NONE"])
+  configure_pipeline_options(opts, "DataflowRunner", "r1", num_workers=4)
+  w = opts.view_as(WorkerOptions)
+  assert (w.autoscaling_algorithm, w.num_workers) == ("NONE", 4)
+  assert w.max_num_workers is None
+  assert _min_workers(opts) == []
 
 
 def test_parse_args_accepts_autoscaling():

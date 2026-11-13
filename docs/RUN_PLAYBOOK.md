@@ -1776,14 +1776,33 @@ back on the branch.
   `job.num_workers` (`R7`) and as the template param `initial_workers`.
 - **Autoscaling mode — `autoscaling=auto|throughput|fixed` (ADR 0034
   D9).** A fleet you sized by hand should stay that size: `auto`
-  (default) pins Dataflow's `autoscaling_algorithm=NONE` exactly when
-  `initial_workers` is given, `fixed` pins it and refuses to launch
-  without `initial_workers`, `throughput` keeps THROUGHPUT_BASED. The
-  2026-09-07 15:53 and 09-08 multi runs scaled 1 → 4 for the parent, fell
-  to 1–2 workers through the parent's load and the child's pool phase,
-  and re-provisioned VMs for the child — ≈ 4 min per job. `R7`/`R7m`
-  now carry `initial_workers=4` + `autoscaling=fixed`; an explicit Beam
-  `--autoscaling_algorithm` always wins.
+  (default) pins it exactly when `initial_workers` is given, `fixed`
+  pins it and refuses to launch without `initial_workers`, `throughput`
+  keeps Dataflow's unbounded THROUGHPUT_BASED. The 2026-09-07 15:53 and
+  09-08 multi runs scaled 1 → 4 for the parent, fell to 1–2 workers
+  through the parent's load and the child's pool phase, and
+  re-provisioned VMs for the child — ≈ 4 min per job. `R7`/`R7m` now
+  carry `initial_workers=4` + `autoscaling=fixed`.
+
+  The pin for a fleet of N is `autoscaling_algorithm=THROUGHPUT_BASED`,
+  `max_num_workers=N` and the service option `min_num_workers=N` — the
+  autoscaler can neither grow nor shrink the fleet, and it drains the
+  pool to 0 when the job ends. It was `NONE` until 2026-11-13: one corp b1
+  job on `NONE` stayed *Running* 20 min 02 s after `Stopping worker
+  pool...` (2 of its 4 T4 VMs never got the stop signal), while two
+  autoscaled jobs logged `Resized worker pool from N to 0` and were done
+  in 1.5–2.2 min ([ADR 0034, D9 amendment](adr/0034-generation-throughput-single-barrier-shared-engines.md)).
+  One launch, not yet re-run; on the next one read the teardown
+  (`Resized worker pool from 4 to 0`, about 2 min) and the worker count
+  between the parent and child stages (never below 4).
+
+  | Launch | Dataflow sees |
+  |---|---|
+  | `initial_workers=4` (`auto` or `fixed`) | `THROUGHPUT_BASED`, `num_workers=4`, `max_num_workers=4`, `min_num_workers=4` |
+  | `initial_workers=4` + Beam `--num_workers=2` | the same, with 2 in place of 4 |
+  | `initial_workers=4` + Beam `--max_num_workers=6` | max 6 kept, min 4: grows to 6, never below 4 |
+  | `autoscaling=throughput`, or no `initial_workers` | Dataflow's default, unbounded |
+  | Beam `--autoscaling_algorithm=NONE` (or `THROUGHPUT_BASED`) | exactly that, no bounds added: the explicit flag wins |
 - **Launcher VM — `launcher_machine_type` (default `e2-standard-8`).**
   The generation launch has the same 12 minutes as an evaluation launch
   (§5a), and on Dataflow's default launcher VM the image pull takes most of

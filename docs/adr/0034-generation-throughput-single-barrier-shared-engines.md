@@ -1,6 +1,6 @@
 # ADR 0034 — Generation throughput: one dedup barrier, one engine per process, a fleet that starts full (and the multi-process experiment)
 
-**Status:** ACCEPTED (2026-09-07) — D1–D3, D5–D7 verified on the 2026-09-07 R7 pair (single + multi SDK topology, 10M rows/table); D4 amended the same day after the pair exposed its fallback defect and verified on the 09-07/09-08 multi pair; D8 revised (rev. 2) and D9 added 2026-09-08 after that pair (see *Acceptance evidence*)
+**Status:** ACCEPTED (2026-09-07) — D1–D3, D5–D7 verified on the 2026-09-07 R7 pair (single + multi SDK topology, 10M rows/table); D4 amended the same day after the pair exposed its fallback defect and verified on the 09-07/09-08 multi pair; D8 revised (rev. 2) and D9 added 2026-09-08 after that pair (see *Acceptance evidence*); D9 amended 2026-11-13 (a pinned fleet is THROUGHPUT_BASED bounded to [N, N], not NONE; n = 1, not yet re-run)
 **Design:** [`docs/designs/2026-09-07-generation-throughput-where-time-goes.md`](../designs/2026-09-07-generation-throughput-where-time-goes.md)
 **Evidence:** the 2026-08-29 R6 pair — cold `2026-08-29_07_33_36-13355700596190055276` (93.8 min) and its immediate warm re-trigger `2026-08-29_09_49_17-12681434869969021419` (86.1 min), both `C_TABLE ◄═ A_TABLE`, 10M rows/table, PK 1.0, 0/10M orphans, `worker_logs.jsonl` + `_full_report.md` in each
 **Amends:** [ADR 0019](0019-rag-population-scoped-to-consumers.md) (embedder lifecycle) · [ADR 0030](0030-single-job-relational-generation.md) (launch topology) · [ADR 0033](0033-pool-ladder-integrity-at-scale.md) (prose ceiling) · the WS6 uniqueness modes ([design](../designs/2026-07-27-ws6-pipeline-shape.md))
@@ -179,6 +179,67 @@ stage — A_TABLE ran its first minutes short-handed and each job paid
 The cost is a fixed 4-worker bill through load and cleanup, minutes on
 a 10M run; the `R7`/`R7m` tiers now pass `initial_workers=4` +
 `autoscaling=fixed`.
+
+*D9 amended 2026-11-13 — the pin is a bounded autoscaler, not `NONE`.*
+A fleet of N (`auto` with `initial_workers`, or `fixed`) is now pinned as
+`autoscaling_algorithm=THROUGHPUT_BASED` with `max_num_workers=N` and the
+Dataflow service option `min_num_workers=N`
+(`run_pipeline._pin_autoscaling`): the same fleet from launch to the last
+stage, but torn down by the autoscaler. N is the fleet the job starts
+with, so an explicit Beam `--num_workers` sets it; an explicit
+`--max_num_workers` or `--dataflow_service_options=min_num_workers=…` is
+kept as given, and an explicit `--autoscaling_algorithm` (including
+`NONE`, the pre-amendment pin) still wins over all of it.
+
+Evidence, one corp launch (n = 1; **not confirmed on a controlled
+re-run**, the owner asked for the change regardless): a b1 job on
+`autoscalingAlgorithm=NONE` (4 × n1-highmem-8 + T4) stayed *Running*
+20 min 02 s after `Stopping worker pool...`. The service signalled only 2
+of the 4 VMs; the other two idled until a service-side timeout of about
+20 minutes, then `vm-monitor` destroyed them. Two autoscaled jobs of the
+same campaign (THROUGHPUT_BASED) logged `Resized worker pool from N to 0`
+and finished their teardown in 2 min 14 s and 1 min 33 s. The cost of the
+stuck teardown is ≈ 2 × (n1-highmem-8 + T4) × 20 min of idle GPU per run,
+plus 20 min of Composer latency before the chained evaluation starts.
+
+```mermaid
+sequenceDiagram
+    participant J as 🔀 Dataflow job
+    participant S as ⚙️ Dataflow service
+    participant V as 🖥️ 4 worker VMs
+    Note over J,V: before, autoscaling_algorithm=NONE
+    J->>S: last stage done, Stopping worker pool...
+    S->>V: stop signal to 2 of 4 VMs
+    Note over V: 2 VMs with T4s idle, job still Running
+    S->>V: ~20 min later vm-monitor destroys the 2
+    S-->>J: Done at +20 min 02 s
+    Note over J,V: after, THROUGHPUT_BASED in [N, N]
+    J->>S: last stage done
+    S->>V: Resized worker pool from N to 0
+    S-->>J: Done at +1 min 33 s to +2 min 14 s
+```
+
+Why a floor and not plain THROUGHPUT_BASED: D9 exists because the
+autoscaler shrank a 4-worker fleet to 1–2 workers between the parent and
+child stages (2026-09-07/08). `max_num_workers = N` alone stops growth,
+not shrinkage. Beam 2.76's `WorkerOptions` has no minimum-workers flag
+(only `num_workers`, `max_num_workers`, `autoscaling_algorithm`); the
+floor is Dataflow's batch service option, documented in
+[Horizontal Autoscaling](https://docs.cloud.google.com/dataflow/docs/horizontal-autoscaling)
+(retrieved 2026-11-13: "To set a lower bound on the number of workers,
+set the `--dataflow-service-options=min_num_workers` service option").
+The `min-num-workers` flag of
+[`gcloud dataflow jobs update-options`](https://docs.cloud.google.com/sdk/gcloud/reference/dataflow/jobs/update-options)
+is streaming-only and is not used. Two things the docs do not say and
+the next launch must show: that a batch job with the floor still logs
+`Resized worker pool from 4 to 0` and a teardown of about 2 minutes (if
+the floor held VMs at shutdown, it would reintroduce the stuck pool:
+then pass `--autoscaling throughput`, or drop the service option and
+accept mid-job dips), and that the worker count never drops below 4
+between the parent and child stages. The amendment moves the
+`autoscaling_algorithm` the generation record shows from `NONE` to
+`THROUGHPUT_BASED`, with `max_num_workers` = N; the floor travels in
+`dataflow_service_options`, which the record does not list.
 
 **Evaluated, not adopted — NVIDIA MPS.** Dataflow's
 [NVIDIA Multi-Process Service](https://docs.cloud.google.com/dataflow/docs/gpu/use-nvidia-mps)

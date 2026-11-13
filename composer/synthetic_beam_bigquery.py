@@ -788,8 +788,9 @@ default_dag_params = {
             type="string",
             enum=["auto", "throughput", "fixed"],
             description="auto = a fleet sized by initial_workers stays that "
-            "size (Dataflow autoscaling NONE), otherwise "
-            "THROUGHPUT_BASED. fixed = same pin, initial_workers "
+            "size (THROUGHPUT_BASED bounded to min = max = "
+            "initial_workers, so it also drains to 0 at the end), "
+            "otherwise THROUGHPUT_BASED. fixed = same pin, initial_workers "
             "required. throughput = always scale (ADR 0034 D9: the "
             "2026-09-07/08 multi runs lost ~4 min per job to "
             "mid-job scale-downs between the parent and child "

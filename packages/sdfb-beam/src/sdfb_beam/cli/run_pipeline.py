@@ -424,7 +424,8 @@ def parse_args(  # noqa: PLR0915 — one flat list of flags; splitting it hides 
       "--autoscaling",
       choices=list(_AUTOSCALING_MODES),
       help="auto (default) = a fleet sized by --initial_workers "
-      "stays that size (autoscaling_algorithm=NONE), "
+      "stays that size (THROUGHPUT_BASED with min = max = "
+      "that size, so it also drains to 0 at the end), "
       "otherwise Dataflow's THROUGHPUT_BASED. fixed = "
       "same pin, and --initial_workers is required. "
       "throughput = always let Dataflow scale (the "
@@ -1136,11 +1137,14 @@ def resolve_autoscaling(mode: str, num_workers: int | None) -> str | None:
   """``--autoscaling`` → the Beam ``autoscaling_algorithm`` to pin, or
     None to leave Dataflow's default (THROUGHPUT_BASED).
 
-    ``auto`` (default) pins ``NONE`` exactly when ``initial_workers`` is
-    given: a fleet you sized by hand should stay that size. The 2026-09-07
-    and 09-08 multi runs dropped to 1-2 workers during the parent's
-    load / FK-pool phase and re-provisioned VMs for the child stage —
-    A_TABLE ran its first 3-8 minutes short-handed (ADR 0034 D9).
+    ``auto`` (default) pins ``THROUGHPUT_BASED`` exactly when
+    ``initial_workers`` is given, and the caller bounds it to that fleet
+    (``_pin_autoscaling``): a fleet you sized by hand should stay that
+    size. The 2026-09-07 and 09-08 multi runs dropped to 1-2 workers
+    during the parent's load / FK-pool phase and re-provisioned VMs for
+    the child stage — A_TABLE ran its first 3-8 minutes short-handed
+    (ADR 0034 D9). Not ``NONE``: a fixed pool's teardown waited ~20 min
+    on VMs the service never signalled (D9 amendment, 2026-11-13).
     ``fixed`` requires ``initial_workers``; ``throughput`` keeps scaling.
     """
   text = str(mode or "auto").strip().lower()
@@ -1152,7 +1156,7 @@ def resolve_autoscaling(mode: str, num_workers: int | None) -> str | None:
   if text == "fixed" and num_workers is None:
     raise ValueError("autoscaling=fixed needs initial_workers (the size of the "
                      "fixed fleet)")
-  return "NONE" if num_workers is not None else None
+  return "THROUGHPUT_BASED" if num_workers is not None else None
 
 
 def resolve_cross_process(runner: str, experiments: list[str] | None) -> bool:
@@ -2747,13 +2751,25 @@ def batch_job_name(base_run_id: str, index: int) -> str:
   return name[:_JOB_NAME_MAX - len(suffix)].rstrip("-") + suffix
 
 
-def _pin_autoscaling(worker_options, autoscaling: str,
+_MIN_WORKERS_OPTION = "min_num_workers"
+
+
+def _pin_autoscaling(options: PipelineOptions, autoscaling: str,
                      num_workers: int | None) -> None:
   """ADR 0034 D9: pin ``autoscaling_algorithm`` per ``--autoscaling``; an
-    explicit Beam flag always wins."""
+    explicit Beam flag always wins.
+
+    A pinned fleet of N is ``THROUGHPUT_BASED`` bounded to [N, N]:
+    ``max_num_workers`` = N (it cannot grow) and the
+    ``min_num_workers=N`` Dataflow service option (it cannot shrink
+    mid-job; Beam has no ``WorkerOptions`` flag for it). N is the fleet
+    the job starts with — an explicit ``--num_workers`` over
+    ``initial_workers``. An explicit ``--max_num_workers`` or
+    ``min_num_workers`` service option is kept as given."""
   algorithm = resolve_autoscaling(autoscaling, num_workers)
   if algorithm is None:
     return
+  worker_options = options.view_as(WorkerOptions)
   if worker_options.autoscaling_algorithm:
     logger.info(
         "Worker autoscaling_algorithm already set explicitly (%s); "
@@ -2762,8 +2778,19 @@ def _pin_autoscaling(worker_options, autoscaling: str,
         autoscaling,
     )
     return
+  fleet = worker_options.num_workers or num_workers
   worker_options.autoscaling_algorithm = algorithm
-  logger.info("Pinned autoscaling_algorithm to %s (ADR 0034 D9).", algorithm)
+  if not worker_options.max_num_workers:
+    worker_options.max_num_workers = fleet
+  google = options.view_as(GoogleCloudOptions)
+  service = list(google.dataflow_service_options or [])
+  if not any(o.split("=", 1)[0] == _MIN_WORKERS_OPTION for o in service):
+    service.append(f"{_MIN_WORKERS_OPTION}={fleet}")
+    google.dataflow_service_options = service
+  logger.info(
+      "Pinned autoscaling_algorithm to %s with max_num_workers=%s and "
+      "%s (ADR 0034 D9).", algorithm, worker_options.max_num_workers,
+      next(o for o in service if o.startswith(_MIN_WORKERS_OPTION)))
 
 
 def configure_pipeline_options(
@@ -2810,7 +2837,6 @@ def configure_pipeline_options(
       logger.info(
           "Pinned worker max_cache_memory_usage_mb to %d MB (ADR 0034).",
           _DEFAULT_STATE_CACHE_MB)
-    _pin_autoscaling(worker_options, autoscaling, num_workers)
     if num_workers is not None:
       if worker_options.num_workers:
         logger.info(
@@ -2822,6 +2848,7 @@ def configure_pipeline_options(
       else:
         worker_options.num_workers = num_workers
         logger.info("Pinned initial num_workers to %d (ADR 0034).", num_workers)
+    _pin_autoscaling(options, autoscaling, num_workers)
     if worker_options.disk_size_gb:
       logger.info(
           "Worker disk_size_gb already set explicitly (%d GB); leaving as-is.",
