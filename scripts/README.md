@@ -5,7 +5,7 @@ root. Current scopes:
 
 | Scope | Owns |
 |---|---|
-| `doc/` | figure/report generators for documentation (`make_<topic>_figures.py`; see `.claude/skills/visual-first-documentation/SKILL.md`) and `sync_design_refs.py` (the generated `Design:` docstring line that maps a module's ADR citations to `docs/DESIGN.md` sections, also in CI) |
+| `doc/` | figure/report generators for documentation (`make_<topic>_figures.py`; see `.claude/skills/visual-first-documentation/SKILL.md`), `probe_sdgx_compat.py` (a self-contained `uv run --script` probe with its own inline dependencies; prints the evidence table of the B.2 backend assessment) and `sync_design_refs.py` (the generated `Design:` docstring line that maps a module's ADR citations to `docs/DESIGN.md` sections, also in CI) |
 | `composer/` | the Composer DAGs under a real Airflow 2.10.5 (own Python 3.11 venv, recipe in the docstring): `check_dags.py` imports the DAG folder into a `DagBag`, runs `dag.test()` per scenario, each in its own process, with the Google calls patched and writes the Dataflow launch bodies (master's are the goldens `packages/sdfb-tests/tests/fixtures/config_parity/dag_bodies_master.json` and `dag_param_defaults_master.json`) |
 | `config/` | generator-config tools (master goldens capture: `capture_master_goldens.py`; `config_digest.py` prints a config file's digest — ADR 0044) |
 | `e2e/` | integration-test analysis, GCP probes, sample fetch, crosschecks, redaction |

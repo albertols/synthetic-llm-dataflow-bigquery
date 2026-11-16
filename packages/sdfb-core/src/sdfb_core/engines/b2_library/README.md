@@ -35,6 +35,11 @@ Why the sdgx path cannot run:
 | `sdgx` 0.2.1–0.2.4 | have it, but pin `numpy<2`: not installable beside the workspace's Python 3.14 / numpy 2.3.5 / pandas 3.0.3 |
 | CTGAN on 0.2.0 itself | fails under pandas 3's string dtype unless `future.infer_string=False`, a process-global option that is unsafe with concurrent DoFn threads |
 
+What it would take to make that path run (a dependency override, a dtype
+cast, and five defects that sit behind the fit), the other libraries, and
+the options are assessed in
+[`docs/designs/2026-11-16-b2-library-backend-assessment.md`](../../../../../../docs/designs/2026-11-16-b2-library-backend-assessment.md).
+
 So `SdgxBackend.fit` asks `sdgx_incompatibility()` first. It probes with
 `importlib.util.find_spec` (which imports `sdgx` and `sdgx.data_connectors`,
 pandas and pluggy, no torch) once per process and, when the connector is missing,
