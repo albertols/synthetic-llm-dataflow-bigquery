@@ -16,6 +16,7 @@
   - `digest`        — canonical reference-row digest (provenance)
   - `local_sinks`   — JSONL file sinks for DirectRunner / local dev
   - `bq_sources`    — driver-side BigQuery reference reader        (M1 §11)
+  - `bq_identifiers` — allow-list for identifiers in SQL text     (CWE-89)
   - `bq_sinks`      — BigQuery `FILE_LOADS` write transforms       (M1 §11)
 """
 

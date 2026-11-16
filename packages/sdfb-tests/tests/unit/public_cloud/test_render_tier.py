@@ -18,7 +18,11 @@
 from __future__ import annotations
 
 import importlib.util
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
 GCP_DIR = REPO_ROOT / "public_cloud" / "deploy" / "gcp"
@@ -144,3 +148,77 @@ def test_scale_tiers_pin_the_fleet_through_template_params():
     assert job["num_workers"] == "4"
   smoke, _job = render("R1p", "citibike")
   assert "autoscaling" not in smoke and "initial_workers" not in smoke
+
+
+# ---------------------------------------------------------------------------
+# CWE-78 (November 2026 scan): run_e2e.sh used to `eval` this renderer's
+# output, and `--var PROJECT_ID=…` (from PROJECT_SUFFIX) landed unescaped
+# inside 'single quotes' — a `'` in the suffix ran the rest as a command.
+# ---------------------------------------------------------------------------
+PAYLOADS = [
+    "x';touch /tmp/sdfb_pwned;'",
+    "x$(touch /tmp/sdfb_pwned)",
+    "x`touch /tmp/sdfb_pwned`",
+    "x y",
+    "x;y",
+    "x\ny",
+    "",
+]
+
+
+@pytest.mark.parametrize("value", PAYLOADS)
+def test_malicious_var_value_is_rejected(value):
+  with pytest.raises(SystemExit, match="PROJECT_ID"):
+    rt.render(GCP_DIR / "tiers.yaml", "R1p", "citibike", {
+        **VARS, "PROJECT_ID": value
+    })
+
+
+def test_malicious_var_name_is_rejected():
+  with pytest.raises(SystemExit, match="--var name"):
+    rt.render(GCP_DIR / "tiers.yaml", "R1p", "citibike", {**VARS, "A;B": "v"})
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="needs bash")
+def test_shell_format_quotes_a_single_quote_safely(tmp_path):
+  """Even if eval'd, the legacy shell format gives the payload back as one
+    literal string and runs nothing."""
+  marker = tmp_path / "pwned"
+  payload = f"a';touch {marker};'b"
+  out = rt.to_shell({"k": payload}, dict.fromkeys(rt.JOB_KEYS, ""))
+  result = subprocess.run(
+      ["bash", "-c", 'eval "$1"; printf %s "$PARAMS"', "_", out],
+      capture_output=True,
+      text=True,
+      check=True)
+  assert result.stdout == f"k={payload}"
+  assert not marker.exists()
+
+
+@pytest.mark.parametrize("fmt", [rt.to_shell, rt.to_lines])
+def test_line_break_in_an_emitted_value_is_rejected(fmt):
+  job = dict.fromkeys(rt.JOB_KEYS, "")
+  with pytest.raises(SystemExit, match="line break"):
+    fmt({"k": "a\nEXPECT=FAIL"}, job)
+  with pytest.raises(SystemExit, match="line break"):
+    fmt({}, {**job, "machine_type": "m\r"})
+
+
+def test_lines_format_is_plain_key_value():
+  out = rt.to_lines(*render("R7", "citibike"))
+  keys = [line.split("=", 1)[0] for line in out.splitlines()]
+  assert keys == [
+      "PARAMS", "MACHINE_TYPE", "ACCELERATOR", "MAX_WORKERS", "NUM_WORKERS",
+      "SDK_CONTAINERS", "EXPECT"
+  ]
+  assert "NUM_WORKERS=4" in out.splitlines()
+  assert "'" not in out
+
+
+def test_run_e2e_never_evals_the_renderer_output():
+  script = (GCP_DIR / "run_e2e.sh").read_text(encoding="utf-8")
+  code = [
+      line for line in script.splitlines() if not line.lstrip().startswith("#")
+  ]
+  assert not any("eval" in line.split() for line in code)
+  assert "--format lines" in script

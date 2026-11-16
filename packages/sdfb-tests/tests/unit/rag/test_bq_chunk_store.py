@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 from sdfb_beam.rag.store import BigQueryChunkStore
 from sdfb_core.rag.store import ChunkStore
 
@@ -159,3 +160,24 @@ def test_row_doc_digests_reads_the_row_doc_prefix_of_one_vector_space():
       "embedder_id": "e",
       "embedder_version": "v1",
   }
+
+
+def test_constructor_rejects_sql_injection_in_table_fqn():
+  """CWE-89 (November 2026 scan): `--rag_chunks_table` is the one part of
+    the SQL that cannot be a bound parameter, so it is allow-listed."""
+  client = _FakeBqClient([])
+  with pytest.raises(ValueError):
+    BigQueryChunkStore("p.d.t` WHERE 1=1; DROP TABLE `p.d.x", client=client)
+  assert not client.queries
+
+
+def test_tampered_table_fqn_is_rejected_at_query_time():
+  client = _FakeBqClient([{"n": 1}])
+  store = BigQueryChunkStore(_TABLE, client=client)
+  store.table_fqn = "p.d.t` OR 1=1 --"
+  for call in (lambda: store.exists("dig", "e", "v1"),
+               lambda: store.row_doc_digests("dig", "e", "v1"),
+               lambda: store.fetch("dig", "row_doc", "e", "v1")):
+    with pytest.raises(ValueError):
+      call()
+  assert not client.queries

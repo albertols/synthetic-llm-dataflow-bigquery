@@ -14,8 +14,14 @@
 #  limitations under the License.
 """Render a tiers.yaml (tier, table) preset into flex-template-run inputs.
 
-Prints eval-able shell lines (PARAMS / MACHINE_TYPE / ACCELERATOR /
-MAX_WORKERS / NUM_WORKERS / SDK_CONTAINERS / EXPECT). Pure python + PyYAML; unit-tested laptop-side.
+Prints PARAMS / MACHINE_TYPE / ACCELERATOR / MAX_WORKERS / NUM_WORKERS /
+SDK_CONTAINERS / EXPECT, one per line. `--format lines` (what run_e2e.sh
+reads, as data, never eval'd) prints plain KEY=VALUE; `--format shell`
+(the default) prints POSIX single-quoted assignments. Pure python + PyYAML;
+unit-tested laptop-side.
+
+CWE-78 (November 2026 scan): every `--var` name and value is allow-listed
+before substitution, and no emitted value may hold a line break or NUL.
 """
 
 # f-string fields keep single quotes: yapf 0.43 cannot parse PEP 701
@@ -25,6 +31,7 @@ MAX_WORKERS / NUM_WORKERS / SDK_CONTAINERS / EXPECT). Pure python + PyYAML; unit
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 
 import yaml
@@ -46,6 +53,22 @@ JOB_KEYS = (
     "expect",
 )
 
+# `--var` values are GCP project ids and bucket names (bucket names may
+# hold dots, up to 222 characters): no quote, space, `$`, backtick or `;`.
+_VAR_NAME_RE = re.compile(r"[A-Z][A-Z0-9_]*")
+_VAR_VALUE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,221}")
+_LINE_BREAKS = ("\n", "\r", "\0")
+
+
+def validate_variables(variables: dict[str, str]) -> None:
+  for name, value in variables.items():
+    if not _VAR_NAME_RE.fullmatch(name):
+      raise SystemExit(f"invalid --var name {name!r} "
+                       f"(allowed: {_VAR_NAME_RE.pattern})")
+    if not _VAR_VALUE_RE.fullmatch(value):
+      raise SystemExit(f"invalid --var value for {name}: {value!r} "
+                       f"(allowed: {_VAR_VALUE_RE.pattern})")
+
 
 def _expand(value: str, variables: dict[str, str]) -> str:
   for k, v in variables.items():
@@ -54,6 +77,7 @@ def _expand(value: str, variables: dict[str, str]) -> str:
 
 
 def render(tiers_path: Path, tier: str, table: str, variables: dict[str, str]):
+  validate_variables(variables)
   cfg = yaml.safe_load(Path(tiers_path).read_text(encoding="utf-8"))
   if tier not in cfg["tiers"]:
     raise SystemExit(f"unknown tier {tier!r}; known: {sorted(cfg['tiers'])}")
@@ -78,18 +102,30 @@ def render(tiers_path: Path, tier: str, table: str, variables: dict[str, str]):
   return params, job
 
 
-def to_shell(params: dict[str, str], job: dict[str, str]) -> str:
+def _assignments(params: dict[str, str],
+                 job: dict[str, str]) -> list[tuple[str, str]]:
   joined = ",".join(f"{k}={params[k]}" for k in sorted(params))
-  lines = [
-      f"PARAMS='{joined}'",
-      f"MACHINE_TYPE='{job['machine_type']}'",
-      f"ACCELERATOR='{job['accelerator']}'",
-      f"MAX_WORKERS='{job['max_workers']}'",
-      f"NUM_WORKERS='{job['num_workers']}'",
-      f"SDK_CONTAINERS='{job['sdk_containers']}'",
-      f"EXPECT='{job['expect']}'",
-  ]
-  return "\n".join(lines)
+  pairs = [("PARAMS", joined)]
+  pairs += [(key.upper(), job[key]) for key in JOB_KEYS]
+  for key, value in pairs:
+    if any(c in value for c in _LINE_BREAKS):
+      raise SystemExit(f"{key} holds a line break or NUL: {value!r}")
+  return pairs
+
+
+def _single_quote(value: str) -> str:
+  """POSIX single quotes: nothing inside is special except `'` itself."""
+  return "'" + value.replace("'", "'\\''") + "'"
+
+
+def to_shell(params: dict[str, str], job: dict[str, str]) -> str:
+  return "\n".join(
+      f"{k}={_single_quote(v)}" for k, v in _assignments(params, job))
+
+
+def to_lines(params: dict[str, str], job: dict[str, str]) -> str:
+  """Plain KEY=VALUE lines, read as data by run_e2e.sh."""
+  return "\n".join(f"{k}={v}" for k, v in _assignments(params, job))
 
 
 def main() -> None:
@@ -98,9 +134,13 @@ def main() -> None:
   ap.add_argument("--tier", required=True)
   ap.add_argument("--table", required=True)
   ap.add_argument("--var", action="append", default=[], metavar="K=V")
+  ap.add_argument("--format", choices=("shell", "lines"), default="shell")
   args = ap.parse_args()
+  if any("=" not in kv for kv in args.var):
+    raise SystemExit("--var must be K=V")
   variables = dict(kv.split("=", 1) for kv in args.var)
-  print(to_shell(*render(args.tiers, args.tier, args.table, variables)))
+  emit = to_lines if args.format == "lines" else to_shell
+  print(emit(*render(args.tiers, args.tier, args.table, variables)))
 
 
 if __name__ == "__main__":
