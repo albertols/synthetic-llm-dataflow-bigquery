@@ -22,6 +22,7 @@ google.cloud.bigquery so nothing here touches GCP.
 
 from __future__ import annotations
 
+import pytest
 from sdfb_beam.pools.store import BigQueryFreeTextPoolStore, pool_to_row, row_to_pool
 from sdfb_core.pools import FreeTextPool
 
@@ -191,3 +192,33 @@ def test_delete_removes_a_digest_and_binds_parameters():
   sql, params = client.queries[0]
   assert sql.startswith("DELETE FROM `p.synthetic_rag.freetext_pools`")
   assert params == {"reference_digest": "d1", "model_uri": "gs://b/m"}
+
+
+# ---------------------------------------------------------------------------
+# CWE-89 (November 2026 scan): `table_fqn` comes from
+# `--freetext_pools_table` and is the one part of the SQL that cannot be a
+# bound parameter, so it is allow-listed (sdfb_beam.io.bq_identifiers).
+# ---------------------------------------------------------------------------
+_BREAKOUT = "p.d.t` WHERE 1=1; DROP TABLE `p.d.x"
+
+
+def test_constructor_rejects_sql_injection_in_table_fqn():
+  client = _FakeBqClient([])
+  with pytest.raises(ValueError):
+    BigQueryFreeTextPoolStore(_BREAKOUT, client=client)
+  assert not client.queries and not client.loads
+
+
+def test_tampered_table_fqn_is_rejected_at_query_time():
+  """The attribute is public and the store is pickled to workers, so every
+    SQL use validates again."""
+  client = _FakeBqClient([{"n": 1}])
+  store = BigQueryFreeTextPoolStore(
+      "p.synthetic_rag.freetext_pools", client=client)
+  store.table_fqn = _BREAKOUT
+  for call in (lambda: store.fetch("d1", "m"), lambda: store.exists("d1", "m"),
+               lambda: store.delete("d1", "m"),
+               lambda: store.write_rows([pool_to_row(_pool())])):
+    with pytest.raises(ValueError):
+      call()
+  assert not client.queries and not client.loads

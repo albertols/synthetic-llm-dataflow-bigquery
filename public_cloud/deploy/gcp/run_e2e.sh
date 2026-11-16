@@ -24,14 +24,30 @@ source "${SCRIPT_DIR}/lib/common.sh" "$@"
 TIER="${1:-}"; TABLE="${2:-}"
 [[ -n "${TIER}" && -n "${TABLE}" ]] || die "usage: run_e2e.sh <tier> <table> [--dry-run]"
 require_env PROJECT_SUFFIX
+# CWE-78 (November 2026 scan): inputs are allow-listed here, the renderer
+# allow-lists its --var values again, and its output is read as data —
+# KEY=VALUE lines, keys allow-listed, assigned with printf -v. Never eval.
+# PROJECT_ID is "sdfb-e2e-<suffix>": a valid GCP project id is <= 30 chars.
+[[ "${PROJECT_SUFFIX}" =~ ^[a-z0-9]([a-z0-9-]{0,19}[a-z0-9])?$ ]] \
+  || die "PROJECT_SUFFIX must match ^[a-z0-9]([a-z0-9-]{0,19}[a-z0-9])?$ (got '${PROJECT_SUFFIX}')"
+[[ "${TIER}" =~ ^[A-Za-z0-9_]+$ && "${TABLE}" =~ ^[A-Za-z0-9_]+$ ]] \
+  || die "tier/table must be [A-Za-z0-9_]+ (got '${TIER}' '${TABLE}')"
 
-# Resolve the preset. Capture-then-eval so a renderer failure (unknown
-# tier/table) dies here — eval "$( )" would swallow the exit status.
+# Resolve the preset. Capture first so a renderer failure (unknown
+# tier/table, rejected --var) dies here.
 RENDERED="$(uv run --no-sync python3 "${SCRIPT_DIR}/lib/render_tier.py" \
   --tiers "${SCRIPT_DIR}/tiers.yaml" --tier "${TIER}" --table "${TABLE}" \
   --var "PROJECT_ID=${PROJECT_ID}" --var "MODELS_BUCKET=${MODELS_BUCKET}" \
-  --var "DATAFLOW_BUCKET=${DATAFLOW_BUCKET}")" || die "tier/table rejected by render_tier.py"
-eval "${RENDERED}"
+  --var "DATAFLOW_BUCKET=${DATAFLOW_BUCKET}" --format lines)" || die "tier/table rejected by render_tier.py"
+while IFS= read -r _line; do
+  [[ -z "${_line}" ]] && continue
+  _key="${_line%%=*}"; _val="${_line#*=}"
+  case "${_key}" in
+    PARAMS|MACHINE_TYPE|ACCELERATOR|MAX_WORKERS|NUM_WORKERS|SDK_CONTAINERS|EXPECT)
+      printf -v "${_key}" '%s' "${_val}" ;;
+    *) die "render_tier.py emitted an unexpected key: ${_key}" ;;
+  esac
+done <<< "${RENDERED}"
 
 TIER_LC="$(echo "${TIER}" | tr '[:upper:]' '[:lower:]')"
 RUN_ID="${TIER_LC}-${TABLE//_/-}-$(date -u +%Y%m%d-%H%M%S)"

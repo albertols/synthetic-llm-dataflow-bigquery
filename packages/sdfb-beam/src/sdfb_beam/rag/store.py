@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING
 
 from sdfb_core.rag.chunking import CHUNK_KIND_ROW_DOC, Chunk
 
+from sdfb_beam.io.bq_identifiers import quoted_table_fqn, validate_table_fqn
+
 if TYPE_CHECKING:  # pragma: no cover - typing only
   pass
 
@@ -37,8 +39,15 @@ class BigQueryChunkStore:
   """`ChunkStore` implementation over one `rag_chunks` table."""
 
   def __init__(self, table_fqn: str, *, client: object | None = None) -> None:
-    self.table_fqn = table_fqn
+    # CWE-89: the table is the one part of the SQL that cannot be a bound
+    # parameter. Validated here (a bad flag fails at launch, on the
+    # driver) and again in _from() (the attribute is public and the store
+    # is pickled to workers).
+    self.table_fqn = validate_table_fqn(table_fqn)
     self._client = client  # injectable for tests; lazy real client
+
+  def _from(self) -> str:
+    return quoted_table_fqn(self.table_fqn)
 
   def _bq(self):
     if self._client is None:
@@ -58,7 +67,7 @@ class BigQueryChunkStore:
 
   def exists(self, reference_digest: str, embedder_id: str,
              embedder_version: str) -> bool:
-    sql = (f"SELECT 1 AS n FROM `{self.table_fqn}` "
+    sql = (f"SELECT 1 AS n FROM {self._from()} "
            "WHERE reference_digest = @reference_digest "
            "AND embedder_id = @embedder_id "
            "AND embedder_version = @embedder_version LIMIT 1")
@@ -75,7 +84,7 @@ class BigQueryChunkStore:
 
   def row_doc_digests(self, reference_digest: str, embedder_id: str,
                       embedder_version: str) -> set[str]:
-    sql = (f"SELECT DISTINCT row_digest FROM `{self.table_fqn}` "
+    sql = (f"SELECT DISTINCT row_digest FROM {self._from()} "
            "WHERE reference_digest = @reference_digest "
            "AND chunk_kind = @chunk_kind "
            "AND embedder_id = @embedder_id "
@@ -105,7 +114,7 @@ class BigQueryChunkStore:
     sql = ("SELECT chunk_id, source_fqn, source_pk, row_digest, "
            "reference_digest, chunk_index, chunk_kind, chunk_text, "
            "embedder_id, embedder_version, embedding, metadata "
-           f"FROM `{self.table_fqn}` "
+           f"FROM {self._from()} "
            "WHERE reference_digest = @reference_digest "
            "AND chunk_kind = @chunk_kind "
            "AND embedder_id = @embedder_id "

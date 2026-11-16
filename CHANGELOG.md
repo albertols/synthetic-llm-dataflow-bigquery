@@ -15,6 +15,7 @@ Measured numbers behind these releases live in [`docs/releases/`](docs/releases/
 ### ⚡ Performance
 
 ### 🐛 Fixed
+- **November 2026 vulnerability scan: three injection paths closed** (2 × CWE-89, 1 × CWE-78; a fourth finding was against `scripts/probe_gpu_dataflow.sh`, already removed in v0.3.2). New [`sdfb_beam/io/bq_identifiers.py`](packages/sdfb-beam/src/sdfb_beam/io/bq_identifiers.py) allow-lists BigQuery project, dataset and table names, which can be part of SQL text but never bound parameters (the patterns are strict subsets of BigQuery's naming rules, so no real table name is rejected). `BigQueryFreeTextPoolStore` and `BigQueryChunkStore` validate `--freetext_pools_table` / `--rag_chunks_table` when they are built and again before every query or load. `extract_ddl_metadata` validates all three parts before the first BigQuery call, and its `INFORMATION_SCHEMA.PARTITIONS` query binds the table name as `@table_name` instead of quoting it into the SQL. `public_cloud/deploy/gcp/run_e2e.sh` no longer runs `eval` on `render_tier.py`'s output: it allow-lists `PROJECT_SUFFIX` and the tier and table names, and reads the renderer's new `--format lines` output as `KEY=VALUE` data. The renderer allow-lists every `--var` name and value, rejects line breaks in what it emits, and its default `--format shell` output is now POSIX single-quoted. A valid tier renders the same `gcloud dataflow flex-template run` command as before.
 
 ### 🗑️ Removed
 
