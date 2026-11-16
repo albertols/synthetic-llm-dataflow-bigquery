@@ -12,9 +12,10 @@ import type { AdjustmentVerdict } from "@contracts/adjustments";
 import { isFiniteNumber, MISSING } from "./format";
 
 /**
- * The generator's tolerance on |landing − source| repeat share: `REPEAT_SHARE_TOLERANCE` in
- * sdfb_core/contracts/model_adjustment.py, the knob `repeat_share_tolerance`. Held here as a
- * constant so the EVALUATION tab does not bundle knobs.json; adjustments.test.ts pins it to the knob.
+ * The generator's tolerance on |landing − source| repeat share: `repeat_share_tolerance` in
+ * sdfb_core/config/model.py (config key `guardrails.repeat_share_tolerance`), the knob
+ * `repeat_share_tolerance`. Held here as a constant so the EVALUATION tab does not bundle
+ * knobs.json; adjustments.test.ts pins it to the knob's default.
  */
 export const REPEAT_SHARE_TOLERANCE = 0.05;
 

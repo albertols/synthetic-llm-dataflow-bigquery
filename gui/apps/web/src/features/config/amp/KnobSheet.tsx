@@ -118,9 +118,7 @@ function KnobSheetBody({ knob: k }: { knob: Knob }) {
             {formatKnobValue(k, value)}
           </dd>
           <dt className="text-text-3">Code default</dt>
-          <dd className="font-mono text-text-2 [overflow-wrap:anywhere]">
-            {k.id === "num_rows" ? "none (required flag)" : formatKnobValue(k)}
-          </dd>
+          <dd className="font-mono text-text-2 [overflow-wrap:anywhere]">{formatKnobValue(k)}</dd>
           {k.composer_default !== undefined ? (
             <>
               <dt className="text-text-3">Composer default</dt>
@@ -146,6 +144,7 @@ function KnobSheetBody({ knob: k }: { knob: Knob }) {
           {k.cli_flag ? <Flag label="Launcher flag" value={k.cli_flag} /> : null}
           {k.composer_param ? <Flag label="Composer param" value={k.composer_param} /> : null}
           {k.flex_param ? <Flag label="Flex Template param" value={k.flex_param} /> : null}
+          {k.config_key ? <Flag label="Config file" value={k.config_key} /> : null}
         </ul>
       </Section>
 

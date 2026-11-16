@@ -15,7 +15,7 @@
 
 These exercise the mirror directly, on small hand-written models, beyond
 what the golden-file parity test (`test_parity_goldens.py`) covers off
-the three committed example models and the goldens script's own invented
+the four committed example models and the goldens script's own invented
 cases: the widening tests here (`test_enforced_edges_widens_...`) are a
 second proof of the path that script's own invented widening model pins,
 written independently of it; the `parse_model` strictness tests duplicate
@@ -26,6 +26,9 @@ and lazy-import tests have no golden-file counterpart at all (they are
 about THIS module's own IO plumbing, not about parity with the original).
 
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0045).
 """
 
 from __future__ import annotations
@@ -833,3 +836,51 @@ def test_sha12_changes_when_content_changes():
       "        ref_cols: [B1]\n")
   changed = sha12([parse_model(text, source="x")])
   assert changed != base
+
+
+# --------------------------------------------------------------------------
+# ADR 0045 — source_table and num_rows
+# --------------------------------------------------------------------------
+_FOREST = """model: forest
+tables:
+  T_ACCOUNTS: {pk: [ACC_ID]}
+  T_RATES: {source_table: other_ds.RATES_V2, num_rows: 5000}
+  T_X: {source_table: p2.ds.T_X}
+"""
+
+
+def test_the_launch_keys_are_read():
+  model = parse_model(_FOREST, source="f.yaml")
+  assert model.tables["T_RATES"].source_table == "other_ds.RATES_V2"
+  assert model.tables["T_RATES"].num_rows == 5000
+  assert model.tables["T_X"].source_table == "p2.ds.T_X"
+  assert model.tables["T_ACCOUNTS"].source_table is None
+  assert model.tables["T_ACCOUNTS"].num_rows is None
+
+
+@pytest.mark.parametrize("spec", [
+    "source_table: T_X", "source_table: a.b.c.d", "source_table: 7",
+    "num_rows: 0", "num_rows: true", "num_rows: '5000'", "num_rows: 5000.0"
+])
+def test_malformed_launch_keys_are_refused(spec):
+  with pytest.raises(RelationshipError):
+    parse_model(f"model: m\ntables:\n  T_A:\n    {spec}\n", source="m.yaml")
+
+
+def test_num_rows_on_a_driven_child_is_refused():
+  text = ("model: m\ntables:\n  T_P: {pk: [P1]}\n  T_C:\n    num_rows: 10\n"
+          "    fk:\n      - {cols: [P1], ref: T_P, ref_cols: [P1]}\n")
+  with pytest.raises(RelationshipError, match="num_rows"):
+    parse_model(text, source="m.yaml")
+
+
+def test_absent_launch_keys_keep_the_sha():
+  plain = parse_model("model: m\ntables:\n  T_A: {pk: [C1]}\n", source="m")
+  null = parse_model(
+      "model: m\ntables:\n  T_A: {pk: [C1], source_table: null, "
+      "num_rows: null}\n",
+      source="m")
+  assert sha12([plain]) == sha12([null])
+  moved = parse_model(
+      "model: m\ntables:\n  T_A: {pk: [C1], num_rows: 7}\n", source="m")
+  assert sha12([moved]) != sha12([plain])

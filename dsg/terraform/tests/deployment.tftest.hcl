@@ -41,6 +41,10 @@ run "deployment_contract" {
     error_message = "A pipeline table takes its name and schema from its schema file."
   }
   assert {
+    condition     = google_bigquery_table.pipeline["synthetic_data_quality/validation_runs"].schema == file("${local.schema_dir}/synthetic_data_quality/validation_runs.schema.json")
+    error_message = "validation_runs takes its schema, record columns included (ADR 0044), from its schema file."
+  }
+  assert {
     condition     = google_bigquery_table.pipeline["synthetic_data_quality/dlq"].time_partitioning[0].field == "dlq_inserted_at" && google_bigquery_table.pipeline["synthetic_rag/rag_chunks"].time_partitioning[0].field == "created_at" && length(google_bigquery_table.pipeline["synthetic_data_quality/fk_fanout_stats"].time_partitioning) == 0
     error_message = "Pipeline tables must follow docs/DEPLOYMENT_PREREQUISITES.md partitioning."
   }
@@ -59,8 +63,8 @@ run "deployment_contract" {
     error_message = "The products catalog must land in the landing dataset: external FK parents resolve there."
   }
   assert {
-    condition     = local.model_paths[var.model] == "gemma4/e4b-it/v1" && var.model_source == "huggingface" && local.machine_type == "g2-standard-8" && local.launch_parameters.vllm_dtype == "auto"
-    error_message = "Gemma 4 E4B-it from Hugging Face on an L4 (G2, dtype auto) is the default."
+    condition     = local.model_paths[var.model] == "gemma4/e4b-it/v1" && var.model_source == "huggingface" && local.machine_type == "g2-standard-8" && local.launch_parameters.gpu == "l4" && !contains(keys(local.launch_parameters), "vllm_dtype")
+    error_message = "Gemma 4 E4B-it from Hugging Face on an L4 (G2) is the default; the launcher derives the dtype from gpu."
   }
   assert {
     condition     = length(module.buckets) == 0 && length(google_compute_subnetwork_iam_member.dataflow_network_user) == 0 && length(google_dataflow_flex_template_job.generation) == 0
@@ -122,6 +126,10 @@ run "terraform_launch" {
     condition     = length(google_dataflow_flex_template_job.generation) == 1 && google_dataflow_flex_template_job.generation[0].ip_configuration == "WORKER_IP_PRIVATE" && google_dataflow_flex_template_job.generation[0].container_spec_gcs_path == local.template_path
     error_message = "launch_job = true must launch the Flex Template on private worker IPs."
   }
+  assert {
+    condition     = google_dataflow_flex_template_job.generation[0].launcher_machine_type == "e2-standard-8" && google_dataflow_flex_template_job.generation[0].parameters["launcher_machine_type"] == google_dataflow_flex_template_job.generation[0].launcher_machine_type
+    error_message = "The launch runs on the launcher VM its launcher_machine_type parameter records."
+  }
 }
 
 run "t4_profile" {
@@ -133,8 +141,8 @@ run "t4_profile" {
   }
 
   assert {
-    condition     = local.machine_type == "n1-standard-8" && strcontains(local.gpu.accelerator, "nvidia-tesla-t4") && local.launch_parameters.vllm_dtype == "float16"
-    error_message = "A T4 runs on N1 and serves Qwen downcast to float16."
+    condition     = local.machine_type == "n1-standard-8" && strcontains(local.gpu.accelerator, "nvidia-tesla-t4") && local.launch_parameters.gpu == "t4"
+    error_message = "A T4 runs on N1 and the launch names it, so the launcher serves Qwen downcast to float16."
   }
 }
 

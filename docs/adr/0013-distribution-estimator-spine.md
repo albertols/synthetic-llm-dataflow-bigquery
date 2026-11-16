@@ -1,6 +1,18 @@
 # ADR 0013 — Synthesis engines use an LLM-as-distribution-estimator spine, not per-row LLM generation
 
-- **Status**: accepted (2026-05-21)
+- **Status**: accepted (2026-05-21). *Note 2026-11-13:* the B.2
+  `sdgx` fit below has never run in production. The locked sdgx 0.2.0 has
+  no `DataFrameConnector` and 0.2.1–0.2.4 pin `numpy<2`, so B.2's
+  distribution model has been the NumPy empirical backend (per-column
+  inverse-CDF and empirical categoricals) on every run; the engine now
+  probes for this once per process and logs it
+  (`b2_backend_fallback reason=sdgx_incompatible`,
+  [b2 README](../../packages/sdfb-core/src/sdfb_core/engines/b2_library/README.md)).
+  The decision (fit once, sample vectorized, LLM only for free text) is
+  unchanged. *Note 2026-11-16:* what a working fit would take and the
+  backend options are assessed in
+  [the B.2 backend assessment](../designs/2026-11-16-b2-library-backend-assessment.md);
+  no decision is taken there.
 - **Figures**: the spine's fidelity primitives and the rejected per-row-LLM
   alternative (GReaT) are drawn in
   [`2026-08-05-source-table-stats.md`](../designs/2026-08-05-source-table-stats.md)

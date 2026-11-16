@@ -14,8 +14,8 @@
 
 # Mode A validation thresholds — env-scoped severity gates.
 #
-# Loaded by the Beam pipeline at job start (M1 §12 — wiring not yet implemented;
-# this file is the contract).
+# Loaded by the Beam pipeline at job start (read by `resolve_thresholds`;
+# `guardrails.thresholds_uri` / `--thresholds_uri` points at it).
 #
 # Severity ladder (see .claude/skills/validation-mode-a.md and the brief §8):
 #   BLOCKER  → raises BlockerThresholdExceeded → Dataflow job FAILED
@@ -79,6 +79,27 @@ rules:
     dimension: validity
     severity: CRITICAL
     threshold: 1.0   # 100% of batch passes the Pandera-derived schema
+
+  schema.column:
+    dimension: validity
+    severity: BLOCKER
+    threshold: 1.0   # every column coerces to its contract dtype
+    # A Pandera failure with no row index: the column's own (a dtype it
+    # cannot be coerced to, a missing or unexpected column), so its whole
+    # micro-batch goes to the DLQ. Added after an SCD table (every row's
+    # VALID_TO at 9999-12-30, past pandas' nanosecond range) sent all of
+    # its 1,000,000 rows to the DLQ as schema.batch and read PASSED.
+
+  schema.landing_type:
+    dimension: validity
+    severity: BLOCKER
+    threshold: 1.0   # every value loads into its LANDING column's type
+    # A STRING source column the landing table types otherwise (DATE,
+    # DATETIME, TIMESTAMP, TIME, INT64, NUMERIC, BIGNUMERIC, FLOAT64, BOOL)
+    # is read the way BigQuery's JSON load reads it; a value the load
+    # cannot read diverts to the DLQ per row. Added after TABLE_C.COL_DATE_1
+    # (STRING source, DATE landing) carried '2847-46-81' past every line
+    # of defense and failed the FILE_LOADS job, and the whole Dataflow job.
 
   null.optional:
     dimension: completeness

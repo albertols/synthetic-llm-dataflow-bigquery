@@ -13,6 +13,7 @@ import type {
   EvaluationSummary,
   Facets,
   FreetextPool,
+  GenerationRecord,
   Page,
   ProfileRow,
   RelationshipModel,
@@ -89,6 +90,11 @@ export interface DataProvider {
    * generator's verdict on the declared key; null when the id does not exist.
    */
   evaluationAdjustments(id: string, ctx?: QueryContext): Promise<EvaluationAdjustments | null>;
+  /**
+   * ADR 0044: the generation record of the evaluation's launch, read from `validation_runs` through
+   * `runs.forEvaluation` (the adjustments join's query); null when the id does not exist.
+   */
+  evaluationRecord(id: string, ctx?: QueryContext): Promise<GenerationRecord | null>;
   metricTrend(q: TrendQueryParsed, ctx?: QueryContext): Promise<TrendPoint[]>;
   compare(ids: string[], ctx?: QueryContext): Promise<Comparison>;
   runs(q: RunFilterParsed, ctx?: QueryContext): Promise<ValidationRun[]>;

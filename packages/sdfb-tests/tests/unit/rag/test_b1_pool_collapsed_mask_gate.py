@@ -31,9 +31,13 @@ and punctuation must match an observed mask exactly.
 
 from __future__ import annotations
 
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.engines.b1_rag.engine import _pool_llm_yield
 from sdfb_core.engines.b1_rag.profile import ColumnKind, ColumnProfile
 from sdfb_core.engines.text_shapes import build_shape_mix
+
+# The ladder every direct `_pool_llm_yield` call runs (the launch default).
+_LADDER = DEFAULT_CONFIG.free_text
 
 # COL_038-class: fixed 5-letter head, digit, THREE literal spaces, 2-letter
 # code, digit run, letter tail.
@@ -75,6 +79,8 @@ def test_gate_rejects_normalized_whitespace_keeps_true_shape():
       _padded_profile(),
       ["CQZWD0   CS0000000000B"],
       target=8,
+      n_choices=_LADDER.pool_parallel_choices,
+      ladder=_LADDER,
   )
   assert y.pool == ["CQZWD9   DN9333333333B"]
   assert y.format_rejected >= 3
@@ -119,7 +125,13 @@ def test_gate_stays_off_for_word_diverse_prose():
     def generate_json(self, prompt, json_schema, **kw):
       return [{"values": ["a fresh synthetic outage note entirely new"]}]
 
-  y = _pool_llm_yield(_ProseClient(), "p", {}, prof, [vals[0]], target=4)
+  y = _pool_llm_yield(
+      _ProseClient(),
+      "p", {},
+      prof, [vals[0]],
+      target=4,
+      n_choices=_LADDER.pool_parallel_choices,
+      ladder=_LADDER)
   assert "a fresh synthetic outage note entirely new" in y.pool
 
 

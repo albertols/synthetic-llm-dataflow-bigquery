@@ -69,8 +69,12 @@ Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the ot
 ## Entry points
 
 - `packages/sdfb-core/src/sdfb_core/engines/base.py` — `GenerationEngine` ABC + `ModelClient` Protocol (the seam).
+- `packages/sdfb-core/src/sdfb_core/config/` — GeneratorConfig (types) + catalogue (prose); `generator.yaml` there holds every default value (`config/generator.yaml` links to it; its comments are rendered from the catalogue, ADR 0043).
+- `packages/sdfb-core/src/sdfb_core/record.py` — the generation record (the `validation_runs` record columns and the config snapshot, ADR 0044); `sdfb_core/version.py` — `generator_version`.
 - `packages/sdfb-beam/src/sdfb_beam/pipeline.py` — `build_pipeline()` composer.
 - `packages/sdfb-beam/src/sdfb_beam/ddl/cli.py` — DDL extractor CLI.
+- `composer/synthetic_beam_bigquery.py` — the one generation DAG (`tables=explicit` keeps master's chain, `tables=all` runs batch jobs; ADR 0045 D6), with `composer/sdfb_batches.py` (its launch helpers and planner mirror) and `composer/sdfb_env.yaml` (the env overlay workflow 3's `sed` fills; the DAG itself has no marker).
+- `packages/sdfb-core/src/sdfb_core/launch/` — whole-model launches (selection, per-table source and rows, the batch planner, ADR 0045); `scripts/launch/run_model.py` — the CLI runner.
 - `scripts/extract_ddl.py`, `scripts/hello_synthetic_mlx.py` — runnable entry shims (image build/push live in CI, see [ADR 0008](docs/adr/0008-ci-driven-builds.md)).
 - `packages/sdfb-evaluation/src/sdfb_evaluation/cli/main.py` — `sdfb-eval` (`plan`, `run`, `report`, `compare`, `catalogue`, `schemas`); the metric catalogue is `catalogue/metrics.yaml`.
 - `docker/flex_entry.py` — the flex template's entry: dispatches on `--sdfb_job` to generation or evaluation.
@@ -96,6 +100,7 @@ Import direction is **strict**: `sdfb-beam` depends on `sdfb-core`, never the ot
 - `b2-library-engineer` — owns `worktrees/b2-library`
 - `gpu-image-builder` — owns `docker/Dockerfile` + the vLLM handler (build itself happens in CI, see ADR 0008)
 - `gcp-deploy-runner` / `e2e-interpreter` / `gcp-po-auditor` — personal-GCP E2E campaign (deploy → interpret → audit)
+- `evaluation-interpreter` — reads a de-identified evaluation hand-off (`runs/evaluation_reports/<id>/oss/`) and checks its hypotheses and levers against the code; no cloud, no data
 
 ## Critical path
 
@@ -122,6 +127,7 @@ M1 is complete end to end, laptop and Dataflow. The work since has been relation
 - **How to declare per-column prompt constraints** (Terraform ⇄ `_ddl.json` worked examples) → [`docs/DDL_CONTRACT_GUIDE.md`](docs/DDL_CONTRACT_GUIDE.md).
 - **How to actually run a deployment** (GPU verdict, run matrix, Dataflow options, L4 capacity strategy, report recipe) → [`docs/RUN_PLAYBOOK.md`](docs/RUN_PLAYBOOK.md).
 - **How to validate a run after it lands** (duplication/memorization/schema defects traced to code + Dataflow observability) → [`.github/prompts/end_to_end_validation_report_generation.prompt.md`](.github/prompts/end_to_end_validation_report_generation.prompt.md).
+- **How good is what landed, for one evaluation or a fleet of them** (engine status per level and family on a fixed rubric, configuration quick wins, code-level candidates; a judge over the deterministic digest of `scripts/e2e/evaluation_digest.py`, `oss/` aliased for every table) → [`.github/prompts/end_to_end_evaluation_report_generation.prompt.md`](.github/prompts/end_to_end_evaluation_report_generation.prompt.md); on the code side, the `evaluation-interpreter` agent.
 - **Did PK/FK enforcement actually happen on a relational job** (registry-derived contract, launch milestones, read-only `bq` PK-duplicate / orphan / fan-out queries cross-checked against `validation_runs`) → [`.github/prompts/e2e_fk_pk_validator.prompt.md`](.github/prompts/e2e_fk_pk_validator.prompt.md).
 - **What was decided and why** → [`docs/adr/`](docs/adr/) (durable ADRs).
 - **What changed in a release, and where to write it** (the `[Unreleased]` block the release Action promotes into the tag's GitHub Release) → [`CHANGELOG.md`](CHANGELOG.md).

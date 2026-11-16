@@ -45,12 +45,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.observability import log_milestone
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
   from sdfb_core.contracts.relationships import FkEdge
-
-_DEFAULT_LIMIT = 100_000
 
 
 def parent_landing_fqn(ref: str, landing_dataset: str) -> str:
@@ -62,7 +61,7 @@ def load_fk_key_pools(
     fks: tuple[FkEdge, ...],
     landing_dataset: str,
     client=None,
-    limit: int = _DEFAULT_LIMIT,
+    limit: int = DEFAULT_CONFIG.relational.fk_key_sample_floor,
 ) -> list[dict]:
   """``[{"cols": [child cols], "keys": [(v, …), …]}, …]`` per edge.
 

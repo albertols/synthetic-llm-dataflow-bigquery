@@ -290,3 +290,45 @@ def test_extract_table_schema_returns_validated_schema():
   schema = extract_table_schema("proj.ds.tbl", client=client)
   assert schema.fqn  # a real TableSchema, not a dict
   assert [c.name for c in schema.columns]  # columns materialized
+
+
+# ---------------------------------------------------------------------------
+# CWE-89 (November 2026 scan): `--reference_table` reaches the
+# INFORMATION_SCHEMA.PARTITIONS query. The table name is a bound
+# parameter; project and dataset are identifiers, so they are allow-listed.
+# ---------------------------------------------------------------------------
+def test_partition_query_binds_table_name_as_a_parameter():
+  client = _fake_extraction_client()
+  extract_ddl_metadata(project="p", dataset="d", table="t", client=client)
+  call = client.query.call_args
+  sql = call.args[0]
+  assert "@table_name" in sql
+  assert "'t'" not in sql
+  assert "`p.d.INFORMATION_SCHEMA.PARTITIONS`" in sql
+  params = call.kwargs["job_config"].query_parameters
+  assert [(p.name, p.value) for p in params] == [("table_name", "t")]
+
+
+@pytest.mark.parametrize("part, value", [
+    ("table", "t' OR '1'='1"),
+    ("table", "t` WHERE 1=1; DROP TABLE `x"),
+    ("dataset", "d`; DROP TABLE x; --"),
+    ("project", "p` UNION ALL SELECT 1 --"),
+])
+def test_extractor_rejects_injection_before_any_bq_call(part, value):
+  client = _fake_extraction_client()
+  kwargs = {"project": "p", "dataset": "d", "table": "t", part: value}
+  with pytest.raises(ValueError, match=part):
+    extract_ddl_metadata(**kwargs, client=client)
+  client.get_table.assert_not_called()
+  client.query.assert_not_called()
+
+
+def test_extract_table_schema_rejects_injection_in_reference_table():
+  from sdfb_beam.ddl import extract_table_schema
+
+  client = _fake_extraction_client()
+  with pytest.raises(ValueError):
+    extract_table_schema("p.d.t' OR '1'='1", client=client)
+  client.get_table.assert_not_called()
+  client.query.assert_not_called()

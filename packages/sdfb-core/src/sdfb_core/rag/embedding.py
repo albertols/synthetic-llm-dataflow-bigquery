@@ -32,12 +32,15 @@ depends only on the `Embedder` Protocol below. Two implementations:
     do the statistical work; the embedder only conditions which exemplars
     are retrieved).
 
+`BgeEmbedder`'s token window and its free-VRAM threshold are launch-config
+constants (`rag.bge_max_length`, `rag.embedder_min_free_vram`, ADR 0043).
+
 REFs:
   - bge-small-en-v1.5: BAAI, MIT license, mirrored per config/models.yml
   - GReaT row serialization (what we embed): arXiv 2210.06280
 
-Design: docs/DESIGN.md §2 Engines; §3 Serving; §6 Throughput
-(ADR 0014, 0019, 0034).
+Design: docs/DESIGN.md §2 Engines; §3 Serving; §6 Throughput; §8 Configuration
+(ADR 0014, 0019, 0034, 0043).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -51,6 +54,7 @@ import math
 import threading
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.observability import log_milestone
 
 # bge-small-en-v1.5 is ~130 MB of fp32 weights; activations and CUDA context
@@ -58,11 +62,11 @@ from sdfb_core.observability import log_milestone
 # picks CUDA. The 2026-07-26 E2E asked for 2 MiB with 2.81 MiB free and
 # OOMed: cuda.is_available() answers "does a GPU exist", never "is there
 # room", and on a DoFn.setup() RETRY the module-level vLLM server reuse
-# (ADR 0014) means the card is already spoken for.
-_MIN_FREE_VRAM_BYTES = 512 * 1024**2
+# (ADR 0014) means the card is already spoken for. The threshold is
+# `rag.embedder_min_free_vram` in the launch config (ADR 0043).
 
 
-def _resolve_auto_device(torch) -> str:
+def _resolve_auto_device(torch, min_free_bytes: int) -> str:
   """``device="auto"`` = CUDA **if there is room**, else CPU."""
   cuda = getattr(torch, "cuda", None)
   if cuda is None or not cuda.is_available():
@@ -76,13 +80,13 @@ def _resolve_auto_device(torch) -> str:
     free_bytes = mem_get_info()[0]
   except Exception:  # pylint: disable=broad-exception-caught
     return "cuda"
-  if free_bytes >= _MIN_FREE_VRAM_BYTES:
+  if free_bytes >= min_free_bytes:
     return "cuda"
   log_milestone(
       "embedder_cuda_no_room",
       level=logging.WARNING,
       free_mib=round(free_bytes / 1024**2, 1),
-      needed_mib=round(_MIN_FREE_VRAM_BYTES / 1024**2),
+      needed_mib=round(min_free_bytes / 1024**2),
   )
   return "cpu"
 
@@ -213,12 +217,14 @@ class BgeEmbedder:
       model_path: str,
       *,
       dim: int = 384,
-      max_length: int = 512,
+      max_length: int = DEFAULT_CONFIG.rag.bge_max_length,
       device: str = "cpu",
+      min_free_vram: int = DEFAULT_CONFIG.rag.embedder_min_free_vram,
   ) -> None:
     self._model_path = model_path
     self._dim = dim
     self._max_length = max_length
+    self._min_free_vram = min_free_vram
     # The requested device ("auto" | "cuda" | "cpu"); resolved at load.
     self._requested = device
     self._device = device
@@ -256,7 +262,7 @@ class BgeEmbedder:
       requested = self._requested
       device = requested
       if device == "auto":
-        device = _resolve_auto_device(torch)
+        device = _resolve_auto_device(torch, self._min_free_vram)
       # One milestone at the seam covers every embedder user (engine
       # setup AND the population EmbedChunksDoFn): worker logs must
       # show whether bulk embedding actually ran on CUDA — the

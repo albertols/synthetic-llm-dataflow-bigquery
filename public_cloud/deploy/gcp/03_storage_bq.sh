@@ -74,6 +74,12 @@ else
     "${PROJECT_ID}:${QUALITY_DATASET}.validation_runs"
 fi
 
+# ADR 0044: append the generation-record columns to a table created before
+# them. Idempotent: the committed schema is a superset, and on a table this
+# script just created it changes nothing.
+run bq update --schema "${REPO_ROOT}/config/bq_schema/synthetic_data_quality/validation_runs.schema.json" \
+  "${PROJECT_ID}:${QUALITY_DATASET}.validation_runs"
+
 # --- one-time public-table snapshots (spec: snapshot-once cost strategy) -----
 # Frozen 50k-row copies; reruns are no-ops via IF NOT EXISTS. citibike has no
 # natural PK -> GENERATE_UUID() trip_id (pk_cols/identity_cols in tiers.yaml).

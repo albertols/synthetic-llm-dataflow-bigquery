@@ -16,6 +16,12 @@
 Cheap, runs on every record. Invalid records are routed to the
 `invalid` tagged output with full structured error context for the DLQ.
 
+The record model is the SOURCE contract. Given the landing schema, a
+STRING source column that the landing table types otherwise (DATE,
+INT64, ...) is also read the way BigQuery's JSON load reads it: a value
+the landing type cannot hold goes to the DLQ as `schema.landing_type`, a
+BLOCKER, instead of failing the whole FILE_LOADS job at the load.
+
 REFs:
   - https://docs.pydantic.dev/latest/errors/validation_errors/
   - .claude/skills/validation-mode-a.md
@@ -30,21 +36,31 @@ from apache_beam.metrics import Metrics
 from pydantic import ValidationError
 from sdfb_core.codegen import derive_record_model
 from sdfb_core.contracts import TableSchema
+from sdfb_core.validation.landing_type import (
+    landing_type_columns,
+    landing_type_error,
+)
 
 
 class ValidateRecordDoFn(beam.DoFn):
   """Validate each record dict against the derived Pydantic model."""
 
-  def __init__(self, table_schema: TableSchema) -> None:
+  def __init__(self,
+               table_schema: TableSchema,
+               landing_schema: TableSchema | None = None) -> None:
     super().__init__()
     self.table_schema = table_schema
+    self.landing_schema = landing_schema
     self._record_model = None  # built in setup()
+    self._landing_types: dict[str, str] = {}  # built in setup()
 
     self._valid = Metrics.counter("validation", "pydantic_valid")
     self._invalid = Metrics.counter("validation", "pydantic_invalid")
 
   def setup(self):
     self._record_model = derive_record_model(self.table_schema)
+    self._landing_types = landing_type_columns(self.table_schema,
+                                               self.landing_schema)
 
   def _load_safety_error(self, record) -> dict | None:
     # Load-safety bound (2026-08-22 single-job run): FILE_LOADS
@@ -61,7 +77,29 @@ class ValidateRecordDoFn(beam.DoFn):
             "error_detail": (f"{col}: non-finite float {v!r} — json.dumps "
                              f"emits invalid JSON and BQ load aborts"),
         }
-    return None
+    return self._landing_type_error(record)
+
+  def _landing_type_error(self, record) -> dict | None:
+    # Corp run: TABLE_C.COL_DATE_1 is STRING in the source and DATE in
+    # the landing table. `'2847-46-81'` passed the source contract, then
+    # failed the load (`Invalid date`) and with it the whole job.
+    failures = []
+    for col, landing_type in self._landing_types.items():
+      value = record.get(col)
+      if not isinstance(value, str):
+        continue  # NULL; a non-string is the record model's to reject
+      reason = landing_type_error(landing_type, value)
+      if reason is not None:
+        failures.append({
+            "column": col,
+            "source_type": "STRING",
+            "landing_type": landing_type,
+            "value": value,
+            "reason": reason,
+        })
+    if not failures:
+      return None
+    return {"rule_id": "schema.landing_type", "error_detail": failures}
 
   # pylint: disable-next=arguments-renamed  # Beam passes the element positionally
   def process(self, record):

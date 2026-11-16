@@ -50,7 +50,7 @@ export function RetrievalSimulator({ model }: { model: RagModel }) {
           <div className="grid gap-1.5">
             <span className="text-xs font-medium text-text-2">
               Seeds per prompt k = {k}{" "}
-              {k === TOP_K ? "(the pipeline's _DEFAULT_TOP_K)" : `(the pipeline uses ${TOP_K})`}
+              {k === TOP_K ? "(the pipeline's default, rag.rag_top_k)" : `(the pipeline uses ${TOP_K})`}
             </span>
             <Slider
               min={1}

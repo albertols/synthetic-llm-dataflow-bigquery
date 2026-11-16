@@ -57,6 +57,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from sdfb_core.config.model import DEFAULT_CONFIG
 
 _SCOPES = ["https://www.googleapis.com/auth/cloud-platform"]
 
@@ -82,7 +83,7 @@ _WARN_DECILE_KS = 0.2
 _WARN_PARITY_DELTA = 0.1
 _FAIL_MULTIPLIER = 2.0
 
-_LEN_PCTS = (0.05, 0.50, 0.95)
+_LEN_PCTS = DEFAULT_CONFIG.sampling.length_percentiles
 
 _VERDICT_RANK = {"fail": 2, "warn": 1, "ok": 0}
 

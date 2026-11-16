@@ -31,8 +31,8 @@ share the sort), temporal values parse ONCE (v1 parsed twice via
 the rows. Everything is stdlib — this module stays importable without
 numpy/Beam/GCP.
 
-Design: docs/DESIGN.md §5 Fidelity
-(ADR 0022).
+Design: docs/DESIGN.md §5 Fidelity; §8 Configuration
+(ADR 0022, 0043).
 """
 
 from __future__ import annotations
@@ -43,6 +43,8 @@ from datetime import UTC, datetime
 from math import log2
 from typing import TYPE_CHECKING
 
+from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig, SamplingSettings
+from sdfb_core.config.salt import salted, settings_salt
 from sdfb_core.engines.text_shapes import build_shape_mix
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -52,26 +54,18 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 _NUMERIC_BQ_TYPES = frozenset(
     {"INTEGER", "INT64", "FLOAT", "FLOAT64", "NUMERIC", "BIGNUMERIC"})
 _TEMPORAL_BQ_TYPES = frozenset({"DATE", "DATETIME", "TIMESTAMP"})
-_SHAPE_MIX_TOP_K = 8
-_LEN_PCTS = (0.05, 0.50, 0.95)
 
 # Part of the stats-table append-skip key: the reference digest hashes ROWS,
 # not this module, so a profiler upgrade must bump this or already-profiled
 # tables keep stale stats forever (ADR 0022).
 PROFILER_VERSION = "2"
 
-# Literal source values land in stats ONLY for enum-routed columns (the T4
-# exemplar-leak lesson): above this distinct count, a column gets shapes /
-# entropy / lengths — never values. Mirrors the engines'
-# _FREE_TEXT_MAX_CATEGORIES so "enum-routed" means the same thing everywhere.
-_TOP_VALUES_MAX_DISTINCT = 50
-_TOP_VALUES_TOP_K = 8
 
-# Row-level null co-occurrence: per-row is-null bitstrings, top-K patterns.
-# Skipped above the column cap — the bitstring alphabet grows with width and
-# the pass is O(rows x cols).
-_NULL_PATTERN_MAX_COLS = 64
-_NULL_PATTERN_TOP_K = 8
+def stats_profiler_version(config: GeneratorConfig) -> str:
+  """The profiler version stamped on stats rows, salted when a setting that
+    shapes the stats is not at its default (ADR 0043)."""
+  return salted(PROFILER_VERSION, settings_salt(config, "source_stats"))
+
 
 # The `__table__` pseudo-column carrying table-level stats (null-pattern
 # mix). Not a source column: `in_source_schema` is False and consumers that
@@ -121,6 +115,8 @@ def profile_source_table(
     reference_rows: list[dict],
     relations: TableRelations | None = None,
     generation_plan: dict[str, str] | None = None,
+    *,
+    config: GeneratorConfig = DEFAULT_CONFIG,
 ) -> dict[str, dict]:
   """name → stats dict for every top-level column of the schema, plus a
     ``__table__`` pseudo-column with table-level stats (null-pattern mix)."""
@@ -132,6 +128,8 @@ def profile_source_table(
       fk_cols.update(fk.cols)
   plan = generation_plan or {}
   n = len(reference_rows)
+  sampling = config.sampling
+  profiler_version = stats_profiler_version(config)
 
   stats: dict[str, dict] = {}
   for col in table_schema.columns:
@@ -179,10 +177,10 @@ def profile_source_table(
         "future_fraction": None,
         "generation_plan": plan.get(col.name, ""),
         "stats_tier": "sample",
-        "profiler_version": PROFILER_VERSION,
+        "profiler_version": profiler_version,
     }
 
-    _add_value_mix(entry, counter, len(strings))
+    _add_value_mix(entry, counter, len(strings), sampling)
 
     if col.bq_type in _NUMERIC_BQ_TYPES:
       _add_numeric(entry, substantive)
@@ -190,14 +188,15 @@ def profile_source_table(
       lengths = sorted(len(s) for s in strings)
       last = len(lengths) - 1
       for p, key in zip(
-          _LEN_PCTS, ("len_p05", "len_p50", "len_p95"), strict=True):
+          sampling.length_percentiles, ("len_p05", "len_p50", "len_p95"),
+          strict=True):
         entry[key] = lengths[int(p * last)]
       entry["mean_len"] = round(sum(lengths) / len(lengths), 2)
       parsed = _parse_temporals(
           strings, sniff=col.bq_type not in _TEMPORAL_BQ_TYPES)
       if parsed:
         _add_temporal(entry, parsed)
-      shapes = build_shape_mix(strings, top_k=_SHAPE_MIX_TOP_K)
+      shapes = build_shape_mix(strings, top_k=sampling.shape_mix_top_k)
       if shapes:
         total = sum(w for w, _ in shapes)
         entry["shape_mix"] = [[_mask_of_template(shape),
@@ -205,13 +204,15 @@ def profile_source_table(
 
     stats[col.name] = entry
 
-  if n and 0 < len(table_schema.columns) <= _NULL_PATTERN_MAX_COLS:
+  if n and 0 < len(table_schema.columns) <= sampling.null_pattern_max_cols:
     stats[TABLE_PSEUDO_COLUMN] = _null_pattern_entry(
-        [c.name for c in table_schema.columns], reference_rows)
+        [c.name for c in table_schema.columns], reference_rows, sampling,
+        profiler_version)
   return stats
 
 
-def _add_value_mix(entry: dict, counter: Counter, total: int) -> None:
+def _add_value_mix(entry: dict, counter: Counter, total: int,
+                   sampling: SamplingSettings) -> None:
   """Skew + information content from the one Counter every column builds.
 
     ``entropy`` is Shannon entropy in bits; ``entropy_norm`` divides by
@@ -228,9 +229,10 @@ def _add_value_mix(entry: dict, counter: Counter, total: int) -> None:
   entry["entropy_norm"] = (
       round(entropy / log2(len(counter)), 4) if len(counter) > 1 else 0.0)
   entry["top1_share"] = round(counter.most_common(1)[0][1] / total, 6)
-  if len(counter) <= _TOP_VALUES_MAX_DISTINCT:
-    entry["top_values"] = [[v, round(c / total, 6)]
-                           for v, c in counter.most_common(_TOP_VALUES_TOP_K)]
+  if len(counter) <= sampling.top_values_max_distinct:
+    entry["top_values"] = [[v, round(
+        c / total,
+        6)] for v, c in counter.most_common(sampling.top_values_top_k)]
 
 
 def _add_numeric(entry: dict, substantive: list[object]) -> None:
@@ -296,7 +298,9 @@ def _add_temporal(entry: dict, parsed: list[datetime]) -> None:
   entry["future_fraction"] = round(sum(1 for d in parsed if d > now) / total, 6)
 
 
-def _null_pattern_entry(names: list[str], reference_rows: list[dict]) -> dict:
+def _null_pattern_entry(names: list[str], reference_rows: list[dict],
+                        sampling: SamplingSettings,
+                        profiler_version: str) -> dict:
   """Row-level null co-occurrence: per-row is-null bitstring, top-K mix.
 
     Per-column ``null_fraction`` cannot say which columns are null TOGETHER
@@ -321,10 +325,11 @@ def _null_pattern_entry(names: list[str], reference_rows: list[dict]) -> dict:
       "identity_col": False,
       "generation_plan": "",
       "null_pattern_columns": names,
-      "null_pattern_mix": [[bits, round(
-          c / n, 6)] for bits, c in patterns.most_common(_NULL_PATTERN_TOP_K)],
+      "null_pattern_mix":
+          [[bits, round(c / n, 6)]
+           for bits, c in patterns.most_common(sampling.null_pattern_top_k)],
       "stats_tier": "sample",
-      "profiler_version": PROFILER_VERSION,
+      "profiler_version": profiler_version,
   }
 
 

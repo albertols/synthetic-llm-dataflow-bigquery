@@ -19,6 +19,8 @@ export type DlqRuleId =
   | "regex.format"
   | "row.duplicate"
   | "schema.batch"
+  | "schema.column"
+  | "schema.landing_type"
   | "schema.non_finite"
   | "schema.types";
 
@@ -32,7 +34,7 @@ export const dlqRules: DlqRulesFile = {
       "error_type": "engine",
       "pipeline_step": "GenerateRecordsDoFn",
       "stage": "pre_write",
-      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:627",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:691",
       "declared": true,
       "severity": "BLOCKER",
       "dimension": "reliability",
@@ -71,7 +73,7 @@ export const dlqRules: DlqRulesFile = {
       "error_type": "referential_integrity",
       "pipeline_step": "GenerateRecordsDoFn",
       "stage": "pre_generate",
-      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:476",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/generate.py:517",
       "declared": false,
       "severity": null,
       "dimension": null,
@@ -227,7 +229,7 @@ export const dlqRules: DlqRulesFile = {
       "error_type": "pandera",
       "pipeline_step": "PanderaValidateBatchDoFn",
       "stage": "pre_write",
-      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/pandera_batch.py:70",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/pandera_batch.py:101",
       "declared": true,
       "severity": "CRITICAL",
       "dimension": "validity",
@@ -235,12 +237,38 @@ export const dlqRules: DlqRulesFile = {
       "counted_in_blocker_gate": false
     },
     {
+      "rule_id": "schema.column",
+      "emitted": true,
+      "error_type": "pandera",
+      "pipeline_step": "PanderaValidateBatchDoFn",
+      "stage": "pre_write",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/pandera_batch.py:101",
+      "declared": true,
+      "severity": "BLOCKER",
+      "dimension": "validity",
+      "scope": "in_dag",
+      "counted_in_blocker_gate": true
+    },
+    {
+      "rule_id": "schema.landing_type",
+      "emitted": true,
+      "error_type": "load_safety",
+      "pipeline_step": "ValidateRecordDoFn",
+      "stage": "pre_write",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/validate_record.py:102",
+      "declared": true,
+      "severity": "BLOCKER",
+      "dimension": "validity",
+      "scope": "in_dag",
+      "counted_in_blocker_gate": true
+    },
+    {
       "rule_id": "schema.non_finite",
       "emitted": true,
       "error_type": "load_safety",
       "pipeline_step": null,
       "stage": "pre_write",
-      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/validate_record.py:58",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/validate_record.py:74",
       "declared": false,
       "severity": null,
       "dimension": null,
@@ -253,7 +281,7 @@ export const dlqRules: DlqRulesFile = {
       "error_type": "pydantic",
       "pipeline_step": "ValidateRecordDoFn",
       "stage": "pre_write",
-      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/validate_record.py:89",
+      "emitted_by": "packages/sdfb-beam/src/sdfb_beam/dofns/validate_record.py:127",
       "declared": true,
       "severity": "BLOCKER",
       "dimension": "validity",
@@ -262,7 +290,7 @@ export const dlqRules: DlqRulesFile = {
     }
   ],
   "exported_from": {
-    "commit": "b1e672da682837318495b58323194e771d6af644",
+    "commit": "ebd3eb9aa02f0edbca906ba232f2d26bb450b389",
     "dirty": []
   }
 };

@@ -18,6 +18,15 @@ the Pandera schema with `lazy=True` (collect-all-failures). Failing
 rows are split out via the `invalid` tagged output; passing rows
 continue downstream.
 
+Two rules. A failure Pandera ties to a row (its failure case has an
+index) sends that row to the DLQ as `schema.batch`. A failure with no
+index is the column's, not a row's (a dtype the column cannot be coerced
+to, a missing or unexpected column): no row of the batch passed, so the
+whole batch goes to the DLQ as `schema.column`, a BLOCKER in
+config/thresholds.yml, and every row's detail names the column's
+failures. The validated frame is thrown away: passing rows continue as
+the dicts they came in as.
+
 REFs:
   - https://pandera.readthedocs.io/en/stable/lazy_validation.html
   - .claude/skills/validation-mode-a.md
@@ -32,6 +41,24 @@ from apache_beam.metrics import Metrics
 from sdfb_core.contracts import TableSchema
 
 from sdfb_beam.codegen import derive_pandera_schema
+
+# The DLQ rule ids (config/thresholds.yml): a failure tied to a row, and
+# one of the whole column.
+RULE_ROW = "schema.batch"
+RULE_COLUMN = "schema.column"
+# How many failure cases a row's DLQ detail carries, of each kind.
+_DETAIL_CASES = 5
+
+
+def _cases(failure_cases: pd.DataFrame) -> list[dict]:
+  """The first failure cases as JSON-safe records: each value as text, a
+  missing one as None (pandas 3 keeps NaN through `astype(str)`, and a
+  NaN is no JSON)."""
+  return [{
+      key: None if pd.isna(value) else str(value)
+      for key, value in record.items()
+  }
+          for record in failure_cases.head(_DETAIL_CASES).to_dict("records")]
 
 
 class PanderaValidateBatchDoFn(beam.DoFn):
@@ -61,7 +88,11 @@ class PanderaValidateBatchDoFn(beam.DoFn):
         yield record
       return
     except pa_err.SchemaErrors as e:
-      failed_indices = self._extract_failed_indices(e, len(batch))
+      column_level = self._has_column_failures(e)
+      failed_indices = (
+          set(range(len(batch)))
+          if column_level else self._extract_failed_indices(e, len(batch)))
+      rule_id = RULE_COLUMN if column_level else RULE_ROW
       for i, record in enumerate(batch):
         if i in failed_indices:
           self._invalid.inc()
@@ -71,13 +102,23 @@ class PanderaValidateBatchDoFn(beam.DoFn):
                   "raw_record": record,
                   "error_type": "pandera",
                   "error_detail": self._summarize_for_row(e, i),
-                  "rule_id": "schema.batch",
+                  "rule_id": rule_id,
                   "stage": "pre_write",
               },
           )
         else:
           self._valid.inc()
           yield record
+
+  @staticmethod
+  def _has_column_failures(errors: pa_err.SchemaErrors) -> bool:
+    """Whether a failure case has no row index: the column's own."""
+    try:
+      fc = errors.failure_cases
+      return (not fc.empty) and ("index" not in fc.columns or
+                                 bool(fc["index"].isna().any()))
+    except Exception:  # pylint: disable=broad-exception-caught
+      return True  # unreadable failure cases: no row can be trusted
 
   @staticmethod
   def _extract_failed_indices(errors: pa_err.SchemaErrors,
@@ -109,13 +150,23 @@ class PanderaValidateBatchDoFn(beam.DoFn):
 
   @staticmethod
   def _summarize_for_row(errors: pa_err.SchemaErrors, idx: int) -> dict:
-    """Compact, JSON-friendly error summary for one row."""
+    """Compact, JSON-friendly error summary for one row: its own failure
+    cases and the column-level ones (no index), which every row of the
+    batch shares, each with its schema_context, column and check."""
     try:
       fc = errors.failure_cases
-      row_fc = fc[fc["index"] == idx] if "index" in fc.columns else fc
+      if "index" in fc.columns:
+        own = fc[fc["index"] == idx]
+        shared = fc[fc["index"].isna()]
+      else:
+        own, shared = fc.iloc[0:0], fc
+      cases = _cases(own) + _cases(shared)
+      if not cases:
+        return {"raw": str(errors)[:500]}
       return {
-          "failure_count": len(row_fc),
-          "first_failures": row_fc.head(5).astype(str).to_dict("records"),
+          "failure_count": len(own) + len(shared),
+          "column_failure_count": len(shared),
+          "first_failures": cases,
       }
     except Exception:  # pylint: disable=broad-exception-caught
       return {"raw": str(errors)[:500]}

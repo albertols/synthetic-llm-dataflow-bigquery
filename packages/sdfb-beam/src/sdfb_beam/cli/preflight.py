@@ -31,7 +31,7 @@ declares fall back to the CLI flags, which is how a one-off table with
 no relationships generates with zero config.
 
 Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuration
-(ADR 0024, 0026, 0028, 0029, 0030, 0031, 0032, 0035, 0036, 0037, 0038).
+(ADR 0024, 0026, 0028, 0029, 0030, 0031, 0032, 0035, 0036, 0037, 0038, 0043).
 """
 
 # f-string fields keep single quotes: yapf 0.43 cannot parse PEP 701
@@ -48,6 +48,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from sdfb_core.config.model import DEFAULT_CONFIG, GeneratorConfig
 from sdfb_core.contracts.description_json import DescriptionJsonError
 from sdfb_core.contracts.model_adjustment import (
     ModelAdjustment,
@@ -65,9 +66,7 @@ from sdfb_core.engines.b1_rag.profile import (
     profile_columns,
 )
 from sdfb_core.engines.constraint_sampler import compile_pattern_sampler
-from sdfb_core.engines.generation_plan import FREE_TEXT_POOL_MAX
 from sdfb_core.engines.pk_capacity import (
-    FK_KEY_SAMPLE_CEILING,
     effective_cells,
     expected_duplicate_share_cells,
     fk_key_sample_cap,
@@ -169,7 +168,10 @@ _POOL_ROUTED_BQ_TYPES = frozenset({"STRING", "JSON", "GEOGRAPHY", "BYTES"})
 def _pk_capacity_factor(
     field_,
     pc,
-    profile: ColumnProfile | None = None) -> tuple[int | None, bool]:
+    profile: ColumnProfile | None = None,
+    *,
+    config: GeneratorConfig,
+) -> tuple[int | None, bool]:
   """One PK member's ``(unique-value capacity, draws_at_random)``;
     capacity ``None`` = unbounded.
 
@@ -182,7 +184,8 @@ def _pk_capacity_factor(
     stop). Bounded constrained members: an enum ``values`` clause (its
     domain, random), a samplable ``pattern`` (its language, with the
     emitted-set rejection of ADR 0028 — exact), else the
-    ``FREE_TEXT_POOL_MAX`` pool cap (random)."""
+    ``free_text.free_text_pool_max`` pool cap of the launch config
+    (random, ADR 0043)."""
   if pc is None:
     return _unconstrained_factor(profile), profile is not None
   if pc.values:
@@ -194,7 +197,7 @@ def _pk_capacity_factor(
     sampler = compile_pattern_sampler(pc.pattern, families=pc.families)
     if sampler is not None:
       return sampler.capacity, False
-  return FREE_TEXT_POOL_MAX, True
+  return config.free_text.free_text_pool_max, True
 
 
 def _unconstrained_factor(profile: ColumnProfile | None) -> int | None:
@@ -251,6 +254,8 @@ def _fold_pk_members(
     effective_pk: tuple[str, ...],
     skip: set[str],
     profiles: Mapping[str, ColumnProfile],
+    *,
+    config: GeneratorConfig,
 ) -> _PkMembers:
   by_name = {c.name: c for c in table_schema.columns}
   m = _PkMembers()
@@ -262,7 +267,7 @@ def _fold_pk_members(
       continue
     pc = parse_prompt_constraint(field_.description, column=col)
     profile = profiles.get(col)
-    factor, at_random = _pk_capacity_factor(field_, pc, profile)
+    factor, at_random = _pk_capacity_factor(field_, pc, profile, config=config)
     if factor is None:
       m.unbounded = True  # one unbounded member covers the tuple
       return m
@@ -285,9 +290,11 @@ def _random_draw_stop(
     gate: float,
     max_rows: int | None,
     at_ceiling: bool,
+    *,
+    fk_key_sample_ceiling: int,
 ) -> SystemExit:
   ceiling_note = (
-      f" The FK key sample is at its {FK_KEY_SAMPLE_CEILING:,}-tuple "
+      f" The FK key sample is at its {fk_key_sample_ceiling:,}-tuple "
       f"side-input ceiling; beyond it the parent join must move to "
       f"the co-partitioned shuffle (ADR 0031)." if at_ceiling else "")
   return SystemExit(
@@ -310,6 +317,7 @@ def _check_pk_capacity(
     fk_edges: tuple[FkEdge, ...] = (),
     fk_parent_rows: Mapping[str, int] | None = None,
     blocker_failure_ratio: float = 1.0,
+    config: GeneratorConfig,
 ) -> dict[tuple[str, ...], int]:
   """P4 (ADR 0028, tuple-aware since ADR 0030, FK/categorical-aware
     since ADR 0035) — the PK TUPLE's generator capacity must cover
@@ -336,13 +344,18 @@ def _check_pk_capacity(
       effective_pk,
       skip={c for fk in edges for c in fk.cols},
       profiles=profiles or {},
+      config=config,
   )
   cells = (
       _joint_cell_weights(reference_rows or [], tuple(m.sampled_cols))
       if m.sampled_cols else [1.0])
   n_eff = effective_cells(cells)
   other = None if m.unbounded else m.uniform * n_eff
-  caps = {tuple(fk.cols): fk_key_sample_cap(num_rows, other) for fk in edges}
+  relational = config.relational
+  caps = {
+      tuple(fk.cols): fk_key_sample_cap(num_rows, other, relational=relational)
+      for fk in edges
+  }
   if m.unbounded:
     return caps
   uniform = m.uniform
@@ -382,8 +395,11 @@ def _check_pk_capacity(
         detail,
         share,
         blocker_failure_ratio,
-        max_rows_under_share(uniform, blocker_failure_ratio, cells),
-        at_ceiling=any(c >= FK_KEY_SAMPLE_CEILING for c in caps.values()),
+        max_rows_under_share(
+            uniform, blocker_failure_ratio, cells, relational=relational),
+        at_ceiling=any(
+            c >= relational.fk_key_sample_ceiling for c in caps.values()),
+        fk_key_sample_ceiling=relational.fk_key_sample_ceiling,
     )
   if share > _PK_DUPLICATE_WARN_SHARE:
     log_milestone(
@@ -432,15 +448,18 @@ def _constraint_vehicle(prof, field_) -> str:
           f"STRING column onto freetext_llm_pool/RAG")
 
 
-def _report_constraint_vehicles(table_schema: TableSchema,
-                                reference_rows: list[dict]) -> None:
+def _report_constraint_vehicles(
+    table_schema: TableSchema,
+    reference_rows: list[dict],
+    config: GeneratorConfig = DEFAULT_CONFIG,
+) -> None:
   """One pretty block per table: every constrained column, keyed
     TABLE.COL, with its clause, its declared ``route`` and the RESOLVED
     generation vehicle (from the real profiler over the reference
     sample) — visible at preflight, before any worker exists."""
   if not reference_rows:
     return
-  profiles = profile_columns(table_schema, reference_rows)
+  profiles = profile_columns(table_schema, reference_rows, config=config)
   name = table_schema.fqn.rsplit(".", 1)[-1]
   payload: dict[str, dict] = {}
   for col in table_schema.columns:
@@ -569,7 +588,7 @@ def _check_pk_is_a_key(
 # parent candidate tuples (`--fk_candidate_cap`). Defined HERE, not in
 # `run_pipeline`, so P4 and the launcher agree on one number without
 # preflight importing the launcher (the import runs the other way).
-DEFAULT_FK_CANDIDATE_CAP = 64
+DEFAULT_FK_CANDIDATE_CAP = DEFAULT_CONFIG.relational.fk_candidate_cap
 
 # Immutable empty defaults (a `{}` default would be shared mutable state).
 _NO_CAPS: Mapping[tuple[str, ...], int] = MappingProxyType({})
@@ -577,6 +596,36 @@ _NO_REST: Mapping[str, tuple[str, ...]] = MappingProxyType({})
 # Parent landing name -> DISTINCT key values it lands (fix H3). Empty =
 # no parent was adjusted, so rows and distinct keys coincide everywhere.
 _NO_PARENT_KEYS: Mapping[str, int] = MappingProxyType({})
+KEY_SET_PARENT_PK = "parent_pk"
+KEY_SET_INHERITED = "inherited"
+
+
+@dataclass(frozen=True)
+class DrivingKeys:
+  """The distinct values a driven child's DRIVING edge can fan out over
+    on its parent (ADR 0036, 2026-11-13 amendment), and which key set
+    bounded them.
+
+    ``key_set`` is ``parent_pk`` when the edge's ``ref_cols`` contain the
+    parent's declared PK — ``keys`` is then the parent's landed distinct
+    PK count (fix H3), or ``None`` when none was recorded, exactly as
+    before. It is ``inherited`` when the parent copies those columns from
+    an upstream ``owner`` (`RelationshipRegistry.key_lineage`): ``keys``
+    is then the owner's landed rows (its distinct keys when the columns
+    cover ITS PK), capped at every table's rows on the way down."""
+
+  keys: int | None
+  key_set: str = KEY_SET_PARENT_PK
+  ref_cols: tuple[str, ...] = ()
+  owner: str = ""
+  owner_cols: tuple[str, ...] = ()
+  owner_rows: int | None = None
+
+
+# Parent ref -> the key set that bounded its driving edge's distinct
+# values, when it is NOT the parent's declared PK (2026-11-13): the
+# owner of inherited columns. Empty = every child sized off the PK.
+_NO_KEY_SETS: Mapping[str, DrivingKeys] = MappingProxyType({})
 
 
 def pk_cell_columns(
@@ -1111,6 +1160,7 @@ def _derived_rows(
     edge_roles: Mapping[FkEdge, str] | None,
     fk_parent_rows: Mapping[str, int],
     fk_parent_distinct_keys: Mapping[str, int] = _NO_PARENT_KEYS,
+    fk_parent_key_sets: Mapping[str, DrivingKeys] = _NO_KEY_SETS,
 ) -> int | None:
   """A DRIVEN child's row count (ADR 0036): ``round(driving parent's
     DISTINCT landed keys x mean fan-out)``. ``None`` when the histogram
@@ -1128,6 +1178,14 @@ def _derived_rows(
     requested against ~109,556 producible on the 2026-09-12 shape,
     written to `validation_runs` as a missed request with no milestone
     naming the cause. Hence the milestone.
+
+    More precisely it is the distinct values of the driving edge's
+    ``ref_cols`` on the parent, which is the parent's PK count only when
+    those columns contain the PK. When the parent INHERITED them
+    (``fk_parent_key_sets``, 2026-11-13) the launcher bounds them by the
+    table that owns them and the milestone names that owner: the corp
+    launch asked 713,173,103 rows of a ~356.5M maximum by multiplying a
+    20.0M-distinct PK whose child fans out over a 10M-row root's triple.
     """
   hist = {int(k): int(n) for k, n in (fanout.get("histogram") or {}).items()}
   total = sum(hist.values())
@@ -1141,7 +1199,30 @@ def _derived_rows(
   mean_fanout = sum(k * n for k, n in hist.items()) / total
   keys = fk_parent_distinct_keys.get(driving_ref) or parent_rows
   derived = round(keys * mean_fanout)
-  if keys < parent_rows:
+  key_set = fk_parent_key_sets.get(driving_ref)
+  if keys < parent_rows and key_set is not None:
+    log_milestone(
+        "model_adjustment_descendant_rows",
+        level=logging.WARNING,
+        table=fqn,
+        parent=driving_ref,
+        parent_rows=parent_rows,
+        parent_distinct_keys=keys,
+        mean_fanout=round(mean_fanout, 4),
+        derived_rows=derived,
+        unadjusted_rows=round(parent_rows * mean_fanout),
+        key_set="inherited",
+        ref_cols=",".join(key_set.ref_cols),
+        key_owner=key_set.owner,
+        owner_cols=",".join(key_set.owner_cols),
+        owner_rows=key_set.owner_rows,
+        note="the driving edge's ref_cols are NOT the parent's declared "
+        "PK: the parent inherits them from key_owner, so it holds at "
+        "most that table's landed distinct values of them (capped at "
+        "its own rows) — sizing this table off the parent's PK "
+        "distinct count would request rows the fan-out cannot produce",
+    )
+  elif keys < parent_rows:
     log_milestone(
         "model_adjustment_descendant_rows",
         level=logging.WARNING,
@@ -1161,8 +1242,8 @@ def _derived_rows(
 
 
 def _independent_pool_caps(
-    supply: EdgeSupply, rows: int,
-    fk_parent_rows: Mapping[str, int]) -> dict[tuple[str, ...], int]:
+    supply: EdgeSupply, rows: int, fk_parent_rows: Mapping[str, int], *,
+    config: GeneratorConfig) -> dict[tuple[str, ...], int]:
   """Per INDEPENDENT edge touching the PK, the parent key sample the
     composer will broadcast (ADR 0037 §6; ruling 13). P4 counts it as a
     per-key factor and `in_set_parent_edges` sizes the side input from
@@ -1184,7 +1265,7 @@ def _independent_pool_caps(
     the whole component and every enabled parent is in-set."""
   caps: dict[tuple[str, ...], int] = {}
   for edge in supply.independent:
-    cap = fk_key_sample_cap(rows, 1)
+    cap = fk_key_sample_cap(rows, 1, relational=config.relational)
     parent_rows = fk_parent_rows.get(edge.ref)
     caps[tuple(edge.cols)] = min(cap, parent_rows) if parent_rows else cap
   return caps
@@ -1203,7 +1284,9 @@ def _driven_child_rows(
     candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
     on_conflict: str = ON_CONFLICT_ADJUST,
     fk_parent_distinct_keys: Mapping[str, int] = _NO_PARENT_KEYS,
+    fk_parent_key_sets: Mapping[str, DrivingKeys] = _NO_KEY_SETS,
     gate: float = 1.0,
+    config: GeneratorConfig,
 ) -> tuple[int | None, dict[tuple[str, ...], int], ModelAdjustment | None]:
   """``(derived rows, independent pool caps, adjustment)`` for a DRIVEN
     child.
@@ -1225,9 +1308,11 @@ def _driven_child_rows(
       edge_roles,
       parent_rows,
       fk_parent_distinct_keys,
+      fk_parent_key_sets,
   )
   supply = edge_supplied_members(effective_pk, edge_roles, conditional_rest)
-  caps = _independent_pool_caps(supply, derived or num_rows, parent_rows)
+  caps = _independent_pool_caps(
+      supply, derived or num_rows, parent_rows, config=config)
   adjustment = None
   if num_rows > 0 and effective_pk:
     adjustment = _check_driven_pk(
@@ -1276,6 +1361,8 @@ def _run_p4(
     candidate_cap: int | None,
     on_model_conflict: str,
     fk_parent_distinct_keys: Mapping[str, int] | None = None,
+    fk_parent_key_sets: Mapping[str, DrivingKeys] | None = None,
+    config: GeneratorConfig,
 ) -> tuple[
     tuple[str, ...],
     int | None,
@@ -1304,6 +1391,7 @@ def _run_p4(
           fk_edges=enforced_fk,
           fk_parent_rows=fk_parent_rows,
           blocker_failure_ratio=blocker_failure_ratio,
+          config=config,
       )
     return effective_pk, None, caps, ()
   # ADR 0037: an independent edge touching the PK is BOTH a P4 factor
@@ -1322,7 +1410,9 @@ def _run_p4(
       candidate_cap=candidate_cap,
       on_conflict=on_model_conflict,
       fk_parent_distinct_keys=fk_parent_distinct_keys or _NO_PARENT_KEYS,
+      fk_parent_key_sets=fk_parent_key_sets or _NO_KEY_SETS,
       gate=blocker_failure_ratio,
+      config=config,
   )
   if adjustment is None:
     return effective_pk, derived_rows, caps, ()
@@ -1354,6 +1444,8 @@ def preflight(
     candidate_cap: int | None = DEFAULT_FK_CANDIDATE_CAP,
     on_model_conflict: str = ON_CONFLICT_ADJUST,
     fk_parent_distinct_keys: Mapping[str, int] | None = None,
+    fk_parent_key_sets: Mapping[str, DrivingKeys] | None = None,
+    config: GeneratorConfig = DEFAULT_CONFIG,
 ) -> PreflightResult:
   """Run P1-P5 + P4; returns the effective pk/identity columns.
 
@@ -1404,7 +1496,12 @@ def preflight(
     over. It equals the parent's rows whenever the parent's PK is
     enforced, and ``rows x (1 - source_repeat_share)`` when the parent's
     own `pk:` was adjusted away — omit it and an adjusted parent's child
-    is asked for roughly twice the rows it can produce.
+    is asked for roughly twice the rows it can produce. Strictly it is
+    the distinct values of the DRIVING edge's ``ref_cols``: when those
+    are columns the parent INHERITED, the launcher passes the owner's
+    bound instead and names it in ``fk_parent_key_sets`` (ref →
+    `DrivingKeys`), which the ``model_adjustment_descendant_rows``
+    milestone reports (2026-11-13).
 
     ``on_model_conflict`` (ADR 0038, ``--on_model_conflict``) decides
     what a MEASURED contradiction does. ``adjust`` (default): a declared
@@ -1419,9 +1516,9 @@ def preflight(
   warnings: list[str] = []
   fqn = table_schema.fqn
   _report_prompt_constraints(table_schema, prompt_constraints_enabled)
-  _report_constraint_vehicles(table_schema, reference_rows)
+  _report_constraint_vehicles(table_schema, reference_rows, config)
   profiles = (
-      profile_columns(table_schema, reference_rows)
+      profile_columns(table_schema, reference_rows, config=config)
       if num_rows > 0 and reference_rows else {})
 
   if relations is None:
@@ -1434,6 +1531,7 @@ def preflight(
           profiles=profiles,
           reference_rows=reference_rows,
           blocker_failure_ratio=blocker_failure_ratio,
+          config=config,
       )
     return PreflightResult(pk_cols, identity_cols, None, warnings)
 
@@ -1564,6 +1662,8 @@ def preflight(
       candidate_cap=candidate_cap,
       on_model_conflict=on_model_conflict,
       fk_parent_distinct_keys=fk_parent_distinct_keys,
+      fk_parent_key_sets=fk_parent_key_sets,
+      config=config,
   )
 
   log_milestone(

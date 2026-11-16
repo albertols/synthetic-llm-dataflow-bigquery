@@ -79,7 +79,7 @@ variable "model_source" {
 }
 
 variable "gpu" {
-  description = "One GPU per worker: l4 (NVIDIA L4 on G2 machines, vLLM dtype auto, both models) or t4 (NVIDIA T4 on N1 machines, vLLM dtype float16, qwen3-4b only)."
+  description = "One GPU per worker, passed to the launch as gpu: l4 (NVIDIA L4 on G2 machines, vLLM dtype bfloat16, both models) or t4 (NVIDIA T4 on N1 machines, vLLM dtype float16, qwen3-4b only). The launcher derives the dtype from it."
   type        = string
   default     = "l4"
   validation {
@@ -98,6 +98,12 @@ variable "num_rows" {
   description = "Rows generated for the root table (users); orders and order_items follow from the measured source fan-out."
   type        = number
   default     = 1000
+}
+
+variable "config_uri" {
+  description = "gs:// path to a generator config YAML (ADR 0043); empty = none."
+  type        = string
+  default     = ""
 }
 
 variable "launch_job" {

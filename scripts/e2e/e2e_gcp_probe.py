@@ -60,6 +60,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import sys
 from typing import Any
 
@@ -91,6 +92,10 @@ _DEFAULT_MILESTONES: list[tuple[str, str]] = [
 # distinct name. Legacy wording regexes above remain as fallback for jobs
 # that predate the instrumented image.
 _SDFB_MILESTONE_RE = re.compile(r"SDFB_MILESTONE name=(?P<name>[a-z0-9_]+)")
+# Key-batch milestones, fields and all (one line each), for the ledger.
+_BATCH_MILESTONE_RE = re.compile(
+    r"SDFB_MILESTONE name=(?P<name>batch_start|batch_done)(?P<fields>(?: .*)?)$"
+)
 
 _DATAFLOW_BASE = "https://dataflow.googleapis.com/v1b3"
 _LOGGING_URL = "https://logging.googleapis.com/v2/entries:list"
@@ -886,6 +891,7 @@ def _worker_log_milestones(
   scanned = 0
   stall_max = 0.0
   packages: dict[str, str] = {}
+  batch_events: list[dict[str, str]] = []
   for _ in range(15):  # bounded paging
     if token:
       body["pageToken"] = token
@@ -900,6 +906,7 @@ def _worker_log_milestones(
       if sm2:
         found.setdefault(f"sdfb.{sm2.group('name')}", ts)
       _note_pool_ladder(pool_ladder, pool_col_rx, text, ts)
+      batch_events.extend(_batch_events(text))
       for label, rx in compiled:
         if label not in found and rx.search(text):
           found[label] = ts
@@ -926,6 +933,115 @@ def _worker_log_milestones(
           round(stall_max, 1) if stall_max else None,
       "worker_packages":
           packages,
+      "batch_ledger":
+          _batch_ledger(batch_events),
+      # Paging stopped with entries left: every count above is partial.
+      "truncated":
+          bool(token),
+  }
+
+
+def _batch_events(text: str) -> list[dict[str, str]]:
+  """``batch_start`` / ``batch_done`` milestones in one log entry, as
+    field dicts (``name`` included) — a standalone twin of
+    ``sdfb_core.observability.parse_milestone``."""
+  out = []
+  for line in text.splitlines():
+    m = _BATCH_MILESTONE_RE.search(line)
+    if not m:
+      continue
+    event = {"name": m.group("name")}
+    try:
+      tokens = shlex.split(m.group("fields"))
+    except ValueError:  # a truncated payload: keep what the name says
+      tokens = []
+    for tok in tokens:
+      if "=" in tok:
+        k, v = tok.split("=", 1)
+        event[k] = v
+    out.append(event)
+  return out
+
+
+def _int_field(event: dict[str, str], key: str) -> int:
+  try:
+    return int(event.get(key, 0))
+  except ValueError:
+    return 0
+
+
+def _batch_ledger(events: list[dict[str, str]]) -> dict[str, dict[str, Any]]:
+  """Per table: batches, re-executed batches, unfinished attempts, and
+    keys/rows counted once per batch next to the raw sums.
+
+    A Dataflow re-execution (lease expiry, control-plane errors) re-runs
+    a fused stage and logs its batches again — the 2026-11 b2 run logged
+    13.49M keys against a 10M-key parent while landing exact counts. A
+    batch is identified by ``keys_digest`` (its key set, stable when a
+    regroup moves the ``batch_id``) and, on images before that field, by
+    ``batch_id``; it is re-executed when its digest or its batch_id was
+    started under more than one ``attempt`` (pre-``attempt`` logs: more
+    than one ``batch_start``). An attempt is unfinished when it has a
+    ``batch_start`` and no ``batch_done``. ``*_once`` counts one
+    completed attempt per batch; a regroup that changed the key set too
+    stays two batches."""
+  per_table: dict[str, list[dict[str, str]]] = {}
+  for event in events:
+    per_table.setdefault(event.get("table") or "(untagged)", []).append(event)
+  return {t: _table_ledger(evs) for t, evs in sorted(per_table.items())}
+
+
+def _table_ledger(events: list[dict[str, str]]) -> dict[str, Any]:
+  attempts_by_id: dict[str, set[str]] = {}
+  attempts_by_digest: dict[str, set[str]] = {}
+  open_starts: dict[tuple[str, str], int] = {}
+  done_by_batch: dict[str, dict[str, str]] = {}
+  batch_ids_by_batch: dict[str, set[str]] = {}
+  raw = {"keys_started_raw": 0, "keys_done_raw": 0, "rows_raw": 0}
+  for i, event in enumerate(events):
+    bid = event.get("batch_id", "")
+    digest = event.get("keys_digest")
+    batch = f"d:{digest}" if digest else f"b:{bid}"
+    batch_ids_by_batch.setdefault(batch, set()).add(bid)
+    attempt = event.get("attempt")
+    slot = (bid, attempt or "")
+    if event["name"] == "batch_start":
+      raw["keys_started_raw"] += _int_field(event, "keys")
+      # No attempt field: every start line is its own attempt.
+      token = attempt or f"line{i}"
+      attempts_by_id.setdefault(bid, set()).add(token)
+      if digest:
+        attempts_by_digest.setdefault(digest, set()).add(token)
+      open_starts[slot] = open_starts.get(slot, 0) + 1
+    else:
+      raw["keys_done_raw"] += _int_field(event, "keys")
+      raw["rows_raw"] += _int_field(event, "rows")
+      done_by_batch[batch] = event  # one completed attempt per batch
+      if open_starts.get(slot, 0) > 0:
+        open_starts[slot] -= 1
+
+  def _reexecuted(batch: str) -> bool:
+    if batch.startswith("d:") and len(attempts_by_digest.get(batch[2:],
+                                                             ())) > 1:
+      return True
+    return any(
+        len(attempts_by_id.get(bid, ())) > 1
+        for bid in batch_ids_by_batch[batch])
+
+  return {
+      "batches":
+          len(batch_ids_by_batch),
+      "reexecuted_batches":
+          sum(1 for b in batch_ids_by_batch if _reexecuted(b)),
+      "unfinished_attempts":
+          sum(open_starts.values()),
+      **raw,
+      "keys_once":
+          sum(_int_field(e, "keys") for e in done_by_batch.values()),
+      "rows_once":
+          sum(_int_field(e, "rows") for e in done_by_batch.values()),
+      "dedupe_by":
+          "keys_digest" if attempts_by_digest else "batch_id",
   }
 
 

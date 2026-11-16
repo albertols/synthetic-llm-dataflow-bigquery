@@ -6,13 +6,16 @@
  */
 import type { ExportedFrom } from "./relational";
 
-/** How a knob can be changed: a launcher flag, a Composer DAG param, a flex-template param, or not at all. */
-export type SettableVia = "cli" | "composer" | "flex" | "constant" | "derived";
+/**
+ * How a knob can be changed: a launcher flag, a Composer DAG param, a flex-template param,
+ * a key of a config file (--config_uri, ADR 0043), or not at all (a constant or a derived value).
+ */
+export type SettableVia = "cli" | "composer" | "flex" | "config" | "constant" | "derived";
 
 export type KnobValue = string | number | boolean | null | readonly KnobValue[] | { readonly [key: string]: KnobValue };
 
 export interface KnobChannel {
-  /** sampling | generation | free_text | rag | guardrails | relational | serving | evaluation */
+  /** io | launch | sampling | generation | free_text | rag | guardrails | relational | serving | evaluation */
   id: string;
   /** Upper-case panel label, e.g. "FREE TEXT". */
   label: string;
@@ -35,6 +38,8 @@ export interface Knob {
   /** Present when the Composer DAG's default differs from the CLI default (raw, may be a deploy-time marker). */
   composer_default?: string;
   flex_param?: string;
+  /** The dotted key a config file sets it with ("free_text.pool_values_per_call"); present when `settable_via` has "config". */
+  config_key?: string;
   choices?: KnobValue[];
   required?: boolean;
   /** The argparse help text, whitespace-normalized. */

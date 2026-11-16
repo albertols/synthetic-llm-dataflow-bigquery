@@ -5,6 +5,14 @@
 > `README.md` (charter AC #2 / DRY policy). No bake-off was run — the
 > decision was made on license + maintenance + spine-fit grounds (see
 > [ADR 0013](../../../../../../docs/adr/0013-distribution-estimator-spine.md)).
+>
+> **2026-11-13: the selection never shipped.** The locked `sdgx` 0.2.0 has
+> no `DataFrameConnector`, and 0.2.1–0.2.4 pin `numpy<2`; every b2 run has
+> been sampled by the NumPy `EmpiricalBackend`. See the package
+> [`README.md`](README.md#what-actually-samples-the-rows-today-the-empirical-backend).
+> **2026-11-16:** what a working `sdgx` fit would take, the alternatives
+> as published today, and three ways forward:
+> [backend assessment](../../../../../../docs/designs/2026-11-16-b2-library-backend-assessment.md).
 
 ## Decision
 

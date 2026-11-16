@@ -21,6 +21,9 @@ rows are readable. `google.cloud.bigquery` is imported lazily so the module
 
 Mirrors `sdfb_beam.rag.store.BigQueryChunkStore` deliberately — same
 lifecycle, same injection point, same parameter-binding discipline.
+
+Design: docs/DESIGN.md §4 Relational generation
+(ADR 0045).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -31,6 +34,9 @@ from __future__ import annotations
 from typing import Any
 
 from sdfb_core.pools import FreeTextPool
+
+from sdfb_beam.io.bq_identifiers import quoted_table_fqn, validate_table_fqn
+from sdfb_beam.io.bq_load import load_json_rows
 
 
 def pool_to_row(pool: FreeTextPool) -> dict[str, Any]:
@@ -69,8 +75,15 @@ class BigQueryFreeTextPoolStore:
   """`FreeTextPoolStore` implementation over one `freetext_pools` table."""
 
   def __init__(self, table_fqn: str, *, client: object | None = None) -> None:
-    self.table_fqn = table_fqn
+    # CWE-89: the table is the one part of the SQL that cannot be a bound
+    # parameter. Validated here (a bad flag fails at launch, on the
+    # driver) and again in _from() (the attribute is public and the store
+    # is pickled to workers).
+    self.table_fqn = validate_table_fqn(table_fqn)
     self._client = client  # injectable for tests; lazy real client
+
+  def _from(self) -> str:
+    return quoted_table_fqn(self.table_fqn)
 
   def __getstate__(self) -> dict:
     # The lazy client is a CACHE, not state: google.cloud clients refuse
@@ -107,7 +120,7 @@ class BigQueryFreeTextPoolStore:
     # syntax error against the real service. Every identifier is
     # backticked so the schema can never trip this again.
     sql = ("SELECT `reference_digest`, `model_uri`, `column`, `target`, "
-           f"`values`, `stagnated`, `attempts` FROM `{self.table_fqn}` "
+           f"`values`, `stagnated`, `attempts` FROM {self._from()} "
            "WHERE `reference_digest` = @reference_digest "
            "AND `model_uri` = @model_uri")
     rows = self._query(sql, {
@@ -117,7 +130,7 @@ class BigQueryFreeTextPoolStore:
     return [row_to_pool(r) for r in rows]
 
   def exists(self, reference_digest: str, model_uri: str) -> bool:
-    sql = (f"SELECT 1 AS n FROM `{self.table_fqn}` "
+    sql = (f"SELECT 1 AS n FROM {self._from()} "
            "WHERE `reference_digest` = @reference_digest "
            "AND `model_uri` = @model_uri LIMIT 1")
     rows = list(
@@ -138,8 +151,9 @@ class BigQueryFreeTextPoolStore:
     from google.cloud import bigquery
 
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-    self._bq().load_table_from_json(
-        rows, self.table_fqn, job_config=job_config).result()
+    # ADR 0045 D9: a batch's tables build their pools together.
+    load_json_rows(self._bq(), rows, validate_table_fqn(self.table_fqn),
+                   job_config)
 
   def delete(self, reference_digest: str, model_uri: str) -> None:
     """Drop every pool row for this digest + LLM (blocking DML).
@@ -148,7 +162,7 @@ class BigQueryFreeTextPoolStore:
         memorized 2026-08-05 pools): `fetch` has no per-column dedup, so a
         rebuild must clear the stale rows before the branch re-appends.
         """
-    sql = (f"DELETE FROM `{self.table_fqn}` "
+    sql = (f"DELETE FROM {self._from()} "
            "WHERE `reference_digest` = @reference_digest "
            "AND `model_uri` = @model_uri")
     self._query(sql, {

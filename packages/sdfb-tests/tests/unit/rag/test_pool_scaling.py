@@ -15,8 +15,8 @@
 multiple bounded calls. Closes the 28-619x oversampling of the 2026-07-19
 run (3 FREE_TEXT columns capped at 32 values over 1000 rows).
 
-Design: docs/DESIGN.md §5 Fidelity
-(ADR 0022).
+Design: docs/DESIGN.md §5 Fidelity; §8 Configuration
+(ADR 0022, 0043).
 """
 
 # Test module: pytest fixtures and white-box access are intentional.
@@ -24,20 +24,20 @@ Design: docs/DESIGN.md §5 Fidelity
 
 from __future__ import annotations
 
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines import GenerationContext
 from sdfb_core.engines.b1_rag import B1RagEngine
-from sdfb_core.engines.b1_rag.engine import (
-    _FREE_TEXT_POOL_MAX,
-    _POOL_VALUES_PER_CALL,
-    _pool_llm_yield,
-)
+from sdfb_core.engines.b1_rag.engine import _pool_llm_yield
 from sdfb_core.engines.b1_rag.profile import profile_columns
 from sdfb_core.rag.embedding import HashingEmbedder
 
+# The launch-default ladder (ADR 0043): what every engine here runs.
+_LADDER = DEFAULT_CONFIG.free_text
+
 
 class _BatchClient:
-  """Yields _POOL_VALUES_PER_CALL fresh values per requested choice, like
+  """Yields pool_values_per_call fresh values per requested choice, like
     a healthy LLM honoring `n` (vLLM parallel sampling)."""
 
   def __init__(self) -> None:
@@ -49,10 +49,11 @@ class _BatchClient:
     out = []
     for _ in range(max(1, n)):
       base = self._issued
-      self._issued += _POOL_VALUES_PER_CALL
+      self._issued += _LADDER.pool_values_per_call
       out.append({
           "values": [
-              f"novel value {base + i}" for i in range(_POOL_VALUES_PER_CALL)
+              f"novel value {base + i}"
+              for i in range(_LADDER.pool_values_per_call)
           ]
       })
     return out
@@ -85,8 +86,8 @@ def _schema_and_rows(n_rows: int = 300):
 
 
 def test_constants():
-  assert _FREE_TEXT_POOL_MAX == 512
-  assert _POOL_VALUES_PER_CALL == 32
+  assert DEFAULT_CONFIG.free_text.free_text_pool_max == 512
+  assert DEFAULT_CONFIG.free_text.pool_values_per_call == 32
 
 
 def test_pool_scales_past_32_with_batched_calls():
@@ -108,7 +109,7 @@ def test_pool_scales_past_32_with_batched_calls():
   # target = min(num_rows=200, distinct=300, 512) = 200
   assert len(pool) >= 200
   # n=4 choices/call -> per-round yield 128: 2 calls cover target=200.
-  assert client.calls >= -(-200 // (_POOL_VALUES_PER_CALL * 4))
+  assert client.calls >= -(-200 // (_LADDER.pool_values_per_call * 4))
   engine.teardown()
 
 
@@ -156,7 +157,7 @@ def test_pool_target_respects_column_distinct():
   engine.setup(client, ctx)
   pool = engine._free_text_pools["notes"]
   assert len(pool) <= 60  # distinct bound, not 512
-  assert len(pool) >= _POOL_VALUES_PER_CALL  # scaled past the old 32 cap
+  assert len(pool) >= _LADDER.pool_values_per_call  # scaled past the old 32 cap
   engine.teardown()
 
 
@@ -190,7 +191,13 @@ def test_pool_llm_yield_empty_yield_stops_after_full_ladder():
   from sdfb_core.engines.base import escalating_sampling
 
   client = _EmptyClient()
-  y = _pool_llm_yield(client, "p", {}, _free_text_prof(), [], target=512)
+  y = _pool_llm_yield(
+      client,
+      "p", {},
+      _free_text_prof(), [],
+      target=512,
+      n_choices=_LADDER.pool_parallel_choices,
+      ladder=_LADDER)
   assert y.pool == []
   assert client.calls == len(escalating_sampling())  # 3, not 32
 
@@ -211,21 +218,31 @@ def test_pool_llm_yield_stops_when_novel_yield_stagnates():
       return [{"values": [f"same value {i}" for i in range(8)]}]
 
   client = _StagnantClient()
-  y = _pool_llm_yield(client, "p", {}, _free_text_prof(), [], target=512)
+  y = _pool_llm_yield(
+      client,
+      "p", {},
+      _free_text_prof(), [],
+      target=512,
+      n_choices=_LADDER.pool_parallel_choices,
+      ladder=_LADDER)
   assert y.pool == [f"same value {i}" for i in range(8)]  # early yield kept
   assert client.calls <= 6  # ladder (3) + stagnation window, not 32
 
 
 def test_pool_llm_yield_healthy_client_still_reaches_target():
   """The stagnation exit must not fire while the pool is actually growing."""
-  from sdfb_core.engines.b1_rag.engine import _POOL_PARALLEL_CHOICES
-
   client = _BatchClient()
-  y = _pool_llm_yield(client, "p", {}, _free_text_prof(), [], target=512)
+  y = _pool_llm_yield(
+      client,
+      "p", {},
+      _free_text_prof(), [],
+      target=512,
+      n_choices=_LADDER.pool_parallel_choices,
+      ladder=_LADDER)
   assert len(y.pool) >= 512
   # 4 full-yield calls at 128 values/round (was 16 at 32/round).
-  assert client.calls == -(-512 //
-                           (_POOL_VALUES_PER_CALL * _POOL_PARALLEL_CHOICES))
+  assert client.calls == -(
+      -512 // (_LADDER.pool_values_per_call * _LADDER.pool_parallel_choices))
 
 
 # --- n-choice batched pool calls (2026-07-25 perf fix) ---------------------
@@ -285,25 +302,33 @@ def _free_text_profile_with_observed():
 
 
 def test_pool_call_requests_parallel_choices():
-  from sdfb_core.engines.b1_rag import engine as b1_engine
-
   client = _RecordingArrayClient()
   y = _pool_llm_yield(
-      client, "p", {}, _free_text_profile_with_observed(), ["seed"], target=512)
+      client,
+      "p", {},
+      _free_text_profile_with_observed(), ["seed"],
+      target=512,
+      n_choices=_LADDER.pool_parallel_choices,
+      ladder=_LADDER)
   assert client.calls, "expected at least one LLM call"
-  assert all(n == b1_engine._POOL_PARALLEL_CHOICES for n in client.calls)
+  assert all(n == _LADDER.pool_parallel_choices for n in client.calls)
   assert len(y.pool) >= 512
   # 4 choices x 32 values = 128 novel per call -> target hit in 4 calls.
   assert y.attempts == 4
 
 
 def test_pool_call_budget_scales_with_choices():
-  # Every call yields exactly 5 novel values (>= _POOL_STAGNATION_MIN_NOVEL,
+  # Every call yields exactly 5 novel values (>= stagnation_min_novel,
   # so the stagnation exit never fires) -> the loop must stop at the
   # SCALED cap: max(len(levels), 2*ceil(512/(32*4))) = 8, not 32.
   client = _RecordingArrayClient(novel_per_call=5)
   y = _pool_llm_yield(
-      client, "p", {}, _free_text_profile_with_observed(), ["seed"], target=512)
+      client,
+      "p", {},
+      _free_text_profile_with_observed(), ["seed"],
+      target=512,
+      n_choices=_LADDER.pool_parallel_choices,
+      ladder=_LADDER)
   assert y.attempts == 8
 
 
@@ -344,10 +369,10 @@ def test_pool_target_takes_the_source_filter_cardinality_when_exact_stats_are_ab
   with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
     engine.setup(client, ctx)
   # target = min(num_rows=1M, source distinct=4022, cap=512) = 512, not 94.
-  assert len(engine._free_text_pools["notes"]) == _FREE_TEXT_POOL_MAX
+  assert len(engine._free_text_pools["notes"]) == _LADDER.free_text_pool_max
   text = "\n".join(r.message for r in caplog.records)
   assert "name=freetext_pool_built" in text
-  assert f"target={_FREE_TEXT_POOL_MAX}" in text
+  assert f"target={_LADDER.free_text_pool_max}" in text
   engine.teardown()
 
 

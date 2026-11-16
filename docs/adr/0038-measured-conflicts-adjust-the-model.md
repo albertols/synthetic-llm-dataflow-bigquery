@@ -188,6 +188,10 @@ distinct keys: its rows when its PK is enforced,
 `rows × (1 - source repeat share)` when it was adjusted
 (`landed_distinct_keys`), and `model_adjustment_descendant_rows` fires
 whenever that shrinks a descendant's derived count.
+*Amended 2026-11-13* — the multiplier is the distinct values of the
+driving edge's `ref_cols`, which is the parent's distinct PK count only
+when those columns contain the PK; see
+[the amendment](#amendment-2026-11-13--a-child-is-sized-off-its-driving-edges-key-set).
 
 **D10 — the DECLARED PK is measured on the source, and that measurement
 decides — against the run's BLOCKER GATE** (fix J). D1 says a
@@ -462,3 +466,49 @@ one launch: the reason D10 measures the key and not the edge.
 not re-type it anywhere it is not derived. The two diagrams are inline
 mermaid (no generated asset), per the `visual-first-documentation` form
 heuristic for control flow.
+
+## Amendment (2026-11-13) — a child is sized off its driving edge's key set
+
+D9 multiplied the parent's distinct **declared-PK** values. The composer
+fans a child out over the parent's distinct **`ref_cols`** tuples, and the
+two agree only when `ref_cols` contain the parent's PK. A 2026-11 corp
+launch (anonymised) is the shape where they do not:
+
+```mermaid
+flowchart LR
+  A["TABLE_A (root)<br/>pk COL_KEY · 10M rows<br/>owns COL_P, COL_Q, COL_R"]
+  B["TABLE_B · 59,126,428 rows<br/>pk COL_KEY, COL_S, COL_T<br/>20,005,378 distinct PKs (adjusted)"]
+  D["TABLE_D<br/>mean fan-out 35.6491"]
+  A -- "drives on COL_KEY<br/>+ inherits the triple (fk_edge_widened)" --> B
+  B -- "drives on COL_P, COL_Q, COL_R" --> D
+```
+
+The launcher logged `model_adjustment_descendant_rows table=TABLE_D
+parent=TABLE_B parent_rows=59126428 parent_distinct_keys=20005378
+mean_fanout=35.6491 derived_rows=713173103`. TABLE_B's triples are copied
+from TABLE_A rows, so they can never number more than TABLE_A's 10M: the
+plan asked 713M of a ≈356.5M maximum, b1 landed 12.6% and b2 37% of it,
+and `validation_runs` said PASSED, because nothing compared `valid_count`
+with `num_rows_requested`.
+
+The bound is now `driving_key_bound` (`sdfb_beam.cli.run_pipeline`):
+
+- `ref_cols` ⊇ the parent's declared PK: fix H3's number, unchanged.
+- otherwise `RelationshipRegistry.key_lineage` follows the enforced
+  (widened) edges that carry ALL of `ref_cols` up to the table that OWNS
+  them, and the bound is the smallest landed row count on the way,
+  including the parent's own rows (the owner's distinct keys when the
+  columns cover the owner's PK). On the corp shape that is 10M, and
+  TABLE_D is sized at 10M × 35.6491 = 356,491,000.
+- no owner landed in this job: the parent's PK figure, as before.
+
+`model_adjustment_descendant_rows` carries `key_set=inherited ref_cols=
+key_owner= owner_cols= owner_rows=` when the inherited bound sized the
+child, and the ADR 0039 projection reads the same bound. A table that
+lands under 0.9 × its `num_rows_requested` valid rows now logs
+`row_projection_shortfall` at the end of the run. That is a warning, not
+a gate change. Proven by `cli/test_driving_key_bound.py`. Whether the
+corp triple stays 1:1 with TABLE_A's PK at generation time is a separate
+fix. The bound here holds either way, because it is taken from the
+owner's landed rows.
+

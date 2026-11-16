@@ -5,7 +5,8 @@
  *                    jump, Home/End go to the ends, Enter or a click opens its
  *                    sheet; a mouse or pen drags it vertically.
  *   screw            a fixed screw: a button that opens the sheet and says
- *                    "fixed constant" — there is nothing to turn.
+ *                    "fixed constant", or names the config-file key that
+ *                    sets it — there is nothing to turn.
  *   readout          a derived value's LED readout (button → sheet).
  *   port             a jack for a free-form flag (button → sheet).
  *
@@ -35,7 +36,10 @@ export type KnobControlProps = {
 
 /** Accessible description of how a knob can be set. */
 export function settableText(k: Knob, kind: KnobKind = kindOf(k)): string {
-  if (kind === "screw") return "Fixed constant: not settable, change it in code.";
+  if (kind === "screw")
+    return k.config_key
+      ? `Set in a config file as ${k.config_key} — no flag.`
+      : "Fixed constant: not settable, change it in code.";
   if (kind === "readout") return "Derived from other settings: not settable directly.";
   const via = k.settable_via.map((v) => SETTABLE_LABEL[v] ?? v).join(", ");
   return kind === "port" ? `Settable via ${via}; free-form, not turnable here.` : `Settable via ${via}.`;

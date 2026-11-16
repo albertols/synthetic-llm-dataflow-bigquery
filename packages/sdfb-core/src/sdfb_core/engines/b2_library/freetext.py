@@ -51,6 +51,7 @@ from sdfb_core.engines.base import (
     escalating_sampling,
 )
 from sdfb_core.engines.text_shapes import (
+    RelaxedShapes,
     build_relaxed_shapes,
     collapsed_mask,
     identifier_sampler,
@@ -669,6 +670,22 @@ class FreeTextHook:
     if shapes is None:
       shapes = build_relaxed_shapes(list(profile.text_pool))
     if shapes is None:
+      # Last resort, where the strict raise used to fire: an all-literal
+      # sentinel mask (a NUL-padded "no value" code) carries no class
+      # position and drags the deduped mix's mean below the gate
+      # (2026-11-12 corp b2 run, TABLE_C.COL_CODE: 114 / 58 = 1.97).
+      # Template from the class-bearing masks; the rejection below still
+      # applies, so nothing observed can land.
+      shapes = _class_bearing_mix(profile.shape_mix)
+      if shapes is not None:
+        log_milestone(
+            "freetext_shape_mix_literal_masks_dropped",
+            level=logging.WARNING,
+            column=profile.name,
+            kept_masks=len(shapes),
+            dropped_masks=len(profile.shape_mix or ()) - len(shapes),
+        )
+    if shapes is None:
       return None
     rng = np.random.default_rng(seed)
 
@@ -689,6 +706,23 @@ class FreeTextHook:
       if len(pool) >= self._pool_size:
         break
     return pool or None
+
+
+def _class_bearing_mix(shapes: RelaxedShapes | None) -> RelaxedShapes | None:
+  """The mix without its all-literal masks, when only they block the gate.
+
+    None when the exact mix already templates (no rescue needed), when no
+    mask was dropped, or when the kept masks still fail
+    :func:`shape_mix_can_template` — so its whitespace-class and
+    two-class-position rules hold on what is kept.
+    """
+  if not shapes or shape_mix_can_template(shapes):
+    return None
+  kept = tuple((weight, shape) for weight, shape in shapes if any(
+      len(entry) > 1 for entry in shape))
+  if len(kept) == len(shapes) or not shape_mix_can_template(kept):
+    return None
+  return kept
 
 
 def _extract_values(responses: list[dict]) -> list[str]:

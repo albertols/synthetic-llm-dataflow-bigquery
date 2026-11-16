@@ -102,6 +102,18 @@ describe("contracts:check", () => {
     const rules = join(out3, "dlq_rules.json");
     writeFileSync(rules, readFileSync(rules, "utf8").replace('"severity": "BLOCKER"', '"severity": "INFO"'));
     expect(diffGenerated(generate({ repo: repo3, inputsDir: out3 }), out3)).toEqual(["dlqRules.ts", "manifest.json"]);
+    const { repo: repo4, out: out4 } = copyInputs();
+    const guides = join(out4, "knob_guides.json");
+    writeFileSync(guides, readFileSync(guides, "utf8").replace("Rows to generate (M)", "Rows to make (M)"));
+    expect(diffGenerated(generate({ repo: repo4, inputsDir: out4 }), out4)).toEqual(["knobGuides.ts", "manifest.json"]);
+  });
+
+  it("knob_guides.json without a guides object fails the generator loudly", () => {
+    const { repo, out } = copyInputs();
+    const guides = join(out, "knob_guides.json");
+    const doc = JSON.parse(readFileSync(guides, "utf8")) as Record<string, unknown>;
+    writeFileSync(guides, JSON.stringify({ ...doc, guides: [] }));
+    expect(() => generate({ repo, inputsDir: out })).toThrow(/knob_guides\.json: "guides" must be an object/);
   });
 
   it("a catalogue edit is drift", () => {

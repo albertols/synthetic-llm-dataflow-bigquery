@@ -26,6 +26,9 @@ Chunking input is the driver-loaded reference *sample* (default 10k rows,
 deterministically fingerprint-ordered), never the full source table — see
 `sdfb_beam.rag.population` for the scope rationale (provenance digest,
 distribution-inference purpose, embed cost, bounded privacy surface).
+
+Design: docs/DESIGN.md §8 Configuration
+(ADR 0043).
 """
 
 from __future__ import annotations
@@ -35,6 +38,7 @@ import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.rag.serialize import serialize_row
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -50,10 +54,7 @@ CHUNK_KIND_FREE_TEXT_COL = "free_text_col"
 # DEFAULT of that launch knob (`--rag_row_docs_limit`): the population
 # branch writes and the engine reads the same prefix, both sliced by the
 # one value the launcher resolves (`resolve_row_docs_limit`).
-MAX_ROW_DOC_ROWS = 1024
-# free_text_col chunks dedupe to distinct (column, value); a pathological
-# near-unique column stays bounded here (consumers pick top-k=8 exemplars).
-MAX_FREE_TEXT_VALUES_PER_COLUMN = 1024
+MAX_ROW_DOC_ROWS = DEFAULT_CONFIG.rag.rag_row_docs_limit
 
 
 @dataclass(frozen=True)
@@ -155,7 +156,8 @@ def chunk_row(
 def distinct_free_text_values(
     rows: list[dict],
     free_text_columns: Sequence[str],
-    cap: int = MAX_FREE_TEXT_VALUES_PER_COLUMN,
+    *,
+    cap: int = DEFAULT_CONFIG.rag.max_free_text_values_per_column,
 ) -> dict[str, list[str]]:
   """First-seen distinct non-empty values per free-text column, capped.
 
@@ -163,7 +165,9 @@ def distinct_free_text_values(
     embedded 23,610 per-occurrence value chunks where the distinct value
     count was a fraction of that — identical strings re-embedded per row.
     First-seen over the fingerprint-ordered sample keeps the pick
-    deterministic."""
+    deterministic. ``cap`` is the launch config's
+    ``rag.max_free_text_values_per_column`` (ADR 0043): a pathological
+    near-unique column stays bounded at it."""
   out: dict[str, list[str]] = {c: [] for c in free_text_columns}
   seen: dict[str, set[str]] = {c: set() for c in free_text_columns}
   for row in rows:
@@ -216,7 +220,6 @@ def chunk_free_text_value(
 __all__ = [
     "CHUNK_KIND_FREE_TEXT_COL",
     "CHUNK_KIND_ROW_DOC",
-    "MAX_FREE_TEXT_VALUES_PER_COLUMN",
     "MAX_ROW_DOC_ROWS",
     "Chunk",
     "chunk_free_text_value",

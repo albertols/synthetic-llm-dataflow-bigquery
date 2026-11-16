@@ -28,6 +28,16 @@ from __future__ import annotations
 import pandera.pandas as pa  # type: ignore[import-untyped]
 from sdfb_core.contracts.schema import FieldSchema, TableSchema
 
+# DATE, DATETIME and TIMESTAMP: microseconds, UTC. BigQuery's range is
+# 0001-01-01 to 9999-12-31 at microsecond precision; pandas' nanosecond
+# timestamps end at 2262-04-11, so an open-ended SCD sentinel
+# (9999-12-31) failed the coercion of its whole column. Pandera keeps the
+# unit only of a tz-aware datetime (a naive one is always nanoseconds), so
+# the naive DATE and DATETIME are validated as UTC too: the frame is thrown
+# away after validation (`PanderaValidateBatchDoFn` yields the records as
+# they came), and the per-record Pydantic model types them exactly.
+_TEMPORAL = "datetime64[us, UTC]"
+
 # BQ type → pandera dtype string. STRUCT and REPEATED are handled via
 # object-typed columns; deep validation of nested structure happens at
 # the per-record Pydantic line (line 1 of defense).
@@ -42,10 +52,10 @@ _PANDERA_DTYPE: dict[str, str] = {
     "BIGNUMERIC": "object",
     "BOOLEAN": "boolean",
     "BOOL": "boolean",
-    "DATE": "datetime64[ns]",
-    "DATETIME": "datetime64[ns]",
+    "DATE": _TEMPORAL,
+    "DATETIME": _TEMPORAL,
     "TIME": "object",
-    "TIMESTAMP": "datetime64[ns, UTC]",
+    "TIMESTAMP": _TEMPORAL,
     "JSON": "object",
     "GEOGRAPHY": "string",
 }
@@ -82,10 +92,10 @@ def derive_pandera_schema(table_schema: TableSchema) -> pa.DataFrameSchema:
       unique=unique_cols,
       strict=True,
       ordered=False,
-      # Coerce dtypes during validation — pandas 2.x can hand us mixed
-      # datetime resolutions (`us` vs `ns`) depending on how the column
-      # was constructed; coercion normalizes those without surprising
-      # the caller. Type-incompatible coercions still raise.
+      # Coerce dtypes during validation — a column can arrive as strings,
+      # datetimes or mixed resolutions depending on how it was built;
+      # coercion normalizes those without surprising the caller.
+      # Type-incompatible coercions still raise.
       coerce=True,
   )
 

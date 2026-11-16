@@ -75,6 +75,9 @@ const FACETS: Facets = {
   modes: [],
   evaluator_versions: [],
   catalogue_versions: [],
+  generator_versions: [],
+  generator_branches: [],
+  config_digests: [],
   relationship_models: ["thelook_demo"],
   metric_ids: [],
   source_tables: ["users", "orders", "order_items", "products", "user_features"].map((t) => ({

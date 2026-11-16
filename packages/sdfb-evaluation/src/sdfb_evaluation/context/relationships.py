@@ -28,10 +28,11 @@ the launch card and the mermaid renderer stay on the generator side — the
 evaluator never needs them.
 
 A two-sided golden-file test pins this module's output against the
-original's, over the three example models this repository ships
+original's, over the four example models this repository ships
 (`config/relationships/{example_retail,example_star_diamond,
-gcp_public_fk_example}.yaml`): `make_parity_goldens.py` (run in the root
-environment, against the originals) writes
+gcp_public_fk_example,example_isolated_forest}.yaml`):
+`make_parity_goldens.py` (run in the root environment, against the
+originals) writes
 `tests/fixtures/parity/goldens.json`; this package's
 `tests/unit/test_parity_goldens.py` recomputes the same values from THIS
 module and asserts equality; the root
@@ -41,13 +42,14 @@ recomputes them from the originals, so neither side can silently drift.
 Design: docs/designs/2026-07-07-evaluation-framework-design.md
 
 Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
-(ADR 0032, 0036).
+(ADR 0032, 0036, 0045).
 """
 
 from __future__ import annotations
 
 import glob as _glob
 import hashlib
+import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -126,6 +128,11 @@ class TableRel:
   identity: tuple[str, ...] = ()
   fk: tuple[Edge, ...] = ()
   enabled: bool = True
+  # ADR 0045 — where a whole-model launch reads the table's source, and its
+  # own row count. Parsed for the content hash's parity; the evaluator takes
+  # each table's source from its validation_runs row.
+  source_table: str | None = None
+  num_rows: int | None = None
 
 
 @dataclass(frozen=True)
@@ -147,7 +154,8 @@ def _name(table: str) -> str:
 # YAML file may name but which the loader always overwrites — never
 # `extra_forbidden` there), `TableRelations`, `FkEdge`.
 _MODEL_KEYS = frozenset({"model", "description", "tables", "source"})
-_TABLE_KEYS = frozenset({"pk", "identity", "fk", "enabled", "note"})
+_TABLE_KEYS = frozenset(
+    {"pk", "identity", "fk", "enabled", "note", "source_table", "num_rows"})
 _EDGE_KEYS = frozenset(
     {"cols", "ref", "ref_cols", "enforced", "note", "drives"})
 
@@ -159,6 +167,35 @@ _EDGE_KEYS = frozenset(
 # trailing space) is rejected.
 _BOOL_TRUE = frozenset({"true", "yes", "on", "y", "t", "1"})
 _BOOL_FALSE = frozenset({"false", "no", "off", "n", "f", "0"})
+
+# ADR 0045 — the generator's grammar for a table's source
+# (`sdfb_core.contracts.relationships.SOURCE_TABLE_RE`), copied.
+_SOURCE_TABLE = re.compile(
+    r"(?:[A-Za-z0-9_-]+\.)?[A-Za-z0-9_]+\.[A-Za-z0-9_-]+")
+
+
+def _optional_source_table(spec: Mapping[str, Any], *,
+                           context: str) -> str | None:
+  """`source_table`: Pydantic's `StrictStr` plus the grammar; null = absent."""
+  value = spec.get("source_table")
+  if value is None:
+    return None
+  if not isinstance(value, str) or not _SOURCE_TABLE.fullmatch(value):
+    raise RelationshipError(f"{context}.source_table: expected "
+                            f"[project.]dataset.table, got {value!r}")
+  return value
+
+
+def _optional_rows(spec: Mapping[str, Any], *, context: str) -> int | None:
+  """`num_rows`: Pydantic's `StrictInt` >= 1 -- an int, never a bool, a float
+  or a string; null = absent."""
+  value = spec.get("num_rows")
+  if value is None:
+    return None
+  if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+    raise RelationshipError(
+        f"{context}.num_rows: expected an integer >= 1, got {value!r}")
+  return value
 
 
 def _reject_unknown(spec: Mapping[str, Any], allowed: frozenset[str],
@@ -312,10 +349,19 @@ def parse_model(text: str, source: str = "") -> RelModel:
     enabled = _optional_bool(
         table_spec, "enabled", default=True, context=table_context)
     _optional_str(table_spec, "note", default="", context=table_context)
+    source_table = _optional_source_table(table_spec, context=table_context)
+    num_rows = _optional_rows(table_spec, context=table_context)
     tables[name] = TableRel(
-        name=name, pk=pk, identity=identity, fk=fk, enabled=enabled)
+        name=name,
+        pk=pk,
+        identity=identity,
+        fk=fk,
+        enabled=enabled,
+        source_table=source_table,
+        num_rows=num_rows)
   model = RelModel(model=model_name, tables=tables, source=source)
   _validate_refs(model)
+  _validate_rows(model)
   return model
 
 
@@ -359,6 +405,23 @@ def _validate_refs(model: RelModel) -> None:
             f"{model.source}: {table}'s fk.ref {edge.ref!r} does not name "
             f"a table in model {model.model!r} ({sorted(known)}). Qualify "
             f"it as dataset.table if the parent lives outside this model.")
+
+
+def _validate_rows(model: RelModel) -> None:
+  """`num_rows` on a table a parent drives is an error -- the generator's
+  `_validate_rows` rule (ADR 0045): an enabled table with an enforced
+  in-model edge to an enabled parent."""
+  for table, relations in model.tables.items():
+    if relations.num_rows is None or not relations.enabled:
+      continue
+    parents = [
+        edge.ref for edge in relations.fk if edge.enforced and
+        not edge.external and model.tables[edge.ref].enabled
+    ]
+    if parents:
+      raise RelationshipError(
+          f"{model.source}: {table}: num_rows is set, but {table} is "
+          f"generated from its parent {parents[0]}'s keys")
 
 
 def is_sample_model(path: str) -> bool:
@@ -683,11 +746,18 @@ def _edge_canon(edge: Edge) -> str:
 
 def _table_canon(model_name: str, table: str, relations: TableRel) -> str:
   """One table's slice of `sha12`'s canonical string — the EXACT format
-  `RelationshipRegistry.sha12` builds for it."""
+  `RelationshipRegistry.sha12` builds for it, the ADR 0045 keys appended
+  only when set."""
   pk = ",".join(relations.pk)
   identity = ",".join(relations.identity)
   edges = "|".join(_edge_canon(edge) for edge in relations.fk)
-  return f"{model_name}:{table}:{pk}:{identity}:{int(relations.enabled)}:{edges}"
+  launch = ""
+  if relations.source_table is not None:
+    launch += f":src={relations.source_table}"
+  if relations.num_rows is not None:
+    launch += f":rows={relations.num_rows}"
+  return (f"{model_name}:{table}:{pk}:{identity}:{int(relations.enabled)}:"
+          f"{edges}{launch}")
 
 
 def sha12(models: Sequence[RelModel]) -> str:

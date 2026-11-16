@@ -6,9 +6,10 @@ import { knobs } from "@contracts/generated/knobs";
 import { fmtPoints, fmtRepeatShare, fmtTolerance, REPEAT_SHARE_TOLERANCE, verdictMark } from "./adjustments";
 
 describe("the repeat-share tolerance", () => {
-  it("is the code's REPEAT_SHARE_TOLERANCE (the repeat_share_tolerance knob), not a number of the GUI's", () => {
+  it("is the config model's repeat_share_tolerance (the repeat_share_tolerance knob), not a number of the GUI's", () => {
     const knob = knobs.knobs.find((k) => k.id === "repeat_share_tolerance")!;
-    expect(knob.source_token).toBe("REPEAT_SHARE_TOLERANCE");
+    expect(knob.source).toMatch(/^packages\/sdfb-core\/src\/sdfb_core\/config\/model\.py:\d+$/);
+    expect(knob.config_key).toBe("guardrails.repeat_share_tolerance");
     expect(REPEAT_SHARE_TOLERANCE).toBe(knob.value);
     expect(fmtTolerance()).toBe("±5 pt");
     expect(fmtTolerance(0.025)).toBe("±2.5 pt");

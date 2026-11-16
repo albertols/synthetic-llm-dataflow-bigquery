@@ -11,6 +11,15 @@ Mode A runs INSIDE the Beam DAG, BEFORE `WriteToBigQuery`. There are three lines
 
 `ValidateRecordDoFn` (see `beam-dofn.md`). Tags `invalid` for any Pydantic `ValidationError`. Cheap, runs on every record.
 
+The record model is the **source** contract, and the landing table may type a column differently. Two load-safety rules (`error_type="load_safety"`) catch values the source contract accepts but the FILE_LOADS job would reject — one such row fails the whole load, and the whole job:
+
+| rule_id | Severity | Catches |
+|---|---|---|
+| `schema.non_finite` | (undeclared) | a NaN / ±Infinity float (`json.dumps` writes invalid JSON) |
+| `schema.landing_type` | BLOCKER | a STRING source column the landing table types as DATE, DATETIME, TIMESTAMP, TIME, INT64, NUMERIC, BIGNUMERIC, FLOAT64 or BOOL, holding text BigQuery's JSON load cannot read as that type (`'2847-46-81'` into DATE). `error_detail` lists each failing column with `source_type`, `landing_type`, `value`, `reason` |
+
+The landing schema comes from `resolve_schemas` (`PipelineConfig.landing_schema`); with the landing table absent or unreachable it is None and `schema.landing_type` checks nothing. Parsing lives in `sdfb_core/validation/landing_type.py` and rejects only what the load cannot read — where BigQuery's acceptance is lenient or undocumented, the value passes.
+
 REF: https://docs.pydantic.dev/latest/
 
 ## Line 2 — per-batch Pandera
@@ -37,7 +46,7 @@ REF: https://beam.apache.org/documentation/patterns/bigqueryio/
 
 A whylogs profile merge was planned for M1 §11 and never built. `whylogs` left the dependencies with the move to Python 3.14: its compiled backend `whylogs-sketching` has no wheel past CPython 3.12 ([ADR 0040](../../docs/adr/0040-dsg-donation-golden-source-sync.md) A6). Distribution checks live in `source_table_stats` and the `validation_runs` writer instead.
 
-## DLQ table schema (`{project}.synthetic_data_quality.dead_letter`)
+## DLQ table schema (`{project}.synthetic_data_quality.dlq`)
 
 Partitioned by DAY on `dlq_inserted_at`, clustered on `(error_type, rule_id)`.
 

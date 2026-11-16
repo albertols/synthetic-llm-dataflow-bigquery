@@ -9,6 +9,50 @@
     "gs://bucket/models/retail.yaml": false
   },
   "models": {
+    "example_isolated_forest": {
+      "component": {
+        "T_ACCOUNTS": [
+          "T_ACCOUNTS"
+        ],
+        "T_EVENTS_LOG": [
+          "T_EVENTS_LOG"
+        ],
+        "T_LEGACY": [
+          "T_LEGACY"
+        ],
+        "T_RATES": [
+          "T_RATES"
+        ]
+      },
+      "derived_widenings": [],
+      "enforced_edges": {
+        "T_ACCOUNTS": [],
+        "T_EVENTS_LOG": [],
+        "T_LEGACY": [],
+        "T_RATES": []
+      },
+      "generation_order": {
+        "T_ACCOUNTS": [
+          "T_ACCOUNTS"
+        ],
+        "T_EVENTS_LOG": [
+          "T_EVENTS_LOG"
+        ],
+        "T_LEGACY": [
+          "T_LEGACY"
+        ],
+        "T_RATES": [
+          "T_RATES"
+        ]
+      },
+      "sha12": "26f856926997",
+      "sources": [
+        [
+          "config/relationships/example_isolated_forest.yaml",
+          "#  Copyright 2026 The synthetic-llm-dataflow-bigquery Authors\n#\n#  Licensed under the Apache License, Version 2.0 (the \"License\");\n#  you may not use this file except in compliance with the License.\n#  You may obtain a copy of the License at\n#\n#      https://www.apache.org/licenses/LICENSE-2.0\n#\n#  Unless required by applicable law or agreed to in writing, software\n#  distributed under the License is distributed on an \"AS IS\" BASIS,\n#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.\n#  See the License for the specific language governing permissions and\n#  limitations under the License.\n\n# A whole-model launch over unrelated tables (ADR 0045). With\n# `--tables=all` every enabled table generates, in batch jobs of at most\n# `launch.max_tables_per_job` tables; no table here has an FK edge, so each\n# one is its own component and the planner packs them freely.\n#\n# In this repository (the golden source) plan it without launching:\n#\n#   uv run --no-sync python3 scripts/launch/run_model.py --dry_run \\\n#     --relationships_uri=config/relationships/example_isolated_forest.yaml \\\n#     --source_dataset=<PROJECT>.<SOURCE_DATASET> \\\n#     --landing_dataset=<PROJECT>.<LANDING_DATASET> \\\n#     --dlq_table=<PROJECT>.synthetic_data_quality.dlq --num_rows=1000 \\\n#     --run_id=plan --model_uri=gs://<BUCKET>/synthetic/models/<family>/<model>/<version>/\n#\n# `scripts/launch/run_model.py` is golden-source only and is not shipped in\n# the Dataflow Solution Guides copy. There, run the launcher with\n# `--tables=all` (the tables launch one after another, sequentially) and the\n# same `--relationships_uri`, source, landing and DLQ options.\n#\n# A directory scan skips this sample (`example_*`); name the file to load it.\nmodel: isolated_forest_example\ndescription: Unrelated landing tables, generated together.\ntables:\n  T_ACCOUNTS: {pk: [ACC_ID]}                                # source: <source dataset>.T_ACCOUNTS\n  T_EVENTS_LOG: {}                                          # no PK: pk.duplicate idle\n  T_RATES: {source_table: other_ds.RATES_V2, num_rows: 5000}\n  T_LEGACY: {enabled: false}                                # skipped by `tables: all`\n"
+        ]
+      ]
+    },
     "example_retail": {
       "component": {
         "A_TABLE": [
@@ -1047,6 +1091,186 @@
         [
           "a.yaml",
           "model: m\ntables:\n  A:\n    fk:\n      - cols: [X]\n        ref: B\n        ref_cols: [X]\n  B:\n    fk:\n      - cols: [X]\n        ref: A\n        ref_cols: [X]\n"
+        ]
+      ]
+    },
+    {
+      "accept": true,
+      "case": "source_table_two_parts",
+      "error_class": null,
+      "sha12": "6075704f8e19",
+      "sources": [
+        [
+          "a.yaml",
+          "model: m\ntables:\n  A:\n    source_table: ds.A_V2\n"
+        ]
+      ]
+    },
+    {
+      "accept": true,
+      "case": "source_table_three_parts",
+      "error_class": null,
+      "sha12": "f94645a95f35",
+      "sources": [
+        [
+          "a.yaml",
+          "model: m\ntables:\n  A:\n    source_table: p-1.ds.A_V2\n"
+        ]
+      ]
+    },
+    {
+      "accept": false,
+      "case": "source_table_one_part_invalid",
+      "error_class": "RelationshipError",
+      "sha12": null,
+      "sources": [
+        [
+          "a.yaml",
+          "model: m\ntables:\n  A:\n    source_table: A_V2\n"
+        ]
+      ]
+    },
+    {
+      "accept": false,
+      "case": "source_table_four_parts_invalid",
+      "error_class": "RelationshipError",
+      "sha12": null,
+      "sources": [
+        [
+          "a.yaml",
+          "model: m\ntables:\n  A:\n    source_table: a.b.c.d\n"
+        ]
+      ]
+    },
+    {
+      "accept": false,
+      "case": "source_table_int_invalid",
+      "error_class": "RelationshipError",
+      "sha12": null,
+      "sources": [
+        [
+          "a.yaml",
+          "model: m\ntables:\n  A:\n    source_table: 7\n"
+        ]
+      ]
+    },
+    {
+      "accept": true,
+      "case": "source_table_null",
+      "error_class": null,
+      "sha12": "75ccd8111b73",
+      "sources": [
+        [
+          "a.yaml",
+          "model: m\ntables:\n  A:\n    source_table: null\n"
+        ]
+      ]
+    },
+    {
+      "accept": true,
+      "case": "num_rows_int",
+      "error_class": null,
+      "sha12": "d28a011c79e4",
+      "sources": [
+        [
+          "a.yaml",
+          "model: m\ntables:\n  A:\n    num_rows: 5000\n"
+        ]
+      ]
+    },
+    {
+      "accept": false,
+      "case": "num_rows_zero_invalid",
+      "error_class": "RelationshipError",
+      "sha12": null,
+      "sources": [
+        [
+          "a.yaml",
+          "model: m\ntables:\n  A:\n    num_rows: 0\n"
+        ]
+      ]
+    },
+    {
+      "accept": false,
+      "case": "num_rows_bool_invalid",
+      "error_class": "RelationshipError",
+      "sha12": null,
+      "sources": [
+        [
+          "a.yaml",
+          "model: m\ntables:\n  A:\n    num_rows: true\n"
+        ]
+      ]
+    },
+    {
+      "accept": false,
+      "case": "num_rows_string_invalid",
+      "error_class": "RelationshipError",
+      "sha12": null,
+      "sources": [
+        [
+          "a.yaml",
+          "model: m\ntables:\n  A:\n    num_rows: '5000'\n"
+        ]
+      ]
+    },
+    {
+      "accept": false,
+      "case": "num_rows_float_invalid",
+      "error_class": "RelationshipError",
+      "sha12": null,
+      "sources": [
+        [
+          "a.yaml",
+          "model: m\ntables:\n  A:\n    num_rows: 5000.0\n"
+        ]
+      ]
+    },
+    {
+      "accept": false,
+      "case": "num_rows_on_driven_child_invalid",
+      "error_class": "RelationshipError",
+      "sha12": null,
+      "sources": [
+        [
+          "a.yaml",
+          "model: m\ntables:\n  P:\n    pk: [P1]\n  C:\n    num_rows: 9\n    fk:\n      - cols: [P1]\n        ref: P\n        ref_cols: [P1]\n"
+        ]
+      ]
+    },
+    {
+      "accept": true,
+      "case": "num_rows_on_documented_child",
+      "error_class": null,
+      "sha12": "1690ab157531",
+      "sources": [
+        [
+          "a.yaml",
+          "model: m\ntables:\n  P:\n    pk: [P1]\n  C:\n    num_rows: 9\n    fk:\n      - cols: [P1]\n        ref: P\n        ref_cols: [P1]\n        enforced: false\n"
+        ]
+      ]
+    },
+    {
+      "accept": true,
+      "case": "num_rows_on_child_of_disabled_parent",
+      "error_class": null,
+      "sha12": "c916d715cf61",
+      "sources": [
+        [
+          "a.yaml",
+          "model: m\ntables:\n  P:\n    pk: [P1]\n    enabled: false\n  C:\n    num_rows: 9\n    fk:\n      - cols: [P1]\n        ref: P\n        ref_cols: [P1]\n"
+        ]
+      ]
+    },
+    {
+      "accept": true,
+      "case": "num_rows_on_external_child",
+      "error_class": null,
+      "sha12": "3257628b738c",
+      "sources": [
+        [
+          "a.yaml",
+          "model: m\ntables:\n  C:\n    num_rows: 9\n    fk:\n      - cols: [P1]\n        ref: ds.P\n        ref_cols: [P1]\n"
         ]
       ]
     }

@@ -286,6 +286,27 @@ class TestMainPlansAndLoops:
     assert "wave 0 | A_TABLE" in card
     assert "documented, never drawn" in card
 
+  def test_launch_config_payload_has_no_resolution_object(
+      self, tmp_path, monkeypatch):
+    """The evaluator recovers generation params from `launch_config`: the
+        resolution dataclass must not leak into it as a repr string."""
+    from sdfb_beam.cli import run_pipeline as rp
+
+    _write_model(tmp_path)
+    payloads = {}
+    monkeypatch.setattr(
+        rp, "log_milestone_pretty",
+        lambda name, payload, **kw: payloads.setdefault(name, payload))
+    monkeypatch.setattr(
+        rp,
+        "_run_relational_job",
+        lambda plan, a, beam_argv, registry=None: 0,
+    )
+    assert rp.main(self._argv(tmp_path)) == 0
+    payload = payloads["launch_config"]
+    assert "config_resolution" not in payload
+    assert payload["config_uri"] == ""
+
   def test_single_job_prep_collects_all_failures(self, tmp_path, monkeypatch,
                                                  caplog):
     """2026-08-22 launch: table 1's P4 stop hid tables 2-4 entirely.
@@ -298,7 +319,11 @@ class TestMainPlansAndLoops:
     _write_model(tmp_path)
     prepped = []
 
-    def _fake_prep(a, client, in_set_landing=frozenset(), registry=None):
+    def _fake_prep(a,
+                   client,
+                   in_set_landing=frozenset(),
+                   registry=None,
+                   **kwargs):
       prepped.append(a.landing_table)
       raise SystemExit(
           f"[preflight P4] boom on {a.landing_table.rsplit('.', 1)[-1]}")

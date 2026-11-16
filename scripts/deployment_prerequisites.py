@@ -102,9 +102,10 @@ Usage:
     #   --require-evaluation \\
     #   --evaluation-label-key-uri projects/my-proj/secrets/eval-key/versions/1
 
-Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity; §8 Configuration;
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity;
+§7 Validation and the dead-letter queue; §8 Configuration;
 §11 Evaluation (sdfb-evaluation)
-(ADR 0020, 0021, 0032, 0041).
+(ADR 0020, 0021, 0032, 0041, 0044).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -132,6 +133,7 @@ from urllib.parse import urlsplit
 
 from sdfb_core.codegen.derive_bq_ddl import derive_bq_schema
 from sdfb_core.contracts.schema import TableSchema
+from sdfb_core.record import bq_update_command
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS_DIR = Path(__file__).resolve().parent
@@ -425,14 +427,49 @@ def step4_bq_tables(ctx: Ctx) -> None:
   from google.api_core.exceptions import NotFound
   for step, label, fqn in tables:
     try:
-      client.get_table(fqn)
-      ctx.add(step, f"BQ table · {label}", OK, bq_table_link(fqn))
+      live = client.get_table(fqn)
     except NotFound:
       ctx.add(step, f"BQ table · {label}", ACTION,
               f"{bq_table_link(fqn)} — not found", _table_action(label, fqn))
+      continue
     except Exception as e:  # pylint: disable=broad-exception-caught
       ctx.add(step, f"BQ table · {label}", SKIP,
               f"{bq_table_link(fqn)} — {short(f'{type(e).__name__}: {e}')}")
+      continue
+    if step == "4d":
+      _validation_runs_contract(ctx, live, fqn)
+    else:
+      ctx.add(step, f"BQ table · {label}", OK, bq_table_link(fqn))
+
+
+def _validation_runs_contract(ctx: Ctx, live, fqn: str) -> None:
+  """4d — a present validation_runs against its committed schema (ADR 0044).
+
+    Missing columns are an ACTION naming the one `bq update` that appends
+    them. Nothing breaks without them — the generator writes today's
+    21-column row and warns — but no generation record is written."""
+  label = "BQ table · validation_runs"
+  link = bq_table_link(fqn)
+  schema_file = (
+      Path(ctx.args.schemas_dir) / "synthetic_data_quality" /
+      "validation_runs.schema.json")
+  try:
+    want = [
+        f["name"] for f in json.loads(schema_file.read_text(encoding="utf-8"))
+    ]
+  except (OSError, ValueError, TypeError, KeyError):
+    ctx.add("4d", label, OK,
+            f"{link} — columns not compared (schema file unusable)")
+    return
+  have = {f.name for f in live.schema}
+  missing = [c for c in want if c not in have]
+  if not missing:
+    ctx.add("4d", label, OK, f"{link} — {len(want)} cols")
+    return
+  ctx.add(
+      "4d", label, ACTION, f"{link} — missing columns: {', '.join(missing)}",
+      f"`{bq_update_command(fqn)}` (additive; until then every launch writes "
+      "the 21-column row and records no generation — ADR 0044)")
 
 
 def step5_staging_bucket(ctx: Ctx) -> None:
@@ -1215,15 +1252,14 @@ def eval_constants(pkg: Path) -> dict:
 
 
 def generator_version(root: Path = REPO_ROOT) -> str | None:
-  """The version the template build names a release template after: the
-    `version` of packages/sdfb-beam/pyproject.toml. None when unreadable."""
-  try:
-    text = (root / "packages" / "sdfb-beam" /
-            "pyproject.toml").read_text(encoding="utf-8")
-  except OSError:
-    return None
-  match = re.search(r'^version\s*=\s*["\']([^"\']+)["\']', text, re.MULTILINE)
-  return match.group(1) if match else None
+  """The version a release names its template after
+    (`sdfb-<version>-template.json`): `GENERATOR_VERSION_BASE` in
+    packages/sdfb-core/src/sdfb_core/version.py (ADR 0044), read without
+    importing it. None when unreadable."""
+  value = _read_literal(
+      root / "packages" / "sdfb-core" / "src" / "sdfb_core" / "version.py",
+      "GENERATOR_VERSION_BASE")
+  return value if isinstance(value, str) and value else None
 
 
 def step13_evaluation(ctx: Ctx) -> None:
@@ -1390,8 +1426,16 @@ def _eval_registry(ctx: Ctx, client, not_found, pkg: Path, schemas: dict,
         ctx.add(step, label, ACTION, f"{link} — not a view (it is a {kind})",
                 f"drop `{fqn}` and re-run `{create}` (it replaces the views)")
     else:
-      _eval_table_contract(ctx, step, label, link, live, name,
-                           schemas.get(name), consts)
+      _eval_table_contract(
+          ctx,
+          step,
+          label,
+          link,
+          live,
+          name,
+          schemas.get(name),
+          consts,
+          fqn=fqn)
 
 
 def _eval_absent(ctx: Ctx, step: str, label: str, link: str, create: str,
@@ -1421,17 +1465,17 @@ def _bq_type(kind) -> str:
 
 
 def _eval_table_contract(ctx: Ctx, step: str, label: str, link: str, live,
-                         name: str, want, consts: dict) -> None:
+                         name: str, want, consts: dict, *, fqn: str) -> None:
   """A present table against its committed schema file, partitioning and
     clustering. Extra live columns are fine."""
   issues: list[str] = []
   notes: list[str] = []
+  missing: list[str] = []
+  wrong: list[str] = []
   if want is None:
     notes.append("columns not compared (schema file unusable, see 13a)")
   else:
     live_by_name = {f.name: f for f in live.schema}
-    missing: list[str] = []
-    wrong: list[str] = []
     for spec in want:
       got = live_by_name.get(spec["name"])
       if got is None:
@@ -1456,15 +1500,26 @@ def _eval_table_contract(ctx: Ctx, step: str, label: str, link: str, live,
     issues += wrong
   _eval_layout(live, name, consts, issues, notes)
   schema_ref = f"packages/sdfb-evaluation/.../schemas/{name}.schema.json"
+  columns_only = bool(missing) and issues == [
+      "missing columns: " + ", ".join(missing)
+  ]
   if issues:
-    ctx.add(
-        step, label, ACTION, f"{link} — " + " · ".join(issues),
-        f"align the table with {schema_ref}: the evaluator's load job fails "
-        "on a missing or mistyped column. Columns can be added with "
-        "`bq update`; partitioning cannot be altered in place (recreate "
-        "the table, it only holds evaluation rows). A partition expiration "
-        "is set with `bq update --time_partitioning_expiration SECONDS "
-        "<table>` (a privacy retention rule for row flags)")
+    if columns_only:
+      action = (
+          "`bq update --schema packages/sdfb-evaluation/src/sdfb_evaluation/"
+          f"schemas/{name}.schema.json {fqn.replace('.', ':', 1)}` — the "
+          "schema file is a superset, so it only appends columns; the "
+          "evaluator's load jobs carry that schema and fail until the table "
+          "has them")
+    else:
+      action = (
+          f"align the table with {schema_ref}: the evaluator's load job fails "
+          "on a missing or mistyped column. Columns can be added with "
+          "`bq update`; partitioning cannot be altered in place (recreate "
+          "the table, it only holds evaluation rows). A partition expiration "
+          "is set with `bq update --time_partitioning_expiration SECONDS "
+          "<table>` (a privacy retention rule for row flags)")
+    ctx.add(step, label, ACTION, f"{link} — " + " · ".join(issues), action)
   else:
     cols = len(want) if want else len(live.schema)
     detail = " · ".join([
@@ -1522,7 +1577,8 @@ def _eval_retention(part, want_days: int, issues: list[str],
 
 def _template_candidates() -> list[tuple[str, str]]:
   """(object name, what it is) for the names 13j knows the deployment's
-    one template by, the release's first."""
+    one template by, the release's first (named after the generator version
+    base, `sdfb_core/version.py`)."""
   named = []
   version = generator_version()
   if version:
@@ -1540,7 +1596,8 @@ def _eval_template(ctx: Ctx) -> None:
     One image and one template serve generation and evaluation (ADR 0041,
     amendment of 2026-10-06), and there is no other: the evaluator's own
     image and template were removed (the note of 2026-10-15). The script
-    knows two names for it (the sdfb-beam version, and `latest`) and cannot
+    knows two names for it (the generator version base,
+    `sdfb_core/version.py`, and `latest`) and cannot
     know a development build's (`sdfb-<branch>-<commit>`): when no known name
     is there it lists the prefix and names what it found. Existence only:
     the object does not say whether its image was built with the evaluator.

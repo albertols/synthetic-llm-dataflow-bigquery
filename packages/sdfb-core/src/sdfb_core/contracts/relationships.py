@@ -28,6 +28,8 @@ A model file, whole::
       A_TABLE:
         pk: [A_COL_001, A_COL_002]
         identity: [A_COL_009]
+        source_table: other_ds.A_TABLE_V2   # optional (ADR 0045): read here
+        num_rows: 5000                      # optional: this table's rows
       B_TABLE:
         pk: [B_COL_001]
         enabled: true                 # false = detach from the model
@@ -60,13 +62,19 @@ Three flags, three different jobs:
   :meth:`RelationshipRegistry.edge_roles`. Only more than one edge
   marked `drives: true` still stops the launch.
 
+Two optional keys say where a launch reads a table and how much of it to
+make (ADR 0045): ``source_table`` (``[project.]dataset.table``; a missing
+project is the launch source dataset's) and ``num_rows`` (a root's own row
+count — a child generated from its parent's keys may not set it).
+
 Column-level ``llm_prompt_constraint`` stays in COLUMN descriptions
 (:mod:`sdfb_core.contracts.prompt_constraint`) — that is per-column
 generation steering, not relational structure, and it belongs next to
 the column it steers.
 
-Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
-(ADR 0032, 0036, 0037).
+Design: docs/DESIGN.md §4 Relational generation; §8 Configuration;
+§11 Evaluation (sdfb-evaluation)
+(ADR 0032, 0036, 0037, 0041, 0045, 0046).
 """
 
 # f-string fields keep single quotes: yapf 0.43 cannot parse PEP 701
@@ -75,15 +83,19 @@ Design: docs/DESIGN.md §4 Relational generation; §8 Configuration
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import re
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import Annotated
 
 import yaml
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import (BaseModel, ConfigDict, Field, StrictInt, StrictStr,
+                      ValidationError, field_validator)
 
 from sdfb_core.observability import sha12
 
 __all__ = [
+    "SOURCE_TABLE_RE",
     "FkEdge",
     "RelationshipError",
     "RelationshipModel",
@@ -102,6 +114,13 @@ class RelationshipError(ValueError):
 def _name(table: str) -> str:
   """Bare table name: model files key on it, targets arrive as FQNs."""
   return table.rsplit(".", 1)[-1]
+
+
+# ADR 0045 — a table's source as `[project.]dataset.table`. The standalone
+# evaluator's relationships parser keeps its own copy of this grammar (it
+# may not import this package, ADR 0041).
+SOURCE_TABLE_RE = re.compile(
+    r"(?:[A-Za-z0-9_-]+\.)?[A-Za-z0-9_]+\.[A-Za-z0-9_-]+")
 
 
 class FkEdge(BaseModel):
@@ -145,6 +164,21 @@ class TableRelations(BaseModel):
   # False = detached from the model (see module docstring).
   enabled: bool = True
   note: str = ""
+  # ADR 0045 — where a launch reads this table's source when it is not the
+  # launch's source dataset under the table's own name, and the table's own
+  # row count when it is not the launch's num_rows. Strict types: the
+  # evaluator's parser accepts exactly what this one does. Absent (or null)
+  # unless set, so no existing model's sha12 moves.
+  source_table: StrictStr | None = None
+  num_rows: Annotated[StrictInt, Field(ge=1)] | None = None
+
+  @field_validator("source_table")
+  @classmethod
+  def _qualified(cls, v: str | None) -> str | None:
+    if v is not None and not SOURCE_TABLE_RE.fullmatch(v):
+      raise ValueError(
+          f"source_table must be [project.]dataset.table, got {v!r}")
+    return v
 
 
 class RelationshipModel(BaseModel):
@@ -175,6 +209,7 @@ def parse_relationship_model(text: str, source: str = "") -> RelationshipModel:
   except ValidationError as exc:
     raise RelationshipError(f"{source}: {exc}") from exc
   _validate_refs(model)
+  _validate_rows(model)
   return model
 
 
@@ -207,6 +242,38 @@ def _validate_refs(model: RelationshipModel) -> None:
             f"not name a table in model {model.model!r} "
             f"({sorted(known)}). Qualify it as dataset.table if "
             f"the parent lives outside this model.")
+
+
+def _validate_rows(model: RelationshipModel) -> None:
+  """`num_rows` belongs to a table no parent drives (ADR 0045): a child
+    generated from its parent's keys takes its row count from them
+    (ADR 0036). Those are the tables `RelationshipRegistry.edge_roles`
+    gives a driving edge: enabled, with an enforced in-model edge to an
+    enabled parent."""
+  for table, relations in model.tables.items():
+    if relations.num_rows is None or not relations.enabled:
+      continue
+    parents = [
+        edge.ref for edge in relations.fk if edge.enforced and
+        not edge.external and model.tables[edge.ref].enabled
+    ]
+    if parents:
+      raise RelationshipError(
+          f"{model.source}: {table}: num_rows is set, but {table} is "
+          f"generated from its parent {parents[0]}'s keys (ADR 0036): its "
+          f"rows follow its parents. Remove num_rows here, or set it on the "
+          f"root of its component.")
+
+
+def _launch_canon(relations: TableRelations) -> str:
+  """The ADR 0045 keys' slice of `sha12`'s canonical string: empty when
+    neither is set, so every model without them keeps its sha."""
+  parts = []
+  if relations.source_table is not None:
+    parts.append(f"src={relations.source_table}")
+  if relations.num_rows is not None:
+    parts.append(f"rows={relations.num_rows}")
+  return "".join(f":{part}" for part in parts)
 
 
 @dataclass(frozen=True)
@@ -607,6 +674,35 @@ class RelationshipRegistry:
         driving edge itself, and when ``table`` has no driving edge."""
     return self._overlap_with_driving(table, edge) or ()
 
+  def key_lineage(
+      self, table: str,
+      cols: Sequence[str]) -> tuple[tuple[str, tuple[str, ...]], ...]:
+    """Where ``table``'s ``cols`` come from: ``((table, cols), (its
+        parent, the same columns under the parent's names), …)``, ending
+        at the table that OWNS them — the first one no enforced edge
+        copies ALL of them into (ADR 0036, 2026-11-13 amendment).
+
+        Each hop follows an enforced (widened, non-external) edge whose
+        ``cols`` cover every column, so by referential integrity the
+        values on a later hop are a superset of the earlier one's: the
+        distinct count at any hop bounds the distinct count at ``table``.
+        A partly carried set is NOT followed (its other columns are
+        ``table``'s own). With several carrying edges the first declared
+        wins — any one is a valid bound. Cycle-safe."""
+    current, names = _name(table), tuple(cols)
+    hops = [(current, names)]
+    seen = {current}
+    while True:
+      up = next((e for e in self.enforced_edges(current) if not e.external and
+                 set(names) <= set(e.cols) and _name(e.ref) not in seen), None)
+      if up is None:
+        return tuple(hops)
+      pos = {c: i for i, c in enumerate(up.cols)}
+      names = tuple(up.ref_cols[pos[c]] for c in names)
+      current = _name(up.ref)
+      seen.add(current)
+      hops.append((current, names))
+
   def edge_rest(self, table: str, edge: FkEdge) -> tuple[str, ...]:
     """``edge.cols`` outside :meth:`edge_overlap`. Empty for the
         driving edge itself, and when ``table`` has no driving edge."""
@@ -647,6 +743,109 @@ class RelationshipRegistry:
       if self._carries(up.ref, target, upstream, seen):
         return True
     return False
+
+  # -- candidate keys (ADR 0046) -----------------------------------------
+
+  def _trace_owner(
+      self, table: str,
+      cols: tuple[str, ...]) -> tuple[str, tuple[str, ...], list[FkEdge]]:
+    """Follow ``cols`` of ``table`` up the enforced edges that carry them
+        (a widened edge whose columns cover them, the table's driving
+        edge first) to the table that GENERATES them. Returns that owner,
+        the columns under the owner's names, and the edges walked."""
+    path: list[FkEdge] = []
+    seen: set[tuple[str, tuple[str, ...]]] = set()
+    while (table, cols) not in seen:
+      seen.add((table, cols))
+      try:
+        driving = self.driving_edge(table)
+      except RelationshipError:
+        driving = None
+      ups = [
+          e for e in self.enforced_edges(table)
+          if not e.external and set(cols) <= set(e.cols)
+      ]
+      ups.sort(key=lambda e: e != driving)
+      if not ups:
+        break
+      up = ups[0]
+      pos = {c: i for i, c in enumerate(up.cols)}
+      cols = tuple(up.ref_cols[pos[c]] for c in cols)
+      path.append(up)
+      table = up.ref
+    return table, cols, path
+
+  @staticmethod
+  def _pk_image(pk: tuple[str, ...], path: list[FkEdge]) -> tuple[str, ...]:
+    """``pk`` (on the owner) under the names of the table the walk
+        started from — or ``()`` when an edge on the way does not carry
+        every PK column."""
+    cols = pk
+    for edge in reversed(path):
+      pos = {r: i for i, r in enumerate(edge.ref_cols)}
+      if not all(c in pos for c in cols):
+        return ()
+      cols = tuple(edge.cols[pos[c]] for c in cols)
+    return cols
+
+  def driving_key_anchor(self, table: str) -> tuple[str, ...]:
+    """The columns of ``table``'s DRIVING PARENT that hold the PK of the
+        table its driving tuple comes from — what the parent's distinct
+        driving keys should number (`fk_parent_key_collapse`, ADR 0046).
+        ``()`` for a table with no in-model driving edge, or when the
+        tuple's owner has no PK the walk can carry back."""
+    try:
+      driving = self.driving_edge(table)
+    except RelationshipError:
+      return ()
+    if driving is None or driving.external:
+      return ()
+    owner, _, path = self._trace_owner(driving.ref, tuple(driving.ref_cols))
+    relations = self.relations(owner)
+    pk = tuple(relations.pk) if relations else ()
+    return self._pk_image(pk, path) if pk else ()
+
+  def implied_candidate_keys(self) -> list[dict]:
+    """Every tuple the model implies is a candidate key (ADR 0046): the
+        ``ref_cols`` of each enabled table's DRIVING edge, traced to the
+        table that generates them, when that owner has a PK the tuple
+        does not already contain. One record per (owner, cols), the
+        first driving child naming it; ``owner_driven`` says the owner
+        is itself generated from parent keys (no dense row ordinal, so
+        the launcher can only report it). Nothing here is measured — the
+        launcher adopts a record only when the source says it is 1:1."""
+    out: dict[tuple[str, tuple[str, ...]], dict] = {}
+    for model in self.models:
+      for child, relations in model.tables.items():
+        if not relations.enabled:
+          continue
+        try:
+          driving = self.driving_edge(child)
+        except RelationshipError:
+          continue
+        if driving is None or driving.external:
+          continue
+        owner, cols, path = self._trace_owner(driving.ref,
+                                              tuple(driving.ref_cols))
+        owner_relations = self.relations(owner)
+        pk = tuple(owner_relations.pk) if owner_relations else ()
+        if not pk or set(pk) <= set(cols) or (owner, cols) in out:
+          continue
+        try:
+          owner_driven = self.driving_edge(owner) is not None
+        except RelationshipError:
+          owner_driven = True
+        out[(owner, cols)] = {
+            "owner": owner,
+            "cols": cols,
+            "pk": pk,
+            "child": child,
+            "parent": driving.ref,
+            "parent_cols": tuple(driving.ref_cols),
+            "anchor": self._pk_image(pk, path),
+            "owner_driven": owner_driven,
+        }
+    return list(out.values())
 
   # -- graph -------------------------------------------------------------
 
@@ -738,7 +937,7 @@ class RelationshipRegistry:
                f"{int(r.enabled)}:" +
                "|".join(f"{','.join(e.cols)}->{e.ref}:{','.join(e.ref_cols)}:"
                         f"{int(e.enforced)}:{int(e.drives)}"
-                        for e in r.fk)
+                        for e in r.fk) + _launch_canon(r)
                for m in self.models
                for t, r in m.tables.items()))
     return sha12(canon)
@@ -873,9 +1072,16 @@ class RelationshipRegistry:
     if relations.identity:
       keys.append(f"identity({','.join(relations.identity)})")
     state = "" if relations.enabled else "   [DISABLED — detached]"
+    # ADR 0045 — a source or row-count override, after the keys.
+    overrides = []
+    if relations.source_table is not None:
+      overrides.append(f"source {relations.source_table}")
+    if relations.num_rows is not None:
+      overrides.append(f"rows {relations.num_rows}")
+    extra = f"   {' · '.join(overrides)}" if overrides else ""
     lines = [
         f" {prefix} | {name:<24} {' '.join(keys) or '(no keys declared)'}"
-        f"{state}"
+        f"{extra}{state}"
     ]
     # Compute roles once per table (ADR 0036/0037).
     try:

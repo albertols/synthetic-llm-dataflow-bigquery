@@ -65,7 +65,7 @@ The single-job relational shape (parents generated first, their landed keys reac
 Two interchangeable engines behind one `GenerationEngine` interface ([`packages/sdfb-core/src/sdfb_core/engines/base.py`](packages/sdfb-core/src/sdfb_core/engines/base.py)); the LLM runs **O(1) times per run, never per row** ([ADR 0013](docs/adr/0013-distribution-estimator-spine.md)):
 
 - **`b1_rag` (RAG engine)** — serialize reference rows to text → embed → exact vector index → retrieve representative exemplars → LLM infers per-column value pools **once** → bulk rows sampled vectorized in NumPy on CPU.
-- **`b2_library` (library-wrapper engine)** — wraps the open-source [`sdgx`](https://github.com/hitsz-ids/synthetic-data-generator) synthesizer (CTGAN backend, empirical fallback), fitted once per worker; the LLM only patches free-text columns with bounded value pools.
+- **`b2_library` (library-wrapper engine)** — is built to wrap the open-source [`sdgx`](https://github.com/hitsz-ids/synthetic-data-generator) synthesizer (CTGAN), fitted once per worker, but today every b2 table is sampled by its NumPy empirical backend: the locked sdgx 0.2.0 lacks the connector it needs and the releases that have it pin numpy<2 ([b2 README](packages/sdfb-core/src/sdfb_core/engines/b2_library/README.md)); the LLM only patches free-text columns with bounded value pools.
 
 **RAG retrieval, in brief.** FAISS `IndexFlatIP` (exact inner product over L2-normalized vectors = cosine; deterministic, single-threaded search) holds ≤1,024 vectors per worker (`--rag_row_docs_limit`, default 1,024). Default retrieval takes the top-k = 8 exemplars nearest the centroid of all row vectors (the most *typical* rows condition the LLM); a greedy k-center mode picks a maximally *diverse* set instead, with a rotating re-seed variant to escape pool stagnation. Free-text columns retrieve exemplar *values* of that column. Rows are serialized GReaT-style ([arXiv 2210.06280](https://arxiv.org/abs/2210.06280)) and the persisted `chunk_text` is byte-identical to what the engine embeds, so stored vectors are safely reusable across runs. Full geometry: [`docs/designs/2026-07-25-rag-retrieval-geometry-roadmap.md`](docs/designs/2026-07-25-rag-retrieval-geometry-roadmap.md).
 
@@ -271,7 +271,7 @@ Real-run evidence flows through a fixed contract:
 - **Run** a tier from the run matrix ([`docs/E2E_TEST_MATRIX.md`](docs/E2E_TEST_MATRIX.md)) per the playbook ([`docs/RUN_PLAYBOOK.md`](docs/RUN_PLAYBOOK.md)) — GPU verdicts, Dataflow options, capacity strategy, pass criteria, launch recipes.
 - **Land** metrics + reports in the local, gitignored `runs/<JOB_ID>/` bundle (`real/` verbatim, `oss/` alias-redacted twins).
 - **Promote** bundles a release cites to `docs/releases/<version>/evidence/<JOB_ID>/` — the layout the release Action reads. Evidence bundles stay out of the public repo (the sensitive-content gate in `scripts/dsg/precheck.py` forbids that path); published releases carry the aggregate report only.
-- **Interpret** with the report generators in [`.github/prompts/`](.github/prompts/): the end-to-end validation report, the free-text crosscheck report, and the prompt-constraint recommender.
+- **Interpret** with the report generators in [`.github/prompts/`](.github/prompts/): the end-to-end validation report, the evaluation assessment report (one evaluation or a fleet: engine status, configuration quick wins, code-level candidates), the free-text crosscheck report, and the prompt-constraint recommender.
 
 ## Platform GUI
 

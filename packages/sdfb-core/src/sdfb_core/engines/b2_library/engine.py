@@ -17,7 +17,7 @@ Implements the shared FASTGEN spine (ADR 0013, design §2/§4):
 
   setup(model_client, ctx):       # once per Beam worker, idempotent
       profile reference_rows → per-column ColumnProfile
-      fit the statistical backend (sdgx CTGAN, NumPy-empirical fallback) ONCE
+      fit the statistical backend ONCE (NumPy-empirical; sdgx never fits today)
   generate_batch(n, cfg):         # many times; cheap
       vectorized-sample n rows from the fitted backend (seeded)
       enforce fidelity (constant/range/enum clamps, LOCAL to b2_library)
@@ -35,7 +35,7 @@ torch) are imported lazily inside the backend's ``fit()`` so importing this
 module works on a laptop with only base deps installed.
 
 Design: docs/DESIGN.md §2 Engines; §4 Relational generation; §5 Fidelity
-(ADR 0013, 0023, 0030, 0031, 0036, 0037).
+(ADR 0013, 0023, 0030, 0031, 0036, 0037, 0046).
 """
 
 from __future__ import annotations
@@ -64,6 +64,10 @@ from sdfb_core.engines.base import (
     apply_conditional_overrides,
     conditional_draws,
 )
+from sdfb_core.engines.candidate_keys import (
+    apply_candidate_keys,
+    bind_candidate_keys,
+)
 from sdfb_core.engines.fanout import FanoutPlan, expand_keys
 from sdfb_core.engines.fk_keys import bind_fk_key_pools
 from sdfb_core.engines.generation_plan import (
@@ -80,11 +84,12 @@ class B2LibraryEngine(GenerationEngine):
   """Library-wrapper engine: fit-once statistical model + free-text LLM hook.
 
     The backend is chosen at ``setup`` time. ``use_sdgx`` (default ``True``)
-    attempts the production ``sdgx`` CTGAN fit and transparently falls back
-    to the pure-NumPy :class:`EmpiricalBackend` when ``sdgx`` is not
-    installed (the laptop / offline case). Set ``use_sdgx=False`` to force
-    the deterministic NumPy backend — this is what the ABC contract tests
-    use so reproducibility is bit-for-bit.
+    picks :class:`SdgxBackend`, which fits ``sdgx`` CTGAN only when its
+    compatibility probe passes and otherwise samples with the pure-NumPy
+    :class:`EmpiricalBackend` — every run so far: the locked sdgx 0.2.0
+    has no ``DataFrameConnector`` (b2 README). Set ``use_sdgx=False`` to
+    force the deterministic NumPy backend — this is what the ABC contract
+    tests use so reproducibility is bit-for-bit.
     """
 
   name = "b2_library"
@@ -103,6 +108,8 @@ class B2LibraryEngine(GenerationEngine):
     # A DRIVEN child's recipe (ADR 0036), bound in setup() from
     # ``ctx.fanout``; None keeps generate_batch's num_rows-driven path.
     self._fanout: FanoutPlan | None = None
+    # Adopted candidate keys (ADR 0046), bound in setup().
+    self._candidate_keys: list = []
 
   # -- lifecycle ----------------------------------------------------------
 
@@ -112,7 +119,10 @@ class B2LibraryEngine(GenerationEngine):
 
     self._ctx = ctx
     self._record_model = derive_record_model(ctx.table_schema)
-    self._profiles = profile_table(ctx.table_schema, ctx.reference_rows)
+    self._profiles = profile_table(
+        ctx.table_schema,
+        ctx.reference_rows,
+        max_age_years=ctx.generator_config.generation.temporal_max_age_years_b2)
     # FK columns take the parent's landed key TUPLES (ADR 0031),
     # drawn jointly per batch — mirroring B.1. The profile override
     # keeps them off the free-text path; the joint draw below owns
@@ -133,6 +143,7 @@ class B2LibraryEngine(GenerationEngine):
             categories=values,
             weights=tuple(1.0 / len(values) for _ in values),
         )
+    self._candidate_keys = bind_candidate_keys(ctx)
     payload = getattr(ctx, "fanout", None)
     self._fanout = FanoutPlan.from_payload(payload) if payload else None
     if payload:
@@ -256,6 +267,7 @@ class B2LibraryEngine(GenerationEngine):
     self._record_model = None
     self._profiles = {}
     self._free_text_cols = []
+    self._candidate_keys = []
     self._ctx = None
     self._fitted = False
 
@@ -290,10 +302,15 @@ class B2LibraryEngine(GenerationEngine):
       for i, name in enumerate(pool.cols):
         columns[name] = [t[i] for t in drawn]
 
+    # 2c. Adopted candidate keys (ADR 0046): the discriminator from the
+    # row ordinal, passed through `enforce_value` untouched (a range
+    # clamp would fold a widened value back onto another row's).
+    keyed = apply_candidate_keys(self._candidate_keys, columns, cfg, n)
+
     # 3. Assemble rows, enforce fidelity, validate, yield.
     col_order = [c.name for c in self._ctx.table_schema.columns]
     for i in range(n):
-      row = self._assemble_row(columns, col_order, i)
+      row = self._assemble_row(columns, col_order, i, passthrough=keyed)
       try:
         yield self._record_model.model_validate(row)
       except Exception:  # pylint: disable=broad-exception-caught

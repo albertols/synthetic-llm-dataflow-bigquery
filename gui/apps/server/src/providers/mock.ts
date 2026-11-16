@@ -3,16 +3,19 @@
  * (seeded, self-consistent, invented thelook-shaped data) with the same
  * shared logic the BigQuery provider uses. Nothing is fetched; nothing is written.
  */
+import { buildGenerationRecord } from "@synthetic-platform/contracts";
 import type {
   ChunkMeta,
   Comparison,
   DlqSummary,
   EvaluationAdjustments,
   EvaluationDetail,
+  EvaluationRecord,
   EvaluationFilterParsed,
   EvaluationSummary,
   Facets,
   FreetextPool,
+  GenerationRecord,
   Page,
   ProfileRow,
   RelationshipModel,
@@ -21,9 +24,11 @@ import type {
   TrendPoint,
   TrendQueryParsed,
   ValidationRun,
+  ValidationRunsRow,
 } from "@synthetic-platform/contracts";
 import {
   ADJUSTED_RELATIONSHIP_MODEL,
+  FOREST_RELATIONSHIP_MODEL,
   getMockDataset,
   MOCK_RELATIONSHIP_MODEL,
   type MockDataset,
@@ -55,9 +60,16 @@ import type { DataProvider, ProfileFilter, RagChunks, RagChunksFilter, SourceSta
 const nullsFirst = (a: string | null, b: string | null) =>
   a === b ? 0 : a === null ? -1 : b === null ? 1 : a < b ? -1 : a > b ? 1 : 0;
 
-/** `run_id` belongs to launch `base`: the one-table id itself, or a per-table `<base>-NN-<table>`. */
+/**
+ * `run_id` belongs to launch `base`: the one-table id itself, a per-table `<base>-NN-<table>`, or a
+ * batched launch's `<base>-bNN-MM-<table>` (ADR 0045). The launcher writes 0-based positions
+ * `{i:02d}`, so a launch or batch of 100 tables ends at 99 and three digits start at the 101st table
+ * (position 100).
+ */
 export function belongsToLaunch(runId: string, base: string): boolean {
-  return runId === base || (runId.startsWith(`${base}-`) && /^\d{2}-.+$/.test(runId.slice(base.length + 1)));
+  return (
+    runId === base || (runId.startsWith(`${base}-`) && /^(b\d{2,}-)?\d{2,}-.+$/.test(runId.slice(base.length + 1)))
+  );
 }
 
 type JsonValue = NonNullable<DlqSummary["sample"]>["raw_record"];
@@ -81,8 +93,8 @@ export class MockProvider implements DataProvider {
   }
 
   relationshipModels(): Promise<RelationshipModel[]> {
-    // The storyline's model, and the adjusted-keys launch's (ADR 0038): both invented.
-    return Promise.resolve([MOCK_RELATIONSHIP_MODEL, ADJUSTED_RELATIONSHIP_MODEL]);
+    // The storyline's model, the adjusted-keys launch's (ADR 0038) and the isolated-forest launch's: all invented.
+    return Promise.resolve([MOCK_RELATIONSHIP_MODEL, ADJUSTED_RELATIONSHIP_MODEL, FOREST_RELATIONSHIP_MODEL]);
   }
 
   private latest() {
@@ -133,16 +145,20 @@ export class MockProvider implements DataProvider {
     );
   }
 
+  /** As runs.forEvaluation: the candidate rows of the evaluation's launch, newest first. */
+  private candidateRuns(evaluation: EvaluationRecord): ValidationRunsRow[] {
+    const filter = adjustmentRunsFilter(evaluation);
+    return this.dataset.validationRuns
+      .filter((r) => matchesAdjustmentRuns(r, filter))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at) || a.run_id.localeCompare(b.run_id))
+      .slice(0, ADJUSTMENT_RUNS_LIMIT);
+  }
+
   evaluationAdjustments(id: string): Promise<EvaluationAdjustments | null> {
     const latest = this.latest();
     const evaluation = latest.find((r) => r.evaluation_id === id);
     if (!evaluation) return Promise.resolve(null);
-    const filter = adjustmentRunsFilter(evaluation);
-    // As runs.forEvaluation: the candidate rows, newest first.
-    const runs = this.dataset.validationRuns
-      .filter((r) => matchesAdjustmentRuns(r, filter))
-      .sort((a, b) => b.created_at.localeCompare(a.created_at) || a.run_id.localeCompare(b.run_id))
-      .slice(0, ADJUSTMENT_RUNS_LIMIT);
+    const runs = this.candidateRuns(evaluation);
     // As evaluations.byJobId: another evaluation that ran as this row's "generation" job.
     const sameJob = evaluation.generation_job_id
       ? latest
@@ -151,6 +167,12 @@ export class MockProvider implements DataProvider {
           .sort()[0]
       : undefined;
     return Promise.resolve(buildAdjustments(evaluation, runs, sameJob ?? null));
+  }
+
+  evaluationRecord(id: string): Promise<GenerationRecord | null> {
+    const evaluation = this.latest().find((r) => r.evaluation_id === id);
+    if (!evaluation) return Promise.resolve(null);
+    return Promise.resolve(buildGenerationRecord(evaluation, this.candidateRuns(evaluation)));
   }
 
   metricTrend(q: TrendQueryParsed): Promise<TrendPoint[]> {

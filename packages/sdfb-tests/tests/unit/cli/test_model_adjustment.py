@@ -35,9 +35,9 @@ from pathlib import Path
 
 import pytest
 from sdfb_beam.cli.preflight import preflight
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts import TableSchema
 from sdfb_core.contracts.model_adjustment import (
-    REPEAT_SHARE_TOLERANCE,
     ModelAdjustment,
     adjusted_model_yaml,
     adjustment_banner,
@@ -189,7 +189,7 @@ def test_landing_repeat_share_divides_by_the_rows_generated():
 
 
 def test_the_tolerance_is_stated():
-  assert 0 < REPEAT_SHARE_TOLERANCE <= 0.1
+  assert 0 < DEFAULT_CONFIG.guardrails.repeat_share_tolerance <= 0.1
 
 
 # --- D. the banner and the milestone ---------------------------------
@@ -255,7 +255,7 @@ def test_milestone_fires_once_per_adjustment(caplog):
       source_repeat_share=0.5,
   ),)
   with caplog.at_level(logging.WARNING, logger="sdfb.milestone"):
-    log_model_adjustments(adjustments)
+    log_model_adjustments(adjustments, tolerance=0.05)
   assert caplog.text.count("name=model_adjusted ") == 1
   assert "change=pk_dropped" in caplog.text
   assert "name=model_adjustments " in caplog.text  # the banner header
@@ -801,6 +801,7 @@ def test_the_summary_row_withholds_the_verdict_when_no_share_was_measured():
       model_uri="gs://b/m/v/",
       excluded_blocker_rules=("pk.duplicate",),
       source_repeat_share=adjustment.source_repeat_share,
+      repeat_share_tolerance=0.05,
   )
   assert row["source_repeat_share"] is None
   assert row["landing_repeat_share"] is None
@@ -969,6 +970,7 @@ def test_the_faithfulness_verdict_is_now_comparable_for_a_wide_pk():
       model_uri="gs://b/m/v/",
       excluded_blocker_rules=("pk.duplicate",),
       source_repeat_share=adjustment.source_repeat_share,
+      repeat_share_tolerance=0.05,
   )
   assert row["source_repeat_share"] == pytest.approx(0.2908, abs=1e-4)
   assert row["landing_repeat_share"] == pytest.approx(0.2908, abs=1e-4)

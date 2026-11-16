@@ -91,9 +91,9 @@ def test_chunk_is_frozen():
 
 # --- population scoped to consumers (2026-07-25 06:18 E2E) -----------------
 
+from sdfb_core.config.model import DEFAULT_CONFIG  # noqa: E402
 from sdfb_core.rag.chunking import (  # noqa: E402
-    MAX_FREE_TEXT_VALUES_PER_COLUMN, MAX_ROW_DOC_ROWS, chunk_free_text_value,
-    distinct_free_text_values,
+    MAX_ROW_DOC_ROWS, chunk_free_text_value, distinct_free_text_values,
 )
 
 
@@ -105,7 +105,7 @@ def test_scope_constants_match_engine_read_contract():
   # pylint: disable-next=unsubscriptable-object  # pydantic's model_fields is a dict
   assert GenerationContext.model_fields[
       "rag_row_docs_limit"].default == MAX_ROW_DOC_ROWS
-  assert MAX_FREE_TEXT_VALUES_PER_COLUMN == 1024
+  assert DEFAULT_CONFIG.rag.max_free_text_values_per_column == 1024
 
 
 def test_distinct_free_text_values_dedupes_first_seen_and_caps():

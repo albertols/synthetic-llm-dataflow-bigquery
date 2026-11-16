@@ -9,6 +9,7 @@
 //   config/bq_schema/<dataset>/*.schema.json
 //   packages/sdfb-evaluation/src/sdfb_evaluation/catalogue/metrics.yaml
 //   generated/knobs.json            (scripts/gui/export_knobs.py)
+//   generated/knob_guides.json      (scripts/gui/export_knobs.py: each generator knob's guide, from the setting catalogue)
 //   generated/relationships.json    (scripts/gui/export_knobs.py: committed sample relationship models)
 //   generated/dlq_rules.json        (scripts/gui/export_knobs.py: DLQ rule → error_type/step/severity)
 //   generated/golden/*.json         (scripts/gui/export_golden_fixtures.py)
@@ -16,6 +17,7 @@
 //   generated/schemas.ts    zod per BigQuery table + field metadata + vocabularies parsed from descriptions
 //   generated/catalogue.ts  the typed metric catalogue + one "metric:<id>" concept per metric
 //   generated/knobs.ts      knobs.json, typed (KnobId / ChannelId unions)
+//   generated/knobGuides.ts knob_guides.json, typed (GeneratorKnobId union)
 //   generated/relationships.ts  relationships.json, typed (RelationshipModelId union)
 //   generated/dlqRules.ts   dlq_rules.json, typed (DlqRuleId union) + dlqRuleById
 //   generated/manifest.json sha256 of every input, so a hand edit of knobs.json or a golden file is drift too
@@ -384,6 +386,48 @@ export const knobs: KnobsFile = ${JSON.stringify(knobs, null, 2)};
 `;
 }
 
+function renderKnobGuides(doc) {
+  requireExport(doc, "knob_guides.json", []);
+  const guides = doc.guides;
+  if (typeof guides !== "object" || guides === null || Array.isArray(guides))
+    throw new Error('knob_guides.json: "guides" must be an object');
+  for (const [id, guide] of Object.entries(guides)) {
+    for (const key of ["purpose", "up", "down"])
+      if (typeof guide[key] !== "string") throw new Error(`knob_guides.json: ${id} lacks "${key}"`);
+    for (const ref of guide.refs ?? [])
+      if (!["paper", "doc", "code"].includes(ref.kind) || !(ref.url || ref.path))
+        throw new Error(`knob_guides.json: ${id} has a ref that is not a paper, doc or code link with a url or path`);
+  }
+  return `${HEADER}/** scripts/gui/export_knobs.py → generated/knob_guides.json, typed: each generator knob's guide, rendered from the setting catalogue. */
+
+/** A further-reading link: a paper or external doc by \`url\`, a repo doc or code by \`path\` (+ \`line\`). */
+export interface GeneratedGuideRef {
+  kind: "paper" | "doc" | "code";
+  label: string;
+  url?: string;
+  path?: string;
+  line?: number;
+}
+
+export interface GeneratedGuide {
+  purpose: string;
+  up: string;
+  down: string;
+  tip?: string;
+  /** KaTeX. */
+  formula?: string;
+  refs?: GeneratedGuideRef[];
+}
+
+export type GeneratorKnobId =
+${Object.keys(guides)
+  .map((id) => `  | ${tsString(id)}`)
+  .join("\n")};
+
+export const generatorGuides: Readonly<Record<GeneratorKnobId, GeneratedGuide>> = ${JSON.stringify(guides, null, 2)};
+`;
+}
+
 function requireExport(doc, name, arrays) {
   if (doc.generated_by !== "scripts/gui/export_knobs.py")
     throw new Error(`${name}: not written by scripts/gui/export_knobs.py`);
@@ -446,6 +490,7 @@ export function generate({ repo, inputsDir }) {
   const catalogue = YAML.parse(catalogueText);
   const knobsText = readFileSync(join(inputsDir, "knobs.json"), "utf8");
   const knobs = JSON.parse(knobsText);
+  const knobGuidesText = readFileSync(join(inputsDir, "knob_guides.json"), "utf8");
   const relationshipsText = readFileSync(join(inputsDir, "relationships.json"), "utf8");
   const dlqRulesText = readFileSync(join(inputsDir, "dlq_rules.json"), "utf8");
 
@@ -454,6 +499,7 @@ export function generate({ repo, inputsDir }) {
   inputs[`${EVAL_SCHEMAS}/views.sql`] = sha256(readFileSync(join(repo, EVAL_SCHEMAS, "views.sql"), "utf8"));
   inputs[CATALOGUE] = sha256(catalogueText);
   inputs["gui/packages/contracts/generated/knobs.json"] = sha256(knobsText);
+  inputs["gui/packages/contracts/generated/knob_guides.json"] = sha256(knobGuidesText);
   inputs["gui/packages/contracts/generated/relationships.json"] = sha256(relationshipsText);
   inputs["gui/packages/contracts/generated/dlq_rules.json"] = sha256(dlqRulesText);
   for (const file of goldenFiles(inputsDir)) {
@@ -468,6 +514,7 @@ export function generate({ repo, inputsDir }) {
   files.set("schemas.ts", renderSchemas(tables, views, catalogue));
   files.set("catalogue.ts", renderCatalogue(catalogue));
   files.set("knobs.ts", renderKnobs(knobs));
+  files.set("knobGuides.ts", renderKnobGuides(JSON.parse(knobGuidesText)));
   files.set("relationships.ts", renderRelationships(JSON.parse(relationshipsText)));
   files.set("dlqRules.ts", renderDlqRules(JSON.parse(dlqRulesText)));
   files.set(
@@ -477,7 +524,7 @@ export function generate({ repo, inputsDir }) {
         generator: "gui/packages/contracts/gen.mjs",
         note: "sha256 of every input; contracts:check fails when an input changed without a re-sync.",
         inputs,
-        outputs: ["schemas.ts", "catalogue.ts", "knobs.ts", "relationships.ts", "dlqRules.ts"],
+        outputs: ["schemas.ts", "catalogue.ts", "knobs.ts", "knobGuides.ts", "relationships.ts", "dlqRules.ts"],
       },
       null,
       2,
@@ -527,7 +574,7 @@ export function main(argv = process.argv.slice(2)) {
     console.error(
       `contracts:check: ${drift.length} generated file(s) out of date: ${drift.join(", ")}.\n` +
         `A fresh copy is in ${tmp} (diff it against ${opts.out}).\n` +
-        "Run `npm run contracts:sync` (and the Python exporters when knobs.json, relationships.json, dlq_rules.json or golden/ changed).",
+        "Run `npm run contracts:sync` (and the Python exporters when knobs.json, knob_guides.json, relationships.json, dlq_rules.json or golden/ changed).",
     );
     return 1;
   }

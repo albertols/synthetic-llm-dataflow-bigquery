@@ -24,13 +24,13 @@ function knobNumber(id: string, fallback: number): number {
   return typeof value === "number" ? value : fallback;
 }
 
-/** `rag_top_k` (engine.py `_DEFAULT_TOP_K`). */
+/** `rag.rag_top_k`'s default (the generator config, ADR 0043). */
 export const TOP_K = knobNumber("rag_top_k", 8);
 /** `--rag_row_docs_limit`'s default (`MAX_ROW_DOC_ROWS`, rag/chunking.py). */
 export const MAX_ROW_DOC_ROWS = knobNumber("rag_row_docs_limit", 1024);
-/** `MAX_FREE_TEXT_VALUES_PER_COLUMN` (rag/chunking.py). */
+/** `rag.max_free_text_values_per_column`'s default (the generator config). */
 export const MAX_VALUES_PER_COLUMN = knobNumber("max_free_text_values_per_column", 1024);
-/** `FREE_TEXT_POOL_MAX` (generation_plan.py). */
+/** `free_text.free_text_pool_max`'s default (the generator config). */
 export const FREE_TEXT_POOL_MAX = knobNumber("free_text_pool_max", 512);
 /** `--reference_rows_limit` default. */
 export const REFERENCE_ROWS_LIMIT = knobNumber("reference_rows_limit", 10_000);

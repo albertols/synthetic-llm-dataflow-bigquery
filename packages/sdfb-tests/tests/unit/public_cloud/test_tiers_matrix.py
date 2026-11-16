@@ -26,6 +26,7 @@ import itertools
 import json
 from pathlib import Path
 
+import yaml
 from sdfb_tests.launch_surface import generator_required
 
 REPO_ROOT = Path(__file__).resolve().parents[5]
@@ -60,3 +61,21 @@ def test_every_required_template_param_is_provided():
     params, _ = rt.render(GCP_DIR / "tiers.yaml", tier, table, VARS)
     missing = required - set(params) - RUNTIME_ADDED
     assert not missing, f"{tier}/{table}: required generator flags missing: {missing}"
+
+
+def test_every_tier_records_the_hardware_it_runs_on():
+  """gpu and sdk_containers reach the launch and match the job run_e2e.sh
+  builds: the T4 accelerator records gpu=t4, and the recorded topology is
+  the one the experiments set (single unless job.sdk_containers is multi;
+  Dataflow's multi default without an accelerator, where both are omitted).
+  """
+  tiers = yaml.safe_load((GCP_DIR / "tiers.yaml").read_text())["tiers"]
+  for tier, table in itertools.product(tiers, TABLES):
+    params, job = rt.render(GCP_DIR / "tiers.yaml", tier, table, VARS)
+    if not job["accelerator"]:
+      assert "gpu" not in params and "sdk_containers" not in params, tier
+      continue
+    assert "nvidia-tesla-t4" in job["accelerator"], tier
+    assert params["gpu"] == "t4", tier
+    topology = "multi" if job["sdk_containers"] == "multi" else "single"
+    assert params["sdk_containers"] == topology, tier

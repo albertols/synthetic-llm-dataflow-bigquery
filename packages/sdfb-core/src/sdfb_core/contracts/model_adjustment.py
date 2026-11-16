@@ -50,10 +50,10 @@ from typing import Any
 
 import yaml
 
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts.relationships import RelationshipModel
 
 __all__ = [
-    "REPEAT_SHARE_TOLERANCE",
     "ModelAdjustment",
     "adjusted_model_yaml",
     "adjusted_models",
@@ -65,20 +65,6 @@ __all__ = [
     "repeat_share_verdict",
     "source_repeat_share",
 ]
-
-# Absolute tolerance between the SOURCE key-repeat share and the one the
-# landing table lands with (ADR 0038 §5).
-#
-# The copy is faithful BY CONSTRUCTION — every parent key draws its child
-# count from the same measured histogram — so the only spread is
-# sampling: the per-key draw converges at O(1/sqrt(keys)) (well under
-# half a point at the 52k keys of the 2026-09-12 launch), plus the
-# derived row count's rounding and, on an orphan-heavy source, the fact
-# that the child copies the MATCHED share's distribution rather than the
-# whole source's. Five points is loose enough to survive all three and
-# tight enough that a structural break is unmissable: a fan-out capped
-# to one child lands ~0.00 and a doubled one ~0.75, both far outside.
-REPEAT_SHARE_TOLERANCE = 0.05
 
 
 @dataclass(frozen=True)
@@ -230,7 +216,7 @@ def landing_repeat_share(*, valid_count: int,
 def repeat_share_verdict(
     source: float | None,
     landing: float | None,
-    tolerance: float = REPEAT_SHARE_TOLERANCE,
+    tolerance: float = DEFAULT_CONFIG.guardrails.repeat_share_tolerance,
 ) -> tuple[float | None, bool | None]:
   """``(delta, within_tolerance)`` — ``(None, None)`` when either share
     is missing, because "no measurement" is not "they agree"."""
@@ -240,7 +226,10 @@ def repeat_share_verdict(
   return delta, abs(delta) <= tolerance
 
 
-def adjustment_banner(adjustments: Sequence[ModelAdjustment]) -> str:
+def adjustment_banner(
+    adjustments: Sequence[ModelAdjustment],
+    tolerance: float = DEFAULT_CONFIG.guardrails.repeat_share_tolerance,
+) -> str:
   """The launcher's multi-line block, in the relationship card's style.
 
     Launcher-side only: worker milestones stay one line. A run that
@@ -266,7 +255,7 @@ def adjustment_banner(adjustments: Sequence[ModelAdjustment]) -> str:
     if share is not None:
       lines.append(f"   source key-repeat share | {share:.2%} over "
                    f"{list(adj.declared_pk)} — the landing table must match "
-                   f"it within {REPEAT_SHARE_TOLERANCE:.0%} "
+                   f"it within {tolerance:.0%} "
                    f"(validation_runs.repeat_share_delta)")
     else:
       # No measurement of the DECLARED PK itself (the capacity
@@ -276,7 +265,7 @@ def adjustment_banner(adjustments: Sequence[ModelAdjustment]) -> str:
       # this banner is worse than no verdict at all.
       lines.append("   source key-repeat share | not measured over "
                    f"{list(adj.declared_pk)} this launch — no "
-                   f"±{REPEAT_SHARE_TOLERANCE:.0%} verdict is written")
+                   f"±{tolerance:.0%} verdict is written")
   lines.append(
       "  pk.duplicate on the adjusted table(s) is EXPECTED and is "
       "excluded from the BLOCKER gate; every other table's still blocks.")

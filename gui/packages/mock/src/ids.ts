@@ -1,5 +1,5 @@
 /** Identifiers shared by the mock's tables: reference digests, run ids, per-table row counts. */
-import { sha256Hex } from "@synthetic-platform/stats";
+import { Random, seedFrom, sha256Hex } from "@synthetic-platform/stats";
 
 import type { EvalSpec } from "./storyline";
 import { sourceFqn, type TableDef } from "./thelook";
@@ -60,4 +60,10 @@ export function dataflowJobId(atMs: number, draw: (lo: number, hi: number) => nu
   const stamp = `${d.slice(0, 10)}_${d.slice(11, 13)}_${d.slice(14, 16)}_${d.slice(17, 19)}`;
   const digits = Array.from({ length: 19 }, (_, i) => draw(i === 0 ? 1 : 0, 9)).join("");
   return `${stamp}-${digits}`;
+}
+
+/** The Dataflow job a launch ran as: the registry's `generation_job_id` and every `validation_runs.job_id` of the launch. */
+export function mockGenerationJobId(spec: Pick<EvalSpec, "id" | "evaluatedAt">): string {
+  const jobRng = new Random(seedFrom("generation-job", spec.id));
+  return dataflowJobId(Date.parse(spec.evaluatedAt) - 150 * 60_000, (lo, hi) => jobRng.int(lo, hi));
 }

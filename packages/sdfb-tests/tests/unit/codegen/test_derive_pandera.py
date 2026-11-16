@@ -97,3 +97,23 @@ def test_pandera_schema_struct_column_is_object(struct_ddl_dict):
   ts = TableSchema.model_validate(struct_ddl_dict)
   schema = derive_pandera_schema(ts)
   assert str(schema.columns["line_items"].dtype) in {"object", "Object"}
+
+
+@pytest.mark.parametrize("bq_type", ["TIMESTAMP", "DATETIME", "DATE"])
+def test_temporal_columns_are_microseconds_utc(bq_type):
+  """BigQuery's precision and range (to 9999-12-31): nanoseconds end at
+  2262-04-11. Pandera keeps a unit only with a time zone, so all three are
+  validated as UTC."""
+  ts = TableSchema.model_validate({
+      "table_info": {
+          "table_id": "X_TABLE"
+      },
+      "columns": [{
+          "name": "COL_001",
+          "bq_type": bq_type
+      }]
+  })
+  dtype = derive_pandera_schema(ts).columns["COL_001"].dtype
+  assert str(dtype) == "datetime64[us, UTC]"
+  frame = pd.DataFrame({"COL_001": ["9999-12-31", "0001-01-01"]})
+  derive_pandera_schema(ts).validate(frame, lazy=True)

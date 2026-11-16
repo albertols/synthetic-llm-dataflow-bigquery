@@ -35,11 +35,15 @@ Design: docs/DESIGN.md §5 Fidelity; §6 Throughput
 
 from __future__ import annotations
 
+from sdfb_core.config.model import DEFAULT_CONFIG
 from sdfb_core.contracts import TableSchema
 from sdfb_core.engines.b1_rag.engine import B1RagEngine, _pool_llm_yield
 from sdfb_core.engines.b1_rag.profile import ColumnKind, ColumnProfile
 from sdfb_core.engines.base import GenerationContext
 from sdfb_core.observability import parse_milestone
+
+# The ladder every direct `_pool_llm_yield` call runs (the launch default).
+_LADDER = DEFAULT_CONFIG.free_text
 
 # Mixed-length identifier values (defeats the strict detector, relaxed
 # templates exist): CHG + 6 digits (9 chars) and CHG + 13 digits (16 chars).
@@ -112,6 +116,8 @@ def test_gate_rejects_hallucinations_keeps_in_format():
       _id_profile(),
       ["CHG000001"],
       target=64,
+      n_choices=_LADDER.pool_parallel_choices,
+      ladder=_LADDER,
   )
   assert "CHG900001" in y.pool
   assert "CHG9000000000002" in y.pool
@@ -129,7 +135,13 @@ def test_gate_skips_prose_columns():
     def generate_json(self, prompt, json_schema, **kw):
       return [{"values": ["a fresh synthetic outage note entirely new"]}]
 
-  y = _pool_llm_yield(_ProseClient(), "p", {}, _prose_profile(), [], target=8)
+  y = _pool_llm_yield(
+      _ProseClient(),
+      "p", {},
+      _prose_profile(), [],
+      target=8,
+      n_choices=_LADDER.pool_parallel_choices,
+      ladder=_LADDER)
   assert "a fresh synthetic outage note entirely new" in y.pool
   assert y.format_rejected == 0
 
@@ -326,6 +338,8 @@ def test_ladder_exits_after_two_fully_rejected_rounds(caplog):
         _id_profile(),
         ["CHG000001"],
         target=512,
+        n_choices=_LADDER.pool_parallel_choices,
+        ladder=_LADDER,
     )
   assert client.call_count == 2, "one escalation retry, then out"
   assert y.pool == []
@@ -347,6 +361,8 @@ def test_partially_rejected_rounds_keep_the_ladder_running():
       _id_profile(),
       ["CHG000001"],
       target=64,
+      n_choices=_LADDER.pool_parallel_choices,
+      ladder=_LADDER,
   )
   assert client.call_count > 2
   assert y.pool
@@ -451,6 +467,8 @@ def test_prose_candidates_are_clamped_to_a_fixed_width_source_ceiling(caplog):
         _fixed_width_prose_profile(35),
         [],
         target=8,
+        n_choices=_LADDER.pool_parallel_choices,
+        ladder=_LADDER,
     )
   assert long_value[:35] in y.pool
   assert long_value not in y.pool
@@ -489,7 +507,12 @@ def test_free_length_prose_is_never_clamped():
       return [{"values": [long_value]}]
 
   y = _pool_llm_yield(
-      _Client(), "p", {}, _free_length_prose_profile(), [], target=8)
+      _Client(),
+      "p", {},
+      _free_length_prose_profile(), [],
+      target=8,
+      n_choices=_LADDER.pool_parallel_choices,
+      ladder=_LADDER)
   assert long_value in y.pool
 
 
@@ -564,7 +587,13 @@ def test_mask_gated_candidates_are_clamped_to_the_fixed_width_ceiling(caplog):
       return [{"values": [long_value, short_value]}]
 
   with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
-    y = _pool_llm_yield(_Client(), "p", {}, prof, [], target=8)
+    y = _pool_llm_yield(
+        _Client(),
+        "p", {},
+        prof, [],
+        target=8,
+        n_choices=_LADDER.pool_parallel_choices,
+        ladder=_LADDER)
   assert long_value[:35] in y.pool
   assert long_value not in y.pool
   assert short_value in y.pool

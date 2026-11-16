@@ -21,8 +21,8 @@ skipped (the pool-store `exists()` idiom).
 Copies `BigQueryFreeTextPoolStore`'s structure verbatim — including the
 0dfb1a3 pickle fix: the lazy client is a cache, never pickled state.
 
-Design: docs/DESIGN.md §5 Fidelity
-(ADR 0022).
+Design: docs/DESIGN.md §4 Relational generation; §5 Fidelity
+(ADR 0022, 0045).
 """
 
 # Heavy or optional dependencies are imported lazily, where they are used.
@@ -31,6 +31,8 @@ Design: docs/DESIGN.md §5 Fidelity
 from __future__ import annotations
 
 from typing import Any
+
+from sdfb_beam.io.bq_load import load_json_rows
 
 
 class BigQuerySourceStatsStore:
@@ -96,8 +98,8 @@ class BigQuerySourceStatsStore:
     from google.cloud import bigquery
 
     job_config = bigquery.LoadJobConfig(write_disposition="WRITE_APPEND")
-    self._bq().load_table_from_json(
-        rows, self.table_fqn, job_config=job_config).result()
+    # ADR 0045 D9: parallel batch launchers append here at once.
+    load_json_rows(self._bq(), rows, self.table_fqn, job_config)
 
 
 __all__ = ["BigQuerySourceStatsStore"]

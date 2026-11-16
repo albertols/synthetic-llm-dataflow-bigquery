@@ -662,8 +662,8 @@ it is where coverage has already saturated on anything k-center can help,
 where the prompt is still a few hundred bytes of prefix, and where the
 *leak surface* (values the model has literally read) is eight. More
 seeds buy little and show more; fewer starve the format. It is
-`_DEFAULT_TOP_K`, and changing it changes the prompt bytes, hence every
-cached prefix.
+`rag.rag_top_k` in a config file, and changing it changes the prompt bytes,
+hence every cached prefix and the key the pools are persisted under.
 
 **Where do the candidates come from?** In the code, a fixed order:
 persisted `free_text_col` vectors (distinct values over the whole 10k

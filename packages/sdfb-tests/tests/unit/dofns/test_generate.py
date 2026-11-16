@@ -187,6 +187,68 @@ def test_setup_and_process_emit_milestones(caplog, recording_engine,
   assert "SDFB_MILESTONE name=batch_done" in text and "rows=4" in text
 
 
+def _batch_fields(caplog, name: str) -> list[dict]:
+  from sdfb_core.observability import parse_milestone
+
+  out = []
+  for record in caplog.records:
+    parsed = parse_milestone(record.getMessage())
+    if parsed and parsed["name"] == name:
+      out.append(parsed)
+  return out
+
+
+def test_each_deserialized_dofn_gets_its_own_attempt_token(
+    caplog, recording_engine, customers_schema):
+  """2026-11 b2 relational run: control-plane 503s made Dataflow
+    re-execute the fused Generate stage, and the logs could not tell a
+    retry from new work. Beam ships ONE pickled DoFn and every worker
+    instance is a fresh unpickle + `setup()`, so the token must be minted
+    in `setup()` — a token minted in `__init__` would ride the pickle and
+    be identical on every worker."""
+  import logging
+  import pickle
+
+  ctx = GenerationContext(table_schema=customers_schema, embedder_uri="")
+  shipped = pickle.dumps(_dofn(ctx))
+  first, second = pickle.loads(shipped), pickle.loads(shipped)
+  with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+    for dofn in (first, second):
+      dofn.setup()
+      dofn.start_bundle()
+      list(dofn.process({"n": 2, "batch_id": 5}))
+  starts = _batch_fields(caplog, "batch_start")
+  dones = _batch_fields(caplog, "batch_done")
+  assert len(starts) == len(dones) == 2
+  assert starts[0]["attempt"] != starts[1]["attempt"]
+  # One attempt's start and done carry the same token, so an unfinished
+  # attempt is a start with no matching done.
+  assert [s["attempt"] for s in starts] == [d["attempt"] for d in dones]
+
+
+def test_a_cached_dofn_rerunning_a_bundle_logs_a_new_attempt(
+    caplog, recording_engine, customers_schema):
+  """The SDK harness caches a bundle processor — and its set-up DoFn —
+    across bundles, so a lease-lost work item re-executed on the SAME VM
+    (143 of 231 re-run batches in that run) can land on the same
+    instance. The bundle counter keeps that re-run distinguishable."""
+  import logging
+
+  ctx = GenerationContext(table_schema=customers_schema, embedder_uri="")
+  dofn = _dofn(ctx)
+  with caplog.at_level(logging.INFO, logger="sdfb.milestone"):
+    dofn.setup()
+    for _ in range(2):
+      dofn.start_bundle()
+      list(dofn.process({"n": 1, "batch_id": 9}))
+  starts = _batch_fields(caplog, "batch_start")
+  assert len(starts) == 2
+  assert starts[0]["attempt"] != starts[1]["attempt"]
+  # Same instance: the token prefix is shared, only the bundle moves.
+  assert (
+      starts[0]["attempt"].split(".")[0] == starts[1]["attempt"].split(".")[0])
+
+
 def test_no_explicit_seed_derives_distinct_seed_per_batch(
     recording_engine, customers_schema):
   """Regression test for the batch-replay defect: with no `--seed`, the

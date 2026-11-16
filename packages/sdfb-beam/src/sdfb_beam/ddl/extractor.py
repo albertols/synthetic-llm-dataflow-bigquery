@@ -46,6 +46,8 @@ from google.cloud import bigquery
 from sdfb_core.contracts import TableSchema
 
 from sdfb_beam.ddl.connection import DEFAULT_TIMEOUT
+from sdfb_beam.io.bq_identifiers import (validate_dataset, validate_project,
+                                         validate_table)
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,11 @@ def extract_ddl_metadata(
     Returns a dict directly consumable by
     `TableSchema.model_validate(result)`.
     """
+  # CWE-89: every part reaches SQL text or a table reference below, so it
+  # is allow-listed before the first BigQuery call (get_table included).
+  validate_project(project)
+  validate_dataset(dataset)
+  validate_table(table)
   full_table_id = f"{project}.{dataset}.{table}"
   logger.info("Extracting DDL for %s (timeout=%ss)", full_table_id, timeout)
   start = time.time()
@@ -304,15 +311,24 @@ def _get_storage_info(
           _int_prop("numTimeTravelPhysicalBytes"),
   }
 
-  # Partition count from INFORMATION_SCHEMA.PARTITIONS — optional.
+  # Partition count from INFORMATION_SCHEMA.PARTITIONS — optional. The
+  # identifiers are validated OUTSIDE the best-effort try (CWE-89): a bad
+  # one raises instead of being logged and swallowed. The table name is a
+  # value in the WHERE clause, so it is a bound parameter.
+  partitions_view = (f"`{validate_project(project)}.{validate_dataset(dataset)}"
+                     ".INFORMATION_SCHEMA.PARTITIONS`")
   try:
     partition_query = f"""
             SELECT COUNT(*) AS num_partitions
-            FROM `{project}.{dataset}.INFORMATION_SCHEMA.PARTITIONS`
-            WHERE table_name = '{table}'
+            FROM {partitions_view}
+            WHERE table_name = @table_name
         """
+    job_config = bigquery.QueryJobConfig(query_parameters=[
+        bigquery.ScalarQueryParameter("table_name", "STRING", table)
+    ])
     rows = list(
-        client.query(partition_query, timeout=timeout).result(timeout=timeout))
+        client.query(partition_query, job_config=job_config,
+                     timeout=timeout).result(timeout=timeout))
     if rows:
       storage_info["num_partitions"] = rows[0].num_partitions
   except Exception as e:  # pylint: disable=broad-exception-caught

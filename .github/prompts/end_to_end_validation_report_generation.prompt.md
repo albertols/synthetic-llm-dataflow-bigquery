@@ -253,6 +253,15 @@ It uses ADC to compute, generically (schema introspected from
   on the 2026-08-29 R6 cold run it was `_fetch_identifier_domains`
   paging 944k source values, ADR 0034) — with chronological durations between them,
   plus the worker image package versions (vllm/torch/transformers/faiss/sdgx).
+- **Batch ledger** — `engine_milestones.batch_ledger` per table: `batches`,
+  `reexecuted_batches` (a `keys_digest` or `batch_id` seen under more than
+  one `attempt=`), `unfinished_attempts` (a `batch_start` with no
+  `batch_done` for its attempt), and `keys_once`/`rows_once` next to the raw
+  sums. Dataflow re-executes a fused stage after a lease loss, so the raw
+  sums can exceed the parent's key count while the landed counts stay
+  exact; quote the `*_once` figures and report re-execution as an
+  infrastructure finding, never as over-generation. `truncated: true` means
+  the probe stopped paging and every ledger figure is partial.
 
 ### LLM-lifecycle forensics (mandatory)
 
@@ -358,6 +367,14 @@ it. Do not use it as a gate on this validation; it is an input to Steps 4-5.
    uv run --project packages/sdfb-evaluation sdfb-eval report --project <PROJECT> \
      --evaluation_id <EVALUATION_ID> --format md --out runs/<JOB_ID>/evaluation_report.md
    ```
+
+   **Single-table bundles only.** The bundle exporter of Step 6 aliases one
+   table; it refuses an evaluation export that names another (a relational
+   launch) rather than write those names into `oss/`. For such an
+   evaluation, and for an assessment across levels, tables or runs, use
+   [`/end_to_end_evaluation_report_generation`](end_to_end_evaluation_report_generation.prompt.md):
+   its digest is aliased for every table from the same registry, so the two
+   `oss/` bundles line up by table, column and job id.
 
 4. **How to read it** (per metric row, never as a verdict on the data):
    - The run `status` describes the evaluation (`SUCCEEDED`, `PARTIAL`, ...);
@@ -607,7 +624,7 @@ The `--metrics` labels name the `real/`+`oss/` files (`gcp=` →
 `gcp_metrics.json`, `offline=` → `offline_metrics.json`, `stats_diff=` →
 `stats_diff_metrics.json` …) — keep all four labels exactly as above (the `evaluation` label of Step 3.6 is a fifth, optional one) or the
 release pipeline's artifact discovery will not find them. The two `evaluation` lines are optional: add them only when Step 3.6 produced both
-files (the exporter copies and redacts extra labels). `--doc` moves the
+files for a single-table evaluation (the exporter copies and redacts extra labels, and refuses an export that names a table it cannot alias). `--doc` moves the
 markdown reports: verbatim into `real/<label>.md`, redacted into
 `oss/<label>.md` (`stats_diff=` → `stats_diff.md`,
 `freetext_crosscheck_report=` → `freetext_crosscheck_report.md`,

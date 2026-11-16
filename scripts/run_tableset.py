@@ -155,9 +155,11 @@ def emit_trigger_configs(
 ) -> list[Path]:
   """Ordered Airflow trigger confs, one JSON per table (Composer path).
 
-    The Composer DAG (`composer/synthetic_beam_bigquery.py`) stays
-    single-table; multi-table on Composer = triggering it once per file, in
-    filename order (waves flattened — the NN_ prefix IS the order)."""
+    Each file is one `tables=explicit` trigger of the Composer DAG
+    (`composer/synthetic_beam_bigquery.py`); a table set on Composer =
+    triggering it once per file, in filename order (waves flattened — the
+    NN_ prefix IS the order). A whole relationships model is one
+    `tables=all` trigger instead (ADR 0045)."""
   tables = list(config["tables"])
   waves_of_names = (
       registry.generation_waves(_names(tables))
