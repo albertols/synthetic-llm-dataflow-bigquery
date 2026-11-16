@@ -300,3 +300,50 @@ def test_leak_scan_catches_leak_in_subdirectory(tmp_path):
 
   hits = bundle_module._leak_scan(oss_dir, mapping)
   assert ("leftover.json", _PROJECT_ID) in hits
+
+
+def _evaluation_export(tmp_path: Path, tables: list[str]) -> Path:
+  path = tmp_path / "evaluation_metrics.json"
+  path.write_text(
+      json.dumps({
+          "evaluation": {
+              "evaluation_id": "eval-1"
+          },
+          "metrics": [{
+              "table_name": name,
+              "metric_id": "column.ks",
+              "status": "pass"
+          } for name in [*tables, "__model__"]],
+      }))
+  return path
+
+
+def test_single_table_evaluation_export_is_bundled(tmp_path):
+  gcp_path, offline_path, report_path = _write_metrics(tmp_path)
+  evaluation = _evaluation_export(tmp_path, ["source_table"])
+  rc = bundle_module.main([
+      "--metrics", f"gcp={gcp_path}", "--metrics", f"offline={offline_path}",
+      "--metrics", f"evaluation={evaluation}", "--report",
+      str(report_path), "--out-root",
+      str(tmp_path / "runs")
+  ])
+  assert rc == 0
+  oss = tmp_path / "runs" / _JOB_ID / "oss" / "evaluation_metrics.json"
+  assert "source_table" not in oss.read_text()
+
+
+def test_multi_table_evaluation_export_is_refused_not_leaked(tmp_path, capsys):
+  # The mapping aliases ONE table; a second one would reach oss/ verbatim
+  # while the leak scan (registered tokens only) still printed clean.
+  gcp_path, offline_path, report_path = _write_metrics(tmp_path)
+  evaluation = _evaluation_export(tmp_path,
+                                  ["source_table", "second_real_table"])
+  rc = bundle_module.main([
+      "--metrics", f"gcp={gcp_path}", "--metrics", f"offline={offline_path}",
+      "--metrics", f"evaluation={evaluation}", "--report",
+      str(report_path), "--out-root",
+      str(tmp_path / "runs")
+  ])
+  assert rc == 1
+  assert "second_real_table" in capsys.readouterr().err
+  assert not (tmp_path / "runs").exists()  # nothing was written

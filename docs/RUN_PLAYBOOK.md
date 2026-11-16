@@ -2163,7 +2163,7 @@ FROM `<PROJECT>.synthetic_data_quality.evaluation_latest_per_job`
 WHERE generation_job_id = '<JOB_ID>'
 ```
 
-The privacy metrics are risk indicators, not guarantees. The same step inside the end-to-end validation report is Step 3.6 of [the prompt](../.github/prompts/end_to_end_validation_report_generation.prompt.md).
+The privacy metrics are risk indicators, not guarantees. The same step inside the end-to-end validation report is Step 3.6 of [the prompt](../.github/prompts/end_to_end_validation_report_generation.prompt.md). To assess one evaluation in depth, or every evaluation of a time span or an engine at once (what each engine gets right per level and family, what a knob or a prompt constraint can fix, what needs code), use the [evaluation report prompt](../.github/prompts/end_to_end_evaluation_report_generation.prompt.md): it reads the tables through `scripts/e2e/evaluation_digest.py` and writes a de-identified hand-off under `runs/evaluation_reports/`.
 
 #### A RUNNING row that never closes
 

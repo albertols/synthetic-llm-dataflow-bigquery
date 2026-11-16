@@ -119,6 +119,27 @@ def _derive_bundle_name(job_id: str, metrics: dict[str, Any],
   return _derive_timestamp(report)
 
 
+def _unaliased_tables(metrics: dict[str, Any],
+                      mapping: redaction.Mapping) -> list[str]:
+  """Tables named by an evaluation export that this bundle cannot alias.
+
+    An export of `sdfb-eval report --format json` carries a top-level
+    `metrics` list of rows with a `table_name`. The mapping aliases ONE
+    table and its columns: a second table's name and columns would reach
+    `oss/` verbatim, and the leak scan, which only knows registered
+    tokens, would still print clean."""
+  missing: set[str] = set()
+  for obj in metrics.values():
+    rows = obj.get("metrics") if isinstance(obj, dict) else None
+    if not isinstance(rows, list):
+      continue
+    for row in rows:
+      name = row.get("table_name") if isinstance(row, dict) else None
+      if name and name != "__model__" and name not in mapping.identifiers:
+        missing.add(str(name))
+  return sorted(missing)
+
+
 def _parse_labeled(items: list[str], flag: str) -> dict[str, Path]:
   """`label=path` pairs (repeatable CLI flag) → {label: Path}."""
   paths: dict[str, Path] = {}
@@ -248,6 +269,18 @@ def main(argv: list[str] | None = None) -> int:
   )
   for text in csv_texts.values():
     _register_csv(mapping, text, redact_values=args.redact_values)
+
+  unaliased = _unaliased_tables(metrics, mapping)
+  if unaliased:
+    names = ", ".join(unaliased)
+    print(
+        f"ERROR: an evaluation export names {len(unaliased)} table(s) this "
+        f"bundle cannot alias ({names}); nothing was written. "
+        "A bundle aliases one table: for a multi-table evaluation use "
+        "scripts/e2e/evaluation_digest.py, whose oss/ twin is aliased for "
+        "every table.",
+        file=sys.stderr)
+    return 1
 
   base = args.out_root / _derive_bundle_name(args.job_id, metrics, args.report)
   real_dir, oss_dir = base / "real", base / "oss"

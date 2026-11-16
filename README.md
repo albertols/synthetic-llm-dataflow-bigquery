@@ -271,7 +271,7 @@ Real-run evidence flows through a fixed contract:
 - **Run** a tier from the run matrix ([`docs/E2E_TEST_MATRIX.md`](docs/E2E_TEST_MATRIX.md)) per the playbook ([`docs/RUN_PLAYBOOK.md`](docs/RUN_PLAYBOOK.md)) — GPU verdicts, Dataflow options, capacity strategy, pass criteria, launch recipes.
 - **Land** metrics + reports in the local, gitignored `runs/<JOB_ID>/` bundle (`real/` verbatim, `oss/` alias-redacted twins).
 - **Promote** bundles a release cites to `docs/releases/<version>/evidence/<JOB_ID>/` — the layout the release Action reads. Evidence bundles stay out of the public repo (the sensitive-content gate in `scripts/dsg/precheck.py` forbids that path); published releases carry the aggregate report only.
-- **Interpret** with the report generators in [`.github/prompts/`](.github/prompts/): the end-to-end validation report, the free-text crosscheck report, and the prompt-constraint recommender.
+- **Interpret** with the report generators in [`.github/prompts/`](.github/prompts/): the end-to-end validation report, the evaluation assessment report (one evaluation or a fleet: engine status, configuration quick wins, code-level candidates), the free-text crosscheck report, and the prompt-constraint recommender.
 
 ## Platform GUI
 
